@@ -56,6 +56,7 @@ docker compose --env-file .env.production \
 - [ ] Inbound WhatsApp -> webhook -> workflow mapping implemented
 - [ ] Outbound message flow and templates approved
 - [ ] Error/retry/dead-letter handling defined for integration failures
+- [ ] Omnichannel bridge implemented per `OMNICHANNEL_WHATSAPP_PLAYBOOK.md`
 
 ## 6) Pipelines, SLA, and automations
 
