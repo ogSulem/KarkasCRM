@@ -1,0 +1,42 @@
+name: twenty
+
+services:
+  caddy:
+    image: caddy:2
+    profiles: ["tls"]
+    restart: always
+    depends_on:
+      server:
+        condition: service_healthy
+    ports:
+      - "80:80"
+      - "443:443"
+    environment:
+      DOMAIN_NAME: ${DOMAIN_NAME}
+      ACME_EMAIL: ${ACME_EMAIL}
+    command:
+      - /bin/sh
+      - -c
+      - |
+        test -n "${DOMAIN_NAME}" && test -n "${ACME_EMAIL}"
+        cat > /etc/caddy/Caddyfile <<CADDY
+        ${DOMAIN_NAME} {
+          tls ${ACME_EMAIL}
+          reverse_proxy server:3000
+          encode zstd gzip
+          header {
+            Strict-Transport-Security "max-age=31536000; includeSubDomains; preload"
+            X-Frame-Options "SAMEORIGIN"
+            X-Content-Type-Options "nosniff"
+            Referrer-Policy "strict-origin-when-cross-origin"
+          }
+        }
+        CADDY
+        caddy run --config /etc/caddy/Caddyfile --adapter caddyfile
+    volumes:
+      - caddy_data:/data
+      - caddy_config:/config
+
+volumes:
+  caddy_data:
+  caddy_config:

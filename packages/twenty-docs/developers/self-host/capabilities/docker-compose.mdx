@@ -82,11 +82,23 @@ Download the `docker-compose.yml` file to your working directory:
 curl -o docker-compose.yml https://raw.githubusercontent.com/twentyhq/twenty/refs/heads/main/packages/twenty-docker/docker-compose.yml
 ```
 
+Optional (recommended for domain + HTTPS): download the TLS overlay and production env template:
+
+```bash
+curl -o docker-compose.tls.yml https://raw.githubusercontent.com/twentyhq/twenty/refs/heads/main/packages/twenty-docker/docker-compose.tls.yml
+curl -o .env.production https://raw.githubusercontent.com/twentyhq/twenty/refs/heads/main/packages/twenty-docker/.env.production.example
+```
+
 ### Step 3: Launch the Application
 
 Start the Docker containers:
 ```bash
 docker compose up -d
+```
+
+For domain + HTTPS with automatic certificates, use:
+```bash
+docker compose --env-file .env.production -f docker-compose.yml -f docker-compose.tls.yml --profile tls up -d
 ```
 
 ### Step 4: Access the Application
@@ -240,4 +252,3 @@ docker compose up -d
 ## Troubleshooting
 
 If you encounter any problem, check [Troubleshooting](/developers/self-host/capabilities/troubleshooting) for solutions.
-
