@@ -4,6 +4,7 @@ set -euo pipefail
 cd "$(dirname "$0")"
 
 command -v docker >/dev/null || { echo "Docker не установлен. Установите: curl -fsSL https://get.docker.com | sh"; exit 1; }
+docker compose version >/dev/null 2>&1 || { echo "Нужен Docker Compose v2 (идёт вместе с Docker). Проверьте: docker compose version"; exit 1; }
 
 if [ ! -f .env ]; then
   cp .env.example .env
@@ -31,5 +32,10 @@ echo
 echo "KarkasCRM запущена:  http://${IP}:${PORT}"
 echo "Проверка API:        curl http://127.0.0.1:${PORT}/api/health"
 echo "Логи:                docker compose logs -f crm"
-echo "Дальше: Настройки → Интеграции → подключите Wazzup (см. DEPLOY.md, раздел 5)."
+echo "Дальше (всё из интерфейса, код менять не нужно):"
+echo "  Настройки → Интеграции      — Wazzup (WhatsApp/Telegram/Instagram/Viber) и почта"
+echo "  Настройки → Воронки и этапы  — свои воронки и этапы"
+echo "  Настройки → Поля карточек    — свои поля контактов и сделок"
+echo "  Настройки → Данные           — план продаж, резервные копии, удаление демо-данных"
+echo "Подробно: DEPLOY.md (разделы 4–6.1) и README.md"
 docker compose ps

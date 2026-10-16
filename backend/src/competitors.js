@@ -25,6 +25,7 @@ export const SOURCE_DEFS = [
 
 export function createCompetitors(ctx) {
   const { db, json, readBody, log, broadcast, getSetting, setSetting, user: noop } = ctx;
+  const seedDemoEnabled = ctx.seedDemoEnabled !== false;
 
   db.exec(`
   CREATE TABLE IF NOT EXISTS competitors(id INTEGER PRIMARY KEY,name TEXT NOT NULL,inn TEXT,ogrn TEXT,city TEXT,website TEXT,phone TEXT,notes TEXT DEFAULT '',price_url TEXT DEFAULT '',created_at TEXT DEFAULT (datetime('now')));
@@ -33,6 +34,9 @@ export function createCompetitors(ctx) {
   CREATE TABLE IF NOT EXISTS reviews(id INTEGER PRIMARY KEY,competitor_id INTEGER REFERENCES competitors(id) ON DELETE CASCADE,source TEXT DEFAULT 'вручную',rating REAL,text TEXT,author TEXT,url TEXT,created_at TEXT DEFAULT (datetime('now')));
   CREATE TABLE IF NOT EXISTS price_rows(id INTEGER PRIMARY KEY,competitor_id INTEGER,scope TEXT DEFAULT 'competitor',item TEXT,price REAL,unit TEXT,sku TEXT,note TEXT,source_name TEXT,updated_at TEXT DEFAULT (datetime('now')));
   CREATE INDEX IF NOT EXISTS idx_checks_comp ON competitor_checks(competitor_id,source);
+  `);
+  for (const [t, c, d] of [['competitors', 'demo', 'INTEGER DEFAULT 0'], ['price_rows', 'demo', 'INTEGER DEFAULT 0']]) { const cols = db.prepare(`PRAGMA table_info(${t})`).all().map(r => r.name); if (!cols.includes(c)) db.exec(`ALTER TABLE ${t} ADD COLUMN ${c} ${d}`) }
+  db.exec(`
   CREATE INDEX IF NOT EXISTS idx_reviews_comp ON reviews(competitor_id);
   CREATE INDEX IF NOT EXISTS idx_prices_comp ON price_rows(competitor_id,scope);
   `);
@@ -541,9 +545,10 @@ export function createCompetitors(ctx) {
 
   // ─────────────────────────── демо-данные для новой вкладки ───────────────────────────
   function seedDemo() {
+    if (!seedDemoEnabled) return;
     if (db.prepare('SELECT COUNT(*) n FROM competitors').get().n || getSetting('COMPETITORS_SEEDED')) return;
     setSetting('COMPETITORS_SEEDED', '1');
-    const comp = { id: db.prepare('INSERT INTO competitors(name,inn,ogrn,city,website,phone,notes) VALUES(?,?,?,?,?,?,?)').run('ООО «СтройКаркас» (демо)', '7707083893', '1027700132195', 'Москва', 'https://example-konkurent.ru', '+7 495 000-11-22', 'Пример заполненной карточки конкурента. Удалите и добавьте своих.').lastInsertRowid, name: 'ООО «СтройКаркас» (демо)', inn: '7707083893', ogrn: '1027700132195', city: 'Москва' };
+    const comp = { id: db.prepare('INSERT INTO competitors(name,inn,ogrn,city,website,phone,notes,demo) VALUES(?,?,?,?,?,?,?,1)').run('ООО «СтройКаркас» (демо)', '7707083893', '1027700132195', 'Москва', 'https://example-konkurent.ru', '+7 495 000-11-22', 'Пример заполненной карточки конкурента. Удалите и добавьте своих.').lastInsertRowid, name: 'ООО «СтройКаркас» (демо)', inn: '7707083893', ogrn: '1027700132195', city: 'Москва' };
     const results = [
       { source: 'rusprofile', title: 'Rusprofile', kind: 'card', status: 'ok', summary: 'Найдено: ООО «СтройКаркас» · действующая', links: linksFor(comp), data: { card: { name: 'ООО «СтройКаркас»', inn: '7707083893', ogrn: '1027700132195', status: 'действующая', address: 'г. Москва, ул. Складочная, 1', courts: 9 } } },
       { source: 'fns', title: 'ФНС (ЕГРЮЛ)', kind: 'card', status: 'ok', summary: 'ООО «СтройКаркас» · Действующая · недоимка 380 000 ₽', links: linksFor(comp), data: { card: { name: 'ООО «СтройКаркас»', inn: '7707083893', ogrn: '1027700132195', status: 'Действующая', regDate: '2011-03-14', region: 'Москва', director: 'Петров Пётр Петрович', arrears: 380000, employees: 31 }, flags: ['недоимка 380 000 ₽'] } },
@@ -557,11 +562,11 @@ export function createCompetitors(ctx) {
     for (const r of results) for (const rv of (r.data?.reviews || [])) db.prepare('INSERT INTO reviews(competitor_id,source,rating,text,author,url) VALUES(?,?,?,?,?,?)').run(comp.id, r.source, rv.rating ?? null, rv.text, rv.author || '', rv.url || '');
     db.prepare('INSERT INTO reviews(competitor_id,source,rating,text,author,url) VALUES(?,?,?,?,?,?)').run(comp.id, 'Авито', 2, 'Долго не отвечали, цена выросла в процессе стройки.', 'Менеджер', '');
     if (!db.prepare("SELECT COUNT(*) n FROM price_rows WHERE scope='ours'").get().n) {
-      const ins = db.prepare('INSERT INTO price_rows(competitor_id,scope,item,price,unit,sku,note,source_name) VALUES(NULL,?,?,?,?,?,?,?)');
+      const ins = db.prepare('INSERT INTO price_rows(competitor_id,scope,item,price,unit,sku,note,source_name,demo) VALUES(NULL,?,?,?,?,?,?,?,1)');
       [['Каркасный дом 8×10 «Север»', 3850000, 'шт', 'DOM-810', 'под ключ'], ['Баня 4×6 под ключ', 890000, 'шт', 'BANYA-46', ''], ['Фундамент на сваях', 180000, 'компл.', 'FUND-SVAI', '']].forEach(r => ins.run('ours', ...r, 'наш прайс'));
     }
     const hisRows = [['Каркасный дом 8×10', 4200000, 'шт', '', 'срок 60 дней'], ['Баня 4×6 под ключ', 910000, 'шт', '', ''], ['Фундамент на сваях', 260000, 'компл.', '', 'только с их домом']];
-    const insP = db.prepare('INSERT INTO price_rows(competitor_id,scope,item,price,unit,sku,note,source_name) VALUES(?,?,?,?,?,?,?,?)');
+    const insP = db.prepare('INSERT INTO price_rows(competitor_id,scope,item,price,unit,sku,note,source_name,demo) VALUES(?,?,?,?,?,?,?,?,1)');
     hisRows.forEach(r => insP.run(comp.id, 'competitor', r[0], r[1], r[2], r[3], r[4], 'демо-прайс'));
     const ourPrices = db.prepare("SELECT * FROM price_rows WHERE scope='ours'").all();
     const competitorRows = db.prepare("SELECT * FROM price_rows WHERE competitor_id=? AND scope='competitor'").all(comp.id);

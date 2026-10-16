@@ -12,8 +12,12 @@ let JSDOM, VirtualConsole;
 try {
   ({ JSDOM, VirtualConsole } = await import('jsdom'));
 } catch {
+  // jsdom можно поставить в отдельный каталог и указать путь: JSDOM_PATH=/path/to/jsdom/lib/api.js
+  if (process.env.JSDOM_PATH) { try { ({ JSDOM, VirtualConsole } = await import(process.env.JSDOM_PATH)) } catch {} }
+}
+if (!JSDOM) {
   console.log('⏭  jsdom не установлен — тест интерфейса пропущен.');
-  console.log('   Установите и повторите:  npm i --no-save jsdom && node tests/ui.smoke.mjs');
+  console.log('   Установите и повторите:  npm i --prefix /tmp/jsdomtest jsdom && JSDOM_PATH=/tmp/jsdomtest/node_modules/jsdom/lib/api.js node tests/ui.smoke.mjs');
   process.exit(0);
 }
 
@@ -51,7 +55,7 @@ try {
   const views = ['dashboard', 'pipe', 'inbox', 'contacts', 'companies', 'tasks', 'products', 'competitors', 'analytics'];
   for (const v of views) { window.go(v); await sleep100(); window.go(v); await sleep(300); const h = $('#view').innerHTML; check('раздел ' + v, h.length > 250 && !/class="card err"/.test(h), h.length + ' симв.') }
 
-  for (const tab of ['integrations', 'competitors', 'pipelines', 'automations', 'templates', 'team', 'data', 'profile']) {
+  for (const tab of ['integrations', 'fields', 'competitors', 'pipelines', 'automations', 'templates', 'team', 'data', 'profile']) {
     window.__state.settingsTab = tab; window.go('settings'); await sleep(320); const h = $('#view').innerHTML;
     check('настройки → ' + tab, h.length > 300 && !/class="card err"/.test(h));
   }
@@ -67,6 +71,17 @@ try {
   await modal('уведомления', () => window.openNotifications());
   await modal('редактор воронки', () => window.openPipelineEditor());
   await modal('импорт CSV', () => window.importContacts());
+  await modal('дубли контактов', () => window.openDuplicates());
+  await modal('редактор своих полей', () => window.editField(-1));
+  const conv = (await (await fetch(BASE + '/api/conversations', { headers: { Authorization: 'Bearer ' + window.__token } })).json())[0];
+  await modal('письмо клиенту', () => window.openEmailComposer(conv.id));
+
+  // свои поля: настройка сохраняется и сразу появляется в формах
+  await fetch(BASE + '/api/custom-fields', { method: 'PUT', headers: { 'Content-Type': 'application/json', Authorization: 'Bearer ' + window.__token }, body: JSON.stringify({ fields: [{ key: 'area', label: 'Площадь участка', type: 'number', entity: 'both' }] }) });
+  window.__state.meta = await (await fetch(BASE + '/api/meta', { headers: { Authorization: 'Bearer ' + window.__token } })).json();
+  window.go('contacts'); await sleep(300); await window.openContact(1); await sleep(250);
+  check('своё поле в форме контакта', /Площадь участка/.test($('#modalBody').innerHTML));
+  window.closeModal();
 
   window.go('pipe'); await sleep(320);
   const dealId = window.__state.deals[0].id;

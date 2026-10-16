@@ -1,8 +1,9 @@
 /* KarkasCRM v2 frontend — amoCRM-like SPA + Wazzup unified inbox */
 const $ = s => document.querySelector(s), $$ = s => [...document.querySelectorAll(s)];
 let token = localStorage.getItem('karkas_token') || '';
-const state = { view: 'dashboard', settingsTab: 'integrations', pipeline: 1, conv: null, deals: [], stages: [], pipelines: [], contacts: [], companies: [], channels: [], cache: {}, dealTab: 'details' };
-const fmt = n => new Intl.NumberFormat('ru-RU').format(Math.round(n || 0)) + ' ₽';
+const state = { view: 'dashboard', settingsTab: 'integrations', pipeline: 1, conv: null, deals: [], stages: [], pipelines: [], contacts: [], companies: [], channels: [], cache: {}, dealTab: 'details', meta: null, dupes: null };
+const CUR = () => (state.meta && state.meta.company && state.meta.company.currency) || '₽';
+const fmt = n => new Intl.NumberFormat('ru-RU').format(Math.round(n || 0)) + ' ' + CUR();
 const esc = (s = '') => String(s ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 const dt = s => s ? String(s).replace('T', ' ').slice(0, 16) : '';
 const num = v => (String(v ?? '').replace(/[^\d.-]/g, '') || 0) * 1;
@@ -17,6 +18,31 @@ function toast(t) { const e = $('#toast'); e.textContent = t; e.classList.add('s
 function openModal(html) { $('#modalBody').innerHTML = html; $('#modal').classList.remove('hidden') }
 function closeModal() { $('#modal').classList.add('hidden') }
 function tmpl(name, obj = {}) { return (obj.body || '').replace(/{(\w+)}/g, (m, k) => esc(obj[k] || m)) }
+/* настраиваемые поля: определения берём из /api/meta (Настройки → Поля карточек) */
+const cfFor = entity => ((state.meta && state.meta.customFields) || []).filter(f => f.entity === 'both' || f.entity === entity);
+const cfValues = (obj = {}) => { try { const v = typeof obj === 'string' ? JSON.parse(obj || '{}') : (obj || {}); return v && typeof v === 'object' ? v : {} } catch { return {} } };
+function cfInputs(entity, obj = {}, grid = 2) {
+  const fields = cfFor(entity); if (!fields.length) return '';
+  const val = cfValues(obj.custom);
+  return `<div style="display:grid;grid-template-columns:repeat(${grid},1fr);gap:12px">${fields.map(f => {
+    const v = esc(val[f.key] ?? '');
+    const label = `${esc(f.label)}${f.required ? ' *' : ''}`;
+    if (f.type === 'select') return `<label>${label}<select name="cf_${esc(f.key)}">${['', ...(f.options || [])].map(o => `<option value="${esc(o)}" ${String(val[f.key] ?? '') === o ? 'selected' : ''}>${esc(o || '—')}</option>`).join('')}</select></label>`;
+    const t = f.type === 'number' ? 'number' : f.type === 'date' ? 'date' : f.type === 'email' ? 'email' : 'text';
+    return `<label>${label}<input name="cf_${esc(f.key)}" type="${t}" value="${v}"></label>`;
+  }).join('')}</div>`;
+}
+function cfCollect(form) {
+  const data = Object.fromEntries(new FormData(form)); const custom = {};
+  for (const k of Object.keys(data)) if (k.startsWith('cf_')) { custom[k.slice(3)] = data[k]; delete data[k] }
+  data.custom = JSON.stringify(custom);
+  return data;
+}
+function cfTable(entity, obj = {}) {
+  const fields = cfFor(entity); const val = cfValues(obj.custom);
+  const rows = fields.filter(f => String(val[f.key] ?? '') !== '').map(f => `<tr><th>${esc(f.label)}</th><td>${esc(val[f.key])}</td></tr>`).join('');
+  return rows ? rows : '';
+}
 
 /* ---------- boot ---------- */
 $('#loginForm').onsubmit = async e => {
@@ -33,6 +59,7 @@ async function boot() {
   try {
     const me = await api('/api/me');
     $('#uName').textContent = me.user.name; $('#uEmail').textContent = me.user.email; $('#uAva').textContent = (me.user.name || 'A')[0].toUpperCase();
+    state.meta = await api('/api/meta').catch(() => null);
     $('#app').classList.remove('hidden'); $('#login').classList.add('hidden'); connectSSE(); render();
   } catch { $('#login').classList.remove('hidden'); $('#app').classList.add('hidden') }
 }
@@ -83,6 +110,7 @@ async function dashboard(v) {
    <div class="kpi"><i>◎</i><span>Контактов / компаний</span><b>${d.contacts} <small>/ ${d.companies}</small></b></div>
    <div class="kpi"><i>✉</i><span>Непрочитанных чатов</span><b class="accent">${d.unread}</b></div>
    <div class="kpi"><i>✓</i><span>Открытых задач</span><b>${d.tasksOpen}</b></div></div>
+  ${d.contacts === 0 && d.dealsTotal === 0 ? `<div class="card" style="box-shadow:none;border-color:#bbf7d0;background:#f0fdf4"><b>База пустая — самое время начать 🚀</b><br><small>Добавьте первый контакт — сделка, задачи и чаты появятся сами. Кнопки «+ Контакт» и «+ Сделка» вверху. Если хотите посмотреть, как всё устроено, включите демо-данные переменной <code>SEED_DEMO=1</code> и перезапустите контейнер.</small></div>` : ''}
   <div class="cols"><div>
    <div class="card"><h3>Воронка продаж</h3>${d.stages.map(s => `<p style="display:flex;justify-content:space-between;margin:8px 0 2px"><span>${esc(s.name)} · ${s.count}</span><b>${fmt(s.sum)}</b></p><div class="bar"><i style="width:${Math.round(s.sum / max * 100)}%"></i></div>`).join('')}</div>
    <div class="card"><h3>Последние сделки</h3><table class="mini"><tr><th>Сделка</th><th>Клиент</th><th>Этап</th><th>Сумма</th></tr>${d.recentDeals.map(x => `<tr><td><b>${esc(x.title)}</b></td><td>${esc(x.contact_name || '—')}</td><td>${esc((d.stages.find(s => s.code === x.stage) || {}).name || x.stage)}</td><td><b>${fmt(x.amount)}</b></td></tr>`).join('')}</table></div></div>
@@ -137,11 +165,12 @@ async function openDeal(id) {
    <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px">
     <label>Ответственный<input name="responsible" value="${esc(d.responsible || 'Администратор')}" list="usersList"><datalist id="usersList">${users.map(u => `<option value="${esc(u.name)}">`).join('')}</datalist></label>
     <label>Причина отказа (для закрытых)<input name="loss_reason" placeholder="дорого / выбрал конкурента" value="${esc(d.loss_reason || '')}"></label></div>
+   ${cfInputs('deals', d) ? `<h4 style="margin:12px 0 6px">Дополнительные поля</h4>${cfInputs('deals', d)}` : ''}
    <button class="btn primary w">Сохранить</button></form>`);
 }
 function selStages(pid) { const pl = state.pipelines.find(p => p.id == pid); if (pl) $('#dealStage').innerHTML = pl.stages.map(s => `<option value="${esc(s.code)}">${esc(s.name)}</option>`).join('') }
 async function saveDeal(e, id) {
-  e.preventDefault(); const data = Object.fromEntries(new FormData(e.target));
+  e.preventDefault(); const data = cfCollect(e.target);
   data.amount = num(data.amount); data.pipeline_id = +data.pipeline_id; if (data.contact_id) data.contact_id = +data.contact_id; else delete data.contact_id;
   await api(id ? '/api/deals/' + id : '/api/deals', { method: id ? 'PATCH' : 'POST', body: JSON.stringify(data) });
   closeModal(); toast('Сделка сохранена'); render(); return false;
@@ -156,7 +185,7 @@ async function openDealCard(id) {
 }
 function dealTab(d, id) {
   const x = d.deal;
-  if (state.dealTab === 'details') return `<table class="mini"><tr><th>Клиент</th><td>${esc(x.contact_name || '—')} ${x.contact_phone ? '· ' + esc(x.contact_phone) : ''}</td></tr><tr><th>Этап</th><td>${esc(x.stage)}</td></tr><tr><th>Приоритет</th><td>${esc(x.priority)}</td></tr><tr><th>Дедлайн</th><td>${esc(x.deadline || '—')}</td></tr><tr><th>Создана</th><td>${esc(dt(x.created_at))}</td></tr><tr><th>Обновлена</th><td>${esc(dt(x.updated_at))}</td></tr>${x.loss_reason ? `<tr><th>Причина отказа</th><td>${esc(x.loss_reason)}</td></tr>` : ''}</table>`;
+  if (state.dealTab === 'details') return `<table class="mini"><tr><th>Клиент</th><td>${esc(x.contact_name || '—')} ${x.contact_phone ? '· ' + esc(x.contact_phone) : ''}</td></tr><tr><th>Этап</th><td>${esc(x.stage)}</td></tr><tr><th>Приоритет</th><td>${esc(x.priority)}</td></tr><tr><th>Дедлайн</th><td>${esc(x.deadline || '—')}</td></tr><tr><th>Создана</th><td>${esc(dt(x.created_at))}</td></tr><tr><th>Обновлена</th><td>${esc(dt(x.updated_at))}</td></tr>${x.loss_reason ? `<tr><th>Причина отказа</th><td>${esc(x.loss_reason)}</td></tr>` : ''}${cfTable('deals', x)}</table>`;
   if (state.dealTab === 'products') return `<div class="row"><b>Позиции</b><button class="btn sm primary" onclick="addDealProduct(${id})">+ Добавить товар</button></div><table class="mini"><tr><th>Название</th><th>Цена</th><th>Кол-во</th><th>Сумма</th><th></th></tr>${(d.products || []).map(p => `<tr><td>${esc(p.name)}</td><td>${fmt(p.price)}</td><td>${p.qty}</td><td><b>${fmt(p.price * p.qty)}</b></td><td><button class="btn sm danger" onclick="delRow('deal_products',${p.id},${id})">✕</button></td></tr>`).join('') || '<tr><td colspan="5"><small>Позиций нет — добавьте товар из прайса</small></td></tr>'}</table>`;
   if (state.dealTab === 'tasks') return `<div class="row"><b>Задачи по сделке</b><button class="btn sm primary" onclick="openTask(null,{deal_id:${id}});closeModal()">+ Задача</button></div>${(d.tasks || []).map(t => `<div class="row"><label><input type="checkbox" ${t.done ? 'checked' : ''} onchange="toggleTask(${t.id},this.checked,${id})"> ${esc(t.title)} <small>${esc(t.due || '')}</small></label></div>`).join('') || '<small>Задач нет</small>'}`;
   if (state.dealTab === 'notes') return `<form onsubmit="return addNote(event,'deals',${id})"><label>Новая заметка<textarea name="body" rows="3" placeholder="Итоги звонка, договорённости…"></textarea></label><button class="btn primary">Добавить заметку</button></form>${(d.notes || []).map(n => `<div class="row"><span>${esc(n.body)}<br><small>${esc(n.author || '')} · ${esc(dt(n.created_at))}</small></span><button class="btn sm danger" onclick="delRow('notes',${n.id},${id})">✕</button></div>`).join('')}`;
@@ -184,14 +213,14 @@ async function inbox(v) {
    <button class="btn orange" onclick="simulate()">+ Тестовое входящее</button><button class="btn" onclick="go('settings','integrations')">⚙ Настроить Wazzup</button></div>
   <div class="inbox">
    <div id="convList">${convs.map(c => `<div class="conv ${c.id === state.conv ? 'active' : ''}" data-name="${esc((c.title || '').toLowerCase() + ' ' + (c.phone || ''))}" onclick="state.conv=${c.id};render()"><b>${esc(c.title || 'Клиент')} ${c.unread ? `<span class="badge">${c.unread}</span>` : ''}</b><p>${esc(c.last_body || '')}</p><small>${chan(c.channels)} · ${esc(dt(c.last_at).slice(0, 10))}</small></div>`).join('') || '<div class="empty">Чатов пока нет.<br><small>Подключите Wazzup или нажмите «Тестовое входящее».</small></div>'}</div>
-   <div class="chat">${cur ? `<div class="chat-head"><b>${esc(cur.title || '')}</b><small>${esc(cur.phone || '')} · ${chan(cur.chat_type || cur.channels)}</small></div>
-    <div class="msgs" id="msgs">${msgs.map(m => `<div class="msg ${m.direction}"><span class="chan ${esc(m.channel)}">${esc(m.channel)}</span> ${esc(m.body)}<small>${esc(dt(m.created_at))}${m.author ? ' · ' + esc(m.author) : ''}${m.status === 'error' ? ' · ⚠ не доставлено' : m.status === 'read' ? ' · ✓✓' : ''}${m.content_uri ? ` · <a href="${esc(m.content_uri)}" target="_blank" rel="noopener">вложение</a>` : ''}</small></div>`).join('') || '<div class="empty">Нет сообщений</div>'}</div>
+   <div class="chat">${cur ? `<div class="chat-head"><b>${esc(cur.title || '')}</b><small>${esc(cur.phone || '')} · ${chan(cur.chat_type || cur.channels)}</small><span style="margin-left:auto;display:flex;gap:6px"><button class="btn sm" onclick="openEmailComposer(${cur.id})" title="Написать письмо с e-mail компании">✉ Письмо</button></span></div>
+    <div class="msgs" id="msgs">${msgs.map(m => `<div class="msg ${m.direction}"><span class="chan ${esc(m.channel)}">${esc(m.channel)}</span> ${m.subject ? `<b>${esc(m.subject)}</b><br>` : ''}${esc(m.body)}<small>${esc(dt(m.created_at))}${m.author ? ' · ' + esc(m.author) : ''}${m.status === 'error' ? ' · ⚠ не доставлено' : m.status === 'read' ? ' · ✓✓' : ''}${m.content_uri ? ` · <a href="${esc(m.content_uri)}" target="_blank" rel="noopener">вложение</a>` : ''}</small></div>`).join('') || '<div class="empty">Нет сообщений</div>'}</div>
     <form class="composer" onsubmit="return sendMsg(event)">
      <select id="msgChannel" title="Канал отправки">${state.channels.filter(c => c.state === 'active' || !c.state).map(c => `<option value="${esc(c.external_id)}" data-type="${esc(c.transport || 'whatsapp')}">${esc(c.name || c.phone || c.transport || 'канал')}</option>`).join('') || '<option value="">локально</option>'}</select>
      <input id="msgText" placeholder="Написать клиенту…" required autocomplete="off">
      <select id="tplSel" style="width:auto" onchange="if(this.value){$('#msgText').value=$('#msgText').value||this.value;this.selectedIndex=0}" title="Шаблоны"><option value="">Шаблоны</option>${(state.cache.templates || []).map(t => `<option value="${esc(t.body)}">${esc(t.name)}</option>`).join('')}</select>
      <button class="btn primary">➤</button></form>` : '<div class="empty">Выберите чат слева</div>'}</div>
-   <div class="profile">${cur ? `<h3>Клиент</h3><p><b>${esc(cur.title || '')}</b></p><p>📞 ${esc(cur.phone || '—')}<br>✉ ${esc(cur.email || '—')}</p><p>Каналы: ${chan(cur.channels)}</p><p><button class="btn sm" onclick="attachContact(${cur.contact_id})">Открыть карточку клиента</button></p><hr><h3>Быстрые действия</h3><div style="display:flex;flex-direction:column;gap:6px"><button class="btn sm" onclick="openTask(null,{contact_id:${cur.contact_id}})">+ Задача</button><button class="btn sm" onclick="quickDeal(${cur.contact_id})">+ Сделка</button><button class="btn sm" onclick="quickNote(${cur.contact_id})">+ Заметка</button></div>` : '<div class="empty">Выберите чат</div>'}</div></div>`;
+   <div class="profile">${cur ? `<h3>Клиент</h3><p><b>${esc(cur.title || '')}</b></p><p>📞 ${esc(cur.phone || '—')}<br>✉ ${esc(cur.email || '—')}</p><p>Каналы: ${chan(cur.channels)}${(cur.channels || '').includes('email') ? ' <span class="tag grey">почта подключена</span>' : ''}</p><p><button class="btn sm" onclick="attachContact(${cur.contact_id})">Открыть карточку клиента</button></p><hr><h3>Быстрые действия</h3><div style="display:flex;flex-direction:column;gap:6px"><button class="btn sm" onclick="openTask(null,{contact_id:${cur.contact_id}})">+ Задача</button><button class="btn sm" onclick="quickDeal(${cur.contact_id})">+ Сделка</button><button class="btn sm" onclick="quickNote(${cur.contact_id})">+ Заметка</button></div>` : '<div class="empty">Выберите чат</div>'}</div></div>`;
   if (!state.cache.templates) state.cache.templates = await api('/api/templates'), render();
   const m = $('#msgs'); if (m) m.scrollTop = m.scrollHeight;
 }
@@ -205,6 +234,22 @@ async function sendMsg(e) {
   const d = await api(`/api/conversations/${state.conv}/messages`, { method: 'POST', body: JSON.stringify({ body, channel_id: sel?.value || '', chat_type: sel?.selectedOptions?.[0]?.dataset.type || 'whatsapp' }) });
   toast(d.send.delivered ? 'Отправлено: ' + d.send.mode : 'Сохранено локально (' + d.send.mode + ')'); render(); return false;
 }
+async function openEmailComposer(convId) {
+  const conv = (await api('/api/conversations')).find(c => c.id === convId) || {};
+  openModal(`<h3>✉ Письмо клиенту</h3><p><small>Уходит с адреса компании (Настройки → Интеграции → Почта). Ответ клиента вернётся в этот же чат, если настроена пересылка входящих на вебхук CRM.</small></p>
+   <form onsubmit="return sendEmail(event,${convId})">
+    <label>Кому<input name="to" type="email" required value="${esc(conv.email || '')}" placeholder="client@mail.ru"></label>
+    <label>Тема<input name="subject" required value="Предложение от ${esc((state.meta && state.meta.company && state.meta.company.name) || 'компании')}"></label>
+    <label>Текст письма<textarea name="body" rows="7" required placeholder="Здравствуйте! Отправляю расчёт…"></textarea></label>
+    <button class="btn primary w">Отправить письмо</button></form>`);
+}
+async function sendEmail(e, convId) {
+  e.preventDefault(); const b = Object.fromEntries(new FormData(e.target));
+  toast('Отправляем письмо…');
+  try { const r = await api(`/api/conversations/${convId}/email`, { method: 'POST', body: JSON.stringify(b) }); closeModal(); toast(r.send.delivered ? 'Письмо отправлено: ' + b.to : 'Письмо сохранено в чате (' + r.send.mode + ')'); render() }
+  catch (err) { toast('Ошибка: ' + err.message) }
+  return false;
+}
 async function simulate() { await api('/api/inbox/simulate', { method: 'POST', body: JSON.stringify({ channel: ['whatsapp', 'telegram', 'instagram'][Math.floor(Math.random() * 3)], phone: '+7 9' + Math.floor(100000000 + Math.random() * 899999999), name: 'Клиент ' + (Math.floor(Math.random() * 90) + 10), body: 'Здравствуйте! Интересует каркасный дом, пришлите расчёт, пожалуйста.' }) }); toast('Входящее сообщение получено'); if (state.view !== 'inbox') go('inbox'); else render() }
 
 /* ---------- contacts / companies ---------- */
@@ -212,7 +257,7 @@ async function contacts(v) {
   const rows = await api('/api/contacts'); state.contacts = rows;
   const q = ($('#globalSearch').value || '').toLowerCase();
   const f = rows.filter(c => !q || JSON.stringify(c).toLowerCase().includes(q));
-  v.innerHTML = `<div class="card"><div class="row" style="border:0"><b>Всего: ${rows.length}</b><span style="display:flex;gap:8px"><button class="btn sm" onclick="download('/api/export/contacts','contacts.csv')">⬇ CSV</button><button class="btn sm" onclick="importContacts()">⬆ Импорт CSV</button></span></div>
+  v.innerHTML = `<div class="card"><div class="row" style="border:0"><b>Всего: ${rows.length}</b><span style="display:flex;gap:8px"><button class="btn sm" onclick="openDuplicates()">🔁 Дубли</button><button class="btn sm" onclick="download('/api/export/contacts','contacts.csv')">⬇ CSV</button><button class="btn sm" onclick="importContacts()">⬆ Импорт CSV</button></span></div>
    <table><tr><th>Клиент</th><th>Контакты</th><th>Компания / источник</th><th>Теги</th><th></th></tr>${f.map(c => `<tr><td><b>${esc(c.name)}</b>${c.position ? `<br><small>${esc(c.position)}</small>` : ''}</td><td>${esc(c.phone || '')}<br><small>${esc(c.email || '')}</small></td><td>${esc(c.company || '—')} <span class="tag grey">${esc(c.source || '')}</span></td><td>${(c.tags || '').split(',').filter(Boolean).map(t => `<span class="tag">${esc(t)}</span>`).join('')}</td>
    <td><button class="btn sm" onclick="openContactCard(${c.id})">Открыть</button> <button class="btn sm" onclick="openContact(${c.id})">✎</button> <button class="btn sm danger" onclick="del('contacts',${c.id})">✕</button></td></tr>`).join('') || '<tr><td colspan="5"><div class="empty">Контактов нет</div></td></tr>'}</table></div>`;
 }
@@ -220,7 +265,7 @@ async function openContactCard(id) {
   const c = state.contacts.find(x => x.id === id) || await api('/api/contacts/' + id);
   const notes = await api(`/api/notes?type=contacts&entity=${id}`);
   const deals = (await api('/api/deals')).deals.filter(d => d.contact_id === id);
-  openModal(`<h3>${esc(c.name)}</h3><table class="mini"><tr><th>Телефон</th><td>${esc(c.phone || '—')}</td></tr><tr><th>E-mail</th><td>${esc(c.email || '—')}</td></tr><tr><th>Компания</th><td>${esc(c.company || '—')}</td></tr><tr><th>Источник</th><td>${esc(c.source || '')}</td></tr><tr><th>Теги</th><td>${(c.tags || '').split(',').filter(Boolean).map(t => `<span class="tag">${esc(t)}</span>`).join('')}</td></tr></table>
+  openModal(`<h3>${esc(c.name)}</h3><table class="mini"><tr><th>Телефон</th><td>${esc(c.phone || '—')}</td></tr><tr><th>E-mail</th><td>${esc(c.email || '—')}</td></tr><tr><th>Компания</th><td>${esc(c.company || '—')}</td></tr><tr><th>Источник</th><td>${esc(c.source || '')}</td></tr><tr><th>Теги</th><td>${(c.tags || '').split(',').filter(Boolean).map(t => `<span class="tag">${esc(t)}</span>`).join('')}</td></tr>${cfTable('contacts', c)}</table>
    <h3 style="margin-top:14px">Сделки клиента</h3>${deals.map(d => `<div class="row"><span>${esc(d.title)}<br><small>${esc(d.stage)}</small></span><b>${fmt(d.amount)}</b></div>`).join('') || '<small>Сделок нет</small>'}
    <h3 style="margin-top:14px">Заметки</h3><form onsubmit="return addNote(event,'contacts',${id})"><textarea name="body" rows="2" placeholder="Заметка…"></textarea><button class="btn primary" style="margin-top:6px">Добавить</button></form>${notes.map(n => `<div class="row"><span>${esc(n.body)}<br><small>${esc(n.author || '')} · ${esc(dt(n.created_at))}</small></span></div>`).join('')}
    <div style="display:flex;gap:8px;margin-top:12px;flex-wrap:wrap"><button class="btn" onclick="openContact(${id})">✎ Редактировать</button><button class="btn ghost" onclick="openTask(null,{contact_id:${id}});closeModal()">+ Задача</button><button class="btn ghost" onclick="quickDeal(${id})">+ Сделка</button></div>`);
@@ -232,9 +277,28 @@ async function openContact(id, preset = {}) {
    <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px"><label>E-mail<input name="email" value="${esc(c.email || '')}"></label><label>Должность<input name="position" value="${esc(c.position || '')}"></label></div>
    <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px"><label>Компания<input name="company" value="${esc(c.company || '')}"></label><label>Источник<input name="source" value="${esc(c.source || 'manual')}"></label></div>
    <label>Теги (через запятую)<input name="tags" value="${esc(c.tags || '')}"></label><label>Заметки<textarea name="notes" rows="2">${esc(c.notes || '')}</textarea></label>
+   ${cfInputs('contacts', c) ? `<h4 style="margin:12px 0 6px">Дополнительные поля</h4>${cfInputs('contacts', c)}` : ''}
    <button class="btn primary w">Сохранить</button></form>`);
 }
-async function saveContact(e, id) { e.preventDefault(); await api(id ? '/api/contacts/' + id : '/api/contacts', { method: id ? 'PATCH' : 'POST', body: JSON.stringify(Object.fromEntries(new FormData(e.target))) }); closeModal(); toast('Контакт сохранён'); render(); return false }
+async function saveContact(e, id) { e.preventDefault(); await api(id ? '/api/contacts/' + id : '/api/contacts', { method: id ? 'PATCH' : 'POST', body: JSON.stringify(cfCollect(e.target)) }); closeModal(); toast('Контакт сохранён'); render(); return false }
+
+/* ---------- дубли контактов ---------- */
+async function openDuplicates() {
+  const d = await api('/api/contacts/duplicates'); state.dupes = d;
+  openModal(`<h3>🔁 Дубли контактов <span class="tag orange">${d.total}</span></h3>
+   <p><small>CRM нашла контакты с одинаковым телефоном или e-mail. Выберите, какую карточку оставить основной — сделки, задачи, заметки и всю переписку перенесём в неё, лишние карточки удалим.</small></p>
+   ${d.groups.map((g, gi) => `<div class="card" style="box-shadow:none"><b>${g.type === 'phone' ? '📞 одинаковый телефон' : '✉ одинаковый e-mail'}: ${esc(g.key.split(':')[1])}</b>
+     <div style="margin-top:8px">${g.contacts.map(c => `<label style="display:flex;gap:8px;align-items:center;padding:4px 0"><input type="radio" name="keep_${gi}" value="${c.id}" style="width:auto" ${c.id === g.contacts[0].id ? 'checked' : ''}><span>${esc(c.name)} <small>${esc(c.phone || '')} ${esc(c.email || '')} · источник ${esc(c.source || '')} · создан ${esc(dt(c.created_at))}</small></span></label>`).join('')}</div>
+     <button class="btn sm primary" onclick="mergeGroup(${gi})">Объединить в выбранную</button></div>`).join('') || '<div class="empty">Дублей не найдено — база аккуратная 👍</div>'}`);
+}
+async function mergeGroup(gi) {
+  const g = state.dupes.groups[gi]; const keep = +($(`input[name="keep_${gi}"]:checked`) || {}).value || 0;
+  if (!keep) return toast('Выберите основную карточку');
+  const ids = g.contacts.map(c => c.id);
+  if (!confirm('Объединить контакты в выбранную карточку?')) return;
+  const r = await api('/api/contacts/merge', { method: 'POST', body: JSON.stringify({ keep, ids }) });
+  toast(`Объединено карточек: ${r.merged}`); state.contacts = []; openDuplicates(); render();
+}
 async function companies(v) {
   const rows = await api('/api/companies'); state.companies = rows;
   v.innerHTML = `<div class="card"><div class="row" style="border:0"><b>Компаний: ${rows.length}</b><button class="btn sm primary" onclick="openCompany()">+ Компания</button></div>
@@ -291,11 +355,25 @@ async function saveProduct(e, id) { e.preventDefault(); const b = Object.fromEnt
 /* ---------- analytics ---------- */
 async function analytics(v) {
   const a = await api('/api/analytics'); const max = Math.max(...a.stages.map(s => s.sum), 1);
+  const plan = a.plan || { target: 0, fact: 0, percent: null };
+  const planBlock = plan.target ? `<div class="card"><h3 style="display:flex;justify-content:space-between;align-items:center">План на месяц <button class="btn sm" onclick="setSalesPlan(${plan.target})">✎ Изменить</button></h3>
+   <p style="display:flex;justify-content:space-between;margin:6px 0 4px"><span>Факт: <b>${fmt(plan.fact)}</b> из ${fmt(plan.target)}</span><b class="${plan.percent >= 100 ? 'green' : 'accent'}">${plan.percent}%</b></p>
+   <div class="bar"><i style="width:${Math.min(100, plan.percent || 0)}%"></i></div>
+   <p><small>Успешных сделок в этом месяце: ${plan.deals}. Осталось выполнить: ${fmt(Math.max(0, plan.target - plan.fact))}.</small></p></div>`
+    : `<div class="card"><h3>План продаж на месяц</h3><p><small>Задайте план — CRM покажет выполнение в процентах и подскажет, сколько осталось до цели.</small></p><button class="btn orange" onclick="setSalesPlan(0)">🎯 Задать план продаж</button></div>`;
   v.innerHTML = `<div class="grid"><div class="kpi"><i>📈</i><span>Конверсия в успех</span><b class="green">${a.conversion}%</b></div>
    <div class="kpi"><i>💵</i><span>Средний чек (выигранные)</span><b>${fmt(a.avgCheck)}</b></div>
    <div class="kpi"><i>🔮</i><span>Прогноз выручки (в работе)</span><b class="accent">${fmt(a.forecast)}</b></div></div>
+  ${planBlock}
   <div class="cols"><div class="card"><h3>Выручка по этапам</h3><div class="chart">${a.stages.map(s => `<div><b style="color:var(--ink)">${s.count}</b><i style="height:${Math.max(4, Math.round(s.sum / max * 120))}px" title="${fmt(s.sum)}"></i><span>${esc(s.name.slice(0, 12))}</span></div>`).join('')}</div></div>
   <div class="card"><h3>Источники лидов</h3>${a.bySource.map(s => `<div class="row"><span>${esc(s.name)} <small>${s.count} сделок</small></span><b>${fmt(s.sum)}</b></div>`).join('') || '<small>Нет данных</small>'}<hr><h3>Причины отказов</h3>${a.byLoss.map(s => `<div class="row"><span>${esc(s.name)}</span><b>${s.count}</b></div>`).join('') || '<small>Отказов нет 🎉</small>'}</div></div>`;
+}
+
+async function setSalesPlan(current) {
+  const v = prompt('План продаж на месяц, ₽:', current || 1000000);
+  if (v === null) return;
+  await api('/api/settings', { method: 'PUT', body: JSON.stringify({ SALES_TARGET: v }) });
+  toast('План сохранён'); render();
 }
 
 /* ---------- конкуренты ---------- */
@@ -440,7 +518,7 @@ async function importPriceUrl(e, compId, scope) {
 /* ---------- settings ---------- */
 async function settings(v) {
   const s = await api('/api/settings'); state.cache.settings = s; const origin = location.origin;
-  const tabs = { integrations: '🔌 Интеграции и каналы', competitors: '🕵 Конкуренты и источники', pipelines: '▦ Воронки и этапы', automations: '⚡ Автоматизации', templates: '💬 Шаблоны сообщений', team: '👥 Команда', data: '💾 Данные и компания', profile: '👤 Профиль' };
+  const tabs = { integrations: '🔌 Интеграции и каналы', fields: '🧩 Поля карточек', competitors: '🕵 Конкуренты и источники', pipelines: '▦ Воронки и этапы', automations: '⚡ Автоматизации', templates: '💬 Шаблоны сообщений', team: '👥 Команда', data: '💾 Данные и компания', profile: '👤 Профиль' };
   let body = '';
   if (state.settingsTab === 'integrations') {
     const chans = state.channels.length ? state.channels : await api('/api/channels').catch(() => []); state.channels = chans;
@@ -462,9 +540,33 @@ async function settings(v) {
       <label>Access Token<input id="waToken" placeholder="${esc(s.whatsapp.token || 'EAA…')}"></label>
       <button class="btn primary" onclick="saveWhatsApp()">Сохранить WhatsApp</button><hr><p>Callback URL Meta: <code>${origin}/webhooks/whatsapp</code></p></div>
      <div class="card"><h3>✈ Telegram (свой бот) и сайт</h3><p>Вебхук бота: <code>${origin}/webhooks/telegram</code><br>Универсальный вебхук для сайта/формы: <code>${origin}/webhooks/generic</code> (JSON <code>{channel, phone, name, body}</code>)</p>
-      <label>Токен бота Telegram<input id="tgToken" placeholder="123456:ABC…"></label><button class="btn" onclick="saveTelegram()">Сохранить</button></div></div>
+      <label>Токен бота Telegram<input id="tgToken" placeholder="123456:ABC…"></label><button class="btn" onclick="saveTelegram()">Сохранить</button></div>
+     <div class="card"><h3>✉ Почта — письма клиентам прямо из CRM</h3>
+      <p>Статус: <b style="color:${s.email.configured ? 'var(--green)' : 'var(--orange)'}">${s.email.configured ? 'SMTP настроен' : 'не настроено'}</b></p>
+      <form onsubmit="return saveEmail(event)">
+       <div style="display:grid;grid-template-columns:2fr 1fr;gap:12px"><label>SMTP-сервер<input name="SMTP_HOST" value="${esc(s.email.host || '')}" placeholder="smtp.yandex.ru / smtp.mail.ru"></label><label>Порт<input name="SMTP_PORT" value="${esc(s.email.port || '587')}"></label></div>
+       <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px"><label>Шифрование<select name="SMTP_SECURE"><option value="" ${!s.email.secure ? 'selected' : ''}>STARTTLS (587, авто)</option><option value="1" ${s.email.secure === '1' ? 'selected' : ''}>SSL/TLS (465)</option><option value="0" ${s.email.secure === '0' ? 'selected' : ''}>без шифрования (внутренний релей)</option></select></label>
+       <label>Логин<input name="SMTP_USER" value="${esc(s.email.user || '')}" placeholder="crm@company.ru"></label></div>
+       <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px"><label>Пароль<input name="SMTP_PASS" type="password" placeholder="${s.email.pass ? '•••••• (сохранён)' : 'пароль приложения'}"></label>
+       <label>Адрес отправителя<input name="MAIL_FROM" value="${esc(s.email.from || '')}" placeholder="crm@company.ru"></label></div>
+       <label>Куда отправить проверочное письмо<input name="SMTP_TEST_TO" value="${esc(s.email.test_to || '')}" placeholder="owner@company.ru"></label>
+       <div style="display:flex;gap:8px;flex-wrap:wrap"><button class="btn primary">Сохранить почту</button><button class="btn" type="button" onclick="testEmail(this.form)">✈ Отправить проверочное письмо</button></div></form>
+      <hr><p><b>Приём входящих писем</b> — в тот же чат клиента. Укажите этот адрес в правиле пересылки вашего почтового ящика (или в почтовом шлюзе/скрипте):</p>
+      <code>${origin}/webhooks/email</code>
+      <label style="margin-top:8px">Секрет вебхука (необязательно, добавится как <code>?secret=…</code>)<input id="mailSecret" value="${esc(s.email.webhook_secret || '')}"></label>
+      <button class="btn sm" onclick="saveMailSecret()">Сохранить секрет</button>
+      <p><small>Входящее письмо создаёт/находит контакт по e-mail, а тема и текст появляются в едином диалоге клиента рядом с WhatsApp и Telegram.</small></p></div></div>
      <div><div class="card"><h3>Права и роли</h3><p><b>Администратор</b> — всё, включая настройки и команду.<br><b>Менеджер</b> — сделки, клиенты, чаты, задачи.<br><b>Наблюдатель</b> — только просмотр.</p><p><small>Создайте пользователей во вкладке «Команда».</small></p></div>
      <div class="card"><h3>Проверка работы</h3><button class="btn orange w" onclick="simulate()">🧪 Имитировать входящее сообщение</button><p style="margin-top:8px"><small>Проверит объединение чатов и создание сделки без реального мессенджера.</small></p><button class="btn w" onclick="fetch('/api/health').then(r=>r.json()).then(d=>toast('API '+d.version+' — OK'))">Проверить API</button></div></div></div>`;
+  } else if (state.settingsTab === 'fields') {
+    const cf = await api('/api/custom-fields');
+    const rows = cf.fields;
+    body = `<div class="settings-cols"><div class="card"><div class="row" style="border:0"><h3>🧩 Свои поля для контактов и сделок</h3><button class="btn sm primary" onclick="editField(-1)">+ Поле</button></div>
+     <table><tr><th>Название</th><th>Где</th><th>Тип</th><th>Обязательное</th><th></th></tr>${rows.map((f, i) => `<tr><td><b>${esc(f.label)}</b><br><small>${esc(f.key)}</small></td><td>${({ contacts: 'Контакты', deals: 'Сделки', both: 'Везде' })[f.entity] || esc(f.entity)}</td><td>${({ text: 'Текст', number: 'Число', date: 'Дата', select: 'Список', phone: 'Телефон', email: 'E-mail' })[f.type] || esc(f.type)}${f.options && f.options.length ? '<br><small>' + f.options.map(esc).join(', ') + '</small>' : ''}</td><td>${f.required ? '✅' : '—'}</td><td><button class="btn sm" onclick="editField(${i})">✎</button> <button class="btn sm danger" onclick="delField(${i})">✕</button></td></tr>`).join('') || '<tr><td colspan="5"><div class="empty">Своих полей пока нет</div></td></tr>'}</table>
+     <p><small>Например: «ИНН», «Площадь участка», «Тип фундамента», «Дата замера». Поля сразу появляются в формах и карточках — код менять не нужно.</small></p></div>
+     <div><div class="card"><h3>Как это работает</h3><ol style="padding-left:18px;margin:0"><li>Добавьте поле: название видит менеджер, ключ — для выгрузок и API.</li><li>Выберите, где показывать: в контактах, сделках или везде.</li><li>Тип поля влияет на ввод: текст, число, дата, e-mail, список вариантов.</li><li>Значения хранятся в карточке и попадают в API как <code>custom: {"ключ": "значение"}</code>.</li></ol>
+     <hr><p><small>Удаление поля не стирает данные карточек — значения просто перестают показываться.</small></p></div>
+     <div class="card"><h3>Настройка из интерфейса</h3><p><small>Этот же принцип действует для воронок и этапов, шаблонов сообщений, автоматизаций, ключей интеграций, плана продаж и резервных копий — всё меняется из CRM, без правок кода и пересборки Docker.</small></p></div></div></div>`;
   } else if (state.settingsTab === 'competitors') {
     const cs = await api('/api/competitor-sources');
     const ours = await api('/api/prices?scope=ours');
@@ -511,17 +613,77 @@ async function settings(v) {
     body = `<div class="settings-cols"><div><div class="card"><h3>Название компании</h3><form onsubmit="return saveCompanySettings(event)"><div style="display:grid;grid-template-columns:2fr 1fr;gap:12px"><label>Название<input name="COMPANY_NAME" value="${esc(s.company.name)}"></label><label>Валюта<input name="CURRENCY" value="${esc(s.company.currency)}"></label></div>
      <label>Автосоздание сделки при первом обращении<select name="AUTO_DEAL"><option value="1" ${s.auto_deal === '1' ? 'selected' : ''}>Да — создавать сделку «Неразобранное»</option><option value="0" ${s.auto_deal !== '1' ? 'selected' : ''}>Нет</option></select></label>
      <button class="btn primary">Сохранить</button></form></div>
+     <div class="card"><h3>🎯 План продаж и уведомления</h3><form onsubmit="return savePlanSettings(event)">
+      <label>План продаж на месяц, ${esc((s.company && s.company.currency) || '₽')}<input name="SALES_TARGET" value="${esc(s.sales_target || 0)}"></label>
+      <label>Webhook о просроченных задачах (необязательно — уведомление придёт в Telegram/Slack/CRM-бот)<input name="NOTIFY_WEBHOOK" value="${esc((s.maintenance || {}).notify_webhook || '')}" placeholder="https://hooks.slack.com/services/…"></label>
+      <button class="btn primary">Сохранить</button></form>
+      <p><small>План показывается в «Аналитике» с процентом выполнения. Напоминания о просроченных задачах CRM присылает во всплывающее окно (🔔) и на webhook, если он задан.</small></p></div>
+     <div class="card"><h3>🔐 Безопасность и доступ</h3><form onsubmit="return saveAdvancedSettings(event)">
+      <label>Попыток входа с одного IP за 5 минут<input name="LOGIN_RATE_LIMIT" value="${esc((s.advanced || {}).login_rate_limit || '12')}"></label>
+      <label>Встраивание в iframe (пусто — запрещено, <code>*</code> или домен портала — разрешено только ему)<input name="FRAME_ANCESTORS" value="${esc((s.advanced || {}).frame_ancestors || '')}" placeholder="https://portal.company.ru"></label>
+      <button class="btn primary">Сохранить</button></form>
+      <p><small>Смена этих параметров применяется сразу, без перезапуска контейнера. Пароль администратора — во вкладке «Профиль», сотрудники и роли — во вкладке «Команда».</small></p></div>
+     <div class="card"><h3>💾 Резервные копии</h3><p><small>CRM сама делает копию базы раз в сутки и хранит ${esc(((s.maintenance || {}).backup_keep_days) || '7')} дней. Копии лежат в томе Docker <code>/data/backups</code> — их видно и снаружи контейнера.</small></p>
+      <div id="backupList">…</div>
+      <div style="display:flex;gap:8px;flex-wrap:wrap;margin-top:8px"><button class="btn primary sm" onclick="makeBackup()">Создать копию сейчас</button><button class="btn sm" onclick="download('/api/backup','karkas-backup.json')">⬇ Скачать текущую базу (JSON)</button></div></div>
+     <div class="card"><h3>🧪 Демо-данные</h3><p><small>В демо-режиме CRM показывает примеры (клиенты, сделки, чаты, конкурент). Нажмите кнопку, когда заведёте свои данные — примеры удалятся, рабочие данные не тронем.</small></p>
+      <button class="btn danger" onclick="cleanDemo()">Удалить демо-данные</button>
+      <p style="margin-top:8px"><small>Чистая установка без примеров: <code>SEED_DEMO=0</code> в docker-compose.</small></p></div>
      <div class="card"><h3>Экспорт и импорт</h3><button class="btn w" onclick="download('/api/export/contacts','contacts.csv')">⬇ Контакты (CSV)</button><p></p><button class="btn w" onclick="download('/api/export/deals','deals.csv')">⬇ Сделки (CSV)</button><p></p><button class="btn w" onclick="download('/api/backup','karkas-backup.json')">⬇ Полный бэкап (JSON)</button>
      <hr><button class="btn w" onclick="importContacts()">⬆ Импорт контактов из CSV</button><p><small>Формат: <code>Имя;Телефон;E-mail;Компания</code> с заголовком в первой строке.</small></p></div></div>
-     <div><div class="card"><h3>Обслуживание</h3><p><small>База — один файл SQLite в Docker-томе <code>karkascrm_data</code>. Бэкап = скачать JSON выше или скопировать <code>crm.db</code>.</small></p><code>docker compose exec crm sh -c "ls -la /data"</code></div>
+     <div><div class="card"><h3>Обслуживание</h3><p><small>Версия CRM: <b>${esc(s.version || '')}</b> · база — один файл SQLite в Docker-томе <code>karkascrm_data</code> (каталог <code>/data</code>), резервные копии — в <code>/data/backups</code>.</small></p><code>docker compose exec crm ls -la /data /data/backups</code>
+      <p style="margin-top:8px"><small>Обновление CRM: <code>docker compose pull && docker compose up -d</code> — база и настройки в томе сохраняются.</small></p>
+      <button class="btn sm" onclick="fetch('/api/health').then(r=>r.json()).then(d=>toast('API '+d.version+' · база '+(d.dbSizeBytes/1024|0)+' КБ · контактов '+d.counts.contacts))">Проверить состояние системы</button></div>
      <div class="card"><h3>API для интеграций</h3><p><small>Все действия доступны по REST с токеном: <code>Authorization: Bearer …</code></small></p><p><small>Вебхуки: <code>/webhooks/wazzup</code>, <code>/webhooks/whatsapp</code>, <code>/webhooks/telegram</code>, <code>/webhooks/generic</code></small></p></div></div></div>`;
   } else {
     body = `<div class="card" style="max-width:480px"><h3>Смена пароля</h3><form onsubmit="return savePassword(event)"><label>Текущий пароль<input name="old" type="password" required></label><label>Новый пароль (мин. 8)<input name="next" type="password" minlength="8" required></label><button class="btn primary w">Сменить пароль</button></form></div>`;
   }
   v.innerHTML = `<div class="tabs">${Object.entries(tabs).map(([k, n]) => `<button class="${state.settingsTab === k ? 'active' : ''}" onclick="state.settingsTab='${k}';render()">${n}</button>`).join('')}</div>${body}`;
+  if (state.settingsTab === 'data') loadBackups();
 }
 async function saveWazzup() { await api('/api/settings', { method: 'PUT', body: JSON.stringify({ WAZZUP_API_KEY: $('#wzKey').value, WAZZUP_CHANNEL_ID: $('#wzChannel').value, WAZZUP_WEBHOOK_SECRET: $('#wzSecret').value, WAZZUP_API_URL: $('#wzUrl').value }) }); toast('Ключ Wazzup сохранён'); render() }
 async function saveWhatsApp() { await api('/api/settings', { method: 'PUT', body: JSON.stringify({ WHATSAPP_TOKEN: $('#waToken').value, WHATSAPP_PHONE_ID: $('#waPhone').value, WHATSAPP_VERIFY_TOKEN: $('#waVerify').value, MESSENGER_PROVIDER: $('#provider').value }) }); toast('Настройки WhatsApp сохранены'); render() }
+let __fields = null;
+async function loadFields() { if (!__fields) __fields = (await api('/api/custom-fields')).fields; return __fields }
+async function editField(i) {
+  const list = await loadFields(); const f = i >= 0 ? list[i] : { key: '', label: '', type: 'text', entity: 'both', options: [], required: false };
+  openModal(`<h3>${i >= 0 ? 'Поле' : 'Новое поле карточки'}</h3><form onsubmit="return saveField(event,${i})">
+   <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px"><label>Название для менеджера*<input name="label" required value="${esc(f.label)}" placeholder="Площадь участка"></label>
+   <label>Ключ (латиницей)*<input name="key" required value="${esc(f.key)}" placeholder="area"></label></div>
+   <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px"><label>Тип<select name="type">${[['text', 'Текст'], ['number', 'Число'], ['date', 'Дата'], ['email', 'E-mail'], ['phone', 'Телефон'], ['select', 'Список вариантов']].map(([k, n]) => `<option value="${k}" ${k === f.type ? 'selected' : ''}>${n}</option>`).join('')}</select></label>
+   <label>Где показывать<select name="entity">${[['both', 'Везде'], ['contacts', 'Только контакты'], ['deals', 'Только сделки']].map(([k, n]) => `<option value="${k}" ${k === f.entity ? 'selected' : ''}>${n}</option>`).join('')}</select></label></div>
+   <label>Варианты для списка (через запятую)<input name="options" value="${esc((f.options || []).join(', '))}" placeholder="каркас, брус, газобетон"></label>
+   <label style="display:flex;gap:8px;align-items:center"><input type="checkbox" name="required" style="width:auto" ${f.required ? 'checked' : ''}> Показывать как важное поле</label>
+   <button class="btn primary w">Сохранить</button></form>`);
+}
+async function saveField(e, i) {
+  e.preventDefault(); const list = (await loadFields()).slice();
+  const b = Object.fromEntries(new FormData(e.target));
+  const field = { key: b.key.replace(/[^a-zA-Z0-9_]/g, ''), label: b.label, type: b.type, entity: b.entity, required: !!b.required, options: (b.options || '').split(',').map(x => x.trim()).filter(Boolean) };
+  if (!field.key) return toast('Ключ должен содержать латинские буквы');
+  if (i >= 0) list[i] = field; else list.push(field);
+  __fields = null; state.meta = null;
+  await api('/api/custom-fields', { method: 'PUT', body: JSON.stringify({ fields: list }) });
+  state.meta = await api('/api/meta').catch(() => null); closeModal(); toast('Поле сохранено'); render(); return false;
+}
+async function delField(i) {
+  if (!confirm('Убрать поле из карточек?')) return;
+  const list = (await loadFields()).slice(); list.splice(i, 1); __fields = null;
+  await api('/api/custom-fields', { method: 'PUT', body: JSON.stringify({ fields: list }) });
+  state.meta = await api('/api/meta').catch(() => null); toast('Поле удалено'); render();
+}
+async function saveEmail(e) {
+  e.preventDefault(); const b = Object.fromEntries(new FormData(e.target));
+  await api('/api/settings', { method: 'PUT', body: JSON.stringify(b) });
+  toast('Настройки почты сохранены'); render(); return false;
+}
+async function testEmail(form) {
+  const b = Object.fromEntries(new FormData(form)); toast('Отправляем проверочное письмо…');
+  try { const r = await api('/api/integrations/email/test', { method: 'POST', body: JSON.stringify(b) }); toast('Письмо ушло на ' + r.to + ' — проверьте ящик'); }
+  catch (err) { toast('Не получилось: ' + err.message) }
+  return false;
+}
+async function saveMailSecret() { await api('/api/settings', { method: 'PUT', body: JSON.stringify({ EMAIL_WEBHOOK_SECRET: $('#mailSecret').value }) }); toast('Секрет сохранён'); render() }
 async function saveTelegram() { await api('/api/settings', { method: 'PUT', body: JSON.stringify({ TELEGRAM_BOT_TOKEN: $('#tgToken').value }) }); toast('Токен сохранён'); render() }
 async function testWazzup() {
   const r = await api('/api/integrations/wazzup/test', { method: 'POST' }).catch(e => ({ ok: false, error: e.message }));
@@ -576,6 +738,22 @@ async function openUser(id) {
    <button class="btn primary w">Сохранить</button></form>`);
 }
 async function saveUser(e, id) { e.preventDefault(); const b = Object.fromEntries(new FormData(e.target)); if (!b.password) delete b.password; b.id = id; await api(id ? '/api/users/' + id : '/api/users', { method: id ? 'PATCH' : 'POST', body: JSON.stringify(b) }); closeModal(); toast('Пользователь сохранён'); render(); return false }
+async function loadBackups() {
+  const host = $('#backupList'); if (!host) return;
+  try { const d = await api('/api/backups');
+    host.innerHTML = `<table class="mini"><tr><th>Файл</th><th>Размер</th><th>Создан</th></tr>${(d.files || []).slice(0, 8).map(f => `<tr><td>${esc(f.name)}</td><td>${(f.sizeBytes / 1024 | 0)} КБ</td><td><small>${esc(dt(f.created_at))}</small></td></tr>`).join('') || '<tr><td colspan="3"><small>Копий пока нет — создайте первую</small></td></tr>'}</table>`;
+  } catch (e) { host.innerHTML = `<small>${esc(e.message)}</small>` }
+}
+async function makeBackup() { const r = await api('/api/backups', { method: 'POST' }); toast('Копия создана: ' + r.created); loadBackups() }
+async function cleanDemo() {
+  if (!confirm('Удалить демонстрационные данные? Ваши собственные клиенты, сделки и чаты останутся.')) return;
+  const r = await api('/api/demo/clean', { method: 'POST' });
+  toast(`Удалено: контактов ${r.cleaned.contacts}, сделок ${r.cleaned.deals}, задач ${r.cleaned.tasks}, чатов ${r.cleaned.conversations}`);
+  state.contacts = []; render();
+}
+async function saveAdvancedSettings(e) { e.preventDefault(); await api('/api/settings', { method: 'PUT', body: JSON.stringify(Object.fromEntries(new FormData(e.target))) }); toast('Сохранено'); layoutRefreshFramePolicy(); return false }
+async function layoutRefreshFramePolicy() { try { const s = await api('/api/settings'); if (s.advanced && s.advanced.frame_ancestors) console.info('iframe разрешён для', s.advanced.frame_ancestors) } catch {} }
+async function savePlanSettings(e) { e.preventDefault(); await api('/api/settings', { method: 'PUT', body: JSON.stringify(Object.fromEntries(new FormData(e.target))) }); toast('Сохранено'); return false }
 async function importContacts() { openModal(`<h3>Импорт контактов из CSV</h3><p><small>Первая строка — заголовки: <code>Имя;Телефон;E-mail;Компания</code>. Разделитель — <code>;</code> или <code>,</code>.</small></p><form onsubmit="return doImport(event)"><label>Вставьте CSV<textarea name="csv" rows="8" placeholder="Имя;Телефон;E-mail;Компания&#10;Иван Петров;+7 900 111-22-33;ivan@mail.ru;ООО Иван"></textarea></label><label>…или выберите файл<input type="file" accept=".csv,text/csv" onchange="csvFromFile(this)"></label><button class="btn primary w">Импортировать</button></form>`) }
 function csvFromFile(input) { const f = input.files[0]; if (!f) return; const r = new FileReader(); r.onload = () => { $('#modalBody textarea').value = r.result }; r.readAsText(f) }
 async function doImport(e) { e.preventDefault(); const d = await api('/api/import/contacts', { method: 'POST', body: JSON.stringify({ csv: new FormData(e.target).get('csv') }) }); closeModal(); toast('Импортировано контактов: ' + d.imported); render(); return false }
@@ -598,5 +776,10 @@ function connectSSE() {
   const es = new EventSource('/api/events?token=' + encodeURIComponent(token));
   es.addEventListener('message', () => { if (state.view === 'inbox' || state.view === 'dashboard') render() });
   es.addEventListener('change', () => { if (['pipe', 'dashboard'].includes(state.view)) render() });
+  es.addEventListener('notify', e => {
+    let d = {}; try { d = JSON.parse(e.data) } catch {}
+    if (d.type === 'overdue_tasks') toast(`⏰ Просроченных задач: ${d.count}. Нажмите 🔔, чтобы посмотреть`);
+    api('/api/dashboard').then(navCounts).catch(() => {});
+  });
 }
 boot();
