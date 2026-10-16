@@ -2,4 +2,8 @@
 .env
 **/node_modules
 .nx/cache
-packages/twenty-server/.env
+packages
+data
+tests
+*.md
+.github

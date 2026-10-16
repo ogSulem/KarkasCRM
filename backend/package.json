@@ -1,0 +1,1 @@
+{"name":"karkas-crm-backend","version":"1.0.0","private":true,"type":"module","engines":{"node":">=22.5"},"scripts":{"start":"node --experimental-sqlite src/server.js","dev":"node --experimental-sqlite --watch src/server.js","test":"node --experimental-sqlite --test ../tests/*.test.js"},"license":"AGPL-3.0"}

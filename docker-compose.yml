@@ -1,0 +1,24 @@
+name: karkascrm
+services:
+  crm:
+    build: .
+    image: karkascrm:latest
+    container_name: karkascrm
+    restart: unless-stopped
+    env_file: [.env]
+    environment:
+      PORT: 8080
+      HOST: 0.0.0.0
+      DATA_DIR: /data
+    ports:
+      - "${CRM_PORT:-8080}:8080"
+    volumes:
+      - crm_data:/data
+    healthcheck:
+      test: ["CMD","wget","-qO-","http://127.0.0.1:8080/api/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+volumes:
+  crm_data:
+    name: karkascrm_data

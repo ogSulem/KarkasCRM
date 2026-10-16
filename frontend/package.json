@@ -1,0 +1,1 @@
+{"name":"karkas-crm-frontend","version":"1.0.0","private":true,"description":"Static SPA, served by backend (no build step)","scripts":{"start":"node ../backend/src/server.js"}}

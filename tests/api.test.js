@@ -1,0 +1,23 @@
+import { test, before, after } from 'node:test';
+import assert from 'node:assert';
+process.env.DATA_DIR = '/tmp/karkas-test-' + Date.now();
+process.env.PORT = '18099';
+const { server } = await import('../backend/src/server.js');
+const base = 'http://127.0.0.1:18099';
+let token;
+before(async () => { await new Promise(r => server.listening ? r() : server.once('listening', r)); });
+after(() => server.close());
+test('health + login + unified inbox merges channels by phone', async () => {
+  assert.equal((await (await fetch(base + '/api/health')).json()).ok, true);
+  const login = await (await fetch(base + '/api/auth/login', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ email: 'admin@example.com', password: 'admin12345' }) })).json();
+  token = login.token; assert.ok(token);
+  const h = { 'Content-Type': 'application/json', Authorization: 'Bearer ' + token };
+  await fetch(base + '/api/inbox/simulate', { method: 'POST', headers: h, body: JSON.stringify({ channel: 'whatsapp', phone: '+7 911 111-22-33', name: 'Тест', body: 'Привет из WhatsApp' }) });
+  await fetch(base + '/api/inbox/simulate', { method: 'POST', headers: h, body: JSON.stringify({ channel: 'telegram', phone: '+79111112233', name: 'Тест', body: 'А это Telegram того же клиента' }) });
+  const convs = await (await fetch(base + '/api/conversations', { headers: h })).json();
+  const mine = convs.filter(c => (c.phone || '').includes('911'));
+  assert.equal(mine.length, 1, 'один объединённый чат');
+  assert.ok(mine[0].channels.includes('whatsapp') && mine[0].channels.includes('telegram'));
+  const deals = await (await fetch(base + '/api/deals', { headers: h })).json();
+  assert.ok(deals.deals.length >= 1);
+});
