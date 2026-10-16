@@ -201,8 +201,10 @@ YANDEX_API_KEY=...
 ### Обновление версии
 
 ```bash
-git pull && docker compose up -d --build          # с доменом: добавьте --profile tls
+./scripts/update.sh        # git pull + docker compose up -d --build (режим с доменом определит по .env)
 ```
+
+То же вручную: `git pull && docker compose up -d --build` (с доменом — добавьте `--profile tls`).
 
 База живёт в томе `karkascrm_data` и при обновлении не трогается; схема доводится до актуальной при старте (новые таблицы и поля добавляются, старые данные и чаты сохраняются — это проверяет `node --experimental-sqlite tests/migrate.test.mjs`).
 

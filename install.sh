@@ -85,6 +85,17 @@ else
   ADDRESS="http://localhost:${PORT}  (снаружи: http://${IP}:${PORT})"
 fi
 
+PORT=$(grep -E '^CRM_PORT=' .env | cut -d= -f2- || true); PORT=${PORT:-8080}
+printf 'Ждём запуска CRM'
+for i in $(seq 1 30); do
+  if curl -fsS --max-time 3 "http://127.0.0.1:${PORT}/api/health" >/dev/null 2>&1; then
+    printf '\n✅ CRM отвечает: %s\n' "$(curl -s "http://127.0.0.1:${PORT}/api/health")"
+    break
+  fi
+  printf '.'; sleep 2
+  [ "$i" = 30 ] && printf '\n⚠️  CRM пока не отвечает — посмотрите логи: docker compose logs -f crm\n'
+done
+
 echo
 echo "KarkasCRM запущена:  ${ADDRESS}"
 echo "Проверка API:        curl http://127.0.0.1:$(grep -E '^CRM_PORT=' .env | cut -d= -f2- || echo 8080)/api/health"
@@ -95,6 +106,8 @@ echo "Дальше (всё из интерфейса, код менять не �
 echo "  Настройки → Интеграции      — Wazzup (WhatsApp/Telegram/Instagram/Viber) и почта"
 echo "  Настройки → Воронки и этапы  — свои воронки и этапы"
 echo "  Настройки → Поля карточек    — свои поля контактов и сделок"
+echo "  Настройки → Интеграции → Почта — SMTP и проверочное письмо"
 echo "  Настройки → Данные           — план продаж, автораспределение лидов, резервные копии, демо-данные"
+echo "Обновление версии: ./scripts/update.sh   ·   Проверки: ./run-tests.sh"
 echo "Подробно: DEPLOY.md (разделы 4–6.1) и README.md"
 docker compose ps

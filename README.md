@@ -184,7 +184,7 @@ docker compose --profile tls up -d --build   # сервер с доменом �
 
 Есть свой nginx вместо Caddy? Возьмите готовый конфиг [`deploy/nginx.conf`](deploy/nginx.conf) (там уже настроены заголовки и `proxy_buffering off` для реалтайма чатов).
 
-Обновление версии: `git pull && docker compose up -d --build` (база в томе `karkascrm_data` не затрагивается, схема обновляется автоматически).
+Обновление версии: `./scripts/update.sh` (то же, что `git pull` + `docker compose up -d --build`, режим с доменом определяется по `.env`). База в томе `karkascrm_data` не затрагивается, схема обновляется автоматически, а перед обновлением схемы складывается копия `pre-upgrade-…`.
 
 ## Настройки (.env)
 
@@ -299,6 +299,7 @@ tests/migrate.test.mjs     проверка обновления базы со �
 tests/ui.smoke.mjs         smoke-тест интерфейса в jsdom
 deploy/                    Caddyfile (домен + HTTPS) и nginx.conf
 Dockerfile, docker-compose.yml, install.sh  сборка и развёртывание
+scripts/update.sh          обновление до новой версии (git pull + пересборка)
 run-local.sh, run-tests.sh, .env.example, README.md, DEPLOY.md
 ```
 
