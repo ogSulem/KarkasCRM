@@ -147,12 +147,15 @@ async function pipe(v) {
   const d = await api('/api/deals?pipeline=' + state.pipeline);
   Object.assign(state, { deals: d.deals, stages: d.stages, pipelines: d.pipelines });
   $('#navDeals').textContent = d.deals.filter(x => !['won', 'lost'].includes(x.stage)).length;
-  const shown = state.dealScope === 'mine' ? d.deals.filter(x => x.responsible_id === meId()) : d.deals;
+  const q = (state.dealQuery || '').toLowerCase();
+  const shown = (state.dealScope === 'mine' ? d.deals.filter(x => x.responsible_id === meId()) : d.deals)
+    .filter(x => !q || `${x.title} ${x.contact_name || ''} ${x.company_name || ''} ${x.responsible || ''}`.toLowerCase().includes(q));
   v.innerHTML = `<div class="card" style="display:flex;gap:10px;align-items:center;flex-wrap:wrap">
     <b>Воронка:</b><select style="width:auto" onchange="state.pipeline=+this.value;render()">${d.pipelines.map(p => `<option value="${p.id}" ${p.id === state.pipeline ? 'selected' : ''}>${esc(p.name)}</option>`).join('')}</select>
     <span class="tabs" style="margin:0"><button class="${state.dealScope !== 'mine' ? 'active' : ''}" onclick="state.dealScope='all';render()">Все сделки</button><button class="${state.dealScope === 'mine' ? 'active' : ''}" onclick="state.dealScope='mine';render()">Мои (${d.deals.filter(x => x.responsible_id === meId()).length})</button></span>
     <span class="tag">В работе: ${shown.length}</span><span class="tag orange">Сумма: ${fmt(shown.filter(x => !['won', 'lost'].includes(x.stage)).reduce((a, x) => a + x.amount, 0))}</span>
-    ${(state.me && state.me.role) === 'admin' ? '<button class="btn sm" style="margin-left:auto" onclick="openPipelineEditor()">⚙ Настроить воронку</button>' : ''}</div>
+    <input id="dealSearch" style="max-width:210px;margin-left:auto" placeholder="🔍 Поиск по сделкам и клиентам" value="${esc(state.dealQuery || '')}" oninput="state.dealQuery=this.value;render()">
+    ${(state.me && state.me.role) === 'admin' ? '<button class="btn sm" onclick="openPipelineEditor()">⚙ Настроить воронку</button>' : ''}</div>
   <div class="kanban">${d.stages.map(s => `<div class="col" ondragover="dragOver(event,this)" ondragleave="this.classList.remove('drag-over')" ondrop="dropDeal(event,'${s.code}',this)">
    <h3><span style="color:${esc(s.color)}">● ${esc(s.name)}</span><span>${shown.filter(x => x.stage === s.code).length}</span></h3>
    <div class="deals">${shown.filter(x => x.stage === s.code).map(x => `<article class="deal" draggable="true" ondragstart="event.dataTransfer.setData('text/plain',${x.id})" onclick="openDealCard(${x.id})" style="border-left-color:${esc(s.color)}">
@@ -250,14 +253,14 @@ async function inbox(v) {
      <select id="tplSel" style="width:auto" onchange="if(this.value){$('#msgText').value=$('#msgText').value||this.value;this.selectedIndex=0}" title="Шаблоны"><option value="">Шаблоны</option>${(state.cache.templates || []).map(t => `<option value="${esc(t.body)}">${esc(t.name)}</option>`).join('')}</select>
      <button class="btn" title="Прикрепить файл ссылкой" onclick="openAttachment()">📎</button>
      <button class="btn primary">➤</button></form>` : '<div class="empty">Выберите чат слева</div>'}</div>
-   <div class="profile">${cur ? `<h3>Клиент</h3><p><b>${esc(cur.title || '')}</b></p><p>📞 ${esc(cur.phone || '—')}<br>✉ ${esc(cur.email || '—')}</p><p>Каналы: ${chan(cur.channels)}${(cur.channels || '').includes('email') ? ' <span class="tag grey">почта подключена</span>' : ''}</p><p><button class="btn sm" onclick="attachContact(${cur.contact_id})">Открыть карточку клиента</button></p><hr><h3>Быстрые действия</h3><div style="display:flex;flex-direction:column;gap:6px"><button class="btn sm" onclick="openTask(null,{contact_id:${cur.contact_id}})">+ Задача</button><button class="btn sm" onclick="quickDeal(${cur.contact_id})">+ Сделка</button><button class="btn sm" onclick="quickNote(${cur.contact_id})">+ Заметка</button></div>` : '<div class="empty">Выберите чат</div>'}</div></div>`;
+   <div class="profile">${cur ? `<h3>Клиент</h3><p><b>${esc(cur.title || '')}</b></p><p>📞 ${esc(cur.phone || '—')}<br>✉ ${esc(cur.email || '—')}</p><p>Каналы: ${chan(cur.channels)}${(cur.channels || '').includes('email') ? ' <span class="tag grey">почта подключена</span>' : ''}</p><p><button class="btn sm" onclick="attachContact(${cur.contact_id})">Открыть карточку клиента</button></p><hr><h3>Быстрые действия</h3><div style="display:flex;flex-direction:column;gap:6px">${cur.phone ? `<a class="btn sm" href="tel:${esc(String(cur.phone).replace(/[^+\d]/g, ''))}">📞 Позвонить</a>` : ''}<button class="btn sm" onclick="openTask(null,{contact_id:${cur.contact_id}})">+ Задача</button><button class="btn sm" onclick="quickDeal(${cur.contact_id})">+ Сделка</button><button class="btn sm" onclick="quickNote(${cur.contact_id})">+ Заметка</button></div>` : '<div class="empty">Выберите чат</div>'}</div></div>`;
   if (!state.cache.templates) state.cache.templates = await api('/api/templates'), render();
   const m = $('#msgs'); if (m) m.scrollTop = m.scrollHeight;
 }
 function filterConvs(q) { q = q.toLowerCase(); $$('#convList .conv').forEach(el => el.style.display = !q || el.dataset.name.includes(q) ? '' : 'none') }
 async function attachContact(id) { go('contacts'); setTimeout(() => openContact(id), 250) }
 async function quickDeal(contactId) { await api('/api/deals', { method: 'POST', body: JSON.stringify({ title: 'Новая сделка', stage: 'new', contact_id: contactId, pipeline_id: state.pipeline }) }); toast('Сделка создана'); go('pipe') }
-async function quickNote(contactId) { openModal(`<h3>Заметка о клиенте</h3><form onsubmit="return saveQuickNote(event,${contactId})"><label>Текст<textarea name="body" rows="3"></textarea></label><button class="btn primary w">Сохранить</button></form>`) }
+async function quickNote(contactId, preset = '') { openModal(`<h3>Заметка о клиенте</h3><form onsubmit="return saveQuickNote(event,${contactId})"><label>Текст<textarea name="body" rows="3" placeholder="Итог звонка, договорённости, следующий шаг…">${esc(preset)}</textarea></label><button class="btn primary w">Сохранить</button></form>`) }
 async function saveQuickNote(e, id) { e.preventDefault(); await api('/api/notes', { method: 'POST', body: JSON.stringify({ entity_type: 'contacts', entity_id: id, body: new FormData(e.target).get('body') }) }); closeModal(); toast('Заметка сохранена'); return false }
 async function sendMsg(e) {
   e.preventDefault(); const body = $('#msgText').value; const sel = $('#msgChannel');
@@ -299,13 +302,28 @@ async function simulate() { await api('/api/inbox/simulate', { method: 'POST', b
 
 /* ---------- contacts / companies ---------- */
 async function contacts(v) {
-  const rows = await api('/api/contacts'); state.contacts = rows;
-  const q = ($('#globalSearch').value || '').toLowerCase();
-  const f = rows.filter(c => !q || JSON.stringify(c).toLowerCase().includes(q));
-  v.innerHTML = `<div class="card"><div class="row" style="border:0"><b>Всего: ${rows.length}</b><span style="display:flex;gap:8px"><button class="btn sm" onclick="openDuplicates()">🔁 Дубли</button><button class="btn sm" onclick="download('/api/export/contacts','contacts.csv')">⬇ CSV</button><button class="btn sm" onclick="importContacts()">⬆ Импорт CSV</button></span></div>
-   <table><tr><th>Клиент</th><th>Контакты</th><th>Компания / источник</th><th>Теги</th><th></th></tr>${f.map(c => `<tr><td><b>${esc(c.name)}</b>${c.position ? `<br><small>${esc(c.position)}</small>` : ''}</td><td>${esc(c.phone || '')}<br><small>${esc(c.email || '')}</small></td><td>${esc(c.company || '—')} <span class="tag grey">${esc(c.source || '')}</span></td><td>${(c.tags || '').split(',').filter(Boolean).map(t => `<span class="tag">${esc(t)}</span>`).join('')}</td>
-   <td><button class="btn sm" onclick="openContactCard(${c.id})">Открыть</button> <button class="btn sm" onclick="openContact(${c.id})">✎</button> <button class="btn sm danger" onclick="del('contacts',${c.id})">✕</button></td></tr>`).join('') || '<tr><td colspan="5"><div class="empty">Контактов нет</div></td></tr>'}</table></div>`;
+  const rows = await api('/api/contacts'); state.contacts = rows; await team();
+  const fl = state.contactFilter || (state.contactFilter = { q: ($('#globalSearch').value || '').toLowerCase(), owner: '', source: '', tag: '' });
+  const sources = [...new Set(rows.map(c => c.source).filter(Boolean))].sort();
+  const tags = [...new Set(rows.flatMap(c => (c.tags || '').split(',').map(t => t.trim()).filter(Boolean)))].sort();
+  const f = rows.filter(c =>
+    (!fl.q || JSON.stringify(c).toLowerCase().includes(fl.q)) &&
+    (!fl.owner || String(c.responsible_id || '') === fl.owner) &&
+    (!fl.source || c.source === fl.source) &&
+    (!fl.tag || (c.tags || '').split(',').map(t => t.trim()).includes(fl.tag)));
+  const ownerName = id => (state.users.find(u => u.id === id) || {}).name || '';
+  v.innerHTML = `<div class="card">
+   <div class="row" style="border:0;flex-wrap:wrap;gap:8px"><b>Всего: ${rows.length}${f.length !== rows.length ? `, показано ${f.length}` : ''}</b><span style="display:flex;gap:8px;flex-wrap:wrap"><button class="btn sm" onclick="openDuplicates()">🔁 Дубли</button><button class="btn sm" onclick="download('/api/export/contacts','contacts.csv')">⬇ CSV</button><button class="btn sm" onclick="importContacts()">⬆ Импорт CSV</button></span></div>
+   <div class="row" style="border:0;flex-wrap:wrap;gap:8px">
+    <input style="flex:1;min-width:220px" placeholder="🔍 Имя, телефон, e-mail, заметки" value="${esc(fl.q)}" oninput="state.contactFilter.q=this.value.toLowerCase();render()">
+    <select style="max-width:190px" onchange="state.contactFilter.owner=this.value;render()"><option value="">Все ответственные</option>${state.users.map(u => `<option value="${u.id}" ${fl.owner === String(u.id) ? 'selected' : ''}>${esc(u.name)}</option>`).join('')}</select>
+    <select style="max-width:170px" onchange="state.contactFilter.source=this.value;render()"><option value="">Все источники</option>${sources.map(x => `<option value="${esc(x)}" ${fl.source === x ? 'selected' : ''}>${esc(x)}</option>`).join('')}</select>
+    <select style="max-width:160px" onchange="state.contactFilter.tag=this.value;render()"><option value="">Все теги</option>${tags.map(x => `<option value="${esc(x)}" ${fl.tag === x ? 'selected' : ''}>${esc(x)}</option>`).join('')}</select>
+    ${(fl.q || fl.owner || fl.source || fl.tag) ? '<button class="btn sm ghost" onclick="resetContactFilter()">Сбросить фильтры</button>' : ''}</div>
+   <table><tr><th>Клиент</th><th>Контакты</th><th>Компания / источник</th><th>Теги</th><th>Ответственный</th><th></th></tr>${f.map(c => `<tr><td><b>${esc(c.name)}</b>${c.position ? `<br><small>${esc(c.position)}</small>` : ''}</td><td>${esc(c.phone || '')}<br><small>${esc(c.email || '')}</small></td><td>${esc(c.company || '—')} <span class="tag grey">${esc(c.source || '')}</span></td><td>${(c.tags || '').split(',').filter(Boolean).map(t => `<span class="tag">${esc(t)}</span>`).join('')}</td><td><small>${esc(ownerName(c.responsible_id) || '—')}</small></td>
+   <td><button class="btn sm" onclick="openContactCard(${c.id})">Открыть</button>${c.phone ? ` <a class="btn sm" href="tel:${esc(c.phone.replace(/[^+\d]/g, ''))}" title="Позвонить">📞</a>` : ''}${(c.channels || '').length ? '' : ''} <button class="btn sm" onclick="openContact(${c.id})">✎</button> <button class="btn sm danger" onclick="del('contacts',${c.id})">✕</button></td></tr>`).join('') || `<tr><td colspan="6"><div class="empty">${rows.length ? 'Ничего не найдено по фильтрам — нажмите «Сбросить»' : 'Контактов нет'}</div></td></tr>`}</table></div>`;
 }
+function resetContactFilter() { state.contactFilter = { q: '', owner: '', source: '', tag: '' }; render() }
 async function openContactCard(id) {
   const c = state.contacts.find(x => x.id === id) || await api('/api/contacts/' + id);
   const notes = await api(`/api/notes?type=contacts&entity=${id}`);
@@ -314,7 +332,7 @@ async function openContactCard(id) {
   openModal(`<h3>${esc(c.name)}</h3><table class="mini"><tr><th>Телефон</th><td>${esc(c.phone || '—')}</td></tr><tr><th>E-mail</th><td>${esc(c.email || '—')}</td></tr><tr><th>Компания</th><td>${esc(c.company || '—')}</td></tr><tr><th>Источник</th><td>${esc(c.source || '')}</td></tr><tr><th>Теги</th><td>${(c.tags || '').split(',').filter(Boolean).map(t => `<span class="tag">${esc(t)}</span>`).join('')}</td></tr>${cfTable('contacts', c)}</table>
    <h3 style="margin-top:14px">Сделки клиента</h3>${deals.map(d => `<div class="row"><span>${esc(d.title)}<br><small>${esc(d.stage)}</small></span><b>${fmt(d.amount)}</b></div>`).join('') || '<small>Сделок нет</small>'}
    <h3 style="margin-top:14px">Заметки</h3><form onsubmit="return addNote(event,'contacts',${id})"><textarea name="body" rows="2" placeholder="Заметка…"></textarea><button class="btn primary" style="margin-top:6px">Добавить</button></form>${notes.map(n => `<div class="row"><span>${esc(n.body)}<br><small>${esc(n.author || '')} · ${esc(dt(n.created_at))}</small></span></div>`).join('')}
-   <div style="display:flex;gap:8px;margin-top:12px;flex-wrap:wrap">${conv ? `<button class="btn primary" onclick="closeModal();state.conv=${conv.id};go('inbox')">💬 Переписка (${conv.unread ? '+' + conv.unread + ' новых' : esc((conv.channels || '').split(',').join(', '))})</button>` : ''}<button class="btn" onclick="openContact(${id})">✎ Редактировать</button><button class="btn ghost" onclick="openTask(null,{contact_id:${id}});closeModal()">+ Задача</button><button class="btn ghost" onclick="quickDeal(${id})">+ Сделка</button></div>`);
+   <div style="display:flex;gap:8px;margin-top:12px;flex-wrap:wrap">${c.phone ? `<a class="btn orange" href="tel:${esc(c.phone.replace(/[^+\d]/g, ''))}" title="Позвонить: откроется телефон, Skype или софтфон">📞 Позвонить</a><button class="btn ghost" onclick="quickNote(${id},'Итог звонка: ')">⏱ Итог звонка</button>` : ''}${conv ? `<button class="btn primary" onclick="closeModal();state.conv=${conv.id};go('inbox')">💬 Переписка (${conv.unread ? '+' + conv.unread + ' новых' : esc((conv.channels || '').split(',').join(', '))})</button>` : ''}<button class="btn" onclick="openContact(${id})">✎ Редактировать</button><button class="btn ghost" onclick="openTask(null,{contact_id:${id}});closeModal()">+ Задача</button><button class="btn ghost" onclick="quickDeal(${id})">+ Сделка</button></div>`);
 }
 async function openContact(id, preset = {}) {
   const c = id ? (state.contacts.find(x => x.id === id) || await api('/api/contacts/' + id)) : preset;
@@ -694,11 +712,11 @@ async function settings(v) {
       <p><small>Смена этих параметров применяется сразу, без перезапуска контейнера. Пароль администратора — во вкладке «Профиль», сотрудники и роли — во вкладке «Команда».</small></p></div>
      <div class="card"><h3>💾 Резервные копии</h3><p><small>CRM сама делает копию базы раз в сутки и хранит ${esc(((s.maintenance || {}).backup_keep_days) || '7')} дней. Копии лежат в томе Docker <code>/data/backups</code> — их видно и снаружи контейнера.</small></p>
       <div id="backupList">…</div>
-      <div style="display:flex;gap:8px;flex-wrap:wrap;margin-top:8px"><button class="btn primary sm" onclick="makeBackup()">Создать копию сейчас</button><button class="btn sm" onclick="download('/api/backup','karkas-backup.json')">⬇ Скачать текущую базу (JSON)</button></div></div>
+      <div style="display:flex;gap:8px;flex-wrap:wrap;margin-top:8px"><button class="btn primary sm" onclick="makeBackup()">Создать копию сейчас</button><button class="btn sm" onclick="download('/api/export/json','karkas-backup.json')">⬇ Скачать текущую базу (JSON)</button></div></div>
      <div class="card"><h3>🧪 Демо-данные</h3><p><small>В демо-режиме CRM показывает примеры (клиенты, сделки, чаты, конкурент). Нажмите кнопку, когда заведёте свои данные — примеры удалятся, рабочие данные не тронем.</small></p>
       <button class="btn danger" onclick="cleanDemo()">Удалить демо-данные</button>
       <p style="margin-top:8px"><small>Чистая установка без примеров: <code>SEED_DEMO=0</code> в docker-compose.</small></p></div>
-     <div class="card"><h3>Экспорт и импорт</h3><button class="btn w" onclick="download('/api/export/contacts','contacts.csv')">⬇ Контакты (CSV)</button><p></p><button class="btn w" onclick="download('/api/export/deals','deals.csv')">⬇ Сделки (CSV)</button><p></p><button class="btn w" onclick="download('/api/backup','karkas-backup.json')">⬇ Полный бэкап (JSON)</button>
+     <div class="card"><h3>Экспорт и импорт</h3><button class="btn w" onclick="download('/api/export/contacts','contacts.csv')">⬇ Контакты (CSV)</button><p></p><button class="btn w" onclick="download('/api/export/deals','deals.csv')">⬇ Сделки (CSV)</button><p></p><button class="btn w" onclick="download('/api/export/json','karkas-backup.json')">⬇ Полный бэкап (JSON)</button>
      <hr><button class="btn w" onclick="importContacts()">⬆ Импорт контактов из CSV</button><p><small>Формат: <code>Имя;Телефон;E-mail;Компания</code> с заголовком в первой строке.</small></p></div></div>
      <div><div class="card"><h3>Обслуживание</h3><p><small>Версия CRM: <b>${esc(s.version || '')}</b> · база — один файл SQLite в Docker-томе <code>karkascrm_data</code> (каталог <code>/data</code>), резервные копии — в <code>/data/backups</code>.</small></p><code>docker compose exec crm ls -la /data /data/backups</code>
       <p style="margin-top:8px"><small>Обновление CRM: <code>docker compose pull && docker compose up -d</code> — база и настройки в томе сохраняются.</small></p>
@@ -813,10 +831,20 @@ async function saveUser(e, id) { e.preventDefault(); const b = Object.fromEntrie
 async function loadBackups() {
   const host = $('#backupList'); if (!host) return;
   try { const d = await api('/api/backups');
-    host.innerHTML = `<table class="mini"><tr><th>Файл</th><th>Размер</th><th>Создан</th></tr>${(d.files || []).slice(0, 8).map(f => `<tr><td>${esc(f.name)}</td><td>${(f.sizeBytes / 1024 | 0)} КБ</td><td><small>${esc(dt(f.created_at))}</small></td></tr>`).join('') || '<tr><td colspan="3"><small>Копий пока нет — создайте первую</small></td></tr>'}</table>`;
+    const isAdmin = ((state.me || {}).role) === 'admin';
+    host.innerHTML = `<table class="mini"><tr><th>Файл</th><th>Размер</th><th>Создан</th><th></th></tr>${(d.files || []).slice(0, 8).map(f => `<tr><td>${esc(f.name)}</td><td>${(f.sizeBytes / 1024 | 0)} КБ</td><td><small>${esc(dt(f.created_at))}</small></td><td style="white-space:nowrap">${isAdmin ? `<button class="btn sm" onclick="download(${JSON.stringify('/api/backups/download?file=' + f.name)},${JSON.stringify(f.name)})" title="Скачать копию">⬇</button> <button class="btn sm" onclick="restoreBackup(${JSON.stringify(f.name)})" title="Восстановить из этой копии">♻</button>` : ''}</td></tr>`).join('') || '<tr><td colspan="4"><small>Копий пока нет — создайте первую</small></td></tr>'}</table>
+     ${isAdmin ? `<p><small>Копии хранятся ${esc(((state.settings || {}).maintenance || {}).backup_keep_days || '7')} дней в томе <code>/data/backups</code>. «⬇» — скачать файл базы, «♻» — восстановить состояние из него (CRM перезапустится автоматически).</small></p>` : ''}`;
   } catch (e) { host.innerHTML = `<small>${esc(e.message)}</small>` }
 }
 async function makeBackup() { const r = await api('/api/backups', { method: 'POST' }); toast('Копия создана: ' + r.created); loadBackups() }
+async function restoreBackup(file) {
+  if (!confirm(`Восстановить базу из копии ${file}? Текущие данные будут заменены (страховочная копия сохранится рядом).`)) return;
+  try {
+    const r = await api('/api/backups/restore', { method: 'POST', body: { file } });
+    toast(r.message || 'База восстановлена, служба перезапускается');
+    setTimeout(() => location.reload(), 3500);
+  } catch (e) { toast(e.message) }
+}
 async function cleanDemo() {
   if (!confirm('Удалить демонстрационные данные? Ваши собственные клиенты, сделки и чаты останутся.')) return;
   const r = await api('/api/demo/clean', { method: 'POST' });

@@ -56,7 +56,27 @@ test('контакты, компании, задачи, заметки, поис
   assert.ok((await call('/api/search?q=Иван')).body.contacts.length >= 1);
   const csv = (await call('/api/export/contacts')).body;
   assert.ok(String(csv).includes('Иван Тестов'), 'CSV-экспорт контактов');
-  assert.ok((await call('/api/backup')).body.contacts.length > 0, 'полный бэкап');
+  assert.ok((await call('/api/export/json')).body.contacts.length > 0, 'полный бэкап');
+  assert.ok((await call('/api/backup')).body.contacts.length > 0, 'старый адрес бэкапа тоже жив');
+});
+
+test('резервные копии базы: создать, скачать, защита от подмены пути', async () => {
+  const made = await call('/api/backups', { method: 'POST' });
+  assert.ok(made.body.created, 'файл копии создан');
+  const list = await call('/api/backups');
+  assert.ok(list.body.files.some(f => f.name === made.body.created), 'копия видна в списке');
+  const file = made.body.created;
+  const dl = await fetch(base + '/api/backups/download?file=' + file, { headers: h });
+  assert.equal(dl.status, 200, 'копия скачивается');
+  assert.equal(dl.headers.get('content-type'), 'application/vnd.sqlite3');
+  const bytes = Buffer.from(await dl.arrayBuffer());
+  assert.equal(bytes.subarray(0, 15).toString(), 'SQLite format 3', 'это настоящий файл базы SQLite');
+  assert.equal((await fetch(base + '/api/backups/download?file=' + file)).status, 401, 'без токена копия не отдаётся');
+  assert.equal((await call('/api/backups/download?file=../crm.db')).status, 400, 'выход из каталога копий запрещён');
+  assert.equal((await call('/api/backups/download?file=no-such-file.db')).status, 404, 'несуществующая копия — 404');
+  assert.equal((await call('/api/backups/download?file=кириллица.db')).status, 400, 'подозрительное имя отклонено');
+  assert.equal((await call('/api/backups/restore', { method: 'POST', body: JSON.stringify({ file: '../crm.db' }) })).status, 400);
+  assert.equal((await call('/api/backups/restore', { method: 'POST', body: JSON.stringify({ file: 'no-such-file.db' }) })).status, 404);
 });
 
 test('настройка воронки и этапов из интерфейса', async () => {

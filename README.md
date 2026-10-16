@@ -8,16 +8,50 @@
 
 ## Быстрый старт
 
+### На своём компьютере (localhost)
+
 ```bash
-git clone <ваш-репозиторий> KarkasCRM && cd KarkasCRM
-cp .env.example .env      # обязательно поменяйте JWT_SECRET и ADMIN_PASSWORD
-docker compose up -d --build
+git clone <адрес-репозитория> KarkasCRM && cd KarkasCRM
+cp .env.example .env                  # для локальной проверки можно оставить как есть
+docker compose up --build             # поднимает CRM на http://localhost:8080
 ```
 
-Откройте `http://<IP-сервера>:8080` → вход `admin@example.com` / `admin12345` (из `.env`).
+Откройте **http://localhost:8080** → вход `admin@example.com` / `admin12345` (`ADMIN_EMAIL` / `ADMIN_PASSWORD` из `.env`).
 
-Скрипт-помощник: `./install.sh` — создаст `.env` и запустит всё одной командой.
-Без Docker: `DATA_DIR=./data node --experimental-sqlite backend/src/server.js`.
+Docker недоступен? Нужен только Node.js 22.5+:
+
+```bash
+./run-local.sh                        # то же самое без Docker: http://127.0.0.1:8080
+```
+
+`run-local.sh` читает `.env` (если файла нет — берёт безопасные значения по умолчанию), хранит базу в `./data` и печатает адрес для входа. Остановка — `Ctrl+C`.
+
+### На сервере с доменом (HTTPS автоматически)
+
+```bash
+cp .env.example .env && nano .env     # CRM_DOMAIN=ваш-домен.ru, ACME_EMAIL, JWT_SECRET, ADMIN_PASSWORD
+docker compose --profile tls up --build
+```
+
+Caddy сам получит сертификат Let's Encrypt и откроет `https://ваш-домен.ru` (порты 80 и 443). То же одной командой:
+
+```bash
+./install.sh --tls ваш-домен.ru mail@ваш-домен.ru
+```
+
+Проверка, что домен и сертификат живы: `https://ваш-домен.ru/.well-known/health` → `ok`.
+Для сервера без домена (доступ по IP): `CRM_BIND=0.0.0.0` и `docker compose up -d --build` → `http://IP:8080`.
+
+Проверить всё сразу (синтаксис, тесты, миграции, интерфейс): `./run-tests.sh`.
+
+### Проверка после запуска (5 минут)
+
+1. **Вход и демо-данные**: под админом видны примеры — сделки на канбане, чаты, конкурент. Уберите их одной кнопкой: Настройки → Данные и компания → «Удалить демо-данные» (рабочие записи не тронет).
+2. **Сделки**: перетащите карточку между этапами, добавьте товар — сумма пересчитается, в карточке видна история и переписка клиента.
+3. **Права**: создайте в Настройки → Команда менеджера, войдите в другом окне браузера — настройки у него только на чтение.
+4. **Чаты**: откройте «Чаты Wazzup» → «🧪 Тестовое входящее»: сообщение появится в инбоксе и создаст сделку в «Неразобранном».
+5. **База и копии**: Настройки → Данные и компания → «Создать копию сейчас», затем у копии — «⬇» (скачать файл базы) и «♻» (восстановить).
+6. **Сервис**: `curl -s localhost:8080/api/health` → `{"ok":true,...,"counts":{...}}`; `docker compose ps` — контейнер `healthy`.
 
 ---
 
@@ -97,8 +131,10 @@ docker compose up -d --build
 
 ### Данные, резервные копии, чистая установка
 - **Автоматические бэкапы** базы раз в сутки в `/data/backups`, срок хранения настраивается; кнопка «Создать копию сейчас»
+- **Копию можно скачать** (`⬇` — файл SQLite, открывается любой программой для БД) и **восстановить из неё в один клик** (`♻`): перед восстановлением CRM сама сохраняет страховочную копию `before-restore-…` и перезапускается
 - **Демо-данные** (примеры клиентов, сделок, чата и конкурента) удаляются одной кнопкой, рабочие записи не затрагиваются
 - **Чистая установка без примеров**: `SEED_DEMO=0` в `.env`
+- **Обновление со старых версий**: при старте CRM сама доводит схему базы до актуальной (добавляет новые таблицы и поля) и **сначала складывает копию `pre-upgrade-…` в `/data/backups`**, данные не теряются — проверяется тестом `tests/migrate.test.mjs` (`/api/health` показывает `schema`)
 - **Напоминания о просроченных задачах**: всплывающее уведомление в CRM и, при желании, webhook в Telegram/Slack
 - **Защита входа** от подбора пароля (ограничение попыток), заголовки безопасности, опциональный запрет встраивания в iframe (`FRAME_ANCESTORS`)
 
@@ -136,14 +172,19 @@ docker compose up -d --build
 
 ## Развёртывание
 
-Подробная инструкция — **[DEPLOY.md](DEPLOY.md)**: публичный IP, HTTPS (Caddy/nginx + Let's Encrypt), обновление, бэкапы, диагностика.
-
-Коротко:
+Подробная инструкция — **[DEPLOY.md](DEPLOY.md)**: публичный IP, домен и HTTPS, обновление, бэкапы и восстановление, диагностика.
 
 ```bash
-cp .env.example .env && nano .env      # JWT_SECRET, ADMIN_PASSWORD, WHATSAPP_*/WAZZUP_* по желанию
-docker compose up -d --build           # → http://IP:8080
+cp .env.example .env && nano .env       # JWT_SECRET, ADMIN_PASSWORD; для домена — CRM_DOMAIN, ACME_EMAIL
+docker compose up -d --build            # локально и на сервере без домена → http://IP:8080
+docker compose --profile tls up -d --build   # сервер с доменом → https://CRM_DOMAIN (сертификат сам)
 ```
+
+Что происходит в режиме с доменом: контейнер `caddy` слушает 80/443, сам получает и продлевает сертификат Let's Encrypt для `CRM_DOMAIN`, проксирует запросы внутрь CRM и добавляет заголовки безопасности. CRM при этом наружу не открыта (`CRM_BIND=127.0.0.1`). Конфиг — [`deploy/Caddyfile`](deploy/Caddyfile), логи Caddy — в томе `karkascrm_caddy_data`.
+
+Есть свой nginx вместо Caddy? Возьмите готовый конфиг [`deploy/nginx.conf`](deploy/nginx.conf) (там уже настроены заголовки и `proxy_buffering off` для реалтайма чатов).
+
+Обновление версии: `git pull && docker compose up -d --build` (база в томе `karkascrm_data` не затрагивается, схема обновляется автоматически).
 
 ## Настройки (.env)
 
@@ -153,6 +194,10 @@ docker compose up -d --build           # → http://IP:8080
 | `JWT_SECRET` | подпись токенов входа — **смените!** | dev-значение |
 | `ADMIN_EMAIL` / `ADMIN_PASSWORD` | первый администратор | `admin@example.com` / `admin12345` |
 | `CRM_PORT` | внешний порт compose | `8080` |
+| `CRM_BIND` | адрес прослушивания: `0.0.0.0` — доступ снаружи, `127.0.0.1` — только через Caddy/nginx | `0.0.0.0` |
+| `CRM_DOMAIN` | домен для HTTPS (профиль `tls`) | — |
+| `ACME_EMAIL` | e-mail для сертификата Let's Encrypt | — |
+| `TZ` | часовой пояс контейнера | `Europe/Moscow` |
 | `DATA_DIR` | каталог базы SQLite (volume) | `/data` в Docker |
 | `WAZZUP_API_KEY` | ключ Wazzup (можно задать в UI) | — |
 | `WAZZUP_VERIFY` / `WAZZUP_WEBHOOK_SECRET` | секрет вебхука | — |
@@ -193,7 +238,10 @@ GET  /api/contacts/duplicates  POST /api/contacts/merge     # поиск и об
 POST /api/conversations/:id/messages    # текст или файл ссылкой (contentUri) в чат клиента
 POST /api/conversations/:id/email       # письмо клиенту из чата (SMTP)
 POST /api/integrations/email/test       # проверочное письмо с текущими настройками
-GET/POST /api/backups                   # список и создание резервных копий
+GET/POST /api/backups                   # список и создание резервных копий (.db в /data/backups)
+GET  /api/backups/download?file=…        # скачать копию (только администратор)
+POST /api/backups/restore                # {"file":"crm-2026-01-31.db"} — восстановить из копии и перезапуститься
+GET  /api/export/json                    # выгрузка всех таблиц в JSON (старый адрес /api/backup тоже работает)
 POST /api/demo/clean                    # удалить демонстрационные данные
 GET  /api/health                        # версия, аптайм, размер базы, счётчики
 POST /api/integrations/wazzup/test|sync|webhook             # Wazzup
@@ -213,32 +261,57 @@ GET  /api/events                                            # SSE-реалтай
 
 ## Тесты
 
-```bash
-# 30 интеграционных тестов (без внешних зависимостей)
-node --experimental-sqlite --test tests/*.test.js
+Всё одной командой (синтаксис → интеграционные тесты → миграции базы → docker-compose → интерфейс):
 
-# необязательный smoke-тест интерфейса: реальный backend + SPA в jsdom (60 проверок)
-npm i --prefix /tmp/jsdomtest jsdom
-JSDOM_PATH=/tmp/jsdomtest/node_modules/jsdom/lib/api.js node tests/ui.smoke.mjs
+```bash
+./run-tests.sh
 ```
 
-30 интеграционных тестов (`tests/api.test.js`, `tests/competitors.test.js`): авторизация и роли, склейка чатов Wazzup/WhatsApp/Telegram в один диалог, идемпотентность вебхуков, автосоздание сделки, товары и пересчёт суммы, настройка воронки, автоматизации, **сквозная отправка сообщения в API Wazzup** и **проверка конкурента по восьми источникам** — на локальных заглушках сверяются реальные запросы и разбор ответов ФНС, ФССП (двухшаговая задача), Федресурса, kad.arbitr, Rusprofile, Google Places, 2ГИС и Яндекс Геопоиска. Парсер Excel проверяется на настоящем файле `.xlsx` (`tests/fixtures/price.xlsx`).
-Дополнительно покрыто: **права ролей** (менеджер не меняет настройки, наблюдатель только читает), **переписка клиента в карточке сделки**, **отправка файлов ссылкой в Wazzup** с проверкой формата запроса, **автосоздание новой сделки при возврате клиента**, **приём писем в общий чат** (тема, склейка по e-mail), **свои поля карточек**, **поиск и объединение дублей контактов** (перенос сделок), **резервные копии и состояние системы**, **удаление демо-данных без потери рабочих** и **ограничение попыток входа**.
+По шагам:
+
+```bash
+# 32 интеграционных теста (без внешних зависимостей и без сети)
+node --experimental-sqlite --test tests/api.test.js tests/competitors.test.js
+
+# 23 проверки на базу из старой версии: поля добавляются, данные и чаты остаются
+node --experimental-sqlite tests/migrate.test.mjs
+
+# необязательный smoke-тест интерфейса: реальный backend + SPA в jsdom (63 проверки)
+npm i --prefix /tmp/jsdomtest jsdom
+JSDOM_PATH=/tmp/jsdomtest/node_modules/jsdom/lib/api.js node --experimental-sqlite tests/ui.smoke.mjs
+```
+
+32 интеграционных теста (`tests/api.test.js` — 21, `tests/competitors.test.js` — 11): авторизация и роли, склейка чатов Wazzup/WhatsApp/Telegram в один диалог, идемпотентность вебхуков, автосоздание сделки, товары и пересчёт суммы, настройка воронки, автоматизации, **сквозная отправка сообщения в API Wazzup** и **проверка конкурента по восьми источникам** — на локальных заглушках сверяются реальные запросы и разбор ответов ФНС, ФССП (двухшаговая задача), Федресурса, kad.arbitr, Rusprofile, Google Places, 2ГИС и Яндекс Геопоиска. Парсер Excel проверяется на настоящем файле `.xlsx` (`tests/fixtures/price.xlsx`).
+Дополнительно покрыто: **права ролей** (менеджер не меняет настройки, наблюдатель только читает), **переписка клиента в карточке сделки**, **отправка файлов ссылкой в Wazzup** с проверкой формата запроса, **автосоздание новой сделки при возврате клиента**, **приём писем в общий чат** (тема, склейка по e-mail), **свои поля карточек**, **поиск и объединение дублей контактов** (перенос сделок), **резервные копии: создание, скачивание файла базы и защита от подмены пути**, **удаление демо-данных без потери рабочих** и **ограничение попыток входа**.
 
 ---
 
 ## Как это устроено
 
 ```
-backend/src/server.js     ядро: схема БД, REST, вебхуки, Wazzup/Meta, SSE (zero-deps)
+backend/src/server.js      ядро: схема БД и миграции, REST, вебхуки, Wazzup/Meta, SSE (zero-deps)
 backend/src/competitors.js разведка конкурентов: 8 источников, риск-скор, отзывы, парсер Excel/CSV
 backend/src/smtp.js        почта: свой SMTP-клиент (465 / STARTTLS / AUTH LOGIN, UTF-8)
-frontend/public/          SPA: index.html, style.css, app.js (без сборки)
-tests/api.test.js         интеграционные тесты на node:test
-deploy/                   конфиги Caddy и nginx для HTTPS
-Dockerfile, docker-compose.yml, install.sh, .env.example, DEPLOY.md
+frontend/public/           SPA: index.html, style.css, app.js (без сборки)
+tests/api.test.js          интеграционные тесты API на node:test
+tests/competitors.test.js  тесты разведки конкурентов (локальные заглушки источников)
+tests/migrate.test.mjs     проверка обновления базы со старой версии
+tests/ui.smoke.mjs         smoke-тест интерфейса в jsdom
+deploy/                    Caddyfile (домен + HTTPS) и nginx.conf
+Dockerfile, docker-compose.yml, install.sh  сборка и развёртывание
+run-local.sh, run-tests.sh, .env.example, README.md, DEPLOY.md
 ```
 
-Один контейнер, один файл базы (`/data/crm.db`, SQLite WAL) — бэкап сводится к копированию файла, обновление к `git pull && docker compose up -d --build`.
+Один контейнер с CRM (плюс контейнер Caddy только в режиме домена), один файл базы (`/data/crm.db`, SQLite WAL) — бэкап сводится к копированию файла, обновление к `git pull && docker compose up -d --build`.
 
-Каталог `packages/` — исторический монорепозиторий Twenty CRM, из которого вырос этот репозиторий. В сборке KarkasCRM он не участвует (исключён через `.dockerignore`) и оставлен без изменений.
+**Про Twenty CRM**: репозиторий вырос из форка ошибочно подключённого монорепозитория Twenty — каталог `packages/` лежит в истории и **в сборку KarkasCRM не входит** (исключён через `.dockerignore`). Код KarkasCRM (`backend/`, `frontend/`, `tests/`, `Dockerfile`, `docker-compose.yml`) написан с нуля и не содержит файлов Twenty — это проверяется командой:
+
+```bash
+grep -ri twenty backend frontend tests Dockerfile docker-compose.yml   # ничего не находит
+```
+
+Чтобы убрать исторический каталог из репозитория (одним отдельным коммитом, лицензия AGPL остаётся в `LICENSE`):
+
+```bash
+./scripts/remove-legacy-twenty.sh      # git rm -r packages + коммит; вернуть можно из истории
+```

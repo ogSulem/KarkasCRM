@@ -95,6 +95,7 @@ try {
   // сделки: фильтр «Мои» на канбане
   window.go('pipe'); await sleep(350);
   check('фильтр сделок «Мои / Все»', /Все сделки/.test($('#view').innerHTML) && /Мои \(/.test($('#view').innerHTML));
+  check('поиск по сделкам на канбане', /Поиск по сделкам/.test($('#view').innerHTML));
 
   // дашборд: блок «Мои задачи»
   window.go('dashboard'); await sleep(350);
@@ -122,7 +123,12 @@ try {
   for (const tab of ['details', 'chat', 'products', 'tasks', 'notes', 'history']) { window.__state.dealTab = tab; await window.openDealCard(dealId); await sleep(220); check('сделка → ' + tab, $('#modalBody').innerHTML.length > 100) }
   window.closeModal();
 
-  window.go('contacts'); await sleep(250); await window.openContactCard(1); await sleep(250);
+  window.go('contacts'); await sleep(300);
+  check('фильтры в списке контактов', /Все ответственные/.test($('#view').innerHTML) && /Все источники/.test($('#view').innerHTML));
+  window.__state.contactFilter = { q: 'ирина', owner: '', source: '', tag: '' }; window.go('contacts'); await sleep(300);
+  check('поиск по контактам работает', /показано 1|показано/.test($('#view').innerHTML));
+  window.resetContactFilter(); await sleep(200);
+  await window.openContactCard(1); await sleep(250);
   check('карточка клиента', /Сделки клиента/.test($('#modalBody').innerHTML)); window.closeModal();
 
   window.go('competitors'); await sleep(400);

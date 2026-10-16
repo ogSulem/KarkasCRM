@@ -8,8 +8,9 @@ services:
     container_name: karkascrm
     restart: unless-stopped
     ports:
-      # Оставьте так для быстрого старта. За HTTPS-прокси (Caddy/nginx) замените на "127.0.0.1:8080:8080"
-      - "${CRM_PORT:-8080}:8080"
+      # Локально: http://localhost:${CRM_PORT}. На сервере с доменом (профиль tls) поставьте CRM_BIND=127.0.0.1,
+      # чтобы CRM была доступна только через Caddy с HTTPS.
+      - "${CRM_BIND:-0.0.0.0}:${CRM_PORT:-8080}:8080"
     environment:
       PORT: 8080
       HOST: 0.0.0.0
@@ -61,6 +62,33 @@ services:
       retries: 3
       start_period: 10s
 
+  # ── HTTPS и домен: docker compose --profile tls up -d --build ─────────────
+  # Caddy сам получает сертификат Let's Encrypt для CRM_DOMAIN и проксирует на CRM.
+  caddy:
+    profiles: ["tls"]
+    image: caddy:2-alpine
+    container_name: karkascrm-caddy
+    restart: unless-stopped
+    depends_on:
+      crm:
+        condition: service_healthy
+    ports:
+      - "80:80"
+      - "443:443"
+      - "443:443/udp"
+    environment:
+      # домен обязателен для профиля tls: CRM_DOMAIN=crm.вашдомен.ru в .env
+      CRM_DOMAIN: "${CRM_DOMAIN:?укажите CRM_DOMAIN в .env}"
+      ACME_EMAIL: ${ACME_EMAIL:-}
+    volumes:
+      - ./deploy/Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+
 volumes:
   crm_data:
     name: karkascrm_data
+  caddy_data:
+    name: karkascrm_caddy_data
+  caddy_config:
+    name: karkascrm_caddy_config

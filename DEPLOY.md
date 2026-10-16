@@ -4,6 +4,16 @@
 
 ---
 
+## 0. Два режима — выберите свой
+
+| Режим | Команда | Результат |
+|---|---|---|
+| **Проверка на своём компьютере** | `docker compose up --build` (или `./run-local.sh` без Docker) | `http://localhost:8080` |
+| **Сервер с доменом и HTTPS** | `docker compose --profile tls up -d --build` (или `./install.sh --tls домен email`) | `https://ваш-домен.ru` |
+| Сервер без домена (доступ по IP) | `docker compose up -d --build` | `http://IP:8080` |
+
+В режиме с доменом контейнер `caddy` слушает 80/443, сам получает сертификат Let's Encrypt для `CRM_DOMAIN` и проксирует трафик в CRM; сама CRM наружу не смотрит (`CRM_BIND=127.0.0.1`).
+
 ## 1. Что нужно
 
 - Сервер (VPS) с публичным IP, Ubuntu/Debian, 1 ГБ RAM и 5 ГБ диска хватит с запасом
@@ -14,34 +24,57 @@ curl -fsSL https://get.docker.com | sh
 docker --version && docker compose version
 ```
 
-- Для HTTPS — домен, A-запись которого указывает на IP сервера (нужен только для вебхуков мессенджеров)
+- Для HTTPS — домен, A-запись которого указывает на IP сервера (нужен и для вебхуков мессенджеров)
+- Node.js 22.5+ — только если хотите запускать без Docker (`./run-local.sh`) или прогнать `./run-tests.sh`
 
-Откройте порт в фаерволе (если используется):
+Откройте порты в фаерволе (если используется):
 
 ```bash
-sudo ufw allow 8080/tcp        # прямой доступ к CRM
-sudo ufw allow 80,443/tcp      # если будете ставить HTTPS
+sudo ufw allow 80,443/tcp      # домен и HTTPS (режим tls)
+sudo ufw allow 8080/tcp        # если CRM открыта напрямую по IP, без Caddy
 ```
 
 ## 2. Установка
 
+### 2.1. Проверка на локальном компьютере
+
 ```bash
-git clone <ваш-репозиторий> KarkasCRM
+git clone <адрес-репозитория> KarkasCRM
 cd KarkasCRM
 cp .env.example .env
-nano .env                      # ОБЯЗАТЕЛЬНО: JWT_SECRET и ADMIN_PASSWORD
-./install.sh                   # или: docker compose up -d --build
+docker compose up --build                # http://localhost:8080
 ```
+
+Без Docker (нужен Node.js 22.5+):
+
+```bash
+./run-local.sh                           # база в ./data, читает .env, http://127.0.0.1:8080
+./run-tests.sh                           # синтаксис + тесты + миграции + интерфейс
+```
+
+### 2.2. Сервер с доменом
+
+```bash
+git clone <адрес-репозитория> KarkasCRM
+cd KarkasCRM
+cp .env.example .env
+nano .env                      # ОБЯЗАТЕЛЬНО: JWT_SECRET и ADMIN_PASSWORD; плюс CRM_DOMAIN и ACME_EMAIL
+./install.sh --tls ваш-домен.ru mail@ваш-домен.ru
+```
+
+`install.sh` сам: создаёт `.env` (если его нет), генерирует `JWT_SECRET` и `ADMIN_PASSWORD` через `openssl rand`, ставит `CRM_BIND=127.0.0.1`, прописывает домен и e-mail и поднимает `docker compose --profile tls up -d --build`. Без режима `--tls` тот же скрипт поднимает CRM локально/по IP.
 
 Проверка:
 
 ```bash
-curl http://127.0.0.1:8080/api/health      # {"ok":true,"service":"KarkasCRM",...}
-docker compose ps
-docker compose logs -f crm
+curl http://127.0.0.1:8080/api/health      # {"ok":true,"service":"KarkasCRM","version":"2.3",...}
+curl https://ваш-домен.ru/.well-known/health   # ok  — домен, сертификат и прокси работают
+docker compose ps                          # crm (healthy) и caddy (running)
+docker compose logs -f crm                 # логи CRM
+docker compose logs -f caddy               # получение сертификата
 ```
 
-Откройте `http://<IP-сервера>:8080` и войдите под `ADMIN_EMAIL` / `ADMIN_PASSWORD`.
+Откройте `https://ваш-домен.ru` и войдите под `ADMIN_EMAIL` / `ADMIN_PASSWORD`.
 
 ### Сгенерировать надёжные секреты
 
@@ -51,29 +84,36 @@ echo "JWT_SECRET=$(openssl rand -hex 32)"; echo "ADMIN_PASSWORD=$(openssl rand -
 
 Вставьте значения в `.env`. После смены `ADMIN_PASSWORD` у уже созданной базы пароль не изменится (пользователь создаётся один раз при первом запуске) — смените его в CRM: Настройки → Профиль, или создайте нового пользователя в Настройки → Команда.
 
-## 3. Домен и HTTPS (рекомендуется)
+## 3. Домен и HTTPS
 
 HTTPS обязателен для вебхуков WhatsApp/Wazzup и полезен для безопасности.
 
-### Вариант A — Caddy (авто-сертификаты, проще всего)
+### Вариант A — Caddy в Docker (ничего не настраивается)
+
+Это основной путь: профиль `tls` уже описан в `docker-compose.yml`, конфиг — в [`deploy/Caddyfile`](deploy/Caddyfile).
 
 ```bash
-sudo apt install -y caddy
-sudo sed -i "s/crm.example.com/ваш-домен.ru/" deploy/Caddyfile
+# в .env: CRM_DOMAIN=ваш-домен.ru, ACME_EMAIL=mail@ваш-домен.ru, CRM_BIND=127.0.0.1
+docker compose --profile tls up -d --build
+```
+
+Caddy слушает 80/443, сам получает и продлевает сертификат, делает gzip, ставит HSTS и отдаёт
+`https://ваш-домен.ru/.well-known/health` → `ok` для быстрой проверки. Сертификаты и логи — в томах
+`karkascrm_caddy_data` и `karkascrm_caddy_config`.
+
+### Вариант B — Caddy установлен на сервере
+
+Если Caddy уже стоит как системная служба, контейнер не нужен:
+
+```bash
+sudo sed -i "s/\${CRM_DOMAIN}/ваш-домен.ru/" deploy/Caddyfile
 sudo cp deploy/Caddyfile /etc/caddy/Caddyfile
 sudo systemctl restart caddy
 ```
 
-Caddy сам получит сертификат Let's Encrypt. Останется закрыть прямой порт: в `docker-compose.yml` замените
+CRM при этом оставьте на `CRM_BIND=127.0.0.1` (доступ только с самого сервера, наружу — через Caddy).
 
-```yaml
-ports:
-  - "127.0.0.1:8080:8080"      # доступ только с самого сервера, наружу — через Caddy
-```
-
-и выполните `docker compose up -d`.
-
-### Вариант B — nginx + certbot
+### Вариант C — nginx + certbot
 
 ```bash
 sudo apt install -y nginx certbot python3-certbot-nginx
@@ -158,30 +198,46 @@ YANDEX_API_KEY=...
 
 ## 7. Обновление, бэкап, восстановление
 
+### Обновление версии
+
 ```bash
-# обновление
-git pull && docker compose up -d --build
-
-# CRM сама делает копии раз в сутки → /data/backups (срок хранения: Настройки → Данные)
-ls -la $(docker volume inspect karkascrm_data -f '{{.Mountpoint}}')/backups
-
-# либо свой бэкап (рекомендуется в cron)
-docker run --rm -v karkascrm_data:/d -v $PWD:/b alpine \
-  sh -c "cp /d/crm.db /b/crm-$(date +%F).db"
-# плюс удобный JSON-бэкап из CRM: Настройки → Данные → «Полный бэкап (JSON)»
-
-# восстановление
-docker compose down
-docker run --rm -v karkascrm_data:/d -v $PWD:/b alpine \
-  sh -c "cp /b/crm-2026-01-31.db /d/crm.db"
-docker compose up -d
+git pull && docker compose up -d --build          # с доменом: добавьте --profile tls
 ```
 
-Пример cron (бэкап каждую ночь в 3:30):
+База живёт в томе `karkascrm_data` и при обновлении не трогается; схема доводится до актуальной при старте (новые таблицы и поля добавляются, старые данные и чаты сохраняются — это проверяет `node --experimental-sqlite tests/migrate.test.mjs`).
 
-```cron
+### Резервные копии
+
+- CRM делает копию базы раз в сутки в `/data/backups` (том `karkascrm_data`), срок хранения — Настройки → Данные и компания.
+- Кнопка «Создать копию сейчас» + у каждой копии две кнопки: **⬇ скачать файл базы** и **♻ восстановить состояние из этой копии**.
+- Свои копии средствами системы (рекомендуется вместе с выгрузкой копий из CRM):
+
+```bash
+docker exec karkascrm sh -c 'ls -la /data /data/backups'
+docker cp karkascrm:/data/backups/crm-$(date +%F).db ./backup-$(date +%F).db
+```
+
+### Восстановление
+
+Самый простой путь — из интерфейса: Настройки → Данные и компания → у нужной копии нажмите **♻**. CRM сама сохранит текущее состояние в файл `before-restore-<дата>.db`, подменит базу и перезапустится (в Docker это делает `restart: unless-stopped`; локально перезапустите `./run-local.sh`). Обновите страницу — данные из копии на месте.
+
+Вручную из файла:
+
+```bash
+docker compose stop crm
+docker run --rm -v karkascrm_data:/data -v "$PWD":/backup alpine \
+  sh -c 'cp /backup/crm-2026-01-31.db /data/crm.db && rm -f /data/crm.db-wal /data/crm.db-shm'
+docker compose start crm          # с доменом: docker compose --profile tls up -d
+```
+
+### Бэкап в cron (своя копия на другой диск)
+
+```bash
+# каждую ночь в 3:30 копируем базу из тома на хост
 30 3 * * * cd /opt/KarkasCRM && docker run --rm -v karkascrm_data:/d -v /opt/backups:/b alpine cp /d/crm.db /b/crm-$(date +\%F).db
 ```
+
+Плюс выгрузка всех таблиц в JSON (Настройки → Данные и компания → «Полный бэкап (JSON)», то же по `GET /api/export/json`) — удобно для переноса данных в другую систему.
 
 ## 8. Диагностика
 
@@ -204,13 +260,42 @@ docker compose up -d
 - Сменить пароль администратора после первого входа
 - HTTPS (Caddy/nginx) и порт 8080, доступный только с localhost (см. раздел 3)
 - Роли: менеджерам — «Менеджер», наблюдателям — «Наблюдатель» (только чтение)
-- Регулярные бэкапы базы (раздел 6)
+- Регулярные бэкапы базы (раздел 7)
+- Вход защищён от подбора пароля: не более `LOGIN_RATE_LIMIT` попыток за 5 минут с одного IP (настраивается в интерфейсе)
 
-## 10. Запуск без Docker (если нужно)
+## 10. Запуск без Docker (локально, разработка, отладка)
 
 ```bash
 node --version          # нужен >= 22.5
-DATA_DIR=./data PORT=8080 JWT_SECRET=... node --experimental-sqlite backend/src/server.js
+./run-local.sh          # читает .env, база в ./data, адрес http://127.0.0.1:8080
+./run-tests.sh          # синтаксис + интеграционные тесты + миграции + интерфейс
 ```
 
-Полезно для локальной разработки и тестов: `node --experimental-sqlite --test tests/*.test.js`.
+Отдельные команды, если нужно:
+
+```bash
+DATA_DIR=./data PORT=8080 JWT_SECRET=... node --experimental-sqlite backend/src/server.js
+node --experimental-sqlite --test tests/api.test.js tests/competitors.test.js
+node --experimental-sqlite tests/migrate.test.mjs
+```
+
+### Служба systemd (если держите CRM без Docker)
+
+```ini
+[Unit]
+Description=KarkasCRM
+After=network.target
+
+[Service]
+WorkingDirectory=/opt/KarkasCRM
+EnvironmentFile=/opt/KarkasCRM/.env
+Environment=DATA_DIR=/opt/KarkasCRM/data PORT=8080 HOST=127.0.0.1
+ExecStart=/usr/bin/node --experimental-sqlite backend/src/server.js
+Restart=always
+User=karkas
+
+[Install]
+WantedBy=multi-user.target
+```
+
+Восстановление из копии при этом способе: нажмите «♻» в интерфейсе (процесс завершится) — `Restart=always` поднимет службу с восстановленной базой.

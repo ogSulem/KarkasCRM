@@ -8,7 +8,7 @@ import { extname, join, normalize } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { createCompetitors } from './competitors.js';
 import { sendMail } from './smtp.js';
-import { statSync, readdirSync, unlinkSync, copyFileSync, mkdirSync as mkdir } from 'node:fs';
+import { statSync, readdirSync, unlinkSync, copyFileSync, mkdirSync as mkdir, createReadStream } from 'node:fs';
 
 const PORT = process.env.PORT || 8080, HOST = process.env.HOST || '0.0.0.0';
 const ROOT = fileURLToPath(new URL('.', import.meta.url));
@@ -18,7 +18,7 @@ const SECRET = process.env.JWT_SECRET || 'change-me-in-production-please-32-char
 const ADMIN_EMAIL = (process.env.ADMIN_EMAIL || 'admin@example.com').toLowerCase();
 const ADMIN_PASSWORD = process.env.ADMIN_PASSWORD || 'admin12345';
 const SEED_DEMO = String(process.env.SEED_DEMO ?? '1') !== '0';
-const VERSION = '2.2';
+const VERSION = '2.3';
 const STARTED = Date.now();
 mkdirSync(DATA_DIR, { recursive: true });
 const db = new DatabaseSync(join(DATA_DIR, 'crm.db'));
@@ -26,34 +26,70 @@ db.exec('PRAGMA journal_mode=WAL; PRAGMA foreign_keys=ON;');
 db.exec(`
 CREATE TABLE IF NOT EXISTS users(id INTEGER PRIMARY KEY,name TEXT,email TEXT UNIQUE,pass TEXT,role TEXT DEFAULT 'manager',active INTEGER DEFAULT 1);
 CREATE TABLE IF NOT EXISTS companies(id INTEGER PRIMARY KEY,name TEXT NOT NULL,inn TEXT,phone TEXT,email TEXT,site TEXT,notes TEXT DEFAULT '',created_at TEXT DEFAULT (datetime('now')));
-CREATE TABLE IF NOT EXISTS contacts(id INTEGER PRIMARY KEY,name TEXT NOT NULL,phone TEXT,email TEXT,company TEXT,company_id INTEGER REFERENCES companies(id) ON DELETE SET NULL,position TEXT,source TEXT DEFAULT 'manual',tags TEXT DEFAULT '',notes TEXT DEFAULT '',responsible_id INTEGER,created_at TEXT DEFAULT (datetime('now')));
+CREATE TABLE IF NOT EXISTS contacts(id INTEGER PRIMARY KEY,name TEXT NOT NULL,phone TEXT,email TEXT,company TEXT,company_id INTEGER REFERENCES companies(id) ON DELETE SET NULL,position TEXT,source TEXT DEFAULT 'manual',tags TEXT DEFAULT '',notes TEXT DEFAULT '',responsible_id INTEGER,demo INTEGER DEFAULT 0,custom TEXT DEFAULT '{}',created_at TEXT DEFAULT (datetime('now')));
 CREATE TABLE IF NOT EXISTS pipelines(id INTEGER PRIMARY KEY,name TEXT NOT NULL,is_default INTEGER DEFAULT 0);
 CREATE TABLE IF NOT EXISTS stages(id INTEGER PRIMARY KEY,pipeline_id INTEGER REFERENCES pipelines(id) ON DELETE CASCADE,code TEXT,name TEXT,color TEXT DEFAULT '#16a34a',sort INTEGER DEFAULT 0,kind TEXT DEFAULT 'open');
-CREATE TABLE IF NOT EXISTS deals(id INTEGER PRIMARY KEY,title TEXT NOT NULL,amount INTEGER DEFAULT 0,stage TEXT DEFAULT 'new',pipeline_id INTEGER DEFAULT 1,contact_id INTEGER REFERENCES contacts(id) ON DELETE SET NULL,company_id INTEGER, responsible TEXT DEFAULT 'Администратор',responsible_id INTEGER,priority TEXT DEFAULT 'normal',loss_reason TEXT,deadline TEXT,closed_at TEXT,created_at TEXT DEFAULT (datetime('now')),updated_at TEXT DEFAULT (datetime('now')));
-CREATE TABLE IF NOT EXISTS tasks(id INTEGER PRIMARY KEY,title TEXT NOT NULL,type TEXT DEFAULT 'call',due TEXT,priority TEXT DEFAULT 'normal',done INTEGER DEFAULT 0,deal_id INTEGER,contact_id INTEGER,responsible_id INTEGER,result TEXT,created_at TEXT DEFAULT (datetime('now')));
+CREATE TABLE IF NOT EXISTS deals(id INTEGER PRIMARY KEY,title TEXT NOT NULL,amount INTEGER DEFAULT 0,stage TEXT DEFAULT 'new',pipeline_id INTEGER DEFAULT 1,contact_id INTEGER REFERENCES contacts(id) ON DELETE SET NULL,company_id INTEGER, responsible TEXT DEFAULT 'Администратор',responsible_id INTEGER,priority TEXT DEFAULT 'normal',loss_reason TEXT,deadline TEXT,closed_at TEXT,demo INTEGER DEFAULT 0,custom TEXT DEFAULT '{}',created_at TEXT DEFAULT (datetime('now')),updated_at TEXT DEFAULT (datetime('now')));
+CREATE TABLE IF NOT EXISTS tasks(id INTEGER PRIMARY KEY,title TEXT NOT NULL,type TEXT DEFAULT 'call',due TEXT,priority TEXT DEFAULT 'normal',done INTEGER DEFAULT 0,deal_id INTEGER,contact_id INTEGER,responsible_id INTEGER,result TEXT,demo INTEGER DEFAULT 0,notified_at TEXT,created_at TEXT DEFAULT (datetime('now')));
 CREATE TABLE IF NOT EXISTS notes(id INTEGER PRIMARY KEY,entity_type TEXT,entity_id INTEGER,body TEXT,author TEXT,created_at TEXT DEFAULT (datetime('now')));
 CREATE TABLE IF NOT EXISTS products(id INTEGER PRIMARY KEY,name TEXT NOT NULL,sku TEXT,price INTEGER DEFAULT 0,unit TEXT DEFAULT 'шт',active INTEGER DEFAULT 1);
 CREATE TABLE IF NOT EXISTS deal_products(id INTEGER PRIMARY KEY,deal_id INTEGER REFERENCES deals(id) ON DELETE CASCADE,product_id INTEGER,name TEXT,price INTEGER,qty REAL DEFAULT 1);
 CREATE TABLE IF NOT EXISTS templates(id INTEGER PRIMARY KEY,name TEXT NOT NULL,body TEXT,channel TEXT DEFAULT 'whatsapp');
 CREATE TABLE IF NOT EXISTS automations(id INTEGER PRIMARY KEY,name TEXT NOT NULL,trigger_type TEXT NOT NULL,trigger_value TEXT,action_type TEXT NOT NULL,action_value TEXT,active INTEGER DEFAULT 1);
 CREATE TABLE IF NOT EXISTS channels(id INTEGER PRIMARY KEY,provider TEXT DEFAULT 'wazzup',external_id TEXT UNIQUE,name TEXT,transport TEXT,phone TEXT,state TEXT,raw TEXT);
-CREATE TABLE IF NOT EXISTS conversations(id INTEGER PRIMARY KEY,contact_id INTEGER REFERENCES contacts(id) ON DELETE CASCADE,title TEXT,channels TEXT DEFAULT '',channel_id TEXT,external_chat_id TEXT,chat_type TEXT,unread INTEGER DEFAULT 0,assigned_id INTEGER,last_at TEXT DEFAULT (datetime('now')),UNIQUE(contact_id));
-CREATE TABLE IF NOT EXISTS messages(id INTEGER PRIMARY KEY,conversation_id INTEGER REFERENCES conversations(id) ON DELETE CASCADE,channel TEXT DEFAULT 'whatsapp',direction TEXT DEFAULT 'in',body TEXT,content_uri TEXT,status TEXT,external_id TEXT,author TEXT,created_at TEXT DEFAULT (datetime('now')));
+CREATE TABLE IF NOT EXISTS conversations(id INTEGER PRIMARY KEY,contact_id INTEGER REFERENCES contacts(id) ON DELETE CASCADE,title TEXT,channels TEXT DEFAULT '',channel_id TEXT,external_chat_id TEXT,chat_type TEXT,unread INTEGER DEFAULT 0,assigned_id INTEGER,demo INTEGER DEFAULT 0,last_at TEXT DEFAULT (datetime('now')),UNIQUE(contact_id));
+CREATE TABLE IF NOT EXISTS messages(id INTEGER PRIMARY KEY,conversation_id INTEGER REFERENCES conversations(id) ON DELETE CASCADE,channel TEXT DEFAULT 'whatsapp',direction TEXT DEFAULT 'in',body TEXT,content_uri TEXT,status TEXT,external_id TEXT,author TEXT,subject TEXT,created_at TEXT DEFAULT (datetime('now')));
 CREATE TABLE IF NOT EXISTS settings(key TEXT PRIMARY KEY,value TEXT);
 CREATE TABLE IF NOT EXISTS activities(id INTEGER PRIMARY KEY,text TEXT,entity_type TEXT,entity_id INTEGER,user_name TEXT,created_at TEXT DEFAULT (datetime('now')));
-CREATE INDEX IF NOT EXISTS idx_msg_conv ON messages(conversation_id,id);
-CREATE UNIQUE INDEX IF NOT EXISTS idx_msg_ext ON messages(external_id) WHERE external_id IS NOT NULL;
-CREATE INDEX IF NOT EXISTS idx_deals_stage ON deals(stage);
 `);
-// light migrations for v1 DBs
+// light migrations for v1 DBs — расширяем старые таблицы до текущей схемы
 const SCHEMA = [
   ['contacts', 'demo', 'INTEGER DEFAULT 0'], ['deals', 'demo', 'INTEGER DEFAULT 0'], ['tasks', 'demo', 'INTEGER DEFAULT 0'],
   ['conversations', 'demo', 'INTEGER DEFAULT 0'], ['tasks', 'notified_at', 'TEXT'], ['messages', 'subject', 'TEXT'],
   ['contacts', 'custom', "TEXT DEFAULT '{}'"], ['deals', 'custom', "TEXT DEFAULT '{}'"],
 ];
-for (const [t, c, d] of [...SCHEMA, ['contacts','company_id','INTEGER'],['contacts','position','TEXT'],['contacts','responsible_id','INTEGER'],['deals','pipeline_id','INTEGER DEFAULT 1'],['deals','priority',"TEXT DEFAULT 'normal'"],['deals','loss_reason','TEXT'],['deals','company_id','INTEGER'],['tasks','type',"TEXT DEFAULT 'call'"],['tasks','priority',"TEXT DEFAULT 'normal'"],['tasks','responsible_id','INTEGER'],['messages','content_uri','TEXT'],['messages','status','TEXT'],['conversations','channel_id','TEXT'],['conversations','external_chat_id','TEXT'],['conversations','chat_type','TEXT']]) {
+const SCHEMA_COLUMNS = [...SCHEMA,
+  ['contacts', 'company_id', 'INTEGER'], ['contacts', 'position', 'TEXT'], ['contacts', 'responsible_id', 'INTEGER'],
+  ['contacts', 'tags', "TEXT DEFAULT ''"], ['contacts', 'notes', "TEXT DEFAULT ''"], ['contacts', 'source', "TEXT DEFAULT 'manual'"],
+  ['deals', 'pipeline_id', 'INTEGER DEFAULT 1'], ['deals', 'priority', "TEXT DEFAULT 'normal'"], ['deals', 'loss_reason', 'TEXT'],
+  ['deals', 'company_id', 'INTEGER'], ['deals', 'responsible', "TEXT DEFAULT 'Администратор'"], ['deals', 'updated_at', 'TEXT'],
+  ['tasks', 'type', "TEXT DEFAULT 'call'"], ['tasks', 'priority', "TEXT DEFAULT 'normal'"], ['tasks', 'responsible_id', 'INTEGER'],
+  ['tasks', 'done', 'INTEGER DEFAULT 0'],
+  ['messages', 'content_uri', 'TEXT'], ['messages', 'status', 'TEXT'], ['messages', 'external_id', 'TEXT'],
+  ['messages', 'channel', "TEXT DEFAULT 'whatsapp'"], ['messages', 'direction', "TEXT DEFAULT 'in'"], ['messages', 'author', 'TEXT'],
+  ['conversations', 'channel_id', 'TEXT'], ['conversations', 'external_chat_id', 'TEXT'], ['conversations', 'chat_type', 'TEXT'],
+  ['conversations', 'last_at', 'TEXT'], ['conversations', 'assigned_id', 'INTEGER'], ['conversations', 'title', 'TEXT'], ['conversations', 'channels', "TEXT DEFAULT ''"],
+];
+
+// чего не хватает в этой базе: если она из старой версии — сначала копия, потом изменения
+const missingColumns = [];
+for (const [t, c] of SCHEMA_COLUMNS) {
+  const cols = db.prepare(`PRAGMA table_info(${t})`).all().map(r => r.name);
+  if (!cols.includes(c)) missingColumns.push([t, c]);
+}
+if (missingColumns.length) {
+  try {
+    mkdir(join(DATA_DIR, 'backups'), { recursive: true });
+    const pre = join(DATA_DIR, 'backups', `pre-upgrade-${new Date().toISOString().slice(0, 19).replace(/[:T]/g, '-')}.db`);
+    copyFileSync(join(DATA_DIR, 'crm.db'), pre);
+    console.log(`База обновляется до текущей версии — страховочная копия: ${pre}`);
+  } catch (e) { console.error('Не удалось сделать копию перед обновлением схемы:', e.message) }
+}
+for (const [t, c, d] of SCHEMA_COLUMNS) {
   const cols = db.prepare(`PRAGMA table_info(${t})`).all().map(r => r.name); if (!cols.includes(c)) db.exec(`ALTER TABLE ${t} ADD COLUMN ${c} ${d}`);
 }
+if (missingColumns.length) console.log(`Схема базы обновлена: заполнено полей — ${missingColumns.length}`);
+// индексы создаём ПОСЛЕ миграций: иначе база прошлой версии упадёт на отсутствующей колонке
+db.exec(`
+CREATE INDEX IF NOT EXISTS idx_msg_conv ON messages(conversation_id,id);
+CREATE INDEX IF NOT EXISTS idx_deals_stage ON deals(stage);
+CREATE INDEX IF NOT EXISTS idx_contacts_phone ON contacts(phone);
+CREATE INDEX IF NOT EXISTS idx_tasks_done ON tasks(done,due);
+CREATE INDEX IF NOT EXISTS idx_conv_contact ON conversations(contact_id);
+`);
+try { db.exec('CREATE UNIQUE INDEX IF NOT EXISTS idx_msg_ext ON messages(external_id) WHERE external_id IS NOT NULL'); }
+catch (e) { console.error('Не удалось создать уникальный индекс по external_id (в базе есть дубли внешних id):', e.message); }
+const SCHEMA_VERSION = 3;
 const getSetting = (k, d = '') => db.prepare('SELECT value FROM settings WHERE key=?').get(k)?.value ?? process.env[k] ?? d;
 const setSetting = (k, v) => db.prepare('INSERT INTO settings(key,value) VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value').run(k, String(v ?? ''));
 const log = (text, et = null, eid = null, user = '') => db.prepare('INSERT INTO activities(text,entity_type,entity_id,user_name) VALUES(?,?,?,?)').run(text, et, eid, user);
@@ -353,7 +389,9 @@ export const server = http.createServer(async (req, res) => {
     }
     if (p === '/api/health') {
       let dbSize = 0; try { dbSize = statSync(join(DATA_DIR, 'crm.db')).size } catch {}
-      const h = { ok: true, service: 'KarkasCRM', version: VERSION, time: new Date().toISOString(), uptimeSec: Math.round((Date.now() - STARTED) / 1000), dbSizeBytes: dbSize, counts: { contacts: db.prepare('SELECT COUNT(*) n FROM contacts').get().n, deals: db.prepare('SELECT COUNT(*) n FROM deals').get().n, messages: db.prepare('SELECT COUNT(*) n FROM messages').get().n } };
+      let backupsCount = 0, lastBackup = null;
+      try { const dir = join(DATA_DIR, 'backups'); const files = existsSync(dir) ? readdirSync(dir).filter(f => f.endsWith('.db')).sort() : []; backupsCount = files.length; lastBackup = files.length ? files[files.length - 1] : null } catch {}
+      const h = { ok: true, service: 'KarkasCRM', version: VERSION, schema: SCHEMA_VERSION, time: new Date().toISOString(), uptimeSec: Math.round((Date.now() - STARTED) / 1000), dbSizeBytes: dbSize, backups: { count: backupsCount, last: lastBackup }, counts: { users: db.prepare('SELECT COUNT(*) n FROM users').get().n, contacts: db.prepare('SELECT COUNT(*) n FROM contacts').get().n, deals: db.prepare('SELECT COUNT(*) n FROM deals').get().n, tasks: db.prepare('SELECT COUNT(*) n FROM tasks WHERE done=0').get().n, messages: db.prepare('SELECT COUNT(*) n FROM messages').get().n } };
       return json(res, 200, h, true);
     }
     if (p === '/api/auth/login' && req.method === 'POST') {
@@ -367,7 +405,7 @@ export const server = http.createServer(async (req, res) => {
     if (p === '/api/events') { res.writeHead(200, { 'Content-Type': 'text/event-stream', 'Cache-Control': 'no-cache', Connection: 'keep-alive' }); res.write('event: ready\ndata: {}\n\n'); clients.add(res); req.on('close', () => clients.delete(res)); return; }
     if (p === '/api/me') return json(res, 200, { user });
     if (p === '/api/meta') return json(res, 200, {
-      version: VERSION, user,
+      version: VERSION, schema: SCHEMA_VERSION, user,
       company: { name: getSetting('COMPANY_NAME', 'Моя компания'), currency: getSetting('CURRENCY', '₽') },
       taskTypes: [{ id: 'call', name: 'Звонок' }, { id: 'meeting', name: 'Встреча' }, { id: 'message', name: 'Сообщение' }, { id: 'email', name: 'Письмо' }, { id: 'other', name: 'Другое' }],
       sources: ['manual', 'wazzup-whatsapp', 'wazzup-telegram', 'wazzup-instagram', 'wazzup-viber', 'whatsapp', 'telegram', 'email', 'site', 'avito', 'import'],
@@ -441,7 +479,7 @@ export const server = http.createServer(async (req, res) => {
       return json(res, 200, { kept: keepId, merged: mergeIds.length, contact: db.prepare('SELECT * FROM contacts WHERE id=?').get(keepId) });
     }
     if (p === '/api/search') { const q = '%' + (u.searchParams.get('q') || '') + '%'; return json(res, 200, { contacts: db.prepare('SELECT id,name,phone FROM contacts WHERE name LIKE ? OR phone LIKE ? LIMIT 8').all(q, q), deals: db.prepare('SELECT id,title,amount FROM deals WHERE title LIKE ? LIMIT 8').all(q), companies: db.prepare('SELECT id,name FROM companies WHERE name LIKE ? LIMIT 5').all(q) }); }
-    if (p === '/api/backup') { const tables = ['users', 'companies', 'contacts', 'pipelines', 'stages', 'deals', 'tasks', 'notes', 'products', 'templates', 'automations', 'conversations', 'messages', 'channels', 'competitors', 'competitor_checks', 'competitor_reports', 'reviews', 'price_rows']; const out = {}; tables.forEach(t => out[t] = db.prepare(`SELECT * FROM ${t}`).all()); res.writeHead(200, { 'Content-Type': 'application/json', 'Content-Disposition': 'attachment; filename=karkas-backup.json' }); return res.end(JSON.stringify(out, null, 2)); }
+    if (p === '/api/export/json' || p === '/api/backup') { const tables = ['users', 'companies', 'contacts', 'pipelines', 'stages', 'deals', 'tasks', 'notes', 'products', 'templates', 'automations', 'conversations', 'messages', 'channels', 'competitors', 'competitor_checks', 'competitor_reports', 'reviews', 'price_rows']; const out = {}; tables.forEach(t => out[t] = db.prepare(`SELECT * FROM ${t}`).all()); res.writeHead(200, { 'Content-Type': 'application/json', 'Content-Disposition': 'attachment; filename=karkas-backup.json' }); return res.end(JSON.stringify(out, null, 2)); }
 
     // ===== generic CRUD =====
     const CRUD = { contacts: ['name', 'phone', 'email', 'company', 'company_id', 'position', 'source', 'tags', 'notes', 'responsible_id', 'custom'], companies: ['name', 'inn', 'phone', 'email', 'site', 'notes'], tasks: ['title', 'type', 'due', 'priority', 'done', 'deal_id', 'contact_id', 'responsible_id', 'result'], products: ['name', 'sku', 'price', 'unit', 'active'], templates: ['name', 'body', 'channel'], automations: ['name', 'trigger_type', 'trigger_value', 'action_type', 'action_value', 'active'], notes: ['entity_type', 'entity_id', 'body', 'author'] };
@@ -527,6 +565,37 @@ export const server = http.createServer(async (req, res) => {
       const dir = join(DATA_DIR, 'backups');
       if (req.method === 'GET') return json(res, 200, { dir: '/data/backups', keepDays: Number(getSetting('BACKUP_KEEP_DAYS', '7')) || 0, files: existsSync(dir) ? readdirSync(dir).filter(f => f.endsWith('.db')).sort().reverse().map(f => ({ name: f, sizeBytes: statSync(join(dir, f)).size, created_at: statSync(join(dir, f)).mtime.toISOString() })) : [] });
       if (req.method === 'POST') { if (!requireAdmin(user, res)) return; const file = makeBackup(true); return json(res, 200, { created: file }) }
+    }
+    if (p === '/api/backups/download') {
+      if (!requireAdmin(user, res)) return;
+      const name = String(u.searchParams.get('file') || '');
+      if (!/^[A-Za-z0-9._-]+\.db$/.test(name)) return json(res, 400, { error: 'Некорректное имя файла копии' });
+      const src = join(DATA_DIR, 'backups', name);
+      if (!existsSync(src)) return json(res, 404, { error: 'Копия не найдена' });
+      res.writeHead(200, { 'Content-Type': 'application/vnd.sqlite3', 'Content-Disposition': `attachment; filename="${name}"`, 'Content-Length': statSync(src).size });
+      return createReadStream(src).pipe(res);
+    }
+    // восстановление базы из копии: кладём файл на место crm.db и перезапускаем службу
+    // (в Docker стоит restart: unless-stopped — контейнер поднимется сам; локально перезапустите ./run-local.sh)
+    if (p === '/api/backups/restore' && req.method === 'POST') {
+      if (!requireAdmin(user, res)) return;
+      const b = await readBody(req);
+      const name = String((b && b.file) || '');
+      if (!/^[A-Za-z0-9._-]+\.db$/.test(name)) return json(res, 400, { error: 'Некорректное имя файла копии' });
+      const src = join(DATA_DIR, 'backups', name);
+      if (!existsSync(src)) return json(res, 404, { error: 'Копия не найдена' });
+      // снимок выбранной копии делаем ДО страховочной копии: имена копий за день совпадают
+      const tmp = join(DATA_DIR, '.restore-src.db');
+      copyFileSync(src, tmp);
+      const safety = `before-restore-${new Date().toISOString().slice(0, 19).replace(/[:T]/g, '-')}.db`;
+      try { db.exec('PRAGMA wal_checkpoint(TRUNCATE)'); copyFileSync(join(DATA_DIR, 'crm.db'), join(DATA_DIR, 'backups', safety)) } catch (e) { console.error('restore: страховочная копия', e.message) }
+      try { db.close() } catch {}
+      copyFileSync(tmp, join(DATA_DIR, 'crm.db'));
+      unlinkSync(tmp);
+      for (const suffix of ['-wal', '-shm']) { const f = join(DATA_DIR, 'crm.db' + suffix); if (existsSync(f)) unlinkSync(f) }
+      json(res, 200, { ok: true, restored: name, safety_copy: safety, restarting: true, message: 'База восстановлена из копии, служба перезапускается — обновите страницу через несколько секунд' });
+      setTimeout(() => process.exit(0), 400);
+      return;
     }
     if (p === '/api/me/password' && req.method === 'POST') { const b = await readBody(req); if (String(b.next || '').length < 8) return json(res, 400, { error: 'Новый пароль должен быть не короче 8 символов' }); const me = db.prepare('SELECT * FROM users WHERE id=?').get(user.id); if (!checkPass(b.old || '', me.pass)) return json(res, 400, { error: 'Старый пароль неверен' }); db.prepare('UPDATE users SET pass=? WHERE id=?').run(hashPass(b.next), user.id); return json(res, 200, { saved: true }); }
 
