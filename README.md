@@ -1,164 +1,372 @@
-<p align="center">
-  <a href="https://www.twenty.com">
-    <img src="./packages/twenty-website/public/images/core/logo.svg" width="100px" alt="Twenty logo" />
-  </a>
-</p>
+# KarkasCRM
 
-<h2 align="center">The #1 Open-Source CRM</h2>
+**CRM уровня amoCRM за один `docker compose up`** — сделки и настраиваемые воронки, клиенты и компании, задачи, аналитика, **единый инбокс мессенджеров через Wazzup** (WhatsApp, Telegram, Instagram и Viber собираются в один чат клиента) и **разведка конкурентов**: долги, суды, банкротство, отзывы с карт и сравнение цен из вашей Excel-таблицы.
 
-<p align="center"><a href="https://twenty.com"><img src="./packages/twenty-website/public/images/readme/globe-icon.svg" width="12" height="12"/> Website</a> · <a href="https://docs.twenty.com"><img src="./packages/twenty-website/public/images/readme/book-icon.svg" width="12" height="12"/> Documentation</a> · <a href="https://github.com/orgs/twentyhq/projects/1"><img src="./packages/twenty-website/public/images/readme/map-icon.svg" width="12" height="12"/> Roadmap </a> · <a href="https://discord.gg/cx5n4Jzs57"><img src="./packages/twenty-website/public/images/readme/discord-icon.svg" width="12" height="12"/> Discord</a> · <a href="https://www.figma.com/file/xt8O9mFeLl46C5InWwoMrN/Twenty"><img src="./packages/twenty-website/public/images/readme/figma-icon.webp"  width="12" height="12"/>  Figma</a></p>
+Написана без внешних зависимостей: Node.js 22 + SQLite + статический SPA. Ни одного npm-пакета в рантайме — контейнер собирается за секунды и не ломается от обновлений зависимостей.
 
-<p align="center">
-  <a href="https://www.twenty.com">
-    <picture>
-      <source media="(prefers-color-scheme: dark)" srcset="./packages/twenty-website/public/images/readme/github-cover-dark.webp" />
-      <source media="(prefers-color-scheme: light)" srcset="./packages/twenty-website/public/images/readme/github-cover-light.webp" />
-      <img src="./packages/twenty-website/public/images/readme/github-cover-light.webp" alt="Twenty banner" />
-    </picture>
-  </a>
-</p>
+---
 
-<br />
+## Быстрый старт
 
-# Why Twenty
-
-Twenty gives technical teams the building blocks for a custom CRM that meets complex business needs and quickly adapts as the business evolves. Twenty is the CRM you build, ship, and version like the rest of your stack.
-
-<a href="https://twenty.com/resources/why-twenty"><img src="./packages/twenty-website/public/images/readme/star-icon.svg" width="14" height="14"/> Learn more about why we built Twenty</a>
-
-<br />
-
-# Installation
-
-### <img src="./packages/twenty-website/public/images/readme/globe-icon.svg" width="14" height="14"/> Cloud
-
-The fastest way to get started. Sign up at [twenty.com](https://twenty.com) and spin up a workspace in under a minute, with no infrastructure to manage and always up to date.
-
-### <img src="./packages/twenty-website/public/images/readme/book-icon.svg" width="14" height="14"/> Build an app
-
-Scaffold a new app with the Twenty CLI:
+### На своём компьютере (localhost)
 
 ```bash
-npx create-twenty-app my-app
+git clone <адрес-репозитория> KarkasCRM && cd KarkasCRM
+cp .env.example .env                  # для локальной проверки можно оставить как есть
+docker compose up --build             # поднимает CRM на http://localhost:8080
 ```
 
-Define objects, fields, and views as code:
+Откройте **http://localhost:8080** → вход `admin@example.com` / `admin12345` (`ADMIN_EMAIL` / `ADMIN_PASSWORD` из `.env`).
 
-```ts
-import { defineObject, FieldType } from 'twenty-sdk/define';
+> Локально CRM поднимается **с демо-данными** (`SEED_DEMO=1`) — есть что посмотреть и потрогать. На рабочем сервере с доменом демо-данные не нужны: `install.sh --tls` сам ставит `SEED_DEMO=0`, и база стартует чистой.
 
-export default defineObject({
-  nameSingular: 'deal',
-  namePlural: 'deals',
-  labelSingular: 'Deal',
-  labelPlural: 'Deals',
-  fields: [
-    { name: 'name', label: 'Name', type: FieldType.TEXT },
-    { name: 'amount', label: 'Amount', type: FieldType.CURRENCY },
-    { name: 'closeDate', label: 'Close Date', type: FieldType.DATE_TIME },
-  ],
-});
-```
-
-Then ship it to your workspace:
+Docker недоступен? Нужен только Node.js 22.5+:
 
 ```bash
-npx twenty app:publish --private
+./run-local.sh                        # то же самое без Docker: http://127.0.0.1:8080
 ```
 
-See the [app development guide](https://docs.twenty.com/developers/extend/apps/getting-started) for objects, views, agents, and logic functions.
+`run-local.sh` читает `.env` (если файла нет — берёт безопасные значения по умолчанию), хранит базу в `./data` и печатает адрес для входа. Остановка — `Ctrl+C`.
 
-### <img src="./packages/twenty-website/public/images/readme/rocket-icon.svg" width="14" height="14"/> Self-hosting
+### На сервере с доменом (HTTPS автоматически)
 
-Run Twenty on your own infrastructure with [Docker Compose](https://docs.twenty.com/developers/self-host/capabilities/docker-compose), or contribute locally via the [local setup guide](https://docs.twenty.com/developers/contribute/capabilities/local-setup).
+```bash
+cp .env.example .env && nano .env     # CRM_DOMAIN=ваш-домен.ru, ACME_EMAIL, JWT_SECRET, ADMIN_PASSWORD
+docker compose --profile tls up --build
+```
 
-<br />
-<br />
+Caddy сам получит сертификат Let's Encrypt и откроет `https://ваш-домен.ru` (порты 80 и 443). То же одной командой:
 
-# Everything you need
+```bash
+./install.sh --tls ваш-домен.ru mail@ваш-домен.ru
+```
 
-Twenty gives you the building blocks of a modern CRM (objects, views, workflows, and agents) and lets you extend them as code. Here's a tour of what's in the box.
+Проверка, что домен и сертификат живы: `https://ваш-домен.ru/.well-known/health` → `ok`.
+Для сервера без домена (доступ по IP): `CRM_BIND=0.0.0.0` и `docker compose up -d --build` → `http://IP:8080`.
 
-Want to go deeper? Read the <a href="https://docs.twenty.com/user-guide/introduction"><img src="./packages/twenty-website/public/images/readme/planner-icon.svg" width="14" height="14"/> User Guide</a> for product walkthroughs, or the <a href="https://docs.twenty.com"><img src="./packages/twenty-website/public/images/readme/book-icon.svg" width="14" height="14"/> Documentation</a> for developer reference.
+Проверить всё сразу (синтаксис, тесты, миграции, интерфейс): `./run-tests.sh`.
 
-<table align="center">
-  <tr>
-    <td width="50%">
-      <picture>
-        <source media="(prefers-color-scheme: dark)" srcset="./packages/twenty-website/public/images/readme/v2-build-apps-dark.webp" />
-        <source media="(prefers-color-scheme: light)" srcset="./packages/twenty-website/public/images/readme/v2-build-apps-light.webp" />
-        <img src="./packages/twenty-website/public/images/readme/v2-build-apps-light.webp" alt="Create your apps" />
-      </picture>
-      <p align="center"><a href="https://docs.twenty.com/developers/extend/apps/getting-started"><img src="./packages/twenty-website/public/images/readme/code-icon.svg" width="16" height="16"/> Learn more about apps in doc</a></p>
-    </td>
-    <td width="50%">
-      <picture>
-        <source media="(prefers-color-scheme: dark)" srcset="./packages/twenty-website/public/images/readme/v2-version-control-dark.webp" />
-        <source media="(prefers-color-scheme: light)" srcset="./packages/twenty-website/public/images/readme/v2-version-control-light.webp" />
-        <img src="./packages/twenty-website/public/images/readme/v2-version-control-light.webp" alt="Stay on top with version control" />
-      </picture>
-      <p align="center"><a href="https://docs.twenty.com/developers/extend/apps/publishing"><img src="./packages/twenty-website/public/images/readme/monitor-icon.svg" width="16" height="16"/> Learn more about version control in doc</a></p>
-    </td>
-  </tr>
-  <tr>
-    <td width="50%">
-      <picture>
-        <source media="(prefers-color-scheme: dark)" srcset="./packages/twenty-website/public/images/readme/v2-all-tools-dark.webp" />
-        <source media="(prefers-color-scheme: light)" srcset="./packages/twenty-website/public/images/readme/v2-all-tools-light.webp" />
-        <img src="./packages/twenty-website/public/images/readme/v2-all-tools-light.webp" alt="All the tools you need to build anything" />
-      </picture>
-      <p align="center"><a href="https://docs.twenty.com/developers/extend/apps/building"><img src="./packages/twenty-website/public/images/readme/rocket-icon.svg" width="16" height="16"/> Learn more about primitives in doc</a></p>
-    </td>
-    <td width="50%">
-      <picture>
-        <source media="(prefers-color-scheme: dark)" srcset="./packages/twenty-website/public/images/readme/v2-tools-dark.webp" />
-        <source media="(prefers-color-scheme: light)" srcset="./packages/twenty-website/public/images/readme/v2-tools-light.webp" />
-        <img src="./packages/twenty-website/public/images/readme/v2-tools-light.webp" alt="Customize your layouts" />
-      </picture>
-      <p align="center"><a href="https://docs.twenty.com/user-guide/layout/overview"><img src="./packages/twenty-website/public/images/readme/planner-icon.svg" width="16" height="16"/> Learn more about layouts in doc</a></p>
-    </td>
-  </tr>
-  <tr>
-    <td width="50%">
-      <picture>
-        <source media="(prefers-color-scheme: dark)" srcset="./packages/twenty-website/public/images/readme/v2-ai-agents-dark.webp" />
-        <source media="(prefers-color-scheme: light)" srcset="./packages/twenty-website/public/images/readme/v2-ai-agents-light.webp" />
-        <img src="./packages/twenty-website/public/images/readme/v2-ai-agents-light.webp" alt="AI agents and chats" />
-      </picture>
-      <p align="center"><a href="https://docs.twenty.com/user-guide/ai/overview"><img src="./packages/twenty-website/public/images/readme/message-icon.svg" width="16" height="16"/> Learn more about AI in doc</a></p>
-    </td>
-    <td width="50%">
-      <picture>
-        <source media="(prefers-color-scheme: dark)" srcset="./packages/twenty-website/public/images/readme/v2-crm-tools-dark.webp" />
-        <source media="(prefers-color-scheme: light)" srcset="./packages/twenty-website/public/images/readme/v2-crm-tools-light.webp" />
-        <img src="./packages/twenty-website/public/images/readme/v2-crm-tools-light.webp" alt="Plus all the tools of a good CRM" />
-      </picture>
-      <p align="center"><a href="https://docs.twenty.com/user-guide/introduction"><img src="./packages/twenty-website/public/images/readme/star-icon.svg" width="16" height="16"/> Learn more about CRM features in doc</a></p>
-    </td>
-  </tr>
-</table>
+### Проверка после запуска (5 минут)
 
-<br />
+1. **Вход и демо-данные**: под админом видны примеры — сделки на канбане, чаты, конкурент. Уберите их одной кнопкой: Настройки → Данные и компания → «Удалить демо-данные» (рабочие записи не тронет).
+2. **Сделки**: перетащите карточку между этапами, добавьте товар — сумма пересчитается, в карточке видна история и переписка клиента.
+3. **Права**: создайте в Настройки → Команда менеджера, войдите в другом окне браузера — настройки у него только на чтение.
+4. **Чаты**: откройте «Чаты Wazzup» → «🧪 Тестовое входящее»: сообщение появится в инбоксе и создаст сделку в «Неразобранном».
+5. **База и копии**: Настройки → Данные и компания → «Создать копию сейчас», затем у копии — «⬇» (скачать файл базы) и «♻» (восстановить).
+6. **Сервис**: `curl -s localhost:8080/api/health` → `{"ok":true,...,"counts":{...}}`; `docker compose ps` — контейнер `healthy`.
 
-# Stack
+---
 
-- <a href="https://www.typescriptlang.org/"><img src="./packages/twenty-website/public/images/readme/stack-typescript.svg" width="14" height="14"/> TypeScript</a>
-- <a href="https://nx.dev/"><img src="./packages/twenty-website/public/images/readme/stack-nx.svg" width="14" height="14"/> Nx</a>
-- <a href="https://nestjs.com/"><img src="./packages/twenty-website/public/images/readme/stack-nestjs.svg" width="14" height="14"/> NestJS</a>, with <a href="https://bullmq.io/">BullMQ</a>, <a href="https://www.postgresql.org/"><img src="./packages/twenty-website/public/images/readme/stack-postgresql.svg" width="14" height="14"/> PostgreSQL</a>, <a href="https://redis.io/"><img src="./packages/twenty-website/public/images/readme/stack-redis.svg" width="14" height="14"/> Redis</a>
-- <a href="https://reactjs.org/"><img src="./packages/twenty-website/public/images/readme/stack-react.svg" width="14" height="14"/> React</a>, with <a href="https://jotai.org/">Jotai</a>, <a href="https://linaria.dev/">Linaria</a> and <a href="https://lingui.dev/">Lingui</a>
+## Что внутри
 
-# Thanks
+### Продажи
+- **Сделки на канбане** с drag-and-drop между этапами, суммой, сроками и приоритетами
+- **Настраиваемые воронки**: создавайте любые воронки и этапы (название, цвет, тип «обычный/успех/отказ») прямо в интерфейсе — Настройки → Воронки
+- **Печать документов прямо из сделки**: кнопки «🖨 КП» и «🧾 Счёт» формируют готовую страницу А4 с реквизитами вашей компании, составом, итогом и НДС — остаётся нажать «Печать» или сохранить в PDF (реквизиты задаются в Настройки → Данные и компания)
+- **Массовые действия**: выделили пачку сделок, контактов или задач — и одним нажатием сменили этап, ответственного, добавили тег, отметили выполненными или удалили
+- **Товары и прайс**: добавление позиций в сделку, сумма пересчитывается автоматически
+- **Причины отказа**, дедлайны, ответственные, приоритеты
+- **Фильтр «Мои / Все»** на канбане — каждый менеджер видит свою работу
+- **Возврат клиента = новая сделка**: если открытых сделок у клиента нет, новое обращение автоматически создаёт сделку в «Неразобранном» (настраивается, воронка и этап — тоже)
+- **Распределение лидов**: включите в настройках — новые обращения уходят наименее загруженному менеджеру, ответственный сразу виден в сделке и карточке клиента
 
-<p align="center">
-  <a href="https://greptile.com"><img src="./packages/twenty-website/public/images/readme/greptile.webp" height="28" alt="Greptile" /></a>
-  &nbsp;&nbsp;&nbsp;&nbsp;
-  <a href="https://sentry.io/"><img src="./packages/twenty-website/public/images/readme/sentry.webp" height="28" alt="Sentry" /></a>
-  &nbsp;&nbsp;&nbsp;&nbsp;
-  <a href="https://crowdin.com/"><img src="./packages/twenty-website/public/images/readme/crowdin.webp" height="28" alt="Crowdin" /></a>
-</p>
+### Клиенты
+- **Контакты** с тегами, источниками, поиском, карточкой клиента (сделки, заметки, задачи, переписка)
+- **Ответственный на карточке** контакта и сделки — видно, кто ведёт клиента; фильтры «Мои»
+- **Компании** (включая ИНН, сайт)
+- **Заметки** к контактам и сделкам, **лента активности** по каждому клиенту
+- **Свои поля карточек** — Настройки → Поля карточек: добавляйте любые поля (текст, число, дата, список) для контактов и сделок, они сразу появляются в формах и карточках. Код менять не нужно
+- **Поиск дублей и объединение контактов** одной кнопкой: сделки, задачи, заметки и вся переписка переносятся в основную карточку
+- **Импорт/экспорт CSV** и полный **бэкап JSON** из интерфейса
 
-Thanks to these amazing services that we use and recommend for code review (Greptile), catching bugs (Sentry) and translating (Crowdin).
+### Задачи
+- Типы (звонок, встреча, сообщение, письмо), сроки, приоритеты, результат
+- Группировка: просроченные / активные / выполненные
+- Создаются вручную, из карточки сделки/клиента или **автоматизациями**
 
-# Join the Community
+### Единый инбокс (Wazzup)
+- **Один чат на клиента**: сообщения из WhatsApp, Telegram, Instagram и Viber склеиваются по телефону или chatId
+- Первое входящее **само создаёт контакт, чат и сделку** на первом этапе воронки
+- Отправка ответов клиенту через ваш номер Wazzup прямо из CRM
+- Статусы сообщений (`sent / delivered / read / error`), счётчики непрочитанного, реалтайм через SSE
+- История сохраняется даже если провайдер отключён — «локальный режим»
+- **Файлы и документы**: кнопка «📎» отправляет файл ссылкой (`contentUri` — так требует Wazzup), ссылка сохраняется в истории чата
+- **Статусы доставки**: отправлено / доставлено / прочитано, ошибки видно прямо в пузыре сообщения
+- **Уведомления на ходу**: всплывающее сообщение и пульсирующий счётчик, когда клиент пишет, а вы в другом разделе
+- **Переписка в карточке сделки**: вкладка «Переписка» показывает диалог с клиентом и открывает чат в один клик
+- **Кнопка «🧪 Тестовое входящее»** — проверить всю логику без реального мессенджера
 
-<p><a href="https://github.com/twentyhq/twenty"><img src="./packages/twenty-website/public/images/readme/star-icon.svg" width="12" height="12"/> Star the repo</a> · <a href="https://discord.gg/cx5n4Jzs57"><img src="./packages/twenty-website/public/images/readme/discord-icon.svg" width="12" height="12"/> Discord</a> · <a href="https://github.com/twentyhq/twenty/discussions"><img src="./packages/twenty-website/public/images/readme/message-icon.svg" width="12" height="12"/> Feature requests</a> · <a href="https://github.com/orgs/twentyhq/projects/1/views/35"><img src="./packages/twenty-website/public/images/readme/rocket-icon.svg" width="12" height="12"/> Releases</a> · <a href="https://twitter.com/twentycrm"><img src="./packages/twenty-website/public/images/readme/x-icon.svg" width="12" height="12"/> X</a> · <a href="https://www.linkedin.com/company/twenty/"><img src="./packages/twenty-website/public/images/readme/linkedin-icon.svg" width="12" height="12"/> LinkedIn</a> · <a href="https://twenty.crowdin.com/twenty"><img src="./packages/twenty-website/public/images/readme/language-icon.svg" width="12" height="12"/> Crowdin</a> · <a href="https://github.com/twentyhq/twenty/contribute"><img src="./packages/twenty-website/public/images/readme/code-icon.svg" width="12" height="12"/> Contribute</a></p>
+### 🕵 Конкуренты — разведка по одному названию
+Вкладка **Конкуренты**: пишете название конкурента или ИНН — CRM параллельно опрашивает источники и собирает отчёт.
+
+| Что проверяем | Откуда | Нужен ключ |
+|---|---|---|
+| Долги: исполнительные производства и суммы | ФССП (api-ip.fssprus.ru) | да, либо ссылка |
+| Банкротство | Федресурс (ЕФРСБ) | нет |
+| Суды: арбитражные дела, роль в процессе | kad.arbitr.ru | нет |
+| Статус ЕГРЮЛ, недоимки, руководители, учредители | ФНС (api-fns.ru) | да, либо ссылка |
+| Реквизиты, связи и аффилированность, «суды и долги» одной страницей | Rusprofile | нет (автопарсинг + ссылки) |
+| Отзывы и рейтинг | Google Карты, 2ГИС, Яндекс Карты, Авито | Google/2ГИС/Яндекс — ключ, Авито — ссылка |
+| Цены и загруженность | ваша Excel-таблица + прайс конкурента (.xlsx/.csv/ссылка) | нет |
+
+Результат каждой проверки:
+- **Риск-скор 0–100** с уровнем (низкий → высокий) и расшифровкой каждого фактора с весом
+- **Вердикт** и **готовые аргументы для разговора** («у него 2 исполнительных производства на 1,24 млн ₽ — предложите договор и гарантию»)
+- **Сравнение цен** с нашей таблицей по сопоставимым позициям: где мы дешевле, где дороже, средняя разница в %
+- **Отзывы** в одной таблице с рейтингом по источникам и отдельным блоком негатива
+- **История проверок** и что изменилось с прошлого раза (риск, число негативных факторов)
+- **Ссылки ручной проверки**: Rusprofile (в т.ч. связи — формат `/connections/<ИНН>`), ФНС «Прозрачный бизнес», бухотчётность, ФССП, Федресурс, kad.arbitr, Яндекс/2ГИС/Авито/Google, госзакупки
+
+**Excel-таблицы.** Наша таблица цен и прайс конкурента загружаются файлом **.xlsx** (настоящий Excel), **.csv**, вставкой строк или ссылкой на опубликованный Google Sheets. Колонки распознаются автоматически: «Наименование», «Цена», «Артикул», «Ед.», «Комментарий/наличие/срок». Наш прайс загружается один раз (Настройки → Конкуренты и источники) и используется во всех отчётах.
+
+**Про источники честно.** Госсайты (ФНС, ФССП, Федресурс, kad.arbitr, Rusprofile) время от времени блокируют автоматические запросы — тогда источник в отчёте помечается «сайт не отдал», а ссылка для ручной проверки остаётся рабочей. Ключи официальных API (api-fns.ru, api-ip.fssprus.ru, Google Places, 2ГИС, Яндекс Геопоиск) включают автозаполнение. Отзывы можно вносить вручную (в том числе «из разговора») — они участвуют в расчёте риска и аргументах.
+
+### ✉ Почта — письма клиентам из CRM
+- **Отправка писем прямо из чата клиента**: кнопка «✉ Письмо» — тема и текст уходят с вашего адреса (SMTP), письмо появляется в единой переписке
+- SMTP настраивается в интерфейсе (Настройки → Интеграции → Почта): STARTTLS (587), SSL/TLS (465) или внутренний релей без шифрования
+- **Кнопка «Отправить проверочное письмо»** — сразу видно, верны ли настройки
+- **Приём входящих**: правило пересылки почтового ящика на `https://ваш-домен/webhooks/email` — письмо создаёт/находит контакт по e-mail и попадает в тот же диалог клиента, что WhatsApp и Telegram
+- Пароль почты хранится на сервере, в интерфейс отдаётся замаскированным
+
+### Аналитика
+- Конверсия в успех, средний чек, прогноз выручки по активным сделкам
+- Выручка по этапам, источники лидов, причины отказов
+- **План продаж на месяц** с процентом выполнения (задаётся из интерфейса)
+
+### Интерфейс: быстрый, тёмный и на телефоне
+- **Палитра команд ⌘K / Ctrl+K** (или клавиша `/`): переход по разделам, создание сделки/контакта/задачи и поиск по клиентам, сделкам и компаниям с клавиатуры
+- **Светлая и тёмная тема** — переключатель в шапке, режим «как в системе», выбор запоминается
+- **Скелетоны загрузки, плавные появления, hover-эффекты, тосты** — интерфейс отвечает мгновенно: карточка сделки переезжает по канбану сразу, задача отмечается не дожидаясь сервера, а отменённое действие откатывается
+- **Статика отдаётся с gzip и ETag** (SPA-скрипт ~160 КБ → ~42 КБ по сети, повторные заходы — ответ `304`), чаты и счётчики обновляются через SSE-реалтайм
+- **Адаптив**: планшет и телефон — горизонтальный канбан, выдвижные панели, крупные кнопки; уважается `prefers-reduced-motion`
+
+### Данные, резервные копии, чистая установка
+- **Автоматические бэкапы** базы раз в сутки в `/data/backups`, срок хранения настраивается; кнопка «Создать копию сейчас»
+- **Копию можно скачать** (`⬇` — файл SQLite, открывается любой программой для БД) и **восстановить из неё в один клик** (`♻`): перед восстановлением CRM сама сохраняет страховочную копию `before-restore-…` и перезапускается
+- **Демо-данные** (примеры клиентов, сделок, чата и конкурента) удаляются одной кнопкой, рабочие записи не затрагиваются
+- **Чистая установка без примеров**: `SEED_DEMO=0` в `.env`
+- **Обновление со старых версий**: при старте CRM сама доводит схему базы до актуальной (добавляет новые таблицы и поля) и **сначала складывает копию `pre-upgrade-…` в `/data/backups`**, данные не теряются — проверяется тестом `tests/migrate.test.mjs` (`/api/health` показывает `schema`)
+- **Напоминания о просроченных задачах**: всплывающее уведомление в CRM и, при желании, webhook в Telegram/Slack
+- **Защита входа** от подбора пароля (ограничение попыток), заголовки безопасности, опциональный запрет встраивания в iframe (`FRAME_ANCESTORS`)
+
+### Команда и права
+- Роли: **Администратор** (всё), **Менеджер** (клиенты, сделки, задачи, заметки и все чаты), **Наблюдатель** (только чтение — для собственника или бухгалтера)
+- Права проверяются на сервере: менеджер не может менять настройки, воронки, шаблоны, автоматизации, ключи интеграций, состав команды и делать бэкапы/удалять демо-данные — интерфейс честно это показывает
+- В таблице команды видно загрузку: сделки в работе и их сумма, задачи, статус входа; роль и активность меняются одной формой
+- **«Мои задачи»** — отдельный фильтр в задачах и блок на дашборде, чтобы менеджер сразу видел свою работу на сегодня (просроченное подсвечено)
+- **Календарь на неделю**, перенос срока одним нажатием («Завтра», «+7 дней») и **повторяющиеся задачи**: закрыли задачу «каждый день/неделю/месяц» — CRM сама создала следующую по расписанию
+- Смена пароля пользователем, деактивация сотрудника без удаления истории
+
+### Автоматизации
+- Триггеры: создана сделка, входящее сообщение, смена этапа
+- Действия: создать задачу, перевести сделку на этап, добавить тег
+- Готовые примеры уже включены после первого запуска
+
+---
+
+## Подключение Wazzup (5 шагов)
+
+1. **В Wazzup**: личный кабинет → «Интеграция с CRM» → API → **Подключить** → скопируйте API-ключ. (Каналы WhatsApp/Telegram/Instagram/Viber добавляются там же в разделе «Каналы».)
+2. **В CRM**: Настройки → **Интеграции и каналы** → вставьте API-ключ → «Сохранить ключ».
+3. Нажмите **«🔍 Проверить и синхронизировать каналы»** — CRM обратится к Wazzup, покажет ваши каналы и сохранит их. При необходимости выберите «Канал по умолчанию».
+4. Нажмите **«Отправить адрес вебхука в Wazzup автоматически»** (или укажите вручную в кабинете Wazzup URL вида `https://ваш-домен/webhooks/wazzup`).
+5. Пишите клиенту с телефона или из мессенджера — сообщение появится в разделе **Чаты Wazzup**; ответы из CRM уходят клиенту через ваш номер.
+
+> Для вебхуков нужен публичный HTTPS-адрес: см. раздел «Домен и HTTPS» в [DEPLOY.md](DEPLOY.md). Поддерживаются и старый (`messages[]`), и новый (`event: message.add`) формат вебхуков Wazzup.
+
+### Другие каналы
+- **Прямой WhatsApp Cloud API (Meta)** — если Wazzup не нужен: Настройки → Интеграции → укажите Phone Number ID, токен и Verify Token, а в Meta укажите `https://ваш-домен/webhooks/whatsapp`. Переключатель провайдера там же.
+- **Свой Telegram-бот**: вебхук на `https://ваш-домен/webhooks/telegram`.
+- **Сайт, Авито, любая форма**: `POST https://ваш-домен/webhooks/generic` с JSON `{ "channel": "site", "phone": "+7…", "name": "Имя", "body": "Текст" }` — сообщение попадёт в тот же инбокс и создаст сделку.
+- **Проверить без мессенджера**: кнопка «🧪 Тестовое входящее» в чате или `POST /api/inbox/simulate`.
+
+---
+
+## Развёртывание
+
+Подробная инструкция — **[DEPLOY.md](DEPLOY.md)**: публичный IP, домен и HTTPS, обновление, бэкапы и восстановление, диагностика.
+
+```bash
+cp .env.example .env && nano .env       # JWT_SECRET, ADMIN_PASSWORD; для домена — CRM_DOMAIN, ACME_EMAIL
+docker compose up -d --build            # локально и на сервере без домена → http://IP:8080
+docker compose --profile tls up -d --build   # сервер с доменом → https://CRM_DOMAIN (сертификат сам)
+```
+
+Что происходит в режиме с доменом: контейнер `caddy` слушает 80/443, сам получает и продлевает сертификат Let's Encrypt для `CRM_DOMAIN`, проксирует запросы внутрь CRM и добавляет заголовки безопасности. CRM при этом наружу не открыта (`CRM_BIND=127.0.0.1`). Конфиг — [`deploy/Caddyfile`](deploy/Caddyfile), логи Caddy — в томе `karkascrm_caddy_data`.
+
+Есть свой nginx вместо Caddy? Возьмите готовый конфиг [`deploy/nginx.conf`](deploy/nginx.conf) (там уже настроены заголовки и `proxy_buffering off` для реалтайма чатов).
+
+Обновление версии: `./scripts/update.sh` (то же, что `git pull` + `docker compose up -d --build`, режим с доменом определяется по `.env`). База в томе `karkascrm_data` не затрагивается, схема обновляется автоматически, а перед обновлением схемы складывается копия `pre-upgrade-…`.
+
+## Настройки (.env)
+
+| Переменная | Назначение | По умолчанию |
+|---|---|---|
+| `PORT` | порт приложения | `8080` |
+| `JWT_SECRET` | подпись токенов входа — **смените!** | dev-значение |
+| `ADMIN_EMAIL` / `ADMIN_PASSWORD` | первый администратор | `admin@example.com` / `admin12345` |
+| `CRM_PORT` | внешний порт compose | `8080` |
+| `CRM_BIND` | адрес прослушивания: `0.0.0.0` — доступ снаружи, `127.0.0.1` — только через Caddy/nginx | `0.0.0.0` |
+| `CRM_DOMAIN` | домен для HTTPS (профиль `tls`) | — |
+| `ACME_EMAIL` | e-mail для сертификата Let's Encrypt | — |
+| `TZ` | часовой пояс контейнера | `Europe/Moscow` |
+| `DATA_DIR` | каталог базы SQLite (volume) | `/data` в Docker |
+| `WAZZUP_API_KEY` | ключ Wazzup (можно задать в UI) | — |
+| `WAZZUP_VERIFY` / `WAZZUP_WEBHOOK_SECRET` | секрет вебхука | — |
+| `WHATSAPP_TOKEN`, `WHATSAPP_PHONE_ID`, `WHATSAPP_VERIFY_TOKEN` | прямой WhatsApp Cloud API | — |
+| `TELEGRAM_BOT_TOKEN` | свой Telegram-бот | — |
+| `FNS_API_KEY` | ключ api-fns.ru (ЕГРЮЛ, недоимки, руководители) | — |
+| `FSSP_TOKEN` | токен ФССП (суммы исполнительных производств) | — |
+| `GOOGLE_PLACES_KEY` | Google Places (рейтинг и тексты отзывов) | — |
+| `TWOGIS_KEY` | 2ГИС (рейтинг и число отзывов) | — |
+| `YANDEX_API_KEY` | Яндекс Геопоиск (карточки организаций) | — |
+| `SMTP_HOST`, `SMTP_PORT`, `SMTP_SECURE`, `SMTP_USER`, `SMTP_PASS`, `MAIL_FROM` | почта: письма клиентам из CRM (то же настраивается в интерфейсе) | — |
+| `EMAIL_WEBHOOK_SECRET` | секрет вебхука входящих писем | — |
+| `SEED_DEMO` | показывать демо-данные при первом запуске (`0` — чистая база) | `1` |
+| `SALES_TARGET` | план продаж на месяц (можно задать в интерфейсе) | `0` |
+| `BACKUP_KEEP_DAYS`, `BACKUP_HOUR` | срок хранения и час создания резервных копий | `7`, `3` |
+| `NOTIFY_WEBHOOK` | webhook уведомлений о просроченных задачах | — |
+| `LOGIN_RATE_LIMIT` | попыток входа с одного IP за 5 минут | `12` |
+| `FRAME_ANCESTORS` | разрешить встраивание в iframe (`*` или домен) | выключено |
+
+Всё, что можно настроить в интерфейсе, хранится в базе (таблица настроек) и **не требует перезапуска**.
+
+---
+
+## Почему так: SQLite, один контейнер и без Redis
+
+Это осознанный выбор в пользу простоты и скорости, а не компромисс:
+
+| Вопрос | Решение в KarkasCRM | Почему так лучше здесь |
+|---|---|---|
+| База данных | **SQLite в режиме WAL** + прагмы `synchronous=NORMAL`, `busy_timeout`, кэш 16 МБ, `mmap` | WAL даёт параллельное чтение и запись, файл базы — это и есть бэкап. Для команды до 30–50 человек и десятков тысяч записей этого хватает с запасом; Postgres потребовал бы отдельного сервиса, миграций и администрирования без выигрыша |
+| Redis / кэш | **Не нужен**: кэш горячих данных живёт в памяти процесса (каналы, настройки, сжатая статика), реалтайм — на SSE | Отдельный Redis — это ещё один контейнер, который надо ставить, мониторить и бэкапить. Задачи, для которых его обычно берут, здесь решены без него |
+| Очередь задач | Планировщик в процессе (напоминания, суточные бэкапы) | Очередь на десятки задач в минуту не требует брокера — сэкономили контейнер и сложность |
+| Деплой | **Один контейнер CRM** (+ Caddy только когда нужен домен и HTTPS) | Собрался за секунды, обновление — `./scripts/update.sh`, откат — из резервной копии в один клик |
+| Статика | Отдаётся самим Node: gzip + ETag + `304` | Без npm-зависимостей и без отдельного веб-сервера: в рантайме ноль пакетов |
+
+Когда стоит задуматься о Postgres: если планируется несколько инстансов CRM за балансировщиком или единовременная работа больше сотни сотрудников. Тогда база меняется на Postgres — остальной код (REST, SPA, вебхуки) остаётся тем же.
+
+---
+
+## API и вебхуки
+
+Все действия CRM доступны по REST с токеном `Authorization: Bearer <JWT>` (`POST /api/auth/login`):
+
+```
+GET/POST/PATCH/DELETE  /api/contacts  /api/companies  /api/deals  /api/tasks
+                       /api/products  /api/templates  /api/automations  /api/notes
+GET  /api/dashboard    GET /api/analytics    GET /api/search?q=
+GET/POST /api/pipelines  PUT/DELETE /api/pipelines/:id      # воронки и этапы
+GET/POST /api/conversations/:id/messages                    # единый инбокс
+GET/PUT  /api/settings  GET/POST /api/channels  /api/users
+GET  /api/meta                          # версия, валюта, свои поля, состояние интеграций
+GET/PUT /api/custom-fields              # свои поля карточек (настройка из интерфейса)
+GET  /api/contacts/duplicates  POST /api/contacts/merge     # поиск и объединение дублей
+POST /api/conversations/:id/messages    # текст или файл ссылкой (contentUri) в чат клиента
+POST /api/conversations/:id/email       # письмо клиенту из чата (SMTP)
+POST /api/integrations/email/test       # проверочное письмо с текущими настройками
+GET/POST /api/backups                   # список и создание резервных копий (.db в /data/backups)
+GET  /api/backups/download?file=…        # скачать копию (только администратор)
+POST /api/backups/restore                # {"file":"crm-2026-01-31.db"} — восстановить из копии и перезапуститься
+GET  /api/export/json                    # выгрузка всех таблиц в JSON (старый адрес /api/backup тоже работает)
+GET  /api/deals/:id/print?doc=quote|invoice   # печатная страница КП или счёта (принимает ?token= для новой вкладки)
+POST /api/demo/clean                    # удалить демонстрационные данные
+GET  /api/health                        # версия, аптайм, размер базы, счётчики
+POST /api/integrations/wazzup/test|sync|webhook             # Wazzup
+# Конкуренты: разведка
+POST /api/competitors/find                # {"name":"ООО Ромашка"} или ИНН → создаёт и сразу проверяет
+GET  /api/competitors                     # список с риском, отзывами и числом цен
+GET  /api/competitors/:id                 # карточка: отчёт, источники, отзывы, прайс, история
+POST /api/competitors/:id/check           # перепроверить (можно ограничить sources: [...])
+POST /api/competitors/:id/reviews         # добавить отзыв вручную (source, rating, text, url)
+POST /api/competitors/:id/prices          # {"base64": "<xlsx>"} | {"csv": "…"} | {"url": "…"}
+GET/PUT /api/competitor-sources           # статус источников, ключи и адреса API
+GET  /api/prices?scope=ours|competitor&competitor=:id
+GET  /api/export/contacts|deals  POST /api/import/contacts  GET /api/backup
+POST /webhooks/wazzup  /webhooks/whatsapp  /webhooks/telegram  /webhooks/generic  /webhooks/email
+GET  /api/events                                            # SSE-реалтайм
+```
+
+## Тесты
+
+Всё одной командой (синтаксис → интеграционные тесты → миграции базы → docker-compose → интерфейс):
+
+```bash
+./run-tests.sh
+```
+
+По шагам:
+
+```bash
+# 36 интеграционных тестов (без внешних зависимостей и без сети)
+node --experimental-sqlite --test tests/api.test.js tests/competitors.test.js
+
+# 23 проверки на базу из старой версии: поля добавляются, данные и чаты остаются
+node --experimental-sqlite tests/migrate.test.mjs
+
+# необязательный smoke-тест интерфейса: реальный backend + SPA в jsdom (77 проверок)
+npm i --prefix /tmp/jsdomtest jsdom
+JSDOM_PATH=/tmp/jsdomtest/node_modules/jsdom/lib/api.js node --experimental-sqlite tests/ui.smoke.mjs
+```
+
+36 интеграционных тестов (`tests/api.test.js` — 25, `tests/competitors.test.js` — 11): авторизация и роли, склейка чатов Wazzup/WhatsApp/Telegram в один диалог, идемпотентность вебхуков, автосоздание сделки, товары и пересчёт суммы, настройка воронки, автоматизации, **сквозная отправка сообщения в API Wazzup** и **проверка конкурента по восьми источникам** — на локальных заглушках сверяются реальные запросы и разбор ответов ФНС, ФССП (двухшаговая задача), Федресурса, kad.arbitr, Rusprofile, Google Places, 2ГИС и Яндекс Геопоиска. Парсер Excel проверяется на настоящем файле `.xlsx` (`tests/fixtures/price.xlsx`).
+Дополнительно покрыто: **права ролей** (менеджер не меняет настройки, наблюдатель только читает), **переписка клиента в карточке сделки**, **отправка файлов ссылкой в Wazzup** с проверкой формата запроса, **автосоздание новой сделки при возврате клиента**, **приём писем в общий чат** (тема, склейка по e-mail), **свои поля карточек**, **поиск и объединение дублей контактов** (перенос сделок), **резервные копии: создание, скачивание файла базы и защита от подмены пути**, **удаление демо-данных без потери рабочих**, **ограничение попыток входа**, **массовые действия над пачкой записей** и **права менеджера на шаблоны, правила и настройки**.
+Smoke-тест интерфейса (77 проверок) дополнительно следит за тем, чтобы работали тёмная тема, палитра ⌘K, календарь задач на неделю, панель массовых действий, реквизиты компании, выбор повтора в задаче, печать КП/счёта и готовый код формы для сайта.
+
+---
+
+## Проверка изменений и релиз
+
+```bash
+./run-tests.sh                     # синтаксис + 34 теста API/конкурентов + миграции базы + интерфейс (73 проверки)
+git add -A && git commit -m "…"    # изменения
+git push origin <ветка>            # своя ветка, не main
+gh pr create --fill --base main    # pull request → проверка → merge
+```
+
+Правило простое: **сначала тесты и проверка на localhost, только потом merge в `main`**. После merge на сервере достаточно `./scripts/update.sh` — база не пересоздаётся, схема обновляется автоматически, перед обновлением складывается копия `pre-upgrade-…`.
+
+---
+
+## Как это устроено
+
+```
+backend/src/server.js      ядро: схема БД и миграции, REST, вебхуки, Wazzup/Meta, SSE (zero-deps)
+backend/src/competitors.js разведка конкурентов: 8 источников, риск-скор, отзывы, парсер Excel/CSV
+backend/src/smtp.js        почта: свой SMTP-клиент (465 / STARTTLS / AUTH LOGIN, UTF-8)
+frontend/public/           SPA: index.html, style.css, app.js (без сборки)
+tests/api.test.js          интеграционные тесты API на node:test
+tests/competitors.test.js  тесты разведки конкурентов (локальные заглушки источников)
+tests/migrate.test.mjs     проверка обновления базы со старой версии
+tests/ui.smoke.mjs         smoke-тест интерфейса в jsdom
+deploy/                    Caddyfile (домен + HTTPS) и nginx.conf
+Dockerfile, docker-compose.yml, install.sh  сборка и развёртывание
+scripts/update.sh          обновление до новой версии (git pull + пересборка)
+run-local.sh, run-tests.sh, .env.example, README.md, DEPLOY.md, LICENSE
+```
+
+Репозиторий содержит **только KarkasCRM**: никаких лишних каталогов, заглушек и файлов
+других проектов — проверяется командой `git ls-files | wc -l` (сотни файлов, а не десятки тысяч).
+
+Один контейнер с CRM (плюс контейнер Caddy только в режиме домена), один файл базы (`/data/crm.db`, SQLite WAL) — бэкап сводится к копированию файла, обновление к `git pull && docker compose up -d --build`.
+
+**Про Twenty CRM**: репозиторий вырос из форка, в который был ошибочно добавлен монорепозиторий Twenty (AGPL-3.0). Он **полностью удалён из текущей версии** — нет ни каталога того монорепозитория, ни служебных файлов проекта Twenty (yarn/nx-конфиги, их `.github`, `.cursor`, заглушки `backend/package.json`, `frontend/Dockerfile` и т. п.). Остались только файлы KarkasCRM:
+
+```bash
+git ls-files | awk -F/ '{print $1}' | sort -u      # backend, frontend, tests, deploy, scripts + конфиги
+grep -ril twenty backend frontend tests deploy Dockerfile docker-compose.yml   # пусто
+```
+
+Код Twenty остался только в исторических коммитах (до `018ed341`); текст лицензии AGPL-3.0 сохранён для справки в `licenses/AGPL-3.0-twenty.txt`, а `LICENSE` описывает права на KarkasCRM.
+
+Если хочется, чтобы и **в истории** ничего лишнего не осталось, начните чистую ветку (делать осознанно: перезапишет историю ветки):
+
+```bash
+git checkout --orphan clean-main     # новая ветка без истории, файлы остаются на месте
+git add -A && git commit -m "KarkasCRM: чистая история"
+git branch -M clean-main main        # заменить локальный main
+git push -f origin main              # ⚠️ перезапишет main на GitHub (старые коммиты пропадут из него)
+```
+
+После этого репозиторий весит сотни килобайт, а в истории нет ни одного файла Twenty.

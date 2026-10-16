@@ -1,0 +1,60 @@
+<!doctype html><html lang="ru" data-theme="light"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>KarkasCRM — сделки, клиенты и все чаты в одном окне</title>
+<meta name="description" content="CRM: воронки и сделки, контакты, задачи, единый инбокс Wazzup (WhatsApp, Telegram, Instagram, Viber), почта, разведка конкурентов. Разворачивается одной командой docker compose up.">
+<meta name="theme-color" content="#16a34a"><meta name="color-scheme" content="light dark">
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Crect width='64' height='64' rx='16' fill='%2316a34a'/%3E%3Cpath d='M18 44V20h7v9l9-9h9l-11 12 12 12h-9l-10-10v10z' fill='white'/%3E%3Ccircle cx='47' cy='19' r='5' fill='%23f97316'/%3E%3C/svg%3E">
+<link rel="stylesheet" href="/style.css"></head><body>
+
+<!-- ── вход ─────────────────────────────────────────────────────────────── -->
+<div id="login" class="login hidden">
+  <form id="loginForm" class="login-card" autocomplete="on">
+    <div class="logo big">K<span>◆</span></div>
+    <h1>KarkasCRM</h1>
+    <p>Сделки, клиенты, задачи и все чаты Wazzup — в одном окне</p>
+    <label>E-mail<input name="email" type="email" autocomplete="username" placeholder="you@company.ru" required></label>
+    <label>Пароль
+      <div class="pw-wrap"><input name="password" type="password" autocomplete="current-password" placeholder="••••••••" required><button type="button" title="Показать пароль" onclick="togglePass(this)">👁</button></div>
+    </label>
+    <button class="btn primary w" id="loginBtn">Войти →</button>
+    <div class="login-hint hidden" id="loginHint"></div>
+    <small id="loginNote">Пароль и логин задаются в файле <code>.env</code> при развёртывании.</small>
+    <div class="err" id="loginErr"></div>
+  </form>
+</div>
+
+<!-- ── приложение ───────────────────────────────────────────────────────── -->
+<div id="app" class="layout hidden"><aside>
+  <div class="brand"><div class="logo">K<span>◆</span></div><div><b>Karkas</b><span>CRM</span></div></div>
+  <nav id="nav">
+    <button data-view="dashboard" class="active">◈ Дашборд</button>
+    <button data-view="pipe">▦ Сделки <span class="pill" id="navDeals"></span></button>
+    <button data-view="inbox">✉ Чаты Wazzup <span class="pill orange" id="navUnread"></span></button>
+    <button data-view="contacts">◎ Контакты</button>
+    <button data-view="companies">🏢 Компании</button>
+    <button data-view="tasks">✓ Задачи <span class="pill" id="navTasks"></span></button>
+    <button data-view="products">📦 Товары</button>
+    <button data-view="competitors">🕵 Конкуренты</button>
+    <button data-view="analytics">📊 Аналитика</button>
+    <button data-view="settings">⚙ Настройки</button>
+  </nav>
+  <div class="side-card"><b>Всё подключается из интерфейса</b><p>Wazzup (WhatsApp, Telegram, Instagram, Viber), почта, ключи источников, воронки, свои поля и права — в разделе «Настройки». Код менять не нужно.</p><button class="btn orange w" onclick="go('settings','integrations')">⚙ Интеграции</button></div>
+  <div class="user"><div class="avatar" id="uAva">А</div><div><b id="uName"></b><small id="uEmail"></small></div><button id="logout" title="Выйти">↪</button></div>
+</aside>
+<main>
+  <header>
+    <div><h2 id="title">Дашборд</h2><p id="subtitle"></p></div>
+    <div class="head-actions">
+      <div class="searchbox"><input id="globalSearch" placeholder="🔍 Поиск или ⌘K — палитра команд"><div id="searchResults" class="search-results hidden"></div></div>
+      <button class="btn orange" onclick="openDeal()">+ Сделка</button>
+      <button class="btn primary" onclick="openContact()">+ Контакт</button>
+      <button class="btn" onclick="openTask()">+ Задача</button>
+      <button class="btn" id="themeBtn" title="Светлая / тёмная тема" onclick="toggleTheme()">🌗</button>
+      <button class="btn" title="Уведомления" onclick="openNotifications()">🔔<span class="pill orange" id="bellCount" style="margin-left:4px"></span></button>
+    </div>
+  </header>
+  <section id="view"></section>
+</main></div>
+
+<div id="modal" class="modal hidden"><div class="modal-card"><button class="x" onclick="closeModal()" title="Закрыть">×</button><div id="modalBody"></div></div></div>
+<div id="toast"></div>
+<script src="/app.js"></script></body></html>

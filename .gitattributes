@@ -15,6 +15,9 @@
 # Patch files may have mixed line endings by design
 *.patch -text
 
+*.db binary
+*.sqlite binary
+*.xlsx binary
 *.png binary
 *.jpg binary
 *.jpeg binary

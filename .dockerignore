@@ -1,5 +1,13 @@
 .git
+.github
 .env
 **/node_modules
-.nx/cache
-packages/twenty-server/.env
+data
+tests
+licenses
+*.md
+docker-compose.yml
+scripts
+run-local.sh
+run-tests.sh
+install.sh

@@ -1,0 +1,34 @@
+# KarkasCRM — HTTPS и домен через Caddy (профиль tls в docker-compose).
+# Домен и e-mail для сертификата берутся из .env: CRM_DOMAIN, ACME_EMAIL.
+# Caddy сам получает и продлевает сертификат Let's Encrypt — настраивать ничего не нужно.
+# DNS домена должен указывать на IP сервера, порты 80 и 443 — открыты.
+
+{$CRM_DOMAIN} {
+	encode gzip
+
+	# быстрая проверка, что прокси и сертификат работают: https://<домен>/.well-known/health
+	handle /.well-known/health {
+		respond "ok" 200
+	}
+
+	handle {
+		reverse_proxy crm:8080 {
+			header_up X-Forwarded-Proto {scheme}
+			header_up X-Real-IP {remote_host}
+		}
+	}
+
+	header {
+		Strict-Transport-Security "max-age=31536000; includeSubDomains"
+		X-Content-Type-Options nosniff
+		Referrer-Policy same-origin
+		-Server
+	}
+
+	log {
+		output file /data/access.log {
+			roll_size 10mb
+			roll_keep 5
+		}
+	}
+}
