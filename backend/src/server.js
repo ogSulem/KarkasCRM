@@ -19,7 +19,7 @@ const SECRET = process.env.JWT_SECRET || 'change-me-in-production-please-32-char
 const ADMIN_EMAIL = (process.env.ADMIN_EMAIL || 'admin@example.com').toLowerCase();
 const ADMIN_PASSWORD = process.env.ADMIN_PASSWORD || 'admin12345';
 const SEED_DEMO = String(process.env.SEED_DEMO ?? '1') !== '0';
-const VERSION = '2.4';
+const VERSION = '2.5';
 const STARTED = Date.now();
 mkdirSync(DATA_DIR, { recursive: true });
 const db = new DatabaseSync(join(DATA_DIR, 'crm.db'));
@@ -60,7 +60,7 @@ const SCHEMA_COLUMNS = [...SCHEMA,
   ['deals', 'pipeline_id', 'INTEGER DEFAULT 1'], ['deals', 'priority', "TEXT DEFAULT 'normal'"], ['deals', 'loss_reason', 'TEXT'],
   ['deals', 'company_id', 'INTEGER'], ['deals', 'responsible', "TEXT DEFAULT 'Администратор'"], ['deals', 'updated_at', 'TEXT'],
   ['tasks', 'type', "TEXT DEFAULT 'call'"], ['tasks', 'priority', "TEXT DEFAULT 'normal'"], ['tasks', 'responsible_id', 'INTEGER'],
-  ['tasks', 'done', 'INTEGER DEFAULT 0'],
+  ['tasks', 'done', 'INTEGER DEFAULT 0'], ['tasks', 'repeat', "TEXT DEFAULT 'none'"],
   ['messages', 'content_uri', 'TEXT'], ['messages', 'status', 'TEXT'], ['messages', 'external_id', 'TEXT'],
   ['messages', 'channel', "TEXT DEFAULT 'whatsapp'"], ['messages', 'direction', "TEXT DEFAULT 'in'"], ['messages', 'author', 'TEXT'],
   ['conversations', 'channel_id', 'TEXT'], ['conversations', 'external_chat_id', 'TEXT'], ['conversations', 'chat_type', 'TEXT'],
@@ -337,6 +337,67 @@ export const scheduler = startScheduler();
 
 // ---------- http ----------
 const SECURITY_HEADERS = { 'X-Content-Type-Options': 'nosniff', 'Referrer-Policy': 'same-origin', 'X-Robots-Tag': 'noindex' };
+// реквизиты компании для печатных документов (задаются в интерфейсе: Настройки → Данные и компания)
+function companyRequisites() {
+  const g = k => getSetting(k, '');
+  return {
+    name: g('COMPANY_NAME') || 'Моя компания', inn: g('COMPANY_INN'), kpp: g('COMPANY_KPP'), ogrn: g('COMPANY_OGRN'),
+    address: g('COMPANY_ADDRESS'), phone: g('COMPANY_PHONE'), email: g('COMPANY_EMAIL'), site: g('COMPANY_SITE'),
+    bank: g('COMPANY_BANK'), account: g('COMPANY_ACCOUNT'), signer: g('COMPANY_SIGNER'), signer_position: g('COMPANY_SIGNER_POSITION'),
+    currency: g('CURRENCY') || '₽', doc_prefix: g('DOC_PREFIX') || 'КП',
+  };
+}
+const escHtml = (v = '') => String(v ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+const money = (n, cur = '₽') => new Intl.NumberFormat('ru-RU').format(Math.round(Number(n) || 0)) + ' ' + cur;
+// печатная страница А4: открывается в новой вкладке и сразу готова к печати или сохранению в PDF
+function dealDocument({ deal, items, doc, company }) {
+  const isInvoice = doc === 'invoice';
+  const sum = items.reduce((a, x) => a + x.price * x.qty, 0);
+  const vat = Math.round(sum * 20 / 120);
+  const number = `${company.doc_prefix}-${String(deal.id).padStart(4, '0')}`;
+  const rows = items.map((x, i) => `<tr><td>${i + 1}</td><td>${escHtml(x.name)}</td><td>шт</td><td class="r">${money(x.price, company.currency)}</td><td class="r">${x.qty}</td><td class="r">${money(x.price * x.qty, company.currency)}</td></tr>`).join('');
+  return `<!doctype html><html lang="ru"><head><meta charset="utf-8"><title>${isInvoice ? 'Счёт' : 'КП'} № ${escHtml(number)} — ${escHtml(company.name)}</title>
+<style>
+  @page{margin:16mm}
+  body{font:13px/1.5 -apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,Arial,sans-serif;color:#0f172a;margin:0;padding:24px;max-width:900px}
+  h1{font-size:20px;margin:0 0 4px}h2{font-size:15px;margin:22px 0 8px}
+  .head{display:flex;justify-content:space-between;gap:24px;border-bottom:2px solid #16a34a;padding-bottom:12px}
+  .brand{font-weight:800;color:#16a34a;font-size:18px}.muted{color:#64748b}
+  table{width:100%;border-collapse:collapse;margin-top:8px}
+  th,td{border:1px solid #cbd5e1;padding:7px 9px;text-align:left;vertical-align:top}
+  th{background:#f1f5f9;font-size:12px;text-transform:uppercase;letter-spacing:.03em}
+  td.r,th.r{text-align:right;white-space:nowrap}
+  .total{margin-top:10px;text-align:right;font-size:15px;font-weight:700}
+  .grid{display:grid;grid-template-columns:1fr 1fr;gap:6px 24px;margin-top:10px}
+  .sign{margin-top:40px;display:flex;justify-content:space-between;gap:24px}
+  .sign div{flex:1}.line{border-bottom:1px solid #94a3b8;height:26px}
+  .noprint{margin:0 0 18px;padding:10px 12px;background:#f0fdf4;border:1px solid #16a34a;border-radius:10px;display:flex;gap:10px;align-items:center}
+  .noprint button{cursor:pointer;border:0;background:#16a34a;color:#fff;padding:8px 14px;border-radius:8px;font:inherit;font-weight:600}
+  @media print{.noprint{display:none}body{padding:0}}
+</style></head><body>
+<div class="noprint"><button onclick="window.print()">🖨 Печать / сохранить в PDF</button><span class="muted">Документ сформирован CRM ${new Date().toLocaleString('ru-RU')}</span></div>
+<div class="head">
+  <div><div class="brand">${escHtml(company.name)}</div>
+    ${company.inn ? `<div class="muted">ИНН ${escHtml(company.inn)}${company.kpp ? ' · КПП ' + escHtml(company.kpp) : ''}${company.ogrn ? ' · ОГРН ' + escHtml(company.ogrn) : ''}</div>` : ''}
+    ${company.address ? `<div class="muted">${escHtml(company.address)}</div>` : ''}
+    <div class="muted">${[company.phone, company.email, company.site].filter(Boolean).map(escHtml).join(' · ')}</div></div>
+  <div style="text-align:right"><h1>${isInvoice ? 'Счёт на оплату' : 'Коммерческое предложение'} № ${escHtml(number)}</h1>
+    <div class="muted">от ${new Date().toLocaleDateString('ru-RU')}</div></div>
+</div>
+<h2>${isInvoice ? 'Плательщик' : 'Заказчик'}</h2>
+<div class="grid"><div><b>${escHtml(deal.contact_name || '—')}</b>${deal.company_name ? `<br>${escHtml(deal.company_name)}` : ''}</div>
+<div>${deal.contact_phone ? `Тел.: ${escHtml(deal.contact_phone)}<br>` : ''}${deal.contact_email ? `E-mail: ${escHtml(deal.contact_email)}` : ''}</div></div>
+<h2>${isInvoice ? 'Предмет счёта' : 'Предложение'}${deal.title ? ' — ' + escHtml(deal.title) : ''}</h2>
+<table><tr><th style="width:34px">№</th><th>Наименование</th><th style="width:70px">Ед.</th><th class="r" style="width:120px">Цена</th><th class="r" style="width:64px">Кол-во</th><th class="r" style="width:130px">Сумма</th></tr>
+${rows || '<tr><td colspan="6" class="muted">Позиции не добавлены — заполните состав в карточке сделки</td></tr>'}</table>
+<div class="total">Итого: ${money(sum, company.currency)}${isInvoice ? `<br><span class="muted">в том числе НДС 20%: ${money(vat, company.currency)}</span>` : ''}</div>
+${isInvoice ? `<h2>Реквизиты для оплаты</h2><div class="grid"><div>${company.bank ? escHtml(company.bank) + '<br>' : ''}${company.account ? 'Р/с ' + escHtml(company.account) : ''}</div><div>${company.signer ? `Подписант: ${escHtml(company.signer_position || 'Руководитель')} ${escHtml(company.signer)}` : ''}</div></div>` : ''}
+${deal.deadline ? `<p class="muted">Срок действия предложения / срок выполнения: ${escHtml(deal.deadline)}</p>` : ''}
+<div class="sign"><div>${isInvoice ? 'Руководитель' : 'Исполнитель'}<div class="line"></div>${company.signer ? escHtml(company.signer) : ''}</div>
+<div>Заказчик<div class="line"></div>${escHtml(deal.contact_name || '')}</div></div>
+</body></html>`;
+}
+const html = (res, code, body) => { res.writeHead(code, { 'Content-Type': 'text/html; charset=utf-8', ...SECURITY_HEADERS }); res.end(body); };
 const json = (res, code, obj) => { res.writeHead(code, { 'Content-Type': 'application/json; charset=utf-8', ...SECURITY_HEADERS }); res.end(JSON.stringify(obj)); };
 // простое ограничение частоты: защита от перебора пароля и от шторма запросов к источникам
 const RL = new Map();
@@ -500,7 +561,7 @@ export const server = http.createServer(async (req, res) => {
     if (p === '/api/export/json' || p === '/api/backup') { const tables = ['users', 'companies', 'contacts', 'pipelines', 'stages', 'deals', 'tasks', 'notes', 'products', 'templates', 'automations', 'conversations', 'messages', 'channels', 'competitors', 'competitor_checks', 'competitor_reports', 'reviews', 'price_rows']; const out = {}; tables.forEach(t => out[t] = db.prepare(`SELECT * FROM ${t}`).all()); res.writeHead(200, { 'Content-Type': 'application/json', 'Content-Disposition': 'attachment; filename=karkas-backup.json' }); return res.end(JSON.stringify(out, null, 2)); }
 
     // ===== generic CRUD =====
-    const CRUD = { contacts: ['name', 'phone', 'email', 'company', 'company_id', 'position', 'source', 'tags', 'notes', 'responsible_id', 'custom'], companies: ['name', 'inn', 'phone', 'email', 'site', 'notes'], tasks: ['title', 'type', 'due', 'priority', 'done', 'deal_id', 'contact_id', 'responsible_id', 'result'], products: ['name', 'sku', 'price', 'unit', 'active'], templates: ['name', 'body', 'channel'], automations: ['name', 'trigger_type', 'trigger_value', 'action_type', 'action_value', 'active'], notes: ['entity_type', 'entity_id', 'body', 'author'] };
+    const CRUD = { contacts: ['name', 'phone', 'email', 'company', 'company_id', 'position', 'source', 'tags', 'notes', 'responsible_id', 'custom'], companies: ['name', 'inn', 'phone', 'email', 'site', 'notes'], tasks: ['title', 'type', 'due', 'priority', 'done', 'deal_id', 'contact_id', 'responsible_id', 'result', 'repeat'], products: ['name', 'sku', 'price', 'unit', 'active'], templates: ['name', 'body', 'channel'], automations: ['name', 'trigger_type', 'trigger_value', 'action_type', 'action_value', 'active'], notes: ['entity_type', 'entity_id', 'body', 'author'] };
     const mCrud = p.match(/^\/api\/(contacts|companies|tasks|products|templates|automations|notes)(?:\/(\d+))?$/);
     if (mCrud) { const [, table, id] = mCrud; const fields = CRUD[table];
       // шаблоны и автоматизации меняет только администратор, товары удаляет тоже он —
@@ -510,7 +571,30 @@ export const server = http.createServer(async (req, res) => {
       if (req.method === 'GET' && !id) { if (table === 'tasks') return json(res, 200, db.prepare('SELECT t.*,c.name contact_name,d.title deal_title,u.name responsible_name FROM tasks t LEFT JOIN contacts c ON c.id=t.contact_id LEFT JOIN deals d ON d.id=t.deal_id LEFT JOIN users u ON u.id=t.responsible_id ORDER BY done,due,id DESC').all()); if (table === 'notes') return json(res, 200, db.prepare('SELECT * FROM notes WHERE entity_type=? AND entity_id=? ORDER BY id DESC').all(u.searchParams.get('type'), u.searchParams.get('entity'))); return json(res, 200, db.prepare(`SELECT * FROM ${table} ORDER BY id DESC`).all()); }
       if (req.method === 'GET') return json(res, 200, db.prepare(`SELECT * FROM ${table} WHERE id=?`).get(id) || {});
       if (req.method === 'POST') { const b = await readBody(req); if (table === 'notes') b.author = user.name; const ks = fields.filter(f => b[f] !== undefined); const r = db.prepare(`INSERT INTO ${table}(${ks}) VALUES(${ks.map(() => '?')})`).run(...ks.map(k => b[k])); log(`Создано (${table} #${r.lastInsertRowid})`, table, Number(r.lastInsertRowid), user.name); broadcast('change', { table }); return json(res, 201, db.prepare(`SELECT * FROM ${table} WHERE id=?`).get(r.lastInsertRowid)); }
-      if (req.method === 'PATCH' && id) { const b = await readBody(req); const ks = Object.keys(b).filter(k => fields.includes(k)); if (ks.length) db.prepare(`UPDATE ${table} SET ${ks.map(k => k + '=?')} WHERE id=?`).run(...ks.map(k => b[k]), id); broadcast('change', { table }); return json(res, 200, db.prepare(`SELECT * FROM ${table} WHERE id=?`).get(id)); }
+      if (req.method === 'PATCH' && id) {
+        const b = await readBody(req); const ks = Object.keys(b).filter(k => fields.includes(k));
+        if (ks.length) db.prepare(`UPDATE ${table} SET ${ks.map(k => k + '=?')} WHERE id=?`).run(...ks.map(k => b[k]), id);
+        // закрыли повторяющуюся задачу — сразу создаём следующую по расписанию
+        let nextTaskId = null;
+        if (table === 'tasks' && Number(b.done) === 1) {
+          const t = db.prepare('SELECT * FROM tasks WHERE id=?').get(id);
+          if (t && t.repeat && t.repeat !== 'none') {
+            const days = { daily: 1, weekly: 7, monthly: 30 }[t.repeat] || 0;
+            const base = /^\d{4}-\d{2}-\d{2}/.test(t.due || '') ? new Date(String(t.due).replace(' ', 'T')) : new Date();
+            const next = new Date(Math.max(base.getTime(), Date.now()) + days * 864e5);
+            const time = /\d{2}:\d{2}/.test(t.due || '') ? String(t.due).slice(-5) : '10:00';
+            const due = `${next.toISOString().slice(0, 10)} ${time}`;
+            const r = db.prepare('INSERT INTO tasks(title,type,due,priority,done,deal_id,contact_id,responsible_id,result,repeat) VALUES(?,?,?,?,0,?,?,?,?,?)')
+              .run(t.title, t.type, due, t.priority || 'normal', t.deal_id, t.contact_id, t.responsible_id, t.result, t.repeat);
+            nextTaskId = Number(r.lastInsertRowid);
+            log(`Повторяющаяся задача «${t.title}» продлена до ${due}`, 'tasks', nextTaskId, user.name);
+            broadcast('change', { table: 'tasks' });
+          }
+        }
+        broadcast('change', { table });
+        const row = db.prepare(`SELECT * FROM ${table} WHERE id=?`).get(id);
+        return json(res, 200, nextTaskId ? { ...row, next_task_id: nextTaskId } : row);
+      }
       if (req.method === 'DELETE' && id) { db.prepare(`DELETE FROM ${table} WHERE id=?`).run(id); broadcast('change', { table }); return json(res, 200, { deleted: true }); }
     }
     // ===== pipelines & stages (configurable) =====
@@ -527,6 +611,16 @@ export const server = http.createServer(async (req, res) => {
       if (req.method === 'GET') return json(res, 200, { pipelines: db.prepare('SELECT * FROM pipelines').all(), stages: getStages(Number(u.searchParams.get('pipeline') || 1)), deals: db.prepare('SELECT d.*,c.name contact_name,c.phone contact_phone,co.name company_name FROM deals d LEFT JOIN contacts c ON c.id=d.contact_id LEFT JOIN companies co ON co.id=d.company_id ORDER BY d.id DESC').all() });
       if (req.method === 'POST') { const b = await readBody(req); const fields = ['title', 'amount', 'stage', 'pipeline_id', 'contact_id', 'company_id', 'responsible', 'responsible_id', 'priority', 'loss_reason', 'deadline', 'custom']; const ks = fields.filter(f => b[f] !== undefined); const r = db.prepare(`INSERT INTO deals(${ks}) VALUES(${ks.map(() => '?')})`).run(...ks.map(k => b[k])); log(`Сделка создана: ${b.title}`, 'deals', Number(r.lastInsertRowid), user.name); runAutomations('deal_created', { deal_id: Number(r.lastInsertRowid), contact_id: b.contact_id }); broadcast('change', { table: 'deals' }); return json(res, 201, db.prepare('SELECT * FROM deals WHERE id=?').get(r.lastInsertRowid)); }
     }
+    // ===== печать документов по сделке: коммерческое предложение или счёт =====
+    if (/^\/api\/deals\/\d+\/print$/.test(p) && req.method === 'GET') {
+      const id = Number(p.split('/')[3]);
+      const deal = db.prepare('SELECT d.*,c.name contact_name,c.phone contact_phone,c.email contact_email,co.name company_name FROM deals d LEFT JOIN contacts c ON c.id=d.contact_id LEFT JOIN companies co ON co.id=d.company_id WHERE d.id=?').get(id);
+      if (!deal) return json(res, 404, { error: 'Сделка не найдена' });
+      const doc = u.searchParams.get('doc') === 'invoice' ? 'invoice' : 'quote';
+      const items = db.prepare('SELECT * FROM deal_products WHERE deal_id=? ORDER BY id').all(id);
+      return html(res, 200, dealDocument({ deal, items, doc, company: companyRequisites() }));
+    }
+
     const mDeal = p.match(/^\/api\/deals\/(\d+)(?:\/(products))?$/);
     if (mDeal) { const id = mDeal[1];
       if (mDeal[2] === 'products') {
@@ -680,9 +774,9 @@ export const server = http.createServer(async (req, res) => {
       } catch (e) { return json(res, 400, { ok: false, error: e.message }) }
     }
     if (p === '/api/settings') {
-      if (req.method === 'GET') { const mask = v => v ? '••••••' + String(v).slice(-4) : ''; return json(res, 200, { version: VERSION, company: { name: getSetting('COMPANY_NAME'), currency: getSetting('CURRENCY', '₽') }, sales_target: Number(getSetting('SALES_TARGET', '0')) || 0, email: { host: getSetting('SMTP_HOST'), port: getSetting('SMTP_PORT', '587'), secure: getSetting('SMTP_SECURE', ''), user: getSetting('SMTP_USER'), pass: mask(getSetting('SMTP_PASS')), from: getSetting('MAIL_FROM'), webhook_secret: getSetting('EMAIL_WEBHOOK_SECRET'), test_to: getSetting('SMTP_TEST_TO'), configured: !!getSetting('SMTP_HOST') }, maintenance: { backup_keep_days: getSetting('BACKUP_KEEP_DAYS', '7'), backup_hour: getSetting('BACKUP_HOUR', '3'), notify_webhook: getSetting('NOTIFY_WEBHOOK') }, advanced: { frame_ancestors: getSetting('FRAME_ANCESTORS'), login_rate_limit: getSetting('LOGIN_RATE_LIMIT', '12') }, messenger_provider: getSetting('MESSENGER_PROVIDER', 'wazzup'), auto_deal: getSetting('AUTO_DEAL', '1'), auto_assign: getSetting('AUTO_ASSIGN', '0'), wazzup: { api_key: mask(getSetting('WAZZUP_API_KEY')), api_url: getSetting('WAZZUP_API_URL', 'https://api.wazzup24.com/v3'), channel_id: getSetting('WAZZUP_CHANNEL_ID'), webhook_secret: getSetting('WAZZUP_WEBHOOK_SECRET'), configured: !!getSetting('WAZZUP_API_KEY') }, whatsapp: { token: mask(getSetting('WHATSAPP_TOKEN')), phone_id: getSetting('WHATSAPP_PHONE_ID'), verify_token: getSetting('WHATSAPP_VERIFY_TOKEN', 'karkas-verify'), configured: !!(getSetting('WHATSAPP_TOKEN') && getSetting('WHATSAPP_PHONE_ID')) }, telegram: { configured: !!getSetting('TELEGRAM_BOT_TOKEN') } }); }
+      if (req.method === 'GET') { const mask = v => v ? '••••••' + String(v).slice(-4) : ''; return json(res, 200, { version: VERSION, company: { name: getSetting('COMPANY_NAME'), currency: getSetting('CURRENCY', '₽') }, sales_target: Number(getSetting('SALES_TARGET', '0')) || 0, email: { host: getSetting('SMTP_HOST'), port: getSetting('SMTP_PORT', '587'), secure: getSetting('SMTP_SECURE', ''), user: getSetting('SMTP_USER'), pass: mask(getSetting('SMTP_PASS')), from: getSetting('MAIL_FROM'), webhook_secret: getSetting('EMAIL_WEBHOOK_SECRET'), test_to: getSetting('SMTP_TEST_TO'), configured: !!getSetting('SMTP_HOST') }, maintenance: { backup_keep_days: getSetting('BACKUP_KEEP_DAYS', '7'), backup_hour: getSetting('BACKUP_HOUR', '3'), notify_webhook: getSetting('NOTIFY_WEBHOOK') }, requisites: companyRequisites(), advanced: { frame_ancestors: getSetting('FRAME_ANCESTORS'), login_rate_limit: getSetting('LOGIN_RATE_LIMIT', '12') }, messenger_provider: getSetting('MESSENGER_PROVIDER', 'wazzup'), auto_deal: getSetting('AUTO_DEAL', '1'), auto_assign: getSetting('AUTO_ASSIGN', '0'), wazzup: { api_key: mask(getSetting('WAZZUP_API_KEY')), api_url: getSetting('WAZZUP_API_URL', 'https://api.wazzup24.com/v3'), channel_id: getSetting('WAZZUP_CHANNEL_ID'), webhook_secret: getSetting('WAZZUP_WEBHOOK_SECRET'), configured: !!getSetting('WAZZUP_API_KEY') }, whatsapp: { token: mask(getSetting('WHATSAPP_TOKEN')), phone_id: getSetting('WHATSAPP_PHONE_ID'), verify_token: getSetting('WHATSAPP_VERIFY_TOKEN', 'karkas-verify'), configured: !!(getSetting('WHATSAPP_TOKEN') && getSetting('WHATSAPP_PHONE_ID')) }, telegram: { configured: !!getSetting('TELEGRAM_BOT_TOKEN') } }); }
       if (req.method === 'PUT') { if (!requireAdmin(user, res)) return; const b = await readBody(req); const clean = v => (v && !String(v).includes('•')) ? v : null; if (clean(b.WAZZUP_API_KEY)) setSetting('WAZZUP_API_KEY', b.WAZZUP_API_KEY); for (const k of ['WAZZUP_API_URL', 'WAZZUP_CHANNEL_ID', 'WAZZUP_WEBHOOK_SECRET', 'WHATSAPP_PHONE_ID', 'WHATSAPP_VERIFY_TOKEN', 'COMPANY_NAME', 'CURRENCY', 'MESSENGER_PROVIDER', 'AUTO_DEAL', 'AUTO_DEAL_STAGE', 'AUTO_ASSIGN']) if (b[k] !== undefined) setSetting(k, b[k]); if (clean(b.WHATSAPP_TOKEN)) setSetting('WHATSAPP_TOKEN', b.WHATSAPP_TOKEN); if (clean(b.TELEGRAM_BOT_TOKEN)) setSetting('TELEGRAM_BOT_TOKEN', b.TELEGRAM_BOT_TOKEN);
-        for (const k of ['SMTP_HOST', 'SMTP_PORT', 'SMTP_SECURE', 'SMTP_USER', 'MAIL_FROM', 'EMAIL_WEBHOOK_SECRET', 'SALES_TARGET', 'BACKUP_KEEP_DAYS', 'BACKUP_HOUR', 'NOTIFY_WEBHOOK', 'FRAME_ANCESTORS', 'LOGIN_RATE_LIMIT', 'SMTP_TEST_TO']) if (b[k] !== undefined) {
+        for (const k of ['SMTP_HOST', 'SMTP_PORT', 'SMTP_SECURE', 'SMTP_USER', 'MAIL_FROM', 'EMAIL_WEBHOOK_SECRET', 'SALES_TARGET', 'BACKUP_KEEP_DAYS', 'BACKUP_HOUR', 'NOTIFY_WEBHOOK', 'FRAME_ANCESTORS', 'LOGIN_RATE_LIMIT', 'SMTP_TEST_TO', 'COMPANY_INN', 'COMPANY_KPP', 'COMPANY_OGRN', 'COMPANY_ADDRESS', 'COMPANY_PHONE', 'COMPANY_EMAIL', 'COMPANY_SITE', 'COMPANY_BANK', 'COMPANY_ACCOUNT', 'COMPANY_SIGNER', 'COMPANY_SIGNER_POSITION', 'DOC_PREFIX']) if (b[k] !== undefined) {
           if (k === 'SALES_TARGET') { setSetting('SALES_TARGET', String(Number(String(b[k]).replace(/[^\d.]/g, '')) || 0)); continue }
           setSetting(k, String(b[k]));
         }

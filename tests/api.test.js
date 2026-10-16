@@ -370,6 +370,50 @@ test('менеджер не меняет правила и шаблоны, но 
   assert.equal((await mcall('/api/users', { method: 'POST', body: JSON.stringify({ name: 'x', email: 'x@x.ru', password: '12345678' }) })).status, 403, 'команда — только админ');
 });
 
+test('печать КП и счёта: реквизиты, позиции и суммы на месте', async () => {
+  await call('/api/settings', { method: 'PUT', body: JSON.stringify({ COMPANY_NAME: 'ООО «Каркас»', COMPANY_INN: '7712345678', COMPANY_KPP: '771201001', COMPANY_ADDRESS: 'Москва, ул. Лесная, 1', COMPANY_BANK: 'АО «Тинькофф Банк», БИК 044525974', COMPANY_ACCOUNT: '40702810100000012345', COMPANY_SIGNER: 'Петров П. П.', COMPANY_SIGNER_POSITION: 'Директор', DOC_PREFIX: 'КП' }) });
+  const settings = (await call('/api/settings')).body;
+  assert.equal(settings.requisites.inn, '7712345678', 'реквизиты сохраняются');
+  assert.equal(settings.requisites.signer, 'Петров П. П.');
+  const client = (await call('/api/contacts', { method: 'POST', body: JSON.stringify({ name: 'Заказчик Печати', phone: '+7 916 000-11-22', email: 'print@example.com' }) })).body;
+  const deal = (await call('/api/deals', { method: 'POST', body: JSON.stringify({ title: 'Дом 8×10', amount: 0, contact_id: client.id }) })).body;
+  assert.ok(deal.id, 'сделка для печати создана');
+  await call(`/api/deals/${deal.id}/products`, { method: 'POST', body: JSON.stringify({ name: 'Каркасный дом 8×10', price: 3000000, qty: 1 }) });
+  await call(`/api/deals/${deal.id}/products`, { method: 'POST', body: JSON.stringify({ name: 'Фундамент', price: 200000, qty: 2 }) });
+  const quote = await fetch(base + `/api/deals/${deal.id}/print?doc=quote&token=` + h.Authorization.split(' ')[1]);
+  assert.equal(quote.status, 200);
+  assert.match(quote.headers.get('content-type'), /text\/html/);
+  const html = await quote.text();
+  assert.match(html, /Коммерческое предложение/);
+  assert.match(html, /ООО «Каркас»/);
+  assert.match(html, /ИНН 7712345678/);
+  assert.match(html, /Фундамент/);
+  assert.match(html, /3\s?400\s?000/, 'итог считается по позициям');
+  assert.match(html, /window\.print\(\)/, 'на странице есть кнопка печати');
+  const invoice = await (await fetch(base + `/api/deals/${deal.id}/print?doc=invoice&token=` + h.Authorization.split(' ')[1])).text();
+  assert.match(invoice, /Счёт на оплату/);
+  assert.match(invoice, /НДС 20%/);
+  assert.match(invoice, /40702810100000012345/, 'банковские реквизиты в счёте');
+  assert.equal((await fetch(base + `/api/deals/${deal.id}/print`)).status, 401, 'без токена документ не отдаётся');
+  assert.equal((await fetch(base + '/api/deals/999999/print?token=' + h.Authorization.split(' ')[1])).status, 404);
+});
+
+test('повторяющиеся задачи: закрыл — появилась следующая', async () => {
+  const t = (await call('/api/tasks', { method: 'POST', body: JSON.stringify({ title: 'Обзвон клиентов', type: 'call', due: '2026-01-15 09:30', repeat: 'weekly', responsible_id: 1 }) })).body;
+  assert.equal(t.repeat, 'weekly', 'повтор сохранился');
+  const done = await call('/api/tasks/' + t.id, { method: 'PATCH', body: JSON.stringify({ done: 1 }) });
+  assert.ok(done.body.next_task_id, 'создана следующая задача');
+  const next = (await call('/api/tasks/' + done.body.next_task_id)).body;
+  assert.equal(next.title, 'Обзвон клиентов');
+  assert.equal(next.repeat, 'weekly');
+  assert.equal(next.done, 0);
+  assert.match(next.due, /09:30$/, 'время суток сохраняется');
+  assert.ok(new Date(next.due.replace(' ', 'T')) > new Date(), 'новый срок в будущем');
+  const plain = (await call('/api/tasks', { method: 'POST', body: JSON.stringify({ title: 'Разовое дело', type: 'other' }) })).body;
+  const plainDone = await call('/api/tasks/' + plain.id, { method: 'PATCH', body: JSON.stringify({ done: 1 }) });
+  assert.ok(!plainDone.body.next_task_id, 'обычная задача не размножается');
+});
+
 test('защита входа: ограничение попыток подбора пароля', async () => {
   const codes = [];
   for (let i = 0; i < 16; i++) codes.push((await call('/api/auth/login', { method: 'POST', body: JSON.stringify({ email: 'admin@example.com', password: 'wrong-' + i }) })).status);

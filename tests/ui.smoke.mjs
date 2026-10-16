@@ -172,6 +172,16 @@ try {
   window.go('pipe'); await sleep(300);
   check('чекбоксы выделения на карточках сделок', /box-shadow:0 0 0 2px|onchange="toggleSel\('deals'/.test($('#view').innerHTML) || /toggleSel\('deals'/.test($('#view').innerHTML));
 
+  // печать документов, реквизиты и повторяющиеся задачи
+  await window.openDealCard(1); await sleep(300);
+  check('в карточке сделки есть печать КП и счёта', /printDoc\(1,'quote'\)/.test($('#modalBody').innerHTML) && /printDoc\(1,'invoice'\)/.test($('#modalBody').innerHTML));
+  window.closeModal();
+  window.__state.settingsTab = 'data'; window.go('settings'); await sleep(350);
+  check('реквизиты компании в настройках', /COMPANY_INN/.test($('#view').innerHTML) && /COMPANY_ACCOUNT/.test($('#view').innerHTML) && /DOC_PREFIX/.test($('#view').innerHTML));
+  await window.openTask(); await sleep(300);
+  check('в задаче можно выбрать повтор', /name="repeat"/.test($('#modalBody').innerHTML) && /Каждую неделю/.test($('#modalBody').innerHTML));
+  window.closeModal();
+
   const code = window.siteFormCode();
   check('готовый код формы для сайта', /webhooks\/generic/.test(code) && /sendToKarkas/.test(code));
 
@@ -179,6 +189,10 @@ try {
   check('кнопка копирования кода формы в настройках', /copySiteFormCode/.test($('#view').innerHTML));
 
   check('скелетоны загрузки описаны для всех разделов', ['dashboard', 'pipe', 'inbox', 'contacts', 'tasks', 'analytics', 'competitors', 'settings'].every(v => typeof window.SKELETONS?.[v] === 'function'));
+
+  const printed = await fetch(BASE + '/api/deals/1/print?doc=invoice&token=' + encodeURIComponent(window.__token || ''));
+  const printedHtml = await printed.text();
+  check('печатный документ отдаётся сервером', printed.status === 200 && /Счёт на оплату/.test(printedHtml), 'код ' + printed.status);
 
   const h = await (await fetch(BASE + '/api/health')).json();
   check('health содержит версию схемы и признак демо', h.schema >= 3 && h.demo === true, JSON.stringify({ v: h.version, schema: h.schema, demo: h.demo }));

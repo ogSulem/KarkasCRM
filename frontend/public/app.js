@@ -238,6 +238,12 @@ async function moveDeal(id, dir, stage) {
   try { await api('/api/deals/' + id, { method: 'PATCH', body: JSON.stringify({ stage }) }); toast('Сделка переведена: ' + stageName) }
   catch (e) { if (card && before) { card.stage = before; if (state.view === 'pipe') pipe($('#view')) } toast(e.message) }
 }
+// печатный документ по сделке открываем в новой вкладке: подпись токеном в адресе (как у SSE)
+function printDoc(dealId, doc = 'quote') {
+  const url = `/api/deals/${dealId}/print?doc=${doc}&token=${encodeURIComponent(token)}`;
+  const w = window.open(url, '_blank');
+  if (!w) toast('Браузер заблокировал новую вкладку — разрешите всплывающие окна для CRM');
+}
 async function openDeal(id) {
   if (!state.contacts.length) state.contacts = await api('/api/contacts');
   if (!state.pipelines.length) state.pipelines = await api('/api/pipelines');
@@ -275,7 +281,7 @@ async function openDealCard(id) {
   openModal(`<h3>${esc(x.title)} <span class="tag orange">${fmt(x.amount)}</span></h3>
    <div class="tabs">${Object.entries(tabs).map(([k, n]) => `<button class="${state.dealTab === k ? 'active' : ''}" onclick="state.dealTab='${k}';openDealCard(${id})">${n}</button>`).join('')}</div>
    <div id="dealTab">${dealTab(d, id)}</div>
-   <div style="display:flex;gap:8px;margin-top:14px;flex-wrap:wrap"><button class="btn" onclick="openDeal(${id})">✎ Редактировать</button>${d.conversation ? `<button class="btn orange" onclick="closeModal();state.conv=${d.conversation.id};go('inbox')">💬 Переписка клиента</button>` : ''}<button class="btn ghost" onclick="openTask(null,{deal_id:${id},contact_id:${x.contact_id || 'null'}})">+ Задача</button><button class="btn ghost" onclick="${x.contact_id ? `openContactCard(${x.contact_id})` : 'openContact()'}">◎ Контакт</button><button class="btn danger" onclick="del('deals',${id});closeModal()">Удалить</button></div>`);
+   <div style="display:flex;gap:8px;margin-top:14px;flex-wrap:wrap"><button class="btn" onclick="openDeal(${id})">✎ Редактировать</button><button class="btn orange" onclick="printDoc(${id},'quote')" title="Коммерческое предложение: печать или сохранение в PDF">🖨 КП</button><button class="btn orange" onclick="printDoc(${id},'invoice')" title="Счёт на оплату с реквизитами">🧾 Счёт</button>${d.conversation ? `<button class="btn orange" onclick="closeModal();state.conv=${d.conversation.id};go('inbox')">💬 Переписка клиента</button>` : ''}<button class="btn ghost" onclick="openTask(null,{deal_id:${id},contact_id:${x.contact_id || 'null'}})">+ Задача</button><button class="btn ghost" onclick="${x.contact_id ? `openContactCard(${x.contact_id})` : 'openContact()'}">◎ Контакт</button><button class="btn danger" onclick="del('deals',${id});closeModal()">Удалить</button></div>`);
 }
 function dealTab(d, id) {
   const x = d.deal;
@@ -552,13 +558,24 @@ async function tasks(v) {
    <p><small>«Мои» — задачи, назначенные на вас (${esc((state.me && state.me.name) || '')})${state.taskScope === 'mine' ? '; неназначенные задачи тоже попадают в список' : ''}.</small></p>
    ${state.taskView === 'week' ? weekCalendar(rows) : ''}
    ${state.taskView === 'week' ? '' : bulkBar('tasks', `<button class="btn sm" onclick="bulkApply('tasks','update',{done:1})">✓ Выполнить</button>`)}
-   ${state.taskView === 'week' ? '' : groups.map(([t, list]) => list.length ? `<h3 style="margin-top:12px">${t} <small>${list.length}</small></h3>${list.map(x => `<div class="row"><label style="display:flex;gap:8px;align-items:center;margin:0"><input type="checkbox" style="width:16px" ${x.done ? 'checked' : ''} onchange="toggleTask(${x.id},this.checked)"> <input type="checkbox" style="width:16px" ${selSet('tasks').has(x.id) ? 'checked' : ''} onchange="toggleSel('tasks',${x.id})" title="Выбрать для массового действия"> <span style="${x.done ? 'text-decoration:line-through;color:#94a3b8' : ''}">${types[x.type] || '•'} ${esc(x.title)}</span> <small>${esc(x.due || '')}${x.contact_name ? ' · ' + esc(x.contact_name) : ''}${x.deal_title ? ' · ' + esc(x.deal_title) : ''}${x.responsible_name ? ' · 👤 ' + esc(x.responsible_name) : ''}</small></label><span style="display:flex;gap:6px"><button class="btn sm" onclick="openTask(${x.id})">✎</button><button class="btn sm danger" onclick="del('tasks',${x.id})">✕</button></span></div>`).join('')}` : '').join('') || '<div class="empty-state"><span class="ico">🎯</span><b>Задач нет</b>Поставьте первое дело — звонок, встречу или письмо.<br><button class="btn primary" onclick="openTask()">+ Задача</button></div>'}</div>`;
+   ${state.taskView === 'week' ? '' : groups.map(([t, list]) => list.length ? `<h3 style="margin-top:12px">${t} <small>${list.length}</small></h3>${list.map(x => `<div class="row"><label style="display:flex;gap:8px;align-items:center;margin:0"><input type="checkbox" style="width:16px" ${x.done ? 'checked' : ''} onchange="toggleTask(${x.id},this.checked)"> <input type="checkbox" style="width:16px" ${selSet('tasks').has(x.id) ? 'checked' : ''} onchange="toggleSel('tasks',${x.id})" title="Выбрать для массового действия"> <span style="${x.done ? 'text-decoration:line-through;color:#94a3b8' : ''}">${types[x.type] || '•'} ${esc(x.title)}${x.repeat && x.repeat !== 'none' ? ' <span class="tag grey" title="Повторяется">🔁 ' + ({ daily: 'ежедневно', weekly: 'еженедельно', monthly: 'ежемесячно' }[x.repeat] || '') + '</span>' : ''}</span> <small>${esc(x.due || '')}${x.contact_name ? ' · ' + esc(x.contact_name) : ''}${x.deal_title ? ' · ' + esc(x.deal_title) : ''}${x.responsible_name ? ' · 👤 ' + esc(x.responsible_name) : ''}</small></label><span style="display:flex;gap:6px">${x.done ? '' : `<button class="btn sm" title="Перенести на завтра" onclick="reschedule(${x.id},1)">Завтра</button><button class="btn sm" title="Перенести на неделю вперёд" onclick="reschedule(${x.id},7)">+7 дней</button>`}<button class="btn sm" onclick="openTask(${x.id})">✎</button><button class="btn sm danger" onclick="del('tasks',${x.id})">✕</button></span></div>`).join('')}` : '').join('') || '<div class="empty-state"><span class="ico">🎯</span><b>Задач нет</b>Поставьте первое дело — звонок, встречу или письмо.<br><button class="btn primary" onclick="openTask()">+ Задача</button></div>'}</div>`;
 }
 async function toggleTask(id, done, refreshId) {
   toast(done ? '✓ Задача выполнена' : '↩ Задача возвращена');
   if (refreshId) openDealCard(refreshId); else if (state.view !== 'tasks' || state.taskView === 'week') render();
   try { await api('/api/tasks/' + id, { method: 'PATCH', body: JSON.stringify({ done: done ? 1 : 0 }) }) }
   catch (e) { toast(e.message); render() }
+}
+// перенос срока задачи одним нажатием: сохраняем время суток, меняем дату
+async function reschedule(id, days) {
+  try {
+    const t = await api('/api/tasks/' + id);
+    const time = /\d{2}:\d{2}/.test(t.due || '') ? String(t.due).slice(-5) : '10:00';
+    const iso = `${new Date(Date.now() + days * 864e5).toISOString().slice(0, 10)} ${time}`;
+    await api('/api/tasks/' + id, { method: 'PATCH', body: JSON.stringify({ due: iso }) });
+    toast(`Задача перенесена на ${iso.slice(0, 10)}`);
+    render();
+  } catch (e) { toast(e.message) }
 }
 async function openTask(id, p = {}) {
   const t = id ? await api('/api/tasks/' + id) : p; if (!state.contacts.length) state.contacts = await api('/api/contacts');
@@ -570,8 +587,11 @@ async function openTask(id, p = {}) {
    <label>Срок<input name="due" type="datetime-local" value="${esc((t.due || '').slice(0, 16))}"></label></div>
    <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px"><label>Контакт<select name="contact_id"><option value="">—</option>${state.contacts.map(c => `<option value="${c.id}" ${c.id === t.contact_id ? 'selected' : ''}>${esc(c.name)}</option>`).join('')}</select></label>
    <label>Сделка<select name="deal_id"><option value="">—</option>${deals.map(d => `<option value="${d.id}" ${d.id === t.deal_id ? 'selected' : ''}>${esc(d.title)}</option>`).join('')}</select></label></div>
-   <label>Ответственный<select name="responsible_id">${userOptions(t.responsible_id ?? meId(), '— как в сделке —')}</select></label>
-   <label>Комментарий<textarea name="result" rows="2">${esc(t.result || '')}</textarea></label><button class="btn primary w">Сохранить</button></form>`);
+   <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px"><label>Ответственный<select name="responsible_id">${userOptions(t.responsible_id ?? meId(), '— как в сделке —')}</select></label>
+   <label>Повторять<select name="repeat">${Object.entries({ none: 'Не повторять', daily: 'Каждый день', weekly: 'Каждую неделю', monthly: 'Каждый месяц' }).map(([k, n]) => `<option value="${k}" ${k === (t.repeat || 'none') ? 'selected' : ''}>${n}</option>`).join('')}</select></label></div>
+   <label>Комментарий<textarea name="result" rows="2">${esc(t.result || '')}</textarea></label>
+   <p><small>Повторяющуюся задачу достаточно закрыть — CRM сама создаст следующую по расписанию.</small></p>
+   <button class="btn primary w">Сохранить</button></form>`);
 }
 async function saveTask(e, id) { e.preventDefault(); const b = Object.fromEntries(new FormData(e.target)); ['contact_id', 'deal_id', 'responsible_id'].forEach(k => { if (b[k]) b[k] = +b[k]; else delete b[k] }); await api(id ? '/api/tasks/' + id : '/api/tasks', { method: id ? 'PATCH' : 'POST', body: JSON.stringify(b) }); closeModal(); toast('Задача сохранена'); render(); return false }
 
@@ -867,6 +887,21 @@ async function settings(v) {
      <label>Автосоздание сделки при обращении<select name="AUTO_DEAL"><option value="1" ${s.auto_deal === '1' ? 'selected' : ''}>Да — создавать сделку «Неразобранное»</option><option value="0" ${s.auto_deal !== '1' ? 'selected' : ''}>Нет</option></select></label>
      <label>Распределять новые обращения между менеджерами<select name="AUTO_ASSIGN"><option value="0" ${s.auto_assign !== '1' ? 'selected' : ''}>Нет — оставлять без ответственного</option><option value="1" ${s.auto_assign === '1' ? 'selected' : ''}>Да — отдавать наименее загруженному менеджеру</option></select></label>
      <button class="btn primary">Сохранить</button></form></div>
+     <div class="card"><h3>🏢 Реквизиты для КП и счёта</h3><p><small>Попадают в печатные документы сделки (кнопки «🖨 КП» и «🧾 Счёт»). Префикс номера — начало нумерации, например «КП», «СЧ».</small></p>
+      <form onsubmit="return saveCompanySettings(event)">
+       <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:12px"><label>ИНН<input name="COMPANY_INN" value="${esc((s.requisites || {}).inn || '')}"></label>
+       <label>КПП<input name="COMPANY_KPP" value="${esc((s.requisites || {}).kpp || '')}"></label>
+       <label>ОГРН<input name="COMPANY_OGRN" value="${esc((s.requisites || {}).ogrn || '')}"></label></div>
+       <label>Юридический адрес<input name="COMPANY_ADDRESS" value="${esc((s.requisites || {}).address || '')}"></label>
+       <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:12px"><label>Телефон<input name="COMPANY_PHONE" value="${esc((s.requisites || {}).phone || '')}"></label>
+       <label>E-mail<input name="COMPANY_EMAIL" value="${esc((s.requisites || {}).email || '')}"></label>
+       <label>Сайт<input name="COMPANY_SITE" value="${esc((s.requisites || {}).site || '')}"></label></div>
+       <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px"><label>Банк<input name="COMPANY_BANK" value="${esc((s.requisites || {}).bank || '')}" placeholder="ООО «Банк», БИК 044525225"></label>
+       <label>Расчётный счёт<input name="COMPANY_ACCOUNT" value="${esc((s.requisites || {}).account || '')}" placeholder="40702810…"></label></div>
+       <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:12px"><label>Подписант<input name="COMPANY_SIGNER" value="${esc((s.requisites || {}).signer || '')}" placeholder="Иванов И. И."></label>
+       <label>Должность подписанта<input name="COMPANY_SIGNER_POSITION" value="${esc((s.requisites || {}).signer_position || '')}" placeholder="Директор"></label>
+       <label>Префикс номера<input name="DOC_PREFIX" value="${esc((s.requisites || {}).doc_prefix || 'КП')}"></label></div>
+       <button class="btn primary">Сохранить реквизиты</button></form></div>
      <div class="card"><h3>🎯 План продаж и уведомления</h3><form onsubmit="return savePlanSettings(event)">
       <label>План продаж на месяц, ${esc((s.company && s.company.currency) || '₽')}<input name="SALES_TARGET" value="${esc(s.sales_target || 0)}"></label>
       <label>Webhook о просроченных задачах (необязательно — уведомление придёт в Telegram/Slack/CRM-бот)<input name="NOTIFY_WEBHOOK" value="${esc((s.maintenance || {}).notify_webhook || '')}" placeholder="https://hooks.slack.com/services/…"></label>
