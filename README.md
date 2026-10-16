@@ -359,3 +359,14 @@ grep -ril twenty backend frontend tests deploy Dockerfile docker-compose.yml   #
 ```
 
 Код Twenty остался только в исторических коммитах (до `018ed341`); текст лицензии AGPL-3.0 сохранён для справки в `licenses/AGPL-3.0-twenty.txt`, а `LICENSE` описывает права на KarkasCRM.
+
+Если хочется, чтобы и **в истории** ничего лишнего не осталось, начните чистую ветку (делать осознанно: перезапишет историю ветки):
+
+```bash
+git checkout --orphan clean-main     # новая ветка без истории, файлы остаются на месте
+git add -A && git commit -m "KarkasCRM: чистая история"
+git branch -M clean-main main        # заменить локальный main
+git push -f origin main              # ⚠️ перезапишет main на GitHub (старые коммиты пропадут из него)
+```
+
+После этого репозиторий весит сотни килобайт, а в истории нет ни одного файла Twenty.
