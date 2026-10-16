@@ -45,6 +45,8 @@ services:
       # Демо-данные, план продаж, резервные копии, защита входа
       SEED_DEMO: ${SEED_DEMO:-1}
       SALES_TARGET: ${SALES_TARGET:-0}
+      AUTO_DEAL: ${AUTO_DEAL:-1}
+      AUTO_ASSIGN: ${AUTO_ASSIGN:-0}
       BACKUP_KEEP_DAYS: ${BACKUP_KEEP_DAYS:-7}
       BACKUP_HOUR: ${BACKUP_HOUR:-3}
       NOTIFY_WEBHOOK: ${NOTIFY_WEBHOOK:-}

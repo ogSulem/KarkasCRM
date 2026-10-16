@@ -18,7 +18,7 @@ const SECRET = process.env.JWT_SECRET || 'change-me-in-production-please-32-char
 const ADMIN_EMAIL = (process.env.ADMIN_EMAIL || 'admin@example.com').toLowerCase();
 const ADMIN_PASSWORD = process.env.ADMIN_PASSWORD || 'admin12345';
 const SEED_DEMO = String(process.env.SEED_DEMO ?? '1') !== '0';
-const VERSION = '2.1';
+const VERSION = '2.2';
 const STARTED = Date.now();
 mkdirSync(DATA_DIR, { recursive: true });
 const db = new DatabaseSync(join(DATA_DIR, 'crm.db'));
@@ -75,8 +75,14 @@ function seedDemoData() {
     const c1 = comp.run('СтройДом', '+7 495 111-22-33', 'info@stroydom.ru').lastInsertRowid;
     const c = db.prepare('INSERT INTO contacts(name,phone,email,company,company_id,source,tags,demo) VALUES(?,?,?,?,?,?,?,1)');
     const ids = [c.run('Ирина Соколова', '+7 916 555-01-20', 'Иванова@example.com', 'СтройДом', c1, 'wazzup-whatsapp', 'VIP,дом').lastInsertRowid, c.run('Дмитрий Орлов', '+7 925 555-01-21', 'Орлов@example.com', 'ИП Орлов', null, 'wazzup-telegram', 'баня').lastInsertRowid, c.run('Анна Лебедева', '+7 903 555-01-22', 'Анна@example.com', '', null, 'site', 'дом 6x8').lastInsertRowid, c.run('Сергей Волков', '+7 999 555-01-23', 'Волков@example.com', 'Волков и Ко', null, 'wazzup-whatsapp', 'повторный').lastInsertRowid];
-    const d = db.prepare('INSERT INTO deals(title,amount,stage,contact_id,deadline,priority,demo) VALUES(?,?,?,?,date(\'now\',?),?,1)');
-    d.run('Каркасный дом 8×10 «Север»', 3850000, 'new', ids[0], '+7 days', 'high'); d.run('Баня 4×6 под ключ', 890000, 'contact', ids[1], '+3 days', 'normal'); d.run('Дом 6×8 с террасой', 2640000, 'offer', ids[2], '+10 days', 'normal'); d.run('Дачный дом + хозблок', 1950000, 'negotiation', ids[3], '+5 days', 'low'); d.run('Каркасный дом 9×12', 4720000, 'won', ids[0], '-2 days', 'normal');
+    const d = db.prepare('INSERT INTO deals(title,amount,stage,contact_id,deadline,priority,responsible,responsible_id,demo) VALUES(?,?,?,?,date(\'now\',?),?,?,?,1)');
+    const owner = db.prepare("SELECT id,name FROM users WHERE active=1 ORDER BY (role='admin') DESC, id LIMIT 1").get();
+    d.run('Каркасный дом 8×10 «Север»', 3850000, 'new', ids[0], '+7 days', 'high', owner?.name || 'Администратор', owner?.id || null);
+    d.run('Баня 4×6 под ключ', 890000, 'contact', ids[1], '+3 days', 'normal', owner?.name || 'Администратор', owner?.id || null);
+    d.run('Дом 6×8 с террасой', 2640000, 'offer', ids[2], '+10 days', 'normal', owner?.name || 'Администратор', owner?.id || null);
+    d.run('Дачный дом + хозблок', 1950000, 'negotiation', ids[3], '+5 days', 'low', owner?.name || 'Администратор', owner?.id || null);
+    d.run('Каркасный дом 9×12', 4720000, 'won', ids[0], '-2 days', 'normal', owner?.name || 'Администратор', owner?.id || null);
+    db.prepare('UPDATE contacts SET responsible_id=? WHERE id IN (' + ids.map(() => '?').join(',') + ')').run(owner?.id || null, ...ids);
     db.prepare('INSERT INTO products(name,sku,price,unit) VALUES(?,?,?,?)').run('Каркасный дом 8×10 «Север»', 'DOM-810', 3850000, 'шт');
     db.prepare('INSERT INTO products(name,sku,price,unit) VALUES(?,?,?,?)').run('Баня 4×6 под ключ', 'BANYA-46', 890000, 'шт');
     db.prepare('INSERT INTO products(name,sku,price,unit) VALUES(?,?,?,?)').run('Фундамент на сваях', 'FUND-SVAI', 180000, 'компл.');
@@ -84,8 +90,9 @@ function seedDemoData() {
     db.prepare('INSERT INTO templates(name,body,channel) VALUES(?,?,?)').run('Напоминание о созвоне', 'Добрый день, {name}! Напоминаю о нашем созвоне сегодня. Подтвердите, пожалуйста, время.', 'whatsapp');
     db.prepare('INSERT INTO automations(name,trigger_type,trigger_value,action_type,action_value) VALUES(?,?,?,?,?)').run('Новая сделка → задача позвонить', 'deal_created', '', 'create_task', 'Позвонить новому клиенту');
     db.prepare('INSERT INTO automations(name,trigger_type,trigger_value,action_type,action_value) VALUES(?,?,?,?,?)').run('Входящее сообщение → задача при простое', 'message_in', '', 'create_task', 'Ответить на новое сообщение');
-    db.prepare('INSERT INTO tasks(title,due,contact_id,type,demo) VALUES(?,?,?,?,1)').run('Позвонить Ирине, уточнить участок', 'Сегодня 14:00', ids[0], 'call');
-    db.prepare('INSERT INTO tasks(title,due,contact_id,type,demo) VALUES(?,?,?,?,1)').run('Отправить расчёт бани Дмитрию', 'Завтра 10:00', ids[1], 'message');
+    const dOwner = db.prepare("SELECT id FROM users WHERE active=1 ORDER BY (role='admin') DESC, id LIMIT 1").get()?.id || null;
+    db.prepare('INSERT INTO tasks(title,due,contact_id,type,responsible_id,demo) VALUES(?,?,?,?,?,1)').run('Позвонить Ирине, уточнить участок', 'Сегодня 14:00', ids[0], 'call', dOwner);
+    db.prepare('INSERT INTO tasks(title,due,contact_id,type,responsible_id,demo) VALUES(?,?,?,?,?,1)').run('Отправить расчёт бани Дмитрию', 'Завтра 10:00', ids[1], 'message', dOwner);
     const conv = db.prepare('INSERT INTO conversations(contact_id,title,channels,unread,chat_type,demo) VALUES(?,?,?,?,?,1)');
     const m = db.prepare('INSERT INTO messages(conversation_id,channel,direction,body,status) VALUES(?,?,?,?,?)');
     let cv = conv.run(ids[0], 'Ирина Соколова', 'whatsapp,telegram', 2, 'whatsapp').lastInsertRowid;
@@ -121,7 +128,10 @@ function runAutomations(trigger, ctx = {}) {
   for (const a of db.prepare('SELECT * FROM automations WHERE active=1 AND trigger_type=?').all(trigger)) {
     if (a.trigger_value && ctx.stage && a.trigger_value !== ctx.stage) continue;
     try {
-      if (a.action_type === 'create_task' && (ctx.contact_id || ctx.deal_id)) db.prepare('INSERT INTO tasks(title,due,contact_id,deal_id) VALUES(?,?,?,?)').run(a.action_value || a.name, 'Сегодня', ctx.contact_id || null, ctx.deal_id || null);
+      if (a.action_type === 'create_task' && (ctx.contact_id || ctx.deal_id)) {
+        const owner = (ctx.deal_id && db.prepare('SELECT responsible_id FROM deals WHERE id=?').get(ctx.deal_id)?.responsible_id) || (ctx.contact_id && db.prepare('SELECT responsible_id FROM contacts WHERE id=?').get(ctx.contact_id)?.responsible_id) || null;
+        db.prepare('INSERT INTO tasks(title,due,contact_id,deal_id,responsible_id) VALUES(?,?,?,?,?)').run(a.action_value || a.name, 'Сегодня', ctx.contact_id || null, ctx.deal_id || null, owner);
+      }
       if (a.action_type === 'change_stage' && ctx.deal_id && a.action_value) db.prepare('UPDATE deals SET stage=? WHERE id=?').run(a.action_value, ctx.deal_id);
       if (a.action_type === 'add_tag' && ctx.contact_id && a.action_value) { const c = db.prepare('SELECT tags FROM contacts WHERE id=?').get(ctx.contact_id); const tags = [...new Set([...(c?.tags || '').split(',').filter(Boolean), a.action_value])].join(','); db.prepare('UPDATE contacts SET tags=? WHERE id=?').run(tags, ctx.contact_id); }
       log(`Автоматизация «${a.name}» сработала`);
@@ -130,6 +140,32 @@ function runAutomations(trigger, ctx = {}) {
 }
 
 // ---------- unified inbox ----------
+// «Неразобранное»: при первом обращении (или если открытых сделок нет) создаём сделку в воронке
+// свободный менеджер: у кого меньше всего сделок в работе (распределение лидов)
+export function nextManager() {
+  const users = db.prepare("SELECT id,name FROM users WHERE active=1 AND role IN ('manager','admin') ORDER BY id").all();
+  if (!users.length) return null;
+  const load = db.prepare("SELECT COUNT(*) n FROM deals WHERE responsible_id=? AND stage NOT IN ('won','lost')");
+  return users.map(u => ({ u, n: load.get(u.id).n })).sort((a, b) => a.n - b.n || a.u.id - b.u.id)[0].u;
+}
+export function ensureDeal(contact) {
+  if (getSetting('AUTO_DEAL', '1') !== '1' || !contact) return null;
+  const open = db.prepare("SELECT id FROM deals WHERE contact_id=? AND stage NOT IN ('won','lost') ORDER BY id DESC").get(contact.id);
+  if (open) return null;
+  const stage = getSetting('AUTO_DEAL_STAGE', 'new');
+  let ownerId = contact.responsible_id || null, ownerName = '';
+  if (ownerId) ownerName = db.prepare('SELECT name FROM users WHERE id=?').get(ownerId)?.name || '';
+  if (!ownerId && getSetting('AUTO_ASSIGN', '0') === '1') {
+    const m = nextManager();
+    if (m) { ownerId = m.id; ownerName = m.name; db.prepare('UPDATE contacts SET responsible_id=? WHERE id=?').run(ownerId, contact.id); log(`Обращение «${contact.name}» назначено на ${m.name}`, 'contacts', contact.id); }
+  }
+  const dr = db.prepare('INSERT INTO deals(title,amount,stage,contact_id,responsible,responsible_id) VALUES(?,?,?,?,?,?)').run('Обращение: ' + contact.name, 0, stage, contact.id, ownerName, ownerId);
+  log(`Новое обращение «${contact.name}» → сделка в этапе «${stage}»`, 'deals', Number(dr.lastInsertRowid));
+  runAutomations('deal_created', { deal_id: Number(dr.lastInsertRowid), contact_id: contact.id });
+  broadcast('change', { table: 'deals' });
+  return Number(dr.lastInsertRowid);
+}
+
 export function upsertIncoming({ channel = 'whatsapp', chatType = '', phone = '', chatId = '', name = '', body = '', external_id = null, channelId = '', contentUri = '', author = '', email = '', subject = '', direction = 'in' }) {
   if (!body && !contentUri) return null;
   const ph = phone || (['whatsapp', 'viber'].includes(chatType || channel) ? chatId : '');
@@ -142,12 +178,13 @@ export function upsertIncoming({ channel = 'whatsapp', chatType = '', phone = ''
   if (!conv) {
     const r = db.prepare('INSERT INTO conversations(contact_id,title,channels,channel_id,external_chat_id,chat_type) VALUES(?,?,?,?,?,?)').run(contact.id, contact.name, channel, channelId, String(chatId || ph || ''), chatType || channel);
     conv = db.prepare('SELECT * FROM conversations WHERE id=?').get(r.lastInsertRowid);
-    if (getSetting('AUTO_DEAL', '1') === '1') { const dr = db.prepare('INSERT INTO deals(title,amount,stage,contact_id) VALUES(?,?,?,?)').run('Обращение: ' + contact.name, 0, getSetting('AUTO_DEAL_STAGE', 'new'), contact.id); dealId = dr.lastInsertRowid; runAutomations('deal_created', { deal_id: dealId, contact_id: contact.id }); }
+    dealId = ensureDeal(contact);
   }
   const channels = [...new Set([...(conv.channels || '').split(',').filter(Boolean), channel])].join(',');
   try { db.prepare('INSERT INTO messages(conversation_id,channel,direction,body,subject,content_uri,status,external_id,author) VALUES(?,?,?,?,?,?,?,?,?)').run(conv.id, channel, 'in', body || '[вложение]', subject, contentUri, channel === 'email' ? 'received' : 'inbound', external_id, author); }
   catch (e) { if (/UNIQUE/i.test(e.message)) return conv; console.error('message insert', e); throw e; }
   db.prepare("UPDATE conversations SET channels=?,channel_id=COALESCE(NULLIF(?,''),channel_id),external_chat_id=COALESCE(NULLIF(?,''),external_chat_id),chat_type=COALESCE(NULLIF(?,''),chat_type),unread=unread+1,last_at=datetime('now') WHERE id=?").run(channels, channelId, String(chatId || ''), chatType, conv.id);
+  if (!dealId) dealId = ensureDeal(contact); // клиент вернулся, а открытой сделки нет — заводим новое обращение
   const openDeal = db.prepare("SELECT id FROM deals WHERE contact_id=? AND stage NOT IN ('won','lost') ORDER BY id DESC").get(contact.id);
   runAutomations('message_in', { contact_id: contact.id, deal_id: dealId || openDeal?.id });
   broadcast('message', { conversation_id: conv.id });
@@ -160,18 +197,39 @@ async function wazzupFetch(path, opt = {}) {
   const base = (getSetting('WAZZUP_API_URL', 'https://api.wazzup24.com/v3')).replace(/\/$/, '');
   const res = await fetch(base + path, { ...opt, headers: { Authorization: 'Bearer ' + key, 'Content-Type': 'application/json', ...(opt.headers || {}) } });
   const data = await res.json().catch(() => ({}));
-  if (!res.ok) throw new Error(data?.description || data?.error || `Wazzup API ${res.status}`);
+  if (!res.ok) { const e = new Error(data?.description || data?.error || `Wazzup API ${res.status}`); e.status = res.status; throw e; }
   return data;
 }
 const isUuid = s => /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(String(s || ''));
-export async function sendViaWazzup(conv, text, user, chatTypeOverride = '') {
+const WZ_TYPES = ['whatsapp', 'viber', 'telegram', 'instagram', 'whatsgroup'];
+const normChatType = t => WZ_TYPES.includes(String(t || '').toLowerCase()) ? String(t).toLowerCase() : 'whatsapp';
+// понятные ошибки вместо «Wazzup API 401»
+function wazzupError(e, status) {
+  const m = String(e?.message || e || '');
+  if (status === 401 || /401|unauthor/i.test(m)) return 'Wazzup: ключ не подошёл (401). Проверьте API-ключ в Настройках — возможно, он перевыпущен в кабинете Wazzup.';
+  if (status === 403 || /403|forbidden/i.test(m)) return 'Wazzup: доступ запрещён (403). Проверьте, что канал подключён и тариф активен.';
+  if (status === 429) return 'Wazzup: слишком много запросов (429). Повторите через минуту.';
+  if (/chatId|chat_id/i.test(m) && /400|invalid/i.test(m)) return 'Wazzup: не принял адресата. Для WhatsApp/Viber нужен номер телефона цифрами, для Telegram/Instagram — идентификатор чата из переписки.';
+  return 'Wazzup: ' + m;
+}
+export async function sendViaWazzup(conv, text, user, chatTypeOverride = '', file = null) {
   // Wazzup принимает только id канала в формате uuid — иначе отвечаем каналом по умолчанию из настроек
   const channelId = (isUuid(conv.channel_id) ? conv.channel_id : '') || getSetting('WAZZUP_CHANNEL_ID');
   if (!channelId) throw new Error('Не выбран канал Wazzup. Настройки → Интеграции → «Проверить и синхронизировать каналы», затем выберите канал по умолчанию.');
-  const chatType = chatTypeOverride || conv.chat_type || 'whatsapp';
-  // whatsapp/viber адресуются по номеру телефона, telegram/instagram — по идентификатору чата из вебхука
-  const chatId = ['whatsapp', 'viber'].includes(chatType) ? (digits(conv.phone) || conv.external_chat_id) : (conv.external_chat_id || digits(conv.phone));
-  const data = await wazzupFetch('/message', { method: 'POST', body: JSON.stringify({ channelId, chatType, chatId, text, crmMessageId: 'karkas-' + Date.now(), crmUserId: String(user?.id || '') }) });
+  const chatType = normChatType(chatTypeOverride || conv.chat_type);
+  // whatsapp/viber/whatsgroup адресуются по номеру телефона или id чата, telegram/instagram — по chatId из вебхука
+  const chatId = ['whatsapp', 'viber', 'whatsgroup'].includes(chatType) ? (conv.external_chat_id || digits(conv.phone)) : (conv.external_chat_id || digits(conv.phone));
+  if (!chatId) throw new Error('Нет адресата: у клиента не заполнен телефон или не пришло ни одного сообщения из этого канала.');
+  const payload = {
+    channelId, chatType, chatId,
+    crmMessageId: 'karkas-' + Date.now().toString(36) + '-' + randomBytes(4).toString('hex'),
+    crmUserId: String(user?.id || ''),
+  };
+  if (file?.contentUri) { payload.contentUri = file.contentUri; if (text) payload.text = text }
+  else payload.text = text || '';
+  let data;
+  try { data = await wazzupFetch('/message', { method: 'POST', body: JSON.stringify(payload) }); }
+  catch (e) { throw new Error(wazzupError(e, e.status)); }
   return { delivered: true, mode: 'wazzup', id: data.messageId || data.id };
 }
 async function sendWhatsAppDirect(to, text) {
@@ -180,10 +238,10 @@ async function sendWhatsAppDirect(to, text) {
   const data = await res.json().catch(() => ({})); if (!res.ok) throw new Error(data?.error?.message || 'WhatsApp API ' + res.status);
   return { delivered: true, mode: 'whatsapp-cloud', id: data?.messages?.[0]?.id };
 }
-async function deliver(conv, channel, text, user) {
+async function deliver(conv, channel, text, user, file = null) {
   const provider = getSetting('MESSENGER_PROVIDER', 'wazzup');
-  if (provider === 'wazzup') { try { return await sendViaWazzup(conv, text, user, channel && channel !== 'site' ? channel : ''); } catch (e) { if (channel !== 'whatsapp') throw e; const d = await sendWhatsAppDirect(conv.phone, text).catch(() => null); if (d) return d; throw e; } }
-  if (channel === 'whatsapp') { const d = await sendWhatsAppDirect(conv.phone, text); if (d) return d; }
+  if (provider === 'wazzup') { try { return await sendViaWazzup(conv, text, user, channel && channel !== 'site' ? channel : '', file); } catch (e) { if (channel !== 'whatsapp' || file) throw e; const d = await sendWhatsAppDirect(conv.phone, text).catch(() => null); if (d) return d; throw e; } }
+  if (channel === 'whatsapp' && !file) { const d = await sendWhatsAppDirect(conv.phone, text); if (d) return d; }
   return { delivered: false, mode: 'local-only' };
 }
 
@@ -248,6 +306,11 @@ function rateLimit(key, limit, windowMs) {
 const readBody = async req => { let s = ''; for await (const ch of req) { s += ch; if (s.length > 5e6) throw new Error('Слишком большой запрос'); } try { return s ? JSON.parse(s) : {}; } catch { return {}; } };
 const MIME = { '.html': 'text/html', '.js': 'text/javascript', '.css': 'text/css', '.svg': 'image/svg+xml', '.png': 'image/png', '.ico': 'image/x-icon' };
 const csv = rows => { if (!rows.length) return ''; const ks = Object.keys(rows[0]); const q = v => `"${String(v ?? '').replace(/"/g, '""')}"`; return [ks.join(';'), ...rows.map(r => ks.map(k => q(r[k])).join(';'))].join('\n'); };
+const ADMIN_ONLY = [
+  /^\/api\/settings$/, /^\/api\/users(\/\d+)?$/, /^\/api\/pipelines(\/\d+)?$/, /^\/api\/automations(\/\d+)?$/,
+  /^\/api\/templates(\/\d+)?$/, /^\/api\/custom-fields$/, /^\/api\/competitor-sources$/, /^\/api\/demo\/clean$/,
+  /^\/api\/backups$/, /^\/api\/integrations\//,
+];
 function requireAdmin(user, res) { if (user.role !== 'admin') { json(res, 403, { error: 'Только для администратора' }); return false; } return true; }
 
 const competitorsApi = createCompetitors({ db, json, readBody, log, broadcast, getSetting, setSetting, seedDemoEnabled: SEED_DEMO });
@@ -313,6 +376,8 @@ export const server = http.createServer(async (req, res) => {
       salesTarget: Number(getSetting('SALES_TARGET', '0')) || 0,
     });
     if (user && p.startsWith('/api/') && user.role === 'viewer' && req.method !== 'GET') return json(res, 403, { error: 'Роль «Наблюдатель» — только просмотр' });
+    // настройки, команда, воронки, шаблоны, автоматизации, ключи и обслуживание — только администратор
+    if (user && user.role !== 'admin' && req.method !== 'GET' && ADMIN_ONLY.some(re => re.test(p))) return json(res, 403, { error: 'Это может менять только администратор (роль в Настройки → Команда)' });
 
     // ===== dashboard / analytics =====
     if (p === '/api/dashboard') {
@@ -382,7 +447,7 @@ export const server = http.createServer(async (req, res) => {
     const CRUD = { contacts: ['name', 'phone', 'email', 'company', 'company_id', 'position', 'source', 'tags', 'notes', 'responsible_id', 'custom'], companies: ['name', 'inn', 'phone', 'email', 'site', 'notes'], tasks: ['title', 'type', 'due', 'priority', 'done', 'deal_id', 'contact_id', 'responsible_id', 'result'], products: ['name', 'sku', 'price', 'unit', 'active'], templates: ['name', 'body', 'channel'], automations: ['name', 'trigger_type', 'trigger_value', 'action_type', 'action_value', 'active'], notes: ['entity_type', 'entity_id', 'body', 'author'] };
     const mCrud = p.match(/^\/api\/(contacts|companies|tasks|products|templates|automations|notes)(?:\/(\d+))?$/);
     if (mCrud) { const [, table, id] = mCrud; const fields = CRUD[table];
-      if (req.method === 'GET' && !id) { if (table === 'tasks') return json(res, 200, db.prepare('SELECT t.*,c.name contact_name,d.title deal_title FROM tasks t LEFT JOIN contacts c ON c.id=t.contact_id LEFT JOIN deals d ON d.id=t.deal_id ORDER BY done,due,id DESC').all()); if (table === 'notes') return json(res, 200, db.prepare('SELECT * FROM notes WHERE entity_type=? AND entity_id=? ORDER BY id DESC').all(u.searchParams.get('type'), u.searchParams.get('entity'))); return json(res, 200, db.prepare(`SELECT * FROM ${table} ORDER BY id DESC`).all()); }
+      if (req.method === 'GET' && !id) { if (table === 'tasks') return json(res, 200, db.prepare('SELECT t.*,c.name contact_name,d.title deal_title,u.name responsible_name FROM tasks t LEFT JOIN contacts c ON c.id=t.contact_id LEFT JOIN deals d ON d.id=t.deal_id LEFT JOIN users u ON u.id=t.responsible_id ORDER BY done,due,id DESC').all()); if (table === 'notes') return json(res, 200, db.prepare('SELECT * FROM notes WHERE entity_type=? AND entity_id=? ORDER BY id DESC').all(u.searchParams.get('type'), u.searchParams.get('entity'))); return json(res, 200, db.prepare(`SELECT * FROM ${table} ORDER BY id DESC`).all()); }
       if (req.method === 'GET') return json(res, 200, db.prepare(`SELECT * FROM ${table} WHERE id=?`).get(id) || {});
       if (req.method === 'POST') { const b = await readBody(req); if (table === 'notes') b.author = user.name; const ks = fields.filter(f => b[f] !== undefined); const r = db.prepare(`INSERT INTO ${table}(${ks}) VALUES(${ks.map(() => '?')})`).run(...ks.map(k => b[k])); log(`Создано (${table} #${r.lastInsertRowid})`, table, Number(r.lastInsertRowid), user.name); broadcast('change', { table }); return json(res, 201, db.prepare(`SELECT * FROM ${table} WHERE id=?`).get(r.lastInsertRowid)); }
       if (req.method === 'PATCH' && id) { const b = await readBody(req); const ks = Object.keys(b).filter(k => fields.includes(k)); if (ks.length) db.prepare(`UPDATE ${table} SET ${ks.map(k => k + '=?')} WHERE id=?`).run(...ks.map(k => b[k]), id); broadcast('change', { table }); return json(res, 200, db.prepare(`SELECT * FROM ${table} WHERE id=?`).get(id)); }
@@ -409,7 +474,14 @@ export const server = http.createServer(async (req, res) => {
         if (req.method === 'POST') { const b = await readBody(req); const pr = b.product_id ? db.prepare('SELECT * FROM products WHERE id=?').get(b.product_id) : null; const r = db.prepare('INSERT INTO deal_products(deal_id,product_id,name,price,qty) VALUES(?,?,?,?,?)').run(id, b.product_id || null, b.name || pr?.name, b.price ?? pr?.price ?? 0, b.qty || 1); const sum = db.prepare('SELECT COALESCE(SUM(price*qty),0) s FROM deal_products WHERE deal_id=?').get(id).s; db.prepare('UPDATE deals SET amount=? WHERE id=?').run(sum, id); broadcast('change', { table: 'deals' }); return json(res, 201, db.prepare('SELECT * FROM deal_products WHERE id=?').get(r.lastInsertRowid)); }
         return json(res, 405, { error: 'Метод не поддерживается' });
       }
-      if (req.method === 'GET') { const deal = db.prepare('SELECT d.*,c.name contact_name,c.phone contact_phone FROM deals d LEFT JOIN contacts c ON c.id=d.contact_id WHERE d.id=?').get(id); return json(res, 200, { deal, notes: db.prepare("SELECT * FROM notes WHERE entity_type='deals' AND entity_id=? ORDER BY id DESC").all(id), tasks: db.prepare('SELECT * FROM tasks WHERE deal_id=? ORDER BY id DESC').all(id), products: db.prepare('SELECT * FROM deal_products WHERE deal_id=?').all(id), history: db.prepare("SELECT * FROM activities WHERE entity_type='deals' AND entity_id=? ORDER BY id DESC LIMIT 20").all(id) }); }
+      if (req.method === 'GET') {
+        const deal = db.prepare('SELECT d.*,c.name contact_name,c.phone contact_phone,c.email contact_email,u.name responsible_name FROM deals d LEFT JOIN contacts c ON c.id=d.contact_id LEFT JOIN users u ON u.id=d.responsible_id WHERE d.id=?').get(id);
+        const products = db.prepare('SELECT dp.*,pr.name product_name FROM deal_products dp LEFT JOIN products pr ON pr.id=dp.product_id WHERE dp.deal_id=?').all(id);
+        // переписка клиента по этой сделке — единый диалог прямо в карточке
+        const conv = deal?.contact_id ? db.prepare('SELECT id,channels,unread,chat_type FROM conversations WHERE contact_id=? ORDER BY last_at DESC').get(deal.contact_id) : null;
+        const messages = conv ? db.prepare('SELECT * FROM messages WHERE conversation_id=? ORDER BY id DESC LIMIT 40').all(conv.id).reverse() : [];
+        return json(res, 200, { deal, notes: db.prepare("SELECT * FROM notes WHERE entity_type='deals' AND entity_id=? ORDER BY id DESC").all(id), tasks: db.prepare('SELECT * FROM tasks WHERE deal_id=? ORDER BY id DESC').all(id), products, history: db.prepare("SELECT * FROM activities WHERE entity_type='deals' AND entity_id=? ORDER BY id DESC LIMIT 20").all(id), conversation: conv, messages });
+      }
       if (req.method === 'PATCH') { const b = await readBody(req); const old = db.prepare('SELECT * FROM deals WHERE id=?').get(id); const fields = ['title', 'amount', 'stage', 'pipeline_id', 'contact_id', 'company_id', 'responsible', 'responsible_id', 'priority', 'loss_reason', 'deadline', 'custom']; const ks = Object.keys(b).filter(k => fields.includes(k)); if (ks.length) db.prepare(`UPDATE deals SET ${ks.map(k => k + '=?')},updated_at=datetime('now')${b.stage && ['won', 'lost'].includes(b.stage) ? ",closed_at=datetime('now')" : ''} WHERE id=?`).run(...ks.map(k => b[k]), id); if (b.stage && old && b.stage !== old.stage) { const s = db.prepare('SELECT name FROM stages WHERE code=?').get(b.stage); log(`Сделка «${old.title}» → этап «${s?.name || b.stage}»`, 'deals', Number(id), user.name); runAutomations('stage_changed', { deal_id: Number(id), contact_id: old.contact_id, stage: b.stage }); } broadcast('change', { table: 'deals' }); return json(res, 200, db.prepare('SELECT * FROM deals WHERE id=?').get(id)); }
       if (req.method === 'DELETE') { db.prepare('DELETE FROM deals WHERE id=?').run(id); return json(res, 200, { deleted: true }); }
     }
@@ -463,7 +535,14 @@ export const server = http.createServer(async (req, res) => {
     const mConv = p.match(/^\/api\/conversations\/(\d+)\/messages$/);
     if (mConv) { const id = mConv[1];
       if (req.method === 'GET') { db.prepare('UPDATE conversations SET unread=0 WHERE id=?').run(id); return json(res, 200, db.prepare('SELECT * FROM messages WHERE conversation_id=? ORDER BY id').all(id)); }
-      if (req.method === 'POST') { const b = await readBody(req); const conv = db.prepare('SELECT cv.*,c.phone FROM conversations cv LEFT JOIN contacts c ON c.id=cv.contact_id WHERE cv.id=?').get(id); if (!conv) return json(res, 404, { error: 'Чат не найден' }); if (b.channel_id) conv.channel_id = b.channel_id; if (b.chat_type) conv.chat_type = b.chat_type; if (b.chatId) conv.external_chat_id = b.chatId; let send = { delivered: false, mode: 'local' }, status = 'local'; const wantChannel = b.chat_type || b.channel || conv.chat_type || 'whatsapp'; try { send = await deliver(conv, wantChannel, b.body, user); status = send.delivered ? 'sent' : 'local'; } catch (e) { status = 'error'; send = { delivered: false, mode: 'error: ' + e.message }; } const tpl = b.body; const r = db.prepare('INSERT INTO messages(conversation_id,channel,direction,body,status,external_id,author) VALUES(?,?,?,?,?,?,?)').run(id, wantChannel, 'out', tpl, status, send.id || null, user.name); db.prepare("UPDATE conversations SET last_at=datetime('now') WHERE id=?").run(id); broadcast('message', { conversation_id: Number(id) }); return json(res, 201, { message: db.prepare('SELECT * FROM messages WHERE id=?').get(r.lastInsertRowid), send }); }
+      if (req.method === 'POST') { const b = await readBody(req); const conv = db.prepare('SELECT cv.*,c.phone FROM conversations cv LEFT JOIN contacts c ON c.id=cv.contact_id WHERE cv.id=?').get(id); if (!conv) return json(res, 404, { error: 'Чат не найден' }); if (b.channel_id) conv.channel_id = b.channel_id; if (b.chat_type) conv.chat_type = b.chat_type; if (b.chatId) conv.external_chat_id = b.chatId;
+        const file = b.contentUri ? { contentUri: String(b.contentUri) } : (b.fileUrl ? { contentUri: String(b.fileUrl) } : null);
+        if (!String(b.body || '').trim() && !file) return json(res, 400, { error: 'Пустое сообщение: введите текст или приложите ссылку на файл' });
+        let send = { delivered: false, mode: 'local' }, status = 'local'; const wantChannel = b.chat_type || b.channel || conv.chat_type || 'whatsapp';
+        try { send = await deliver(conv, wantChannel, b.body || '', user, file); status = send.delivered ? 'sent' : 'local'; } catch (e) { status = 'error'; send = { delivered: false, mode: 'error: ' + e.message }; }
+        const body = String(b.body || '').trim() || (file ? '[вложение]' : '');
+        const r = db.prepare('INSERT INTO messages(conversation_id,channel,direction,body,content_uri,status,external_id,author) VALUES(?,?,?,?,?,?,?,?)').run(id, wantChannel, 'out', body, file?.contentUri || null, status, send.id || null, user.name);
+        db.prepare("UPDATE conversations SET last_at=datetime('now') WHERE id=?").run(id); broadcast('message', { conversation_id: Number(id) }); return json(res, 201, { message: db.prepare('SELECT * FROM messages WHERE id=?').get(r.lastInsertRowid), send }); }
     }
     const mEmail = p.match(/^\/api\/conversations\/(\d+)\/email$/);
     if (mEmail && req.method === 'POST') {
@@ -510,8 +589,8 @@ export const server = http.createServer(async (req, res) => {
       } catch (e) { return json(res, 400, { ok: false, error: e.message }) }
     }
     if (p === '/api/settings') {
-      if (req.method === 'GET') { const mask = v => v ? '••••••' + String(v).slice(-4) : ''; return json(res, 200, { version: VERSION, company: { name: getSetting('COMPANY_NAME'), currency: getSetting('CURRENCY', '₽') }, sales_target: Number(getSetting('SALES_TARGET', '0')) || 0, email: { host: getSetting('SMTP_HOST'), port: getSetting('SMTP_PORT', '587'), secure: getSetting('SMTP_SECURE', ''), user: getSetting('SMTP_USER'), pass: mask(getSetting('SMTP_PASS')), from: getSetting('MAIL_FROM'), webhook_secret: getSetting('EMAIL_WEBHOOK_SECRET'), test_to: getSetting('SMTP_TEST_TO'), configured: !!getSetting('SMTP_HOST') }, maintenance: { backup_keep_days: getSetting('BACKUP_KEEP_DAYS', '7'), backup_hour: getSetting('BACKUP_HOUR', '3'), notify_webhook: getSetting('NOTIFY_WEBHOOK') }, advanced: { frame_ancestors: getSetting('FRAME_ANCESTORS'), login_rate_limit: getSetting('LOGIN_RATE_LIMIT', '12') }, messenger_provider: getSetting('MESSENGER_PROVIDER', 'wazzup'), auto_deal: getSetting('AUTO_DEAL', '1'), wazzup: { api_key: mask(getSetting('WAZZUP_API_KEY')), api_url: getSetting('WAZZUP_API_URL', 'https://api.wazzup24.com/v3'), channel_id: getSetting('WAZZUP_CHANNEL_ID'), webhook_secret: getSetting('WAZZUP_WEBHOOK_SECRET'), configured: !!getSetting('WAZZUP_API_KEY') }, whatsapp: { token: mask(getSetting('WHATSAPP_TOKEN')), phone_id: getSetting('WHATSAPP_PHONE_ID'), verify_token: getSetting('WHATSAPP_VERIFY_TOKEN', 'karkas-verify'), configured: !!(getSetting('WHATSAPP_TOKEN') && getSetting('WHATSAPP_PHONE_ID')) }, telegram: { configured: !!getSetting('TELEGRAM_BOT_TOKEN') } }); }
-      if (req.method === 'PUT') { if (!requireAdmin(user, res)) return; const b = await readBody(req); const clean = v => (v && !String(v).includes('•')) ? v : null; if (clean(b.WAZZUP_API_KEY)) setSetting('WAZZUP_API_KEY', b.WAZZUP_API_KEY); for (const k of ['WAZZUP_API_URL', 'WAZZUP_CHANNEL_ID', 'WAZZUP_WEBHOOK_SECRET', 'WHATSAPP_PHONE_ID', 'WHATSAPP_VERIFY_TOKEN', 'COMPANY_NAME', 'CURRENCY', 'MESSENGER_PROVIDER', 'AUTO_DEAL', 'AUTO_DEAL_STAGE']) if (b[k] !== undefined) setSetting(k, b[k]); if (clean(b.WHATSAPP_TOKEN)) setSetting('WHATSAPP_TOKEN', b.WHATSAPP_TOKEN); if (clean(b.TELEGRAM_BOT_TOKEN)) setSetting('TELEGRAM_BOT_TOKEN', b.TELEGRAM_BOT_TOKEN);
+      if (req.method === 'GET') { const mask = v => v ? '••••••' + String(v).slice(-4) : ''; return json(res, 200, { version: VERSION, company: { name: getSetting('COMPANY_NAME'), currency: getSetting('CURRENCY', '₽') }, sales_target: Number(getSetting('SALES_TARGET', '0')) || 0, email: { host: getSetting('SMTP_HOST'), port: getSetting('SMTP_PORT', '587'), secure: getSetting('SMTP_SECURE', ''), user: getSetting('SMTP_USER'), pass: mask(getSetting('SMTP_PASS')), from: getSetting('MAIL_FROM'), webhook_secret: getSetting('EMAIL_WEBHOOK_SECRET'), test_to: getSetting('SMTP_TEST_TO'), configured: !!getSetting('SMTP_HOST') }, maintenance: { backup_keep_days: getSetting('BACKUP_KEEP_DAYS', '7'), backup_hour: getSetting('BACKUP_HOUR', '3'), notify_webhook: getSetting('NOTIFY_WEBHOOK') }, advanced: { frame_ancestors: getSetting('FRAME_ANCESTORS'), login_rate_limit: getSetting('LOGIN_RATE_LIMIT', '12') }, messenger_provider: getSetting('MESSENGER_PROVIDER', 'wazzup'), auto_deal: getSetting('AUTO_DEAL', '1'), auto_assign: getSetting('AUTO_ASSIGN', '0'), wazzup: { api_key: mask(getSetting('WAZZUP_API_KEY')), api_url: getSetting('WAZZUP_API_URL', 'https://api.wazzup24.com/v3'), channel_id: getSetting('WAZZUP_CHANNEL_ID'), webhook_secret: getSetting('WAZZUP_WEBHOOK_SECRET'), configured: !!getSetting('WAZZUP_API_KEY') }, whatsapp: { token: mask(getSetting('WHATSAPP_TOKEN')), phone_id: getSetting('WHATSAPP_PHONE_ID'), verify_token: getSetting('WHATSAPP_VERIFY_TOKEN', 'karkas-verify'), configured: !!(getSetting('WHATSAPP_TOKEN') && getSetting('WHATSAPP_PHONE_ID')) }, telegram: { configured: !!getSetting('TELEGRAM_BOT_TOKEN') } }); }
+      if (req.method === 'PUT') { if (!requireAdmin(user, res)) return; const b = await readBody(req); const clean = v => (v && !String(v).includes('•')) ? v : null; if (clean(b.WAZZUP_API_KEY)) setSetting('WAZZUP_API_KEY', b.WAZZUP_API_KEY); for (const k of ['WAZZUP_API_URL', 'WAZZUP_CHANNEL_ID', 'WAZZUP_WEBHOOK_SECRET', 'WHATSAPP_PHONE_ID', 'WHATSAPP_VERIFY_TOKEN', 'COMPANY_NAME', 'CURRENCY', 'MESSENGER_PROVIDER', 'AUTO_DEAL', 'AUTO_DEAL_STAGE', 'AUTO_ASSIGN']) if (b[k] !== undefined) setSetting(k, b[k]); if (clean(b.WHATSAPP_TOKEN)) setSetting('WHATSAPP_TOKEN', b.WHATSAPP_TOKEN); if (clean(b.TELEGRAM_BOT_TOKEN)) setSetting('TELEGRAM_BOT_TOKEN', b.TELEGRAM_BOT_TOKEN);
         for (const k of ['SMTP_HOST', 'SMTP_PORT', 'SMTP_SECURE', 'SMTP_USER', 'MAIL_FROM', 'EMAIL_WEBHOOK_SECRET', 'SALES_TARGET', 'BACKUP_KEEP_DAYS', 'BACKUP_HOUR', 'NOTIFY_WEBHOOK', 'FRAME_ANCESTORS', 'LOGIN_RATE_LIMIT', 'SMTP_TEST_TO']) if (b[k] !== undefined) {
           if (k === 'SALES_TARGET') { setSetting('SALES_TARGET', String(Number(String(b[k]).replace(/[^\d.]/g, '')) || 0)); continue }
           setSetting(k, String(b[k]));

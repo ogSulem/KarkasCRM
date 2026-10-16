@@ -233,6 +233,94 @@ test('демо-данные удаляются одной кнопкой, раб
   assert.ok(after.length < before, 'демо-записи ушли, база стала чище');
 });
 
+test('права: менеджер ведёт клиентов, но не меняет настройки; наблюдатель — только чтение', async () => {
+  const admin = h;
+  await call('/api/users', { method: 'POST', body: JSON.stringify({ name: 'Менеджер Пётр', email: 'petr@example.com', password: 'menedzher123', role: 'manager' }) });
+  await call('/api/users', { method: 'POST', body: JSON.stringify({ name: 'Наблюдатель', email: 'viewer@example.com', password: 'nabludatel123', role: 'viewer' }) });
+  const login = async (email, password) => (await call('/api/auth/login', { method: 'POST', body: JSON.stringify({ email, password }) })).body.token;
+  const mToken = await login('petr@example.com', 'menedzher123');
+  const vToken = await login('viewer@example.com', 'nabludatel123');
+  const asM = (p, opt = {}) => call(p, { ...opt, headers: { ...(opt.headers || {}), Authorization: 'Bearer ' + mToken } });
+  const asV = (p, opt = {}) => call(p, { ...opt, headers: { ...(opt.headers || {}), Authorization: 'Bearer ' + vToken } });
+
+  const c = await asM('/api/contacts', { method: 'POST', body: JSON.stringify({ name: 'Клиент менеджера', phone: '+7 999 000-11-22' }) });
+  assert.equal(c.status, 201, 'менеджер создаёт контакты');
+  const d = await asM('/api/deals', { method: 'POST', body: JSON.stringify({ title: 'Сделка менеджера', amount: 1000, stage: 'new', contact_id: c.body.id }) });
+  assert.equal(d.status, 201, 'менеджер создаёт сделки');
+  assert.equal((await asM('/api/deals/' + d.body.id, { method: 'PATCH', body: JSON.stringify({ stage: 'open' }) })).status, 200, 'менеджер двигает сделки');
+  for (const [path, method, body] of [['/api/settings', 'PUT', '{"COMPANY_NAME":"Хак"}'], ['/api/pipelines', 'POST', '{"name":"Хак"}'], ['/api/templates', 'POST', '{"name":"Хак","body":"x"}'], ['/api/automations', 'POST', '{"name":"Хак","trigger_type":"deal_created","action_type":"create_task","action_value":"x"}'], ['/api/custom-fields', 'PUT', '{"fields":[]}'], ['/api/users', 'POST', '{"name":"Хак","email":"h@h.ru","password":"hacker1234"}'], ['/api/demo/clean', 'POST', '{}'], ['/api/backups', 'POST', '{}']]) {
+    assert.equal((await asM(path, { method, body })).status, 403, 'менеджеру запрещено: ' + method + ' ' + path);
+  }
+  assert.equal((await asV('/api/contacts')).status, 200, 'наблюдатель читает данные');
+  assert.equal((await asV('/api/contacts', { method: 'POST', body: JSON.stringify({ name: 'Нельзя' }) })).status, 403, 'наблюдатель не создаёт записи');
+  assert.equal((await asV('/api/deals/' + d.body.id, { method: 'PATCH', body: JSON.stringify({ amount: 1 }) })).status, 403, 'наблюдатель не меняет сделки');
+  h = admin; // дальше снова работаем администратором
+});
+
+test('карточка сделки показывает переписку клиента', async () => {
+  const convs = (await call('/api/conversations')).body;
+  const conv = convs.find(c => (c.phone || '').includes('79115550101'));
+  const client = (await call('/api/contacts')).body.find(c => c.id === conv.contact_id);
+  const deal = (await call('/api/deals', { method: 'POST', body: JSON.stringify({ title: 'Сделка с перепиской', amount: 500, stage: 'new', contact_id: client.id }) })).body;
+  const card = (await call('/api/deals/' + deal.id)).body;
+  assert.ok(card.conversation && card.conversation.id === conv.id, 'в карточке сделки есть ссылка на чат клиента');
+  assert.ok(card.messages.length >= 2, 'переписка клиента отдаётся вместе со сделкой');
+  assert.ok(card.messages.some(m => m.direction === 'in'), 'видны входящие сообщения клиента');
+});
+
+test('Wazzup: отправка файла по ссылке и понятные подсказки об ошибках', async () => {
+  const mock = (await import('node:http')).createServer(async (req, res) => {
+    let b = ''; for await (const ch of req) b += ch;
+    if (req.url === '/message' && req.method === 'POST') { (globalThis.__wzFiles = globalThis.__wzFiles || []).push(JSON.parse(b)); res.writeHead(200, { 'Content-Type': 'application/json' }); return res.end(JSON.stringify({ messageId: 'wz-file-' + globalThis.__wzFiles.length })); }
+    res.writeHead(404); res.end('{}');
+  });
+  await new Promise(r => mock.listen(18156, r));
+  try {
+    await call('/api/settings', { method: 'PUT', body: JSON.stringify({ WAZZUP_API_URL: 'http://127.0.0.1:18156', WAZZUP_CHANNEL_ID: 'e0629e11-0f67-4567-92a9-2237e91ec1b9', MESSENGER_PROVIDER: 'wazzup' }) });
+    const conv = (await call('/api/conversations')).body.find(c => (c.phone || '').includes('79115550101'));
+    assert.equal((await call(`/api/conversations/${conv.id}/messages`, { method: 'POST', body: JSON.stringify({ body: '   ' }) })).status, 400, 'пустое сообщение отклоняется с подсказкой');
+    const file = await call(`/api/conversations/${conv.id}/messages`, { method: 'POST', body: JSON.stringify({ contentUri: 'https://disk.yandex.ru/i/smeta.pdf', body: 'Смета во вложении', chat_type: 'whatsapp' }) });
+    assert.equal(file.status, 201);
+    const sentFile = globalThis.__wzFiles.find(x => x.contentUri);
+    assert.equal(sentFile.contentUri, 'https://disk.yandex.ru/i/smeta.pdf', 'файл уходит ссылкой contentUri');
+    assert.equal(sentFile.text, 'Смета во вложении', 'подпись к файлу передаётся');
+    assert.equal(sentFile.chatType, 'whatsapp', 'тип канала из интерфейса');
+    assert.ok(/^\d+$/.test(sentFile.chatId), 'для WhatsApp адресат — только цифры телефона, как требует Wazzup');
+    assert.equal(file.body.message.content_uri, 'https://disk.yandex.ru/i/smeta.pdf', 'ссылка на файл сохраняется в истории чата');
+    await call(`/api/conversations/${conv.id}/messages`, { method: 'POST', body: JSON.stringify({ body: 'Ещё одно сообщение', chat_type: 'whatsapp' }) });
+    const ids = globalThis.__wzFiles.map(x => x.crmMessageId);
+    assert.equal(ids.length, 2, 'два исходящих ушли в Wazzup');
+    assert.notEqual(ids[0], ids[1], 'у каждого сообщения уникальный crmMessageId (Wazzup не склеит дубли)');
+  } finally { mock.close(); }
+});
+
+test('автосоздание сделки: новое обращение клиента даёт новую сделку в «Неразобранном»', async () => {
+  const phone = '79110007711';
+  await call('/webhooks/generic', { method: 'POST', body: JSON.stringify({ channel: 'site', phone, name: 'Обращение с сайта', body: 'Нужен расчёт дома' }) });
+  const first = (await call('/api/deals')).body.deals.filter(d => d.contact_name === 'Обращение с сайта');
+  assert.equal(first.length, 1, 'первое обращение создало сделку');
+  assert.equal(first[0].stage, 'new', 'сделка попала в «Неразобранное»');
+  await call('/webhooks/generic', { method: 'POST', body: JSON.stringify({ channel: 'site', phone, body: 'И ещё вопрос' }) });
+  assert.equal((await call('/api/deals')).body.deals.filter(d => d.contact_name === 'Обращение с сайта').length, 1, 'пока сделка открыта, второй сделки не создаётся');
+  await call('/api/deals/' + first[0].id, { method: 'PATCH', body: JSON.stringify({ stage: 'won' }) });
+  await call('/webhooks/generic', { method: 'POST', body: JSON.stringify({ channel: 'site', phone, body: 'Здравствуйте, вернулся! Нужен ещё один дом' }) });
+  assert.equal((await call('/api/deals')).body.deals.filter(d => d.contact_name === 'Обращение с сайта').length, 2, 'вернувшийся клиент получил новую сделку');
+});
+
+test('автоназначение: новые обращения распределяются между менеджерами', async () => {
+  await call('/api/users', { method: 'POST', body: JSON.stringify({ name: 'Менеджер Анна', email: 'anna@example.com', password: 'menedzher456', role: 'manager' }) });
+  await call('/api/settings', { method: 'PUT', body: JSON.stringify({ AUTO_ASSIGN: '1', AUTO_DEAL: '1' }) });
+  for (const phone of ['79110008811', '79110008822']) await call('/webhooks/generic', { method: 'POST', body: JSON.stringify({ channel: 'site', phone, name: 'Лид ' + phone.slice(-4), body: 'Нужен расчёт' }) });
+  const deals = (await call('/api/deals')).body.deals.filter(d => /Лид/.test(d.contact_name || ''));
+  assert.equal(deals.length, 2, 'оба обращения превратились в сделки');
+  const owners = deals.map(d => d.responsible_id);
+  assert.ok(owners.every(Boolean), 'у новых сделок есть ответственный');
+  assert.notEqual(owners[0], owners[1], 'лиды распределились между менеджерами поровну, а не одному');
+  const contacts = (await call('/api/contacts')).body.filter(c => /^Лид /.test(c.name));
+  assert.ok(contacts.every(c => c.responsible_id), 'ответственный виден и в карточке клиента');
+  await call('/api/settings', { method: 'PUT', body: JSON.stringify({ AUTO_ASSIGN: '0' }) });
+});
+
 test('защита входа: ограничение попыток подбора пароля', async () => {
   const codes = [];
   for (let i = 0; i < 16; i++) codes.push((await call('/api/auth/login', { method: 'POST', body: JSON.stringify({ email: 'admin@example.com', password: 'wrong-' + i }) })).status);

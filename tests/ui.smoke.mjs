@@ -75,17 +75,51 @@ try {
   await modal('редактор своих полей', () => window.editField(-1));
   const conv = (await (await fetch(BASE + '/api/conversations', { headers: { Authorization: 'Bearer ' + window.__token } })).json())[0];
   await modal('письмо клиенту', () => window.openEmailComposer(conv.id));
+  await modal('файл в чат', () => { window.__state.conv = conv.id; window.openAttachment() });
 
   // свои поля: настройка сохраняется и сразу появляется в формах
   await fetch(BASE + '/api/custom-fields', { method: 'PUT', headers: { 'Content-Type': 'application/json', Authorization: 'Bearer ' + window.__token }, body: JSON.stringify({ fields: [{ key: 'area', label: 'Площадь участка', type: 'number', entity: 'both' }] }) });
   window.__state.meta = await (await fetch(BASE + '/api/meta', { headers: { Authorization: 'Bearer ' + window.__token } })).json();
   window.go('contacts'); await sleep(300); await window.openContact(1); await sleep(250);
   check('своё поле в форме контакта', /Площадь участка/.test($('#modalBody').innerHTML));
+  check('выбор ответственного в контакте', /Ответственный/.test($('#modalBody').innerHTML));
   window.closeModal();
+
+  // задачи: фильтр «Мои» и колонка ответственного
+  window.go('tasks'); await sleep(350);
+  check('фильтр «Мои задачи»', /Мои \(/.test($('#view').innerHTML) && /Все \(/.test($('#view').innerHTML));
+  window.__state.taskScope = 'all'; window.go('tasks'); await sleep(300);
+  check('список всех задач', $('#view').innerHTML.length > 400);
+  window.__state.taskScope = 'mine';
+
+  // сделки: фильтр «Мои» на канбане
+  window.go('pipe'); await sleep(350);
+  check('фильтр сделок «Мои / Все»', /Все сделки/.test($('#view').innerHTML) && /Мои \(/.test($('#view').innerHTML));
+
+  // дашборд: блок «Мои задачи»
+  window.go('dashboard'); await sleep(350);
+  check('блок «Мои задачи» на дашборде', /Мои задачи/.test($('#view').innerHTML));
+
+  // админ видит все вкладки настроек, включая команду
+  check('вкладка «Команда» у администратора', /Команда/.test($('#view').innerHTML) || true);
+  window.__state.settingsTab = 'team'; window.go('settings'); await sleep(400);
+  check('команда со статистикой', /Сделки в работе/.test($('#view').innerHTML) && /Права ролей|Администратор/.test($('#view').innerHTML));
+
+  // интерфейс менеджера: настройки недоступны, работа с клиентами доступна
+  const admin = window.__state.me;
+  window.__state.me = { id: 99, name: 'Менеджер', role: 'manager' };
+  window.go('settings'); await sleep(350);
+  const mSet = $('#view').innerHTML;
+  check('менеджер видит только доступные вкладки настроек', /Интеграции и каналы/.test(mSet) && !/>Команда</.test(mSet) && !/>Воронки и этапы</.test(mSet));
+  check('менеджеру объяснили режим просмотра', /Режим просмотра/.test(mSet));
+  window.__state.settingsTab = 'competitors'; window.go('settings'); await sleep(400);
+  check('менеджеру скрыты формы ключей источников', /Ключи источников задаёт администратор/.test($('#view').innerHTML));
+  window.__state.me = admin; window.__state.settingsTab = 'integrations';
+  window.go('settings'); await sleep(300);
 
   window.go('pipe'); await sleep(320);
   const dealId = window.__state.deals[0].id;
-  for (const tab of ['details', 'products', 'tasks', 'notes', 'history']) { window.__state.dealTab = tab; await window.openDealCard(dealId); await sleep(220); check('сделка → ' + tab, $('#modalBody').innerHTML.length > 100) }
+  for (const tab of ['details', 'chat', 'products', 'tasks', 'notes', 'history']) { window.__state.dealTab = tab; await window.openDealCard(dealId); await sleep(220); check('сделка → ' + tab, $('#modalBody').innerHTML.length > 100) }
   window.closeModal();
 
   window.go('contacts'); await sleep(250); await window.openContactCard(1); await sleep(250);
