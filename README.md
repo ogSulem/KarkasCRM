@@ -340,19 +340,19 @@ tests/ui.smoke.mjs         smoke-тест интерфейса в jsdom
 deploy/                    Caddyfile (домен + HTTPS) и nginx.conf
 Dockerfile, docker-compose.yml, install.sh  сборка и развёртывание
 scripts/update.sh          обновление до новой версии (git pull + пересборка)
-run-local.sh, run-tests.sh, .env.example, README.md, DEPLOY.md
+run-local.sh, run-tests.sh, .env.example, README.md, DEPLOY.md, LICENSE
 ```
+
+Репозиторий содержит **только KarkasCRM**: никаких лишних каталогов, заглушек и файлов
+других проектов — проверяется командой `git ls-files | wc -l` (сотни файлов, а не десятки тысяч).
 
 Один контейнер с CRM (плюс контейнер Caddy только в режиме домена), один файл базы (`/data/crm.db`, SQLite WAL) — бэкап сводится к копированию файла, обновление к `git pull && docker compose up -d --build`.
 
-**Про Twenty CRM**: репозиторий вырос из форка ошибочно подключённого монорепозитория Twenty — каталог `packages/` лежит в истории и **в сборку KarkasCRM не входит** (исключён через `.dockerignore`). Код KarkasCRM (`backend/`, `frontend/`, `tests/`, `Dockerfile`, `docker-compose.yml`) написан с нуля и не содержит файлов Twenty — это проверяется командой:
+**Про Twenty CRM**: репозиторий вырос из форка, в который был ошибочно добавлен монорепозиторий Twenty (AGPL-3.0). Он **полностью удалён из текущей версии** — нет ни каталога того монорепозитория, ни служебных файлов проекта Twenty (yarn/nx-конфиги, их `.github`, `.cursor`, заглушки `backend/package.json`, `frontend/Dockerfile` и т. п.). Остались только файлы KarkasCRM:
 
 ```bash
-grep -ri twenty backend frontend tests Dockerfile docker-compose.yml   # ничего не находит
+git ls-files | awk -F/ '{print $1}' | sort -u      # backend, frontend, tests, deploy, scripts + конфиги
+grep -ril twenty backend frontend tests deploy Dockerfile docker-compose.yml   # пусто
 ```
 
-Чтобы убрать исторический каталог из репозитория (одним отдельным коммитом, лицензия AGPL остаётся в `LICENSE`):
-
-```bash
-./scripts/remove-legacy-twenty.sh      # git rm -r packages + коммит; вернуть можно из истории
-```
+Код Twenty остался только в исторических коммитах (до `018ed341`); текст лицензии AGPL-3.0 сохранён для справки в `licenses/AGPL-3.0-twenty.txt`, а `LICENSE` описывает права на KarkasCRM.

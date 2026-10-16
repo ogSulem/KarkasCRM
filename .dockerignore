@@ -1,9 +1,13 @@
 .git
+.github
 .env
 **/node_modules
-.nx/cache
-packages
 data
 tests
+licenses
 *.md
-.github
+docker-compose.yml
+scripts
+run-local.sh
+run-tests.sh
+install.sh
