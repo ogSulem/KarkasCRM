@@ -6,6 +6,7 @@ import { createHmac, randomBytes, scryptSync, timingSafeEqual } from 'node:crypt
 import { readFileSync, existsSync, mkdirSync } from 'node:fs';
 import { extname, join, normalize } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { createCompetitors } from './competitors.js';
 
 const PORT = process.env.PORT || 8080, HOST = process.env.HOST || '0.0.0.0';
 const ROOT = fileURLToPath(new URL('.', import.meta.url));
@@ -135,10 +136,14 @@ async function wazzupFetch(path, opt = {}) {
   if (!res.ok) throw new Error(data?.description || data?.error || `Wazzup API ${res.status}`);
   return data;
 }
-export async function sendViaWazzup(conv, text, user) {
-  const channelId = conv.channel_id || getSetting('WAZZUP_CHANNEL_ID'); if (!channelId) throw new Error('Не выбран канал Wazzup (Настройки → Wazzup → синхронизировать каналы)');
-  const chatType = conv.chat_type || 'whatsapp';
-  const chatId = conv.external_chat_id || digits(conv.phone);
+const isUuid = s => /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(String(s || ''));
+export async function sendViaWazzup(conv, text, user, chatTypeOverride = '') {
+  // Wazzup принимает только id канала в формате uuid — иначе отвечаем каналом по умолчанию из настроек
+  const channelId = (isUuid(conv.channel_id) ? conv.channel_id : '') || getSetting('WAZZUP_CHANNEL_ID');
+  if (!channelId) throw new Error('Не выбран канал Wazzup. Настройки → Интеграции → «Проверить и синхронизировать каналы», затем выберите канал по умолчанию.');
+  const chatType = chatTypeOverride || conv.chat_type || 'whatsapp';
+  // whatsapp/viber адресуются по номеру телефона, telegram/instagram — по идентификатору чата из вебхука
+  const chatId = ['whatsapp', 'viber'].includes(chatType) ? (digits(conv.phone) || conv.external_chat_id) : (conv.external_chat_id || digits(conv.phone));
   const data = await wazzupFetch('/message', { method: 'POST', body: JSON.stringify({ channelId, chatType, chatId, text, crmMessageId: 'karkas-' + Date.now(), crmUserId: String(user?.id || '') }) });
   return { delivered: true, mode: 'wazzup', id: data.messageId || data.id };
 }
@@ -150,7 +155,7 @@ async function sendWhatsAppDirect(to, text) {
 }
 async function deliver(conv, channel, text, user) {
   const provider = getSetting('MESSENGER_PROVIDER', 'wazzup');
-  if (provider === 'wazzup') { try { return await sendViaWazzup(conv, text, user); } catch (e) { if (channel !== 'whatsapp') throw e; const d = await sendWhatsAppDirect(conv.phone, text).catch(() => null); if (d) return d; throw e; } }
+  if (provider === 'wazzup') { try { return await sendViaWazzup(conv, text, user, channel && channel !== 'site' ? channel : ''); } catch (e) { if (channel !== 'whatsapp') throw e; const d = await sendWhatsAppDirect(conv.phone, text).catch(() => null); if (d) return d; throw e; } }
   if (channel === 'whatsapp') { const d = await sendWhatsAppDirect(conv.phone, text); if (d) return d; }
   return { delivered: false, mode: 'local-only' };
 }
@@ -162,6 +167,7 @@ const MIME = { '.html': 'text/html', '.js': 'text/javascript', '.css': 'text/css
 const csv = rows => { if (!rows.length) return ''; const ks = Object.keys(rows[0]); const q = v => `"${String(v ?? '').replace(/"/g, '""')}"`; return [ks.join(';'), ...rows.map(r => ks.map(k => q(r[k])).join(';'))].join('\n'); };
 function requireAdmin(user, res) { if (user.role !== 'admin') { json(res, 403, { error: 'Только для администратора' }); return false; } return true; }
 
+const competitorsApi = createCompetitors({ db, json, readBody, log, broadcast, getSetting, setSetting });
 export const server = http.createServer(async (req, res) => {
   const u = new URL(req.url, `http://${req.headers.host}`), p = u.pathname;
   try {
@@ -264,11 +270,11 @@ export const server = http.createServer(async (req, res) => {
     if (p === '/api/me/password' && req.method === 'POST') { const b = await readBody(req); const me = db.prepare('SELECT * FROM users WHERE id=?').get(user.id); if (!checkPass(b.old || '', me.pass)) return json(res, 400, { error: 'Старый пароль неверен' }); db.prepare('UPDATE users SET pass=? WHERE id=?').run(hashPass(b.next), user.id); return json(res, 200, { saved: true }); }
 
     // ===== inbox =====
-    if (p === '/api/conversations' && req.method === 'GET') return json(res, 200, db.prepare(`SELECT cv.*,c.phone,c.email,(SELECT body FROM messages WHERE conversation_id=cv.id ORDER BY id DESC LIMIT 1) last_body FROM conversations cv LEFT JOIN contacts c ON c.id=cv.contact_id ORDER BY cv.last_at DESC`).all());
+    if (p === '/api/conversations' && req.method === 'GET') return json(res, 200, db.prepare(`SELECT cv.*,c.phone,c.email,(SELECT body FROM messages WHERE conversation_id=cv.id ORDER BY id DESC LIMIT 1) last_body FROM conversations cv LEFT JOIN contacts c ON c.id=cv.contact_id ORDER BY cv.last_at DESC, cv.id DESC`).all());
     const mConv = p.match(/^\/api\/conversations\/(\d+)\/messages$/);
     if (mConv) { const id = mConv[1];
       if (req.method === 'GET') { db.prepare('UPDATE conversations SET unread=0 WHERE id=?').run(id); return json(res, 200, db.prepare('SELECT * FROM messages WHERE conversation_id=? ORDER BY id').all(id)); }
-      if (req.method === 'POST') { const b = await readBody(req); const conv = db.prepare('SELECT cv.*,c.phone FROM conversations cv LEFT JOIN contacts c ON c.id=cv.contact_id WHERE cv.id=?').get(id); if (!conv) return json(res, 404, { error: 'Чат не найден' }); if (b.channel_id) conv.channel_id = b.channel_id; if (b.chat_type) conv.chat_type = b.chat_type; if (b.chatId) conv.external_chat_id = b.chatId; let send = { delivered: false, mode: 'local' }, status = 'local'; try { send = await deliver(conv, b.channel || conv.chat_type || 'whatsapp', b.body, user); status = send.delivered ? 'sent' : 'local'; } catch (e) { status = 'error'; send = { delivered: false, mode: 'error: ' + e.message }; } const tpl = b.body; const r = db.prepare('INSERT INTO messages(conversation_id,channel,direction,body,status,external_id,author) VALUES(?,?,?,?,?,?,?)').run(id, b.channel || conv.chat_type || 'whatsapp', 'out', tpl, status, send.id || null, user.name); db.prepare("UPDATE conversations SET last_at=datetime('now') WHERE id=?").run(id); broadcast('message', { conversation_id: Number(id) }); return json(res, 201, { message: db.prepare('SELECT * FROM messages WHERE id=?').get(r.lastInsertRowid), send }); }
+      if (req.method === 'POST') { const b = await readBody(req); const conv = db.prepare('SELECT cv.*,c.phone FROM conversations cv LEFT JOIN contacts c ON c.id=cv.contact_id WHERE cv.id=?').get(id); if (!conv) return json(res, 404, { error: 'Чат не найден' }); if (b.channel_id) conv.channel_id = b.channel_id; if (b.chat_type) conv.chat_type = b.chat_type; if (b.chatId) conv.external_chat_id = b.chatId; let send = { delivered: false, mode: 'local' }, status = 'local'; const wantChannel = b.chat_type || b.channel || conv.chat_type || 'whatsapp'; try { send = await deliver(conv, wantChannel, b.body, user); status = send.delivered ? 'sent' : 'local'; } catch (e) { status = 'error'; send = { delivered: false, mode: 'error: ' + e.message }; } const tpl = b.body; const r = db.prepare('INSERT INTO messages(conversation_id,channel,direction,body,status,external_id,author) VALUES(?,?,?,?,?,?,?)').run(id, wantChannel, 'out', tpl, status, send.id || null, user.name); db.prepare("UPDATE conversations SET last_at=datetime('now') WHERE id=?").run(id); broadcast('message', { conversation_id: Number(id) }); return json(res, 201, { message: db.prepare('SELECT * FROM messages WHERE id=?').get(r.lastInsertRowid), send }); }
     }
     if (p === '/api/inbox/simulate' && req.method === 'POST') { const b = await readBody(req); const conv = upsertIncoming({ channel: b.channel || 'whatsapp', chatType: b.channel || 'whatsapp', phone: b.phone || '+7 900 000-00-00', name: b.name || 'Тестовый клиент', body: b.body || 'Здравствуйте! Хочу расчёт дома.' }); return json(res, 201, { conversation_id: conv?.id }); }
     // CSV export/import
@@ -284,6 +290,11 @@ export const server = http.createServer(async (req, res) => {
     if (p === '/api/settings') {
       if (req.method === 'GET') { const mask = v => v ? '••••••' + String(v).slice(-4) : ''; return json(res, 200, { company: { name: getSetting('COMPANY_NAME'), currency: getSetting('CURRENCY', '₽') }, messenger_provider: getSetting('MESSENGER_PROVIDER', 'wazzup'), auto_deal: getSetting('AUTO_DEAL', '1'), wazzup: { api_key: mask(getSetting('WAZZUP_API_KEY')), api_url: getSetting('WAZZUP_API_URL', 'https://api.wazzup24.com/v3'), channel_id: getSetting('WAZZUP_CHANNEL_ID'), webhook_secret: getSetting('WAZZUP_WEBHOOK_SECRET'), configured: !!getSetting('WAZZUP_API_KEY') }, whatsapp: { token: mask(getSetting('WHATSAPP_TOKEN')), phone_id: getSetting('WHATSAPP_PHONE_ID'), verify_token: getSetting('WHATSAPP_VERIFY_TOKEN', 'karkas-verify'), configured: !!(getSetting('WHATSAPP_TOKEN') && getSetting('WHATSAPP_PHONE_ID')) }, telegram: { configured: !!getSetting('TELEGRAM_BOT_TOKEN') } }); }
       if (req.method === 'PUT') { if (!requireAdmin(user, res)) return; const b = await readBody(req); const clean = v => (v && !String(v).includes('•')) ? v : null; if (clean(b.WAZZUP_API_KEY)) setSetting('WAZZUP_API_KEY', b.WAZZUP_API_KEY); for (const k of ['WAZZUP_API_URL', 'WAZZUP_CHANNEL_ID', 'WAZZUP_WEBHOOK_SECRET', 'WHATSAPP_PHONE_ID', 'WHATSAPP_VERIFY_TOKEN', 'COMPANY_NAME', 'CURRENCY', 'MESSENGER_PROVIDER', 'AUTO_DEAL', 'AUTO_DEAL_STAGE']) if (b[k] !== undefined) setSetting(k, b[k]); if (clean(b.WHATSAPP_TOKEN)) setSetting('WHATSAPP_TOKEN', b.WHATSAPP_TOKEN); if (clean(b.TELEGRAM_BOT_TOKEN)) setSetting('TELEGRAM_BOT_TOKEN', b.TELEGRAM_BOT_TOKEN); log('Настройки обновлены', null, null, user.name); return json(res, 200, { saved: true }); }
+    }
+    // ===== конкуренты: разведка (долги, суды, банкротство, отзывы, прайс-таблицы) =====
+    if (/^\/api\/(competitors|competitor-sources|competitor-links|competitors\/find|prices|reviews)/.test(p)) {
+      const handled = await competitorsApi.handle(req, res, { p, u, user });
+      if (handled !== false) return;
     }
     if (p.startsWith('/api/')) return json(res, 404, { error: 'Не найдено' });
     let file = normalize(join(PUBLIC_DIR, p === '/' ? 'index.html' : p)); if (!file.startsWith(PUBLIC_DIR) || !existsSync(file)) file = join(PUBLIC_DIR, 'index.html');

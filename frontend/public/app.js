@@ -8,7 +8,7 @@ const dt = s => s ? String(s).replace('T', ' ').slice(0, 16) : '';
 const num = v => (String(v ?? '').replace(/[^\d.-]/g, '') || 0) * 1;
 async function api(path, opt = {}) {
   const r = await fetch(path, { ...opt, headers: { 'Content-Type': 'application/json', Authorization: 'Bearer ' + token, ...(opt.headers || {}) } });
-  if (r.status === 401) { logout(); throw new Error('Сессия истекла'); }
+  if (r.status === 401) { if (token) logout(); throw new Error('Требуется вход'); }
   if (String(opt.raw ? 0 : 1) && !(r.headers.get('content-type') || '').includes('json')) return r;
   const d = await r.json().catch(() => ({})); if (!r.ok) throw new Error(d.error || 'Ошибка ' + r.status); return d;
 }
@@ -29,6 +29,7 @@ $('#loginForm').onsubmit = async e => {
 $('#logout').onclick = logout;
 function logout() { token = ''; localStorage.removeItem('karkas_token'); location.reload() }
 async function boot() {
+  if (!token) { $('#app').classList.add('hidden'); $('#login').classList.remove('hidden'); return }
   try {
     const me = await api('/api/me');
     $('#uName').textContent = me.user.name; $('#uEmail').textContent = me.user.email; $('#uAva').textContent = (me.user.name || 'A')[0].toUpperCase();
@@ -41,7 +42,7 @@ const TITLES = {
   dashboard: ['Дашборд', 'Продажи, воронка и активность команды'], pipe: ['Сделки', 'Воронка продаж — перетаскивайте карточки между этапами'],
   inbox: ['Чаты Wazzup', 'WhatsApp, Telegram, Instagram и сайт — в одном окне клиента'], contacts: ['Контакты', 'База клиентов и всех, кто писал в мессенджеры'],
   companies: ['Компании', 'Юридические лица и организации'], tasks: ['Задачи', 'Звонки, встречи и письма по клиентам'],
-  products: ['Товары и услуги', 'Прайс для быстрого наполнения сделок'], analytics: ['Аналитика', 'Конверсия, средний чек и источники'], settings: ['Настройки', 'Интеграции, воронки, автоматизации, команда и данные']
+  products: ['Товары и услуги', 'Прайс для быстрого наполнения сделок'], competitors: ['Конкуренты', 'Разведка: долги, суды, банкротство, отзывы и цены — по одному названию'], analytics: ['Аналитика', 'Конверсия, средний чек и источники'], settings: ['Настройки', 'Интеграции, воронки, автоматизации, команда и данные']
 };
 async function render() {
   const [t, s] = TITLES[state.view] || ['', '']; $('#title').textContent = t; $('#subtitle').textContent = s;
@@ -54,6 +55,7 @@ async function render() {
     if (state.view === 'companies') return await companies(v);
     if (state.view === 'tasks') return await tasks(v);
     if (state.view === 'products') return await products(v);
+    if (state.view === 'competitors') return await competitorsView(v);
     if (state.view === 'analytics') return await analytics(v);
     if (state.view === 'settings') return await settings(v);
   } catch (e) { v.innerHTML = `<div class="card err">${esc(e.message)}</div>` }
@@ -89,6 +91,7 @@ async function dashboard(v) {
    <button class="btn primary" onclick="openDeal()">+ Новая сделка</button>
    <button class="btn" onclick="openTask()">+ Задача</button>
    <button class="btn orange" onclick="go('settings','integrations')">⚙ Подключить Wazzup</button>
+   <button class="btn" onclick="go('competitors')">🕵 Проверить конкурента</button>
    <button class="btn ghost" onclick="simulate()">🧪 Тестовое входящее сообщение</button></div></div></div>`;
 }
 
@@ -295,10 +298,149 @@ async function analytics(v) {
   <div class="card"><h3>Источники лидов</h3>${a.bySource.map(s => `<div class="row"><span>${esc(s.name)} <small>${s.count} сделок</small></span><b>${fmt(s.sum)}</b></div>`).join('') || '<small>Нет данных</small>'}<hr><h3>Причины отказов</h3>${a.byLoss.map(s => `<div class="row"><span>${esc(s.name)}</span><b>${s.count}</b></div>`).join('') || '<small>Отказов нет 🎉</small>'}</div></div>`;
 }
 
+/* ---------- конкуренты ---------- */
+const RISK_CLASS = l => ({ 'низкий': 'ok', 'умеренный': 'mid', 'повышенный': 'warn', 'высокий': 'bad' }[l] || 'mid');
+const STATUS_LABEL = { ok: '✅ получено', skipped: '🔑 нужен ключ', blocked: '⛔ сайт не отдал', error: '⚠ ошибка' };
+async function competitorsView(v) {
+  const list = await api('/api/competitors');
+  const badge = c => c.risk === null ? '<span class="risk mid">не проверен</span>' : `<span class="risk ${RISK_CLASS(c.level)}">риск ${c.risk} · ${esc(c.level)}</span>`;
+  v.innerHTML = `<div class="card">
+   <h3>Кого проверяем?</h3>
+   <div class="row" style="border:0;flex-wrap:wrap;gap:8px">
+    <input id="compQuery" style="flex:1;min-width:240px" placeholder="Название конкурента или ИНН/ОГРН — например «КаркасСтрой» или 7701234567">
+    <input id="compCity" style="max-width:170px" placeholder="Город (для отзывов)">
+    <button class="btn primary" onclick="findCompetitor()">🔎 Проверить конкурента</button>
+    <button class="btn" onclick="openCompetitor()">+ Вручную</button>
+    <button class="btn ghost" onclick="openPriceImport(null,'ours')">📊 Загрузить нашу таблицу</button></div>
+   <small>Проверяем: ФНС (статус, недоимки, руководители) · ФССП (долги приставов) · Федресурс (банкротство) · арбитражные суды · Rusprofile (связи) · отзывы с Google/Яндекс/2ГИС и Авито · цены из Excel-таблиц. Часть источников требует ключ — они честно помечаются, а ручные ссылки на проверку есть всегда.</small>
+  </div>
+  <div class="grid">${list.map(c => `<div class="kpi" style="display:flex;flex-direction:column;gap:6px">
+    <div style="display:flex;justify-content:space-between;align-items:start;gap:8px"><b style="font-size:15px">${esc(c.name)}</b>${badge(c)}</div>
+    <small>${c.inn ? 'ИНН ' + esc(c.inn) : 'ИНН не указан'}${c.city ? ' · ' + esc(c.city) : ''}</small>
+    <small>${c.reviews ? '⭐ ' + (c.avg_rating ?? '—') + ' · отзывов ' + c.reviews : 'отзывов нет'}${c.prices ? ' · цен ' + c.prices : ''}${c.checked_at ? ' · проверен ' + esc(dt(c.checked_at)) : ''}</small>
+    <div style="display:flex;gap:6px;flex-wrap:wrap;margin-top:4px"><button class="btn sm primary" onclick="openCompetitorCard(${c.id})">Отчёт</button><button class="btn sm" onclick="checkCompetitor(${c.id})">↻ Проверить</button><button class="btn sm" onclick="openCompetitor(${c.id})">✎</button><button class="btn sm danger" onclick="delCompetitor(${c.id})">✕</button></div>
+    ${c.verdict ? `<small style="color:var(--muted)">${esc(c.verdict.slice(0, 150))}</small>` : ''}</div>`).join('') || '<div class="card empty">Список пуст — впишите название конкурента выше и нажмите «Проверить». CRM соберёт отчёт по 8 источникам и сравнит цены с нашей таблицей.</div>'}</div>`;
+}
+async function findCompetitor() {
+  const name = $('#compQuery').value.trim(); if (!name) return toast('Введите название конкурента или ИНН');
+  toast('Проверяем источники… это может занять до 20 секунд');
+  try {
+    const r = await api('/api/competitors/find', { method: 'POST', body: JSON.stringify({ name, city: $('#compCity').value.trim() }) });
+    const risky = r.report.factors.filter(f => f.type === 'risk').length;
+    toast(`Отчёт готов: риск ${r.report.risk} (${r.report.level}), негативных факторов ${risky}`);
+    await render(); openCompetitorCard(r.competitor.id);
+  } catch (e) { toast('Ошибка: ' + e.message) }
+}
+async function checkCompetitor(id) { toast('Обновляем данные…'); try { const r = await api(`/api/competitors/${id}/check`, { method: 'POST', body: JSON.stringify({}) }); toast(`Готово: риск ${r.report.risk} (${r.report.level})${r.changes.length ? ' · ' + r.changes.join(' · ') : ''}`); if (!$('#modal').classList.contains('hidden') && state.compId === id) openCompetitorCard(id); else render(); } catch (e) { toast('Ошибка: ' + e.message) } }
+async function delCompetitor(id) { if (!confirm('Удалить конкурента и его отчёты?')) return; await api('/api/competitors/' + id, { method: 'DELETE' }); toast('Удалено'); render() }
+async function openCompetitor(id) {
+  const c = id ? await api('/api/competitors/' + id) : {};
+  openModal(`<h3>${id ? 'Конкурент' : 'Новый конкурент для разведки'}</h3><form onsubmit="return saveCompetitor(event,${id || 'null'})">
+   <label>Название*<input name="name" required value="${esc(c.name || '')}" placeholder="ООО «КаркасСтрой»"></label>
+   <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px"><label>ИНН<input name="inn" value="${esc(c.inn || '')}" placeholder="10–12 цифр"></label><label>ОГРН<input name="ogrn" value="${esc(c.ogrn || '')}"></label></div>
+   <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px"><label>Город<input name="city" value="${esc(c.city || '')}"></label><label>Телефон<input name="phone" value="${esc(c.phone || '')}"></label></div>
+   <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px"><label>Сайт<input name="website" value="${esc(c.website || '')}"></label><label>Ссылка на его таблицу цен (CSV/Google Sheets)<input name="price_url" value="${esc(c.price_url || '')}"></label></div>
+   <label>Заметки<textarea name="notes" rows="2">${esc(c.notes || '')}</textarea></label>
+   <button class="btn primary w">Сохранить</button></form>`);
+}
+async function saveCompetitor(e, id) { e.preventDefault(); const b = Object.fromEntries(new FormData(e.target)); const r = await api(id ? '/api/competitors/' + id : '/api/competitors', { method: id ? 'PATCH' : 'POST', body: JSON.stringify(b) }); closeModal(); toast('Сохранено'); if (!id && r.id) return openCompetitorCard(r.id); render(); return false }
+async function openCompetitorCard(id) {
+  state.compId = id; state.compTab = state.compTab || 'report';
+  const c = await api('/api/competitors/' + id);
+  const rep = c.report || {};
+  const tabs = { report: 'Отчёт', sources: 'Источники', debts: 'Долги и суды', reviews: 'Отзывы', prices: 'Цены и Excel', history: 'История' };
+  openModal(`<h3 style="display:flex;align-items:center;gap:10px;flex-wrap:wrap">${esc(c.name)}
+    ${rep.risk !== undefined ? `<span class="risk ${RISK_CLASS(rep.level)}">риск ${rep.risk} · ${esc(rep.level)}</span>` : '<span class="risk mid">не проверен</span>'}
+    <button class="btn sm primary" onclick="checkCompetitor(${id})">↻ Проверить заново</button></h3>
+   <div class="tabs">${Object.entries(tabs).map(([k, n]) => `<button class="${state.compTab === k ? 'active' : ''}" onclick="state.compTab='${k}';openCompetitorCard(${id})">${n}</button>`).join('')}</div>
+   <div id="compTab">${competitorTab(c, rep)}</div>
+   <div style="display:flex;gap:8px;margin-top:14px;flex-wrap:wrap"><button class="btn" onclick="openCompetitor(${id})">✎ Реквизиты</button><button class="btn ghost" onclick="openPriceImport(${id},'competitor')">📊 Его прайс</button><button class="btn ghost" onclick="openPriceImport(${id},'ours')">📊 Наша таблица</button><button class="btn danger" onclick="delCompetitor(${id});closeModal()">Удалить</button></div>`);
+}
+const RISK_COLORS = { 'низкий': '#16a34a', 'умеренный': '#eab308', 'повышенный': '#f97316', 'высокий': '#dc2626' };
+function competitorTab(c, rep) {
+  if (state.compTab === 'report') {
+    if (!rep.risk && rep.risk !== 0) return '<div class="empty">Ещё не проверяли. Нажмите «Проверить заново» — соберём данные из 8 источников.</div>';
+    const color = RISK_COLORS[rep.level] || '#eab308';
+    const f = rep.found || {};
+    return `${rep.noData ? '<div class="card" style="box-shadow:none;border-color:#fde68a;background:#fffbeb"><b>⚠ Пока мало данных</b><br><small>Ни один источник не отдал данные автоматически: нет ключей или сайты ограничили запросы. Нажмите Настройки → «Конкуренты и источники», чтобы задать ключи, добавьте отзывы вручную и загрузите прайс — отчёт станет содержательным.</small></div>' : ''}
+     <div class="card" style="box-shadow:none"><div style="display:flex;gap:16px;align-items:center;flex-wrap:wrap">
+      <div style="min-width:120px;text-align:center"><div style="font-size:34px;font-weight:800;color:${color}">${rep.risk}</div><small>риск 0–100 · ${esc(rep.level)}</small><div class="bar" style="margin-top:6px"><i style="width:${rep.risk}%;background:${color}"></i></div></div>
+      <div style="flex:1;min-width:240px"><b>Вердикт:</b><br>${esc(rep.verdict || '')}</div></div></div>
+     ${f.name ? `<table class="mini"><tr><th>Компания</th><td>${esc(f.name)}</td></tr>${f.inn ? `<tr><th>ИНН / ОГРН</th><td>${esc(f.inn)} / ${esc(f.ogrn || '—')}</td></tr>` : ''}${f.director ? `<tr><th>Руководитель</th><td>${esc(f.director)}</td></tr>` : ''}${f.address ? `<tr><th>Адрес</th><td>${esc(f.address)}</td></tr>` : ''}</table>` : ''}
+     <h3 style="margin-top:14px">Что говорит в нашу пользу</h3>${(rep.talking_points || []).map(t => `<div class="row"><span>${esc(t)}</span></div>`).join('') || '<small>Нет данных — проверьте источники с ключами</small>'}
+     ${rep.factors?.length ? `<h3 style="margin-top:14px">Все факторы</h3><table class="mini">${rep.factors.map(x => `<tr><td>${x.type === 'risk' ? '⚠' : x.type === 'plus' ? '✅' : 'ℹ'} ${esc(x.text)}</td><td style="white-space:nowrap"><small>${esc(x.source)}${x.weight ? ' · ' + (x.weight > 0 ? '+' : '') + x.weight : ''}</small></td></tr>`).join('')}</table>` : ''}
+     ${rep.summary?.length ? `<p><small>${rep.summary.map(esc).join('<br>')}</small></p>` : ''}
+     <h3 style="margin-top:14px">Проверить вручную (откроется в новой вкладке)</h3><div style="display:flex;flex-wrap:wrap;gap:6px">${(rep.links || []).map(l => `<a class="btn sm" href="${esc(l.url)}" target="_blank" rel="noopener">${esc(l.label)} ↗</a>`).join('')}</div>`;
+  }
+  if (state.compTab === 'sources') return `<table><tr><th>Источник</th><th>Статус</th><th>Результат</th><th>Проверен</th><th></th></tr>${c.checks.map(ch => `<tr><td><b>${esc(ch.title || ch.source)}</b></td><td><span class="risk ${ch.status === 'ok' ? 'ok' : ch.status === 'skipped' ? 'mid' : 'bad'}">${STATUS_LABEL[ch.status] || ch.status}</span></td><td><small>${esc(ch.summary)}</small></td><td><small>${esc(dt(ch.checked_at))}</small></td><td>${(ch.links || []).slice(0, 3).map(l => `<a class="btn sm" href="${esc(l.url)}" target="_blank" rel="noopener">↗</a>`).join(' ')}</td></tr>`).join('')}</table>
+    <p><small>Без ключей источники работают в режиме ссылок: данные всё равно попадут в CRM, если менеджер вставит их в отзывы или заметки. Ключи задаются в Настройки → Конкуренты и источники.</small></p>`;
+  if (state.compTab === 'debts') {
+    const g = k => c.checks.find(x => x.source === k) || {};
+    const fssp = g('fssp').data || {}, fed = g('fedresurs').data || {}, kad = g('kad').data || {}, fns = g('fns').data || {}, rp = g('rusprofile').data || {};
+    return `<h3>ФССП: исполнительные производства</h3>${(fssp.productions || []).length ? `<table class="mini"><tr><th>№</th><th>Предмет</th><th>Сумма</th><th>Пристав / отдел</th></tr>${fssp.productions.map(p => `<tr><td>${esc(p.number || '')}</td><td>${esc(p.subject || '')}</td><td><b>${fmt(p.sum)}</b></td><td><small>${esc(p.bailiff || '')} ${esc(p.department || '')}</small></td></tr>`).join('')}</table><p><b>Итого долгов: ${fmt(fssp.total || 0)}</b></p>` : `<p><small>${esc(g('fssp').summary || 'нет данных')}</small></p>`}
+     <h3 style="margin-top:14px">Федресурс: банкротство</h3>${(fed.cases || []).length ? `<table class="mini"><tr><th>Должник</th><th>Дело</th><th>Статус</th><th>Дата</th></tr>${fed.cases.map(x => `<tr><td>${esc(x.name)}</td><td>${esc(x.case)}</td><td>${esc(x.status)}</td><td>${esc(x.date)}</td></tr>`).join('')}</table>` : `<p><small>${esc(g('fedresurs').summary || 'нет данных')}</small></p>`}
+     <h3 style="margin-top:14px">Арбитражные дела ${kad.total ? `(${kad.total})` : ''}</h3>${(kad.cases || []).length ? `<table class="mini"><tr><th>Дело</th><th>Дата</th><th>Роль</th><th></th></tr>${kad.cases.map(x => `<tr><td>${esc(x.number)}</td><td>${esc(x.date)}</td><td>${esc(x.role)}</td><td>${x.url ? `<a class="btn sm" href="${esc(x.url)}" target="_blank" rel="noopener">↗</a>` : ''}</td></tr>`).join('')}</table>` : `<p><small>${esc(g('kad').summary || 'нет данных')}</small></p>`}
+     <h3 style="margin-top:14px">ФНС и Rusprofile</h3><table class="mini">${Object.entries(fns.card || {}).filter(([, v]) => v && typeof v !== 'object').map(([k, v]) => `<tr><th>${esc(k)}</th><td>${esc(v)}</td></tr>`).join('')}${Object.entries(rp.card || {}).filter(([, v]) => v && typeof v !== 'object').map(([k, v]) => `<tr><th>Rusprofile: ${esc(k)}</th><td>${esc(v)}</td></tr>`).join('')}</table>
+     <div style="display:flex;flex-wrap:wrap;gap:6px;margin-top:10px">${(g('fssp').links || []).slice(0, 2).map(l => `<a class="btn sm" href="${esc(l.url)}" target="_blank" rel="noopener">${esc(l.label)} ↗</a>`).join('')}</div>`;
+  }
+  if (state.compTab === 'reviews') {
+    const bySource = c.reviews.reduce((a, r) => { a[r.source] = a[r.source] || { n: 0, sum: 0 }; a[r.source].n++; a[r.source].sum += r.rating || 0; return a }, {});
+    const avg = c.reviews.filter(r => r.rating).length ? (c.reviews.reduce((a, r) => a + (r.rating || 0), 0) / c.reviews.filter(r => r.rating).length).toFixed(1) : '—';
+    const bad = c.reviews.filter(r => (r.rating || 5) <= 3);
+    return `<div class="grid">${Object.entries(bySource).map(([s, v]) => `<div class="kpi"><i>⭐</i><span>${esc(s)}</span><b>${(v.sum / v.n).toFixed(1)} <small>· ${v.n} шт</small></b></div>`).join('')}<div class="kpi"><i>Σ</i><span>Средний рейтинг / всего</span><b class="accent">${avg} <small>· ${c.reviews.length}</small></b></div></div>
+     ${bad.length ? `<div class="card" style="box-shadow:none;border-color:#fecaca;background:#fef2f2"><b>⚠ Негатив для аргументации (${bad.length})</b>${bad.slice(0, 5).map(r => `<div class="row"><span>${esc(r.text || '')}<br><small>${esc(r.source)} · ${r.rating}★</small></span></div>`).join('')}</div>` : ''}
+     <form onsubmit="return addReview(event,${c.id})" style="display:flex;gap:8px;align-items:end;flex-wrap:wrap;margin:10px 0">
+      <label style="flex:1;min-width:180px">Отзыв<input name="text" required placeholder="Что пишут клиенты"></label>
+      <label style="width:150px">Источник<input name="source" value="Авито" list="revSources"><datalist id="revSources"><option>Авито</option><option>Яндекс Карты</option><option>Google</option><option>2ГИС</option><option>Отзовик</option><option>из разговора</option></datalist></label>
+      <label style="width:100px">Оценка<input name="rating" type="number" min="1" max="5" step="0.5" value="3"></label>
+      <label style="flex:1;min-width:150px">Ссылка<input name="url" placeholder="https://…"></label>
+      <button class="btn primary">Добавить</button></form>
+     <table><tr><th>Источник</th><th>Оценка</th><th>Отзыв</th><th>Автор</th><th></th></tr>${c.reviews.map(r => `<tr><td>${esc(r.source)}</td><td>${r.rating ?? '—'}</td><td><small>${esc(r.text || '')} ${r.url ? `<a href="${esc(r.url)}" target="_blank" rel="noopener">↗</a>` : ''}</small></td><td><small>${esc(r.author || '')}</small></td><td><button class="btn sm danger" onclick="delReview(${r.id},${c.id})">✕</button></td></tr>`).join('') || '<tr><td colspan="5"><div class="empty">Отзывов пока нет. Добавьте вручную или подключите ключи Google/2ГИС/Яндекс в настройках.</div></td></tr>'}</table>`;
+  }
+  if (state.compTab === 'prices') {
+    const pr = rep.pricing;
+    return `<div class="row" style="border:0"><b>Прайс конкурента: ${c.prices.length} позиций</b><span style="display:flex;gap:6px"><button class="btn sm primary" onclick="openPriceImport(${c.id},'competitor')">📊 Загрузить его прайс</button><button class="btn sm" onclick="openPriceImport(${c.id},'ours')">📊 Наша таблица</button></span></div>
+     ${pr ? `<div class="card" style="box-shadow:none"><b>Сравнение с нашими ценами:</b> ${pr.avgDiff > 0 ? `конкурент дороже в среднем на ${pr.avgDiff}%` : pr.avgDiff < 0 ? `конкурент дешевле в среднем на ${Math.abs(pr.avgDiff)}%` : 'цены сопоставимы'} · дороже у него в ${pr.expensive} поз., дешевле в ${pr.cheaper} поз.<br><small>Наша сумма по сопоставимым позициям: ${fmt(pr.ourSum)} · его: ${fmt(pr.theirSum)}</small></div>
+      <table class="mini"><tr><th>Позиция</th><th>Наша цена</th><th>Его цена</th><th>Разница</th></tr>${pr.pairs.map(p => { const d = Math.round((p.theirs - p.ours) / (p.ours || 1) * 100); return `<tr><td>${esc(p.item)}</td><td>${fmt(p.ours)}</td><td>${fmt(p.theirs)}</td><td><b style="color:${d > 0 ? '#dc2626' : '#16a34a'}">${d > 0 ? '+' : ''}${d}%</b></td></tr>` }).join('')}</table>` : '<small>Сравнение появится, когда загрузите нашу таблицу и прайс конкурента (или укажете ссылку на его таблицу в реквизитах).</small>'}
+     <table class="mini" style="margin-top:12px"><tr><th>Позиция конкурента</th><th>Цена</th><th>Ед.</th><th>Комментарий</th></tr>${c.prices.slice(0, 40).map(p => `<tr><td>${esc(p.item)}</td><td>${fmt(p.price)}</td><td>${esc(p.unit || '')}</td><td><small>${esc(p.note || '')}</small></td></tr>`).join('') || '<tr><td colspan="4"><div class="empty">Его прайс не загружен</div></td></tr>'}</table>`;
+  }
+  return `<div class="list">${(c.history || []).map(h => `<div class="row"><span><b style="color:${RISK_COLORS[h.level] || '#333'}">риск ${h.risk}</b> · ${esc(h.level)}<br><small>${esc(h.verdict || '')}</small></span><small>${esc(dt(h.created_at))}</small></div>`).join('') || '<small>Проверок ещё не было</small>'}</div>`;
+}
+async function addReview(e, id) { e.preventDefault(); const b = Object.fromEntries(new FormData(e.target)); b.rating = b.rating ? num(b.rating) : null; await api(`/api/competitors/${id}/reviews`, { method: 'POST', body: JSON.stringify(b) }); toast('Отзыв добавлен'); openCompetitorCard(id); return false }
+async function delReview(id, compId) { await api('/api/reviews/' + id, { method: 'DELETE' }); toast('Удалено'); openCompetitorCard(compId) }
+function openPriceImport(compId, scope) {
+  const isOurs = scope === 'ours';
+  openModal(`<h3>${isOurs ? 'Наша таблица цен' : 'Прайс конкурента'} — Excel или CSV</h3>
+   <p><small>Поддерживается <b>.xlsx</b> (обычный Excel), <b>.csv</b> и вставка строк. Нужны колонки с названием и ценой — например «Наименование» и «Цена». Дополнительно читаются «Артикул», «Ед.», «Комментарий/наличие/срок».</small></p>
+   <form onsubmit="return importPriceFile(event,${compId || 'null'},'${scope}')">
+     <label>Файл .xlsx или .csv<input type="file" name="file" accept=".xlsx,.csv,.txt,.tsv" required></label>
+     <button class="btn primary w">Загрузить файл</button></form>
+   <hr><form onsubmit="return importPriceText(event,${compId || 'null'},'${scope}')">
+     <label>…или вставьте строки таблицы (разделитель ; или Tab)<textarea name="csv" rows="6" placeholder="Наименование;Цена&#10;Каркасный дом 8×10;3850000&#10;Баня 4×6;890000"></textarea></label>
+     <button class="btn w">Импортировать текст</button></form>
+   <hr><form onsubmit="return importPriceUrl(event,${compId || null},'${scope}')">
+     <label>…или ссылка на таблицу (опубликованный Google Sheets / CSV)${isOurs ? ' — будет сохраняться как источник нашей цены' : ''}<input name="url" placeholder="https://docs.google.com/spreadsheets/d/…/export?format=csv"></label>
+     <button class="btn w">Загрузить из ссылки</button></form>`);
+}
+async function importPriceFile(e, compId, scope) {
+  e.preventDefault(); const file = e.target.file.files[0]; if (!file) return false;
+  toast('Читаем файл…');
+  const base64 = await new Promise(r => { const f = new FileReader(); f.onload = () => r(String(f.result).split(',').pop()); f.readAsDataURL(file) });
+  try { const r = await api(compId ? `/api/competitors/${compId}/prices` : '/api/prices', { method: 'POST', body: JSON.stringify({ base64, filename: file.name, scope }) }); toast(`Загружено позиций: ${r.imported}`); closeModal(); if (compId) openCompetitorCard(compId); else render(); } catch (err) { toast(err.message) }
+  return false;
+}
+async function importPriceText(e, compId, scope) { e.preventDefault(); const csv = new FormData(e.target).get('csv'); try { const r = await api(compId ? `/api/competitors/${compId}/prices` : '/api/prices', { method: 'POST', body: JSON.stringify({ csv, filename: 'вставленная таблица', scope }) }); toast(`Импортировано: ${r.imported}`); closeModal(); if (compId) openCompetitorCard(compId); else render(); } catch (err) { toast(err.message) } return false }
+async function importPriceUrl(e, compId, scope) {
+  e.preventDefault(); const url = new FormData(e.target).get('url');
+  if (!compId) { try { const r = await api('/api/prices/load', { method: 'POST', body: JSON.stringify({ url }) }); toast(`Загружено из таблицы: ${r.imported}`); closeModal(); render(); } catch (err) { toast(err.message) } return false }
+  await api('/api/competitors/' + compId, { method: 'PATCH', body: JSON.stringify({ price_url: url }) });
+  toast('Ссылка сохранена'); await checkCompetitor(compId); return false;
+}
+
 /* ---------- settings ---------- */
 async function settings(v) {
   const s = await api('/api/settings'); state.cache.settings = s; const origin = location.origin;
-  const tabs = { integrations: '🔌 Интеграции и каналы', pipelines: '▦ Воронки и этапы', automations: '⚡ Автоматизации', templates: '💬 Шаблоны сообщений', team: '👥 Команда', data: '💾 Данные и компания', profile: '👤 Профиль' };
+  const tabs = { integrations: '🔌 Интеграции и каналы', competitors: '🕵 Конкуренты и источники', pipelines: '▦ Воронки и этапы', automations: '⚡ Автоматизации', templates: '💬 Шаблоны сообщений', team: '👥 Команда', data: '💾 Данные и компания', profile: '👤 Профиль' };
   let body = '';
   if (state.settingsTab === 'integrations') {
     const chans = state.channels.length ? state.channels : await api('/api/channels').catch(() => []); state.channels = chans;
@@ -323,6 +465,24 @@ async function settings(v) {
       <label>Токен бота Telegram<input id="tgToken" placeholder="123456:ABC…"></label><button class="btn" onclick="saveTelegram()">Сохранить</button></div></div>
      <div><div class="card"><h3>Права и роли</h3><p><b>Администратор</b> — всё, включая настройки и команду.<br><b>Менеджер</b> — сделки, клиенты, чаты, задачи.<br><b>Наблюдатель</b> — только просмотр.</p><p><small>Создайте пользователей во вкладке «Команда».</small></p></div>
      <div class="card"><h3>Проверка работы</h3><button class="btn orange w" onclick="simulate()">🧪 Имитировать входящее сообщение</button><p style="margin-top:8px"><small>Проверит объединение чатов и создание сделки без реального мессенджера.</small></p><button class="btn w" onclick="fetch('/api/health').then(r=>r.json()).then(d=>toast('API '+d.version+' — OK'))">Проверить API</button></div></div></div>`;
+  } else if (state.settingsTab === 'competitors') {
+    const cs = await api('/api/competitor-sources');
+    const ours = await api('/api/prices?scope=ours');
+    const KEY_FIELDS = [['FNS_API_KEY', 'Ключ api-fns.ru (ФНС: ЕГРЮЛ, недоимки, руководители)', 'получить: api-fns.ru → тариф «Базовый»'], ['FSSP_TOKEN', 'Токен ФССП (суммы долгов приставов)', 'получить: api-ip.fssprus.ru → регистрация'], ['GOOGLE_PLACES_KEY', 'Ключ Google Places (рейтинг и тексты отзывов)', 'console.cloud.google.com → Places API'], ['TWOGIS_KEY', 'Ключ 2ГИС (рейтинг и число отзывов)', 'dev.2gis.ru → Places API'], ['YANDEX_API_KEY', 'Ключ Яндекс Геопоиска (карточка организации)', 'developer.tech.yandex.ru → Geosearch']];
+    body = `<div class="settings-cols"><div>
+     <div class="card"><h3>Статус источников</h3><table class="mini"><tr><th>Источник</th><th>Что даёт</th><th>Готовность</th></tr>${cs.sources.map(s => `<tr><td><b>${esc(s.name)}</b>${s.needs.length ? `<br><small>нужен ключ</small>` : '<br><small>без ключа</small>'}</td><td><small>${esc(s.about)}</small></td><td><span class="risk ${s.configured ? 'ok' : 'mid'}">${s.configured ? 'готов' : s.needs.length ? 'нет ключа (ссылки работают)' : 'по ссылкам'}</span></td></tr>`).join('')}</table>
+      <p><small>Все источники работают и без ключей — CRM сформирует прямые ссылки (Rusprofile, ФНС, ФССП, Федресурс, Кад.Арбитр, Яндекс/2ГИС/Авито). С ключами данные подтягиваются в отчёт автоматически. Сайты госорганов иногда отвечают блокировкой автоматических запросов — тогда в отчёте будет статус «сайт не отдал» и ссылка для ручной проверки.</small></p></div>
+     <div class="card"><h3>Ключи источников (хранятся на сервере)</h3><form onsubmit="return saveCompetitorKeys(event)">${KEY_FIELDS.map(([k, label, hint]) => `<label>${esc(label)}<input name="${k}" placeholder="${cs.keys[k] ? '•••••• (сохранён)' : esc(hint)}"></label>`).join('')}
+      <label>Таймаут запросов к источникам, мс<input name="COMPETITOR_TIMEOUT_MS" value="${esc(cs.timeout)}"></label>
+      <button class="btn primary">Сохранить ключи</button></form></div>
+     <div class="card"><h3>Наша таблица цен (Excel/CSV)</h3><p><small>Загружается один раз и используется для сравнения с конкурентами во всех отчётах. Поддерживается .xlsx, .csv и ссылка на опубликованный Google Sheets.</small></p>
+      ${ours.rows.length ? `<p><b>Загружено позиций: ${ours.rows.length}</b> <small>${cs.ourPriceUrl ? '· источник: ' + esc(cs.ourPriceUrl) : ''}</small></p>` : '<p><small>Пока не загружена.</small></p>'}
+      <button class="btn primary w" onclick="openPriceImport(null,'ours')">📊 Загрузить нашу таблицу</button></div>
+     <div class="card"><h3>Наши цены в базе</h3><table class="mini"><tr><th>Позиция</th><th>Цена</th><th>Ед.</th></tr>${ours.rows.slice(0, 15).map(r => `<tr><td>${esc(r.item)}</td><td>${fmt(r.price)}</td><td>${esc(r.unit || '')}</td></tr>`).join('') || '<tr><td colspan="3"><small>Пусто</small></td></tr>'}</table></div>
+     </div><div>
+     <div class="card"><h3>Как это работает</h3><ol style="padding-left:18px;margin:0"><li>Открываете вкладку <b>Конкуренты</b> и пишете название или ИНН.</li><li>CRM параллельно опрашивает 8 источников и считает <b>риск-скор 0–100</b>.</li><li>Смотрит отзывы с карт и Авито, собирает негатив для аргументов.</li><li>Сравнивает цены с нашей Excel-таблицей: где мы дешевле, где дороже.</li><li>Даёт вердикт и готовые фразы для менеджера. Каждая проверка сохраняется в историю.</li></ol></div>
+     <div class="card"><h3>Адреса API источников</h3><p><small>Меняются только для корпоративного прокси или собственного зеркала данных.</small></p><form onsubmit="return saveCompetitorUrls(event)">${[['FNS_API_URL', 'ФНС API'], ['FSSP_API_URL', 'ФССП API'], ['FEDRESURS_API_URL', 'Федресурс'], ['KAD_API_URL', 'Арбитр'], ['RUSPROFILE_URL', 'Rusprofile'], ['GOOGLE_API_URL', 'Google Places'], ['TWOGIS_API_URL', '2ГИС'], ['YANDEX_API_URL', 'Яндекс Геопоиск']].map(([k, n]) => `<label>${n}<input name="${k}" value="${esc((cs.urls || {})[k] || '')}"></label>`).join('')}<button class="btn">Сохранить адреса</button></form></div>
+     <div class="card"><h3>Для разработчиков</h3><p><small>API: <code>POST /api/competitors/find</code> · <code>POST /api/competitors/:id/check</code> · <code>POST /api/competitors/:id/prices</code> (base64 .xlsx или CSV) · <code>GET /api/prices?scope=ours</code></small></p></div></div></div>`;
   } else if (state.settingsTab === 'pipelines') {
     const pl = await api('/api/pipelines');
     body = `<div class="card"><div class="row" style="border:0"><h3>Воронки продаж</h3><button class="btn sm primary" onclick="addPipeline()">+ Воронка</button></div>
@@ -370,6 +530,8 @@ async function testWazzup() {
   toast(sync.error ? 'Ошибка синхронизации: ' + sync.error : `Каналов найдено и сохранено: ${sync.synced ?? n}`); state.channels = []; render();
 }
 async function registerWazzupWebhook() { const url = location.origin + '/webhooks/wazzup'; try { await api('/api/integrations/wazzup/webhook', { method: 'POST', body: JSON.stringify({ url }) }); toast('Вебхук зарегистрирован в Wazzup'); } catch (e) { toast(e.message); } }
+async function saveCompetitorKeys(e) { e.preventDefault(); const b = {}; for (const [k, v] of new FormData(e.target)) if (v && !String(v).includes('•')) b[k] = v; await api('/api/competitor-sources', { method: 'PUT', body: JSON.stringify(b) }); toast('Ключи сохранены'); render(); return false }
+async function saveCompetitorUrls(e) { e.preventDefault(); const b = {}; for (const [k, v] of new FormData(e.target)) if (v) b[k] = v; await api('/api/competitor-sources', { method: 'PUT', body: JSON.stringify(b) }); toast('Адреса сохранены'); render(); return false }
 async function saveCompanySettings(e) { e.preventDefault(); await api('/api/settings', { method: 'PUT', body: JSON.stringify(Object.fromEntries(new FormData(e.target))) }); toast('Сохранено'); return false }
 async function savePassword(e) { e.preventDefault(); try { await api('/api/me/password', { method: 'POST', body: JSON.stringify(Object.fromEntries(new FormData(e.target))) }); toast('Пароль изменён'); closeModal(); } catch (err) { toast(err.message) } return false }
 async function addPipeline() { const name = prompt('Название воронки:', 'Новая воронка'); if (!name) return; await api('/api/pipelines', { method: 'POST', body: JSON.stringify({ name }) }); toast('Воронка создана'); render() }

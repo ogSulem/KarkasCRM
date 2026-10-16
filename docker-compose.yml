@@ -28,6 +28,12 @@ services:
       WHATSAPP_PHONE_ID: ${WHATSAPP_PHONE_ID:-}
       WHATSAPP_VERIFY_TOKEN: ${WHATSAPP_VERIFY_TOKEN:-karkas-verify}
       TELEGRAM_BOT_TOKEN: ${TELEGRAM_BOT_TOKEN:-}
+      # Вкладка «Конкуренты» (можно задать в интерфейсе: Настройки → Конкуренты и источники)
+      FNS_API_KEY: ${FNS_API_KEY:-}
+      FSSP_TOKEN: ${FSSP_TOKEN:-}
+      GOOGLE_PLACES_KEY: ${GOOGLE_PLACES_KEY:-}
+      TWOGIS_KEY: ${TWOGIS_KEY:-}
+      YANDEX_API_KEY: ${YANDEX_API_KEY:-}
     volumes:
       - crm_data:/data
     healthcheck:

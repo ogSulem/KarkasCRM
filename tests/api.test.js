@@ -125,7 +125,8 @@ test('отправка сообщения клиенту через Wazzup (ск
     assert.equal(chans[0].name, 'WhatsApp Продажи');
     await call('/api/integrations/wazzup/webhook', { method: 'POST', body: JSON.stringify({ url: 'https://crm.example.com/webhooks/wazzup' }) });
     assert.equal(globalThis.__wzHook.webhooksUri, 'https://crm.example.com/webhooks/wazzup', 'вебхук зарегистрирован в Wazzup');
-    const conv = (await call('/api/conversations')).body[0];
+    const conv = (await call('/api/conversations')).body.find(c => (c.phone || '').includes('79115550101'));
+    assert.ok(conv, 'нашлась беседа с клиентом Wazzup');
     const sent = await call(`/api/conversations/${conv.id}/messages`, { method: 'POST', body: JSON.stringify({ body: 'Здравствуйте! Отправляю расчёт.', channel: 'whatsapp' }) });
     assert.equal(sent.status, 201);
     assert.equal(sent.body.send.delivered, true, 'сообщение ушло в Wazzup');
@@ -135,6 +136,10 @@ test('отправка сообщения клиенту через Wazzup (ск
     assert.equal(globalThis.__wz.body.chatType, 'whatsapp');
     assert.equal(globalThis.__wz.body.text, 'Здравствуйте! Отправляю расчёт.');
     assert.ok(/^\d+$/.test(globalThis.__wz.body.chatId), 'chatId — только цифры, как требует Wazzup');
+    // отправка с выбором другого типа канала (как в интерфейсе: Telegram-канал Wazzup)
+    await call(`/api/conversations/${conv.id}/messages`, { method: 'POST', body: JSON.stringify({ body: 'Ответ в Telegram', chat_type: 'telegram' }) });
+    assert.equal(globalThis.__wz.body.chatType, 'telegram', 'тип канала берётся из интерфейса');
+    assert.ok(globalThis.__wz.body.chatId.length > 0, 'для Telegram используется идентификатор чата из вебхука');
     assert.equal(sent.body.message.status, 'sent');
   } finally { mock.close(); }
 });
