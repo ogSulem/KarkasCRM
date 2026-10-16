@@ -341,6 +341,35 @@ test('автоназначение: новые обращения распред
   await call('/api/settings', { method: 'PUT', body: JSON.stringify({ AUTO_ASSIGN: '0' }) });
 });
 
+test('массовые действия: одна операция на пачку записей', async () => {
+  const ids = [];
+  for (let i = 0; i < 3; i++) ids.push((await call('/api/contacts', { method: 'POST', body: JSON.stringify({ name: `Пачка ${i}`, phone: `+7 900 000-00-0${i}` }) })).body.id);
+  const upd = await call('/api/bulk', { method: 'POST', body: JSON.stringify({ table: 'contacts', ids, action: 'update', patch: { tags: 'пачка,тест' } }) });
+  assert.equal(upd.status, 200); assert.equal(upd.body.count, 3);
+  const all = (await call('/api/contacts')).body.filter(c => String(c.tags || '').includes('пачка'));
+  assert.equal(all.length, 3, 'тег проставился всем выбранным');
+  assert.equal((await call('/api/bulk', { method: 'POST', body: JSON.stringify({ table: 'contacts', ids: [], patch: { tags: 'x' } }) })).status, 400, 'пустой список — ошибка');
+  assert.equal((await call('/api/bulk', { method: 'POST', body: JSON.stringify({ table: 'contacts', ids, patch: { role: 'admin' } }) })).status, 400, 'недопустимое поле отброшено');
+  const del = await call('/api/bulk', { method: 'POST', body: JSON.stringify({ table: 'contacts', ids, action: 'delete' }) });
+  assert.equal(del.status, 200);
+  assert.equal((await call('/api/contacts')).body.filter(c => ids.includes(c.id)).length, 0, 'записи удалены');
+});
+
+test('менеджер не меняет правила и шаблоны, но работает с клиентами', async () => {
+  const created = (await call('/api/users', { method: 'POST', body: JSON.stringify({ name: 'Менеджер Оля', email: `olya${Date.now()}@example.com`, password: 'manager12345', role: 'manager' }) })).body;
+  const login = (await call('/api/auth/login', { method: 'POST', body: JSON.stringify({ email: `olya${Date.now() - 1}@example.com`, password: 'manager12345' }) })).body;
+  // повторный вход с тем же e-mail, что и создавали
+  const users = (await call('/api/users')).body; const u = users.find(x => x.id === created.id);
+  const l2 = (await call('/api/auth/login', { method: 'POST', body: JSON.stringify({ email: u.email, password: 'manager12345' }) })).body;
+  const mh = { Authorization: 'Bearer ' + l2.token };
+  const mcall = (path, opt = {}) => fetch(base + path, { ...opt, headers: { 'Content-Type': 'application/json', ...mh, ...(opt.headers || {}) } }).then(async r => ({ status: r.status, body: (r.headers.get('content-type') || '').includes('json') ? await r.json() : await r.text() }));
+  assert.equal((await mcall('/api/contacts', { method: 'POST', body: JSON.stringify({ name: 'Клиент Оли' }) })).status, 201, 'менеджер ведёт клиентов');
+  assert.equal((await mcall('/api/automations', { method: 'POST', body: JSON.stringify({ name: 'Правило', trigger_type: 'deal_created', action_type: 'create_task', action_value: 'x' }) })).status, 403, 'правила — только админ');
+  assert.equal((await mcall('/api/templates', { method: 'POST', body: JSON.stringify({ name: 'Шаблон', body: 'x', channel: 'whatsapp' }) })).status, 403, 'шаблоны — только админ');
+  assert.equal((await mcall('/api/settings', { method: 'PUT', body: JSON.stringify({ COMPANY_NAME: 'Взлом' }) })).status, 403, 'настройки — только админ');
+  assert.equal((await mcall('/api/users', { method: 'POST', body: JSON.stringify({ name: 'x', email: 'x@x.ru', password: '12345678' }) })).status, 403, 'команда — только админ');
+});
+
 test('защита входа: ограничение попыток подбора пароля', async () => {
   const codes = [];
   for (let i = 0; i < 16; i++) codes.push((await call('/api/auth/login', { method: 'POST', body: JSON.stringify({ email: 'admin@example.com', password: 'wrong-' + i }) })).status);

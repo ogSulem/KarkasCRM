@@ -72,13 +72,17 @@ if [ "$MODE" = "tls" ]; then
   [ -n "$EMAIL" ] && set_env ACME_EMAIL "$EMAIL"
   # CRM доступна только через HTTPS-прокси, наружу порт 8080 не торчит
   set_env CRM_BIND "127.0.0.1"
+  # на рабочем сервере демо-данные не нужны: база должна быть чистой
+  set_env SEED_DEMO "0"
   echo "Режим: домен с HTTPS → https://${DOMAIN}"
   echo "Проверьте, что DNS домена указывает на этот сервер, а порты 80 и 443 открыты."
   docker compose --profile tls up -d --build
   ADDRESS="https://${DOMAIN}"
 else
   set_env CRM_BIND "0.0.0.0"
-  echo "Режим: локальный запуск / по IP без домена"
+  # для локальной проверки оставляем демо-данные, чтобы было что посмотреть
+  set_env SEED_DEMO "1"
+  echo "Режим: локальный запуск / по IP без домена (демо-данные включены)"
   docker compose up -d --build
   IP=$(curl -s --max-time 4 ifconfig.me || hostname -I | awk '{print $1}')
   PORT=$(grep -E '^CRM_PORT=' .env | cut -d= -f2- || true); PORT=${PORT:-8080}

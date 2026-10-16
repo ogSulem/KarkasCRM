@@ -3,6 +3,7 @@
 import http from 'node:http';
 import { DatabaseSync } from 'node:sqlite';
 import { createHmac, randomBytes, scryptSync, timingSafeEqual } from 'node:crypto';
+import { gzipSync } from 'node:zlib';
 import { readFileSync, existsSync, mkdirSync } from 'node:fs';
 import { extname, join, normalize } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -18,11 +19,16 @@ const SECRET = process.env.JWT_SECRET || 'change-me-in-production-please-32-char
 const ADMIN_EMAIL = (process.env.ADMIN_EMAIL || 'admin@example.com').toLowerCase();
 const ADMIN_PASSWORD = process.env.ADMIN_PASSWORD || 'admin12345';
 const SEED_DEMO = String(process.env.SEED_DEMO ?? '1') !== '0';
-const VERSION = '2.3';
+const VERSION = '2.4';
 const STARTED = Date.now();
 mkdirSync(DATA_DIR, { recursive: true });
 const db = new DatabaseSync(join(DATA_DIR, 'crm.db'));
-db.exec('PRAGMA journal_mode=WAL; PRAGMA foreign_keys=ON;');
+db.exec(`PRAGMA journal_mode=WAL; PRAGMA foreign_keys=ON;
+PRAGMA busy_timeout=5000;      -- не падать, если запись идёт параллельно
+PRAGMA synchronous=NORMAL;     -- быстрая запись при WAL и при этом безопасная
+PRAGMA temp_store=MEMORY;      -- временные таблицы в памяти
+PRAGMA cache_size=-16000;      -- кэш страниц ~16 МБ
+PRAGMA mmap_size=268435456;    -- файл базы читается через память, SELECT быстрее`);
 db.exec(`
 CREATE TABLE IF NOT EXISTS users(id INTEGER PRIMARY KEY,name TEXT,email TEXT UNIQUE,pass TEXT,role TEXT DEFAULT 'manager',active INTEGER DEFAULT 1);
 CREATE TABLE IF NOT EXISTS companies(id INTEGER PRIMARY KEY,name TEXT NOT NULL,inn TEXT,phone TEXT,email TEXT,site TEXT,notes TEXT DEFAULT '',created_at TEXT DEFAULT (datetime('now')));
@@ -157,6 +163,7 @@ const sanitizeFields = list => (Array.isArray(list) ? list : []).slice(0, 40).ma
 
 // ---------- realtime ----------
 const clients = new Set();
+const staticGzip = new Map(); // кэш сжатых ассетов: gzip считается один раз на версию файла
 export function broadcast(ev, data) { const s = `event: ${ev}\ndata: ${JSON.stringify(data)}\n\n`; clients.forEach(r => { try { r.write(s); } catch {} }); }
 
 // ---------- automations ----------
@@ -391,7 +398,7 @@ export const server = http.createServer(async (req, res) => {
       let dbSize = 0; try { dbSize = statSync(join(DATA_DIR, 'crm.db')).size } catch {}
       let backupsCount = 0, lastBackup = null;
       try { const dir = join(DATA_DIR, 'backups'); const files = existsSync(dir) ? readdirSync(dir).filter(f => f.endsWith('.db')).sort() : []; backupsCount = files.length; lastBackup = files.length ? files[files.length - 1] : null } catch {}
-      const h = { ok: true, service: 'KarkasCRM', version: VERSION, schema: SCHEMA_VERSION, time: new Date().toISOString(), uptimeSec: Math.round((Date.now() - STARTED) / 1000), dbSizeBytes: dbSize, backups: { count: backupsCount, last: lastBackup }, counts: { users: db.prepare('SELECT COUNT(*) n FROM users').get().n, contacts: db.prepare('SELECT COUNT(*) n FROM contacts').get().n, deals: db.prepare('SELECT COUNT(*) n FROM deals').get().n, tasks: db.prepare('SELECT COUNT(*) n FROM tasks WHERE done=0').get().n, messages: db.prepare('SELECT COUNT(*) n FROM messages').get().n } };
+      const h = { ok: true, service: 'KarkasCRM', version: VERSION, schema: SCHEMA_VERSION, demo: SEED_DEMO, time: new Date().toISOString(), uptimeSec: Math.round((Date.now() - STARTED) / 1000), dbSizeBytes: dbSize, backups: { count: backupsCount, last: lastBackup }, counts: { users: db.prepare('SELECT COUNT(*) n FROM users').get().n, contacts: db.prepare('SELECT COUNT(*) n FROM contacts').get().n, deals: db.prepare('SELECT COUNT(*) n FROM deals').get().n, tasks: db.prepare('SELECT COUNT(*) n FROM tasks WHERE done=0').get().n, messages: db.prepare('SELECT COUNT(*) n FROM messages').get().n } };
       return json(res, 200, h, true);
     }
     if (p === '/api/auth/login' && req.method === 'POST') {
@@ -478,13 +485,28 @@ export const server = http.createServer(async (req, res) => {
       broadcast('change', { table: 'contacts' });
       return json(res, 200, { kept: keepId, merged: mergeIds.length, contact: db.prepare('SELECT * FROM contacts WHERE id=?').get(keepId) });
     }
-    if (p === '/api/search') { const q = '%' + (u.searchParams.get('q') || '') + '%'; return json(res, 200, { contacts: db.prepare('SELECT id,name,phone FROM contacts WHERE name LIKE ? OR phone LIKE ? LIMIT 8').all(q, q), deals: db.prepare('SELECT id,title,amount FROM deals WHERE title LIKE ? LIMIT 8').all(q), companies: db.prepare('SELECT id,name FROM companies WHERE name LIKE ? LIMIT 5').all(q) }); }
+    if (p === '/api/search') {
+      // SQLite сравнивает кириллицу в LIKE с учётом регистра, поэтому фильтруем по строке в JS —
+      // так «ирина», «Ирина» и «ИРИНА» находят одного клиента
+      const raw = String(u.searchParams.get('q') || '').trim();
+      if (raw.length < 2) return json(res, 200, { contacts: [], deals: [], companies: [] });
+      const needle = raw.toLowerCase();
+      const hit = (...vals) => vals.some(v => String(v ?? '').toLowerCase().includes(needle));
+      const contacts = db.prepare('SELECT id,name,phone,email,company FROM contacts ORDER BY id DESC LIMIT 2000').all().filter(c => hit(c.name, c.phone, c.email, c.company)).slice(0, 8);
+      const deals = db.prepare('SELECT id,title,amount FROM deals ORDER BY id DESC LIMIT 2000').all().filter(d => hit(d.title, d.amount)).slice(0, 8);
+      const companies = db.prepare('SELECT id,name,inn FROM companies ORDER BY id DESC LIMIT 1000').all().filter(c => hit(c.name, c.inn)).slice(0, 5);
+      return json(res, 200, { contacts, deals, companies });
+    }
     if (p === '/api/export/json' || p === '/api/backup') { const tables = ['users', 'companies', 'contacts', 'pipelines', 'stages', 'deals', 'tasks', 'notes', 'products', 'templates', 'automations', 'conversations', 'messages', 'channels', 'competitors', 'competitor_checks', 'competitor_reports', 'reviews', 'price_rows']; const out = {}; tables.forEach(t => out[t] = db.prepare(`SELECT * FROM ${t}`).all()); res.writeHead(200, { 'Content-Type': 'application/json', 'Content-Disposition': 'attachment; filename=karkas-backup.json' }); return res.end(JSON.stringify(out, null, 2)); }
 
     // ===== generic CRUD =====
     const CRUD = { contacts: ['name', 'phone', 'email', 'company', 'company_id', 'position', 'source', 'tags', 'notes', 'responsible_id', 'custom'], companies: ['name', 'inn', 'phone', 'email', 'site', 'notes'], tasks: ['title', 'type', 'due', 'priority', 'done', 'deal_id', 'contact_id', 'responsible_id', 'result'], products: ['name', 'sku', 'price', 'unit', 'active'], templates: ['name', 'body', 'channel'], automations: ['name', 'trigger_type', 'trigger_value', 'action_type', 'action_value', 'active'], notes: ['entity_type', 'entity_id', 'body', 'author'] };
     const mCrud = p.match(/^\/api\/(contacts|companies|tasks|products|templates|automations|notes)(?:\/(\d+))?$/);
     if (mCrud) { const [, table, id] = mCrud; const fields = CRUD[table];
+      // шаблоны и автоматизации меняет только администратор, товары удаляет тоже он —
+      // иначе правила и прайс может случайно переписать любой менеджер
+      if (req.method !== 'GET' && ['templates', 'automations'].includes(table) && !requireAdmin(user, res)) return;
+      if (req.method === 'DELETE' && table === 'products' && !requireAdmin(user, res)) return;
       if (req.method === 'GET' && !id) { if (table === 'tasks') return json(res, 200, db.prepare('SELECT t.*,c.name contact_name,d.title deal_title,u.name responsible_name FROM tasks t LEFT JOIN contacts c ON c.id=t.contact_id LEFT JOIN deals d ON d.id=t.deal_id LEFT JOIN users u ON u.id=t.responsible_id ORDER BY done,due,id DESC').all()); if (table === 'notes') return json(res, 200, db.prepare('SELECT * FROM notes WHERE entity_type=? AND entity_id=? ORDER BY id DESC').all(u.searchParams.get('type'), u.searchParams.get('entity'))); return json(res, 200, db.prepare(`SELECT * FROM ${table} ORDER BY id DESC`).all()); }
       if (req.method === 'GET') return json(res, 200, db.prepare(`SELECT * FROM ${table} WHERE id=?`).get(id) || {});
       if (req.method === 'POST') { const b = await readBody(req); if (table === 'notes') b.author = user.name; const ks = fields.filter(f => b[f] !== undefined); const r = db.prepare(`INSERT INTO ${table}(${ks}) VALUES(${ks.map(() => '?')})`).run(...ks.map(k => b[k])); log(`Создано (${table} #${r.lastInsertRowid})`, table, Number(r.lastInsertRowid), user.name); broadcast('change', { table }); return json(res, 201, db.prepare(`SELECT * FROM ${table} WHERE id=?`).get(r.lastInsertRowid)); }
@@ -667,6 +689,27 @@ export const server = http.createServer(async (req, res) => {
         if (clean(b.SMTP_PASS)) setSetting('SMTP_PASS', b.SMTP_PASS);
         log('Настройки обновлены', null, null, user.name); return json(res, 200, { saved: true }); }
     }
+    // ===== массовые действия: выделили записи и применили к ним одно изменение =====
+    if (p === '/api/bulk' && req.method === 'POST') {
+      const b = await readBody(req);
+      const table = String(b.table || ''), ids = (b.ids || []).map(Number).filter(Boolean);
+      const fields = CRUD[table];
+      if (!fields || !ids.length) return json(res, 400, { error: 'Нечего обрабатывать: укажите таблицу и хотя бы одну запись' });
+      if (ids.length > 500) return json(res, 400, { error: 'За один раз можно изменить не больше 500 записей' });
+      if ((b.action === 'delete' && (table === 'products' || table === 'templates' || table === 'automations')) && !requireAdmin(user, res)) return;
+      if (b.action === 'delete') { const st = db.prepare(`DELETE FROM ${table} WHERE id=?`); for (const id of ids) st.run(id) }
+      else {
+        const patch = {}; for (const k of Object.keys(b.patch || {})) if (fields.includes(k) && b.patch[k] !== undefined) patch[k] = b.patch[k];
+        const ks = Object.keys(patch);
+        if (!ks.length) return json(res, 400, { error: 'Не передано ни одного допустимого поля' });
+        const st = db.prepare(`UPDATE ${table} SET ${ks.map(k => k + '=?').join(',')} WHERE id=?`);
+        for (const id of ids) st.run(...ks.map(k => patch[k]), id);
+        log(`Массовое изменение (${table}): ${ids.length} записей — ${ks.join(', ')}`, table, null, user.name);
+      }
+      broadcast('change', { table });
+      return json(res, 200, { table, action: b.action === 'delete' ? 'delete' : 'update', count: ids.length });
+    }
+
     // ===== конкуренты: разведка (долги, суды, банкротство, отзывы, прайс-таблицы) =====
     if (/^\/api\/(competitors|competitor-sources|competitor-links|competitors\/find|prices|reviews)/.test(p)) {
       const handled = await competitorsApi.handle(req, res, { p, u, user });
@@ -675,7 +718,20 @@ export const server = http.createServer(async (req, res) => {
     if (p.startsWith('/api/')) return json(res, 404, { error: 'Не найдено' });
     let file = normalize(join(PUBLIC_DIR, p === '/' ? 'index.html' : p)); if (!file.startsWith(PUBLIC_DIR) || !existsSync(file)) file = join(PUBLIC_DIR, 'index.html');
     const fa = getSetting('FRAME_ANCESTORS');
-    res.writeHead(200, { 'Content-Type': MIME[extname(file)] || 'application/octet-stream', 'Cache-Control': 'no-cache', ...SECURITY_HEADERS, ...(fa ? { 'Content-Security-Policy': `frame-ancestors ${fa}` } : {}) });
+    const st = statSync(file);
+    // ETag = размер+время файла: браузер переиспользует копию и страница открывается мгновенно
+    const etag = `W/"${st.size.toString(16)}-${Math.round(st.mtimeMs).toString(16)}"`;
+    const headers = { 'Content-Type': MIME[extname(file)] || 'application/octet-stream', 'Cache-Control': 'no-cache', ETag: etag, ...SECURITY_HEADERS, ...(fa ? { 'Content-Security-Policy': `frame-ancestors ${fa}` } : {}) };
+    if (req.headers['if-none-match'] === etag) { res.writeHead(304, headers); return res.end(); }
+    const type = MIME[extname(file)] || '';
+    const compressible = /^(text|application\/(javascript|json|xml)|image\/svg)/.test(type);
+    if (compressible && /gzip/.test(String(req.headers['accept-encoding'] || '')) && st.size > 1024) {
+      const cached = staticGzip.get(file);
+      const gz = (cached && cached.mtimeMs === st.mtimeMs) ? cached.gz : (() => { const g = gzipSync(readFileSync(file), { level: 6 }); staticGzip.set(file, { mtimeMs: st.mtimeMs, gz: g }); return g })();
+      res.writeHead(200, { ...headers, 'Content-Encoding': 'gzip', 'Content-Length': gz.length, Vary: 'Accept-Encoding' });
+      return res.end(gz);
+    }
+    res.writeHead(200, { ...headers, 'Content-Length': st.size });
     res.end(readFileSync(file));
   } catch (e) { console.error(e); json(res, 500, { error: e.message }); }
 });

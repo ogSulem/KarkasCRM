@@ -27,7 +27,9 @@ const srv = spawn('node', ['--experimental-sqlite', 'backend/src/server.js'], { 
 for (let i = 0; i < 60; i++) { try { if ((await fetch(BASE + '/api/health')).ok) break } catch {} await sleep(200) }
 
 const html = readFileSync(join(ROOT, 'frontend/public/index.html'), 'utf8').replace(/<script[^>]*><\/script>/, '');
-const appJs = readFileSync(join(ROOT, 'frontend/public/app.js'), 'utf8') + '\nwindow.__state = state;';
+const appJs = readFileSync(join(ROOT, 'frontend/public/app.js'), 'utf8') + `
+window.__state = state;
+Object.assign(window, { SKELETONS, toggleTheme, applyTheme, openPalette, closePalette, toggleSel, clearSel, siteFormCode, bulkApply, openContactCard, openDealCard, api, get token() { return token } });`;
 const dom = new JSDOM(html, { runScripts: 'dangerously', url: BASE + '/', pretendToBeVisual: true, virtualConsole: new VirtualConsole() });
 const { window } = dom;
 window.__token = '';
@@ -47,8 +49,10 @@ const check = (name, cond, extra = '') => checks.push({ name, ok: !!cond, extra 
 const sleep100 = () => sleep(250);
 
 try {
+  $('#loginForm [name=email]').value = 'admin@example.com';
+  $('#loginForm [name=password]').value = 'admin12345';
   $('#loginForm').dispatchEvent(new window.Event('submit', { bubbles: true, cancelable: true }));
-  await sleep(500);
+  await sleep(700);
   check('вход выполнен', $('#login').classList.contains('hidden') && !$('#app').classList.contains('hidden'), $('#loginErr').textContent);
   window.__token = window.localStorage.getItem('karkas_token');
 
@@ -141,9 +145,48 @@ try {
 
   const si = $('#globalSearch'); si.value = 'дом'; si.dispatchEvent(new window.Event('input', { bubbles: true })); await sleep(500);
   check('глобальный поиск', $('#searchResults').innerHTML.length > 20);
+
+  // ── тема, палитра команд, неделя задач, массовые действия, форма для сайта ──
+  const themeBefore = window.document.documentElement.dataset.theme;
+  window.toggleTheme(); await sleep(60);
+  check('переключение светлой/тёмной темы', window.document.documentElement.dataset.theme !== themeBefore || window.localStorage.getItem('karkas_theme') === 'dark',
+    'тема: ' + window.document.documentElement.dataset.theme);
+  window.localStorage.removeItem('karkas_theme'); window.applyTheme('auto');
+
+  window.openPalette('сделк'); await sleep(150);
+  check('палитра команд открывается и ищет', !$('#palette').classList.contains('hidden') && /Сделки/.test($('#paletteList').innerHTML));
+  const anyContact = window.__state.contacts[0];
+  window.openPalette(anyContact ? anyContact.name.split(' ')[0] : 'клиент'); await sleep(800);
+  check('палитра ищет клиентов по базе', /Клиенты|Сделки|Компании/.test($('#paletteList').innerHTML), $('#paletteList').textContent.trim().slice(0, 60));
+  window.closePalette();
+
+  window.__state.taskView = 'week'; window.go('tasks'); await sleep(350);
+  check('календарь задач на неделю', /class="calendar"/.test($('#view').innerHTML) && /cal-day/.test($('#view').innerHTML));
+  window.__state.taskView = 'list'; window.go('tasks'); await sleep(300);
+
+  window.go('contacts'); await sleep(300);
+  window.toggleSel('contacts', window.__state.contacts[0].id); await sleep(300);
+  check('панель массовых действий в контактах', /class="bulkbar"/.test($('#view').innerHTML) && /Выбрано: 1/.test($('#view').innerHTML));
+  window.clearSel('contacts'); await sleep(200);
+
+  window.go('pipe'); await sleep(300);
+  check('чекбоксы выделения на карточках сделок', /box-shadow:0 0 0 2px|onchange="toggleSel\('deals'/.test($('#view').innerHTML) || /toggleSel\('deals'/.test($('#view').innerHTML));
+
+  const code = window.siteFormCode();
+  check('готовый код формы для сайта', /webhooks\/generic/.test(code) && /sendToKarkas/.test(code));
+
+  window.__state.settingsTab = 'integrations'; window.go('settings'); await sleep(350);
+  check('кнопка копирования кода формы в настройках', /copySiteFormCode/.test($('#view').innerHTML));
+
+  check('скелетоны загрузки описаны для всех разделов', ['dashboard', 'pipe', 'inbox', 'contacts', 'tasks', 'analytics', 'competitors', 'settings'].every(v => typeof window.SKELETONS?.[v] === 'function'));
+
+  const h = await (await fetch(BASE + '/api/health')).json();
+  check('health содержит версию схемы и признак демо', h.schema >= 3 && h.demo === true, JSON.stringify({ v: h.version, schema: h.schema, demo: h.demo }));
 } catch (e) { checks.push({ name: 'выполнение сценариев', ok: false, extra: e.message }) }
 
 srv.kill('SIGKILL');
+process.on('exit', () => { try { srv.kill('SIGKILL') } catch {} });
+process.on('uncaughtException', e => { console.error('Smoke-тест упал:', e.message); try { srv.kill('SIGKILL') } catch {}; process.exit(1) });
 const failed = checks.filter(c => !c.ok);
 console.log('\n=== Smoke-тест интерфейса KarkasCRM ===');
 checks.forEach(c => console.log(`${c.ok ? '✅' : '❌'} ${c.name}${c.extra ? ' — ' + String(c.extra).slice(0, 140) : ''}`));

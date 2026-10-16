@@ -76,7 +76,7 @@ tr:hover td{background:#fafcfb}
 .col h3{display:flex;justify-content:space-between;font-size:13px;margin-bottom:8px;font-weight:700}
 .col .deals{overflow:auto;display:flex;flex-direction:column;gap:8px;padding-bottom:6px}
 .col.drag-over{outline:2px dashed var(--green);background:var(--green-l)}
-.deal{background:#fff;border:1px solid var(--line);border-left:3px solid var(--green);border-radius:11px;padding:10px;cursor:grab;box-shadow:0 1px 2px rgba(15,23,42,.05);display:block}
+.deal{position:relative;background:#fff;border:1px solid var(--line);border-left:3px solid var(--green);border-radius:11px;padding:10px;cursor:grab;box-shadow:0 1px 2px rgba(15,23,42,.05);display:block}
 .deal:hover{box-shadow:var(--shadow)}
 .deal b{font-size:13.5px;display:block;margin-bottom:2px}
 .deal .sum{color:var(--green-d);font-weight:700}
@@ -197,3 +197,155 @@ code{background:#eef2f7}
   .chart{height:120px}
 }
 @media(prefers-reduced-motion:reduce){*{transition:none!important;animation:none!important}}
+
+/* ══════════════════════════════════════════════════════════════════════════
+   v2.4 — полировка интерфейса: тёмная тема, анимации, скелетоны, палитра ⌘K
+   ══════════════════════════════════════════════════════════════════════════ */
+
+/* ── тёмная тема ─────────────────────────────────────────────────────────── */
+:root{--ring:rgba(22,163,74,.28);--shadow-dark:0 18px 40px -18px rgba(0,0,0,.75)}
+html[data-theme=dark]{
+  --ink:#e8eef0;--muted:#93a4b3;--line:#26333b;--bg:#0d1417;--card:#141d21;
+  --green:#22c55e;--green-d:#16a34a;--green-l:#123326;--orange:#fb923c;--orange-l:#3a2415;
+  --shadow:0 1px 2px rgba(0,0,0,.5),0 10px 30px -18px rgba(0,0,0,.8)
+}
+html[data-theme=dark] body{background:var(--bg);color:var(--ink)}
+html[data-theme=dark] aside{background:linear-gradient(180deg,#061a10,#0b2a18)}
+html[data-theme=dark] .card,html[data-theme=dark] .kpi,html[data-theme=dark] .modal-card,
+html[data-theme=dark] .search-results,html[data-theme=dark] .deal,html[data-theme=dark] .msg,
+html[data-theme=dark] .tabs button{background:var(--card);color:var(--ink);border-color:var(--line)}
+html[data-theme=dark] input,html[data-theme=dark] select,html[data-theme=dark] textarea{background:#0f171b;color:var(--ink);border-color:var(--line)}
+html[data-theme=dark] .col{background:#101a1e;border-color:var(--line)}
+html[data-theme=dark] .msgs,html[data-theme=dark] .bar{background:#0f171b}
+html[data-theme=dark] .bar i{opacity:.9}
+html[data-theme=dark] th{border-color:var(--line)}
+html[data-theme=dark] td{border-color:#1c262c}
+html[data-theme=dark] tr:hover td{background:#182227}
+html[data-theme=dark] .conv:hover{background:#182227}
+html[data-theme=dark] .conv.active{background:#123326}
+html[data-theme=dark] .tag{background:#123326;color:#86efac}
+html[data-theme=dark] .tag.orange{background:#3a2415;color:#fdba74}
+html[data-theme=dark] .tag.grey{background:#1c262c;color:#c3ced6}
+html[data-theme=dark] code{background:#1c262c;color:#c7f9d6}
+html[data-theme=dark] .msg.out{background:linear-gradient(135deg,#15803d,#166534);color:#fff}
+html[data-theme=dark] .btn{background:#182227;border-color:var(--line);color:var(--ink)}
+html[data-theme=dark] .btn:hover{border-color:#3b4b55}
+html[data-theme=dark] .btn.primary{background:var(--green);border-color:var(--green);color:#04170c}
+html[data-theme=dark] .btn.orange{background:var(--orange);border-color:var(--orange);color:#2a1405}
+html[data-theme=dark] .btn.danger{background:#2a1517;border-color:#5b2327;color:#fca5a5}
+html[data-theme=dark] .modal{background:rgba(3,7,9,.66)}
+html[data-theme=dark] .skeleton,html[data-theme=dark] .sk-line{background:linear-gradient(90deg,#141d21 25%,#1d282e 37%,#141d21 63%)}
+html[data-theme=dark] #toast{background:#e8eef0;color:#0d1417}
+html[data-theme=dark] .empty{color:var(--muted)}
+
+/* ── плавные появления и микро-интеракции ────────────────────────────────── */
+@keyframes fadeUp{from{opacity:0;transform:translateY(8px)}to{opacity:1;transform:none}}
+@keyframes popIn{from{opacity:0;transform:scale(.97)}to{opacity:1;transform:none}}
+@keyframes shake{10%,90%{transform:translateX(-1px)}20%,80%{transform:translateX(2px)}30%,50%,70%{transform:translateX(-3px)}40%,60%{transform:translateX(3px)}}
+@keyframes shimmer{0%{background-position:-420px 0}100%{background-position:420px 0}}
+@keyframes spin{to{transform:rotate(360deg)}}
+@keyframes aurora{0%{transform:translate3d(-6%,-4%,0) scale(1)}50%{transform:translate3d(6%,4%,0) scale(1.08)}100%{transform:translate3d(-6%,-4%,0) scale(1)}}
+#view>*{animation:fadeUp .22s ease both}
+.modal-card{animation:popIn .18s ease both}
+.deal{transition:transform .15s ease,box-shadow .2s ease}
+.deal:hover{transform:translateY(-2px)}
+.deal:active{cursor:grabbing;transform:scale(.99)}
+.kpi{transition:transform .18s ease,box-shadow .2s ease}
+.kpi:hover{transform:translateY(-3px);box-shadow:0 16px 34px -20px rgba(15,23,42,.45)}
+.card{transition:box-shadow .2s ease,border-color .2s ease}
+nav button{position:relative}
+nav button.active::before{content:'';position:absolute;left:-8px;top:22%;bottom:22%;width:3px;border-radius:3px;background:linear-gradient(180deg,var(--green),var(--orange))}
+:focus-visible{outline:2px solid var(--green);outline-offset:2px;border-radius:8px}
+.btn:focus-visible{outline-offset:1px}
+header{position:sticky;top:0;z-index:20;background:color-mix(in srgb,var(--bg) 88%,transparent);backdrop-filter:blur(8px);padding:10px 0;margin:-10px 0 10px}
+html[data-theme=dark] header{background:color-mix(in srgb,var(--bg) 88%,transparent)}
+html.no-backdrop header{background:var(--bg)}
+body.dragging{cursor:grabbing}
+.btn.loading{position:relative;color:transparent!important;pointer-events:none}
+.btn.loading::after{content:'';position:absolute;inset:0;margin:auto;width:15px;height:15px;border-radius:50%;border:2px solid rgba(255,255,255,.45);border-top-color:#fff;animation:spin .7s linear infinite}
+.btn.loading.ghost::after,html[data-theme=dark] .btn.loading:not(.primary):not(.orange)::after{border-color:rgba(120,140,150,.45);border-top-color:var(--green)}
+
+/* ── скелетоны загрузки (мгновенное ощущение отклика) ─────────────────────── */
+.skeleton{background:linear-gradient(90deg,#eef2f4 25%,#f8fafb 37%,#eef2f4 63%);background-size:840px 100%;animation:shimmer 1.15s linear infinite;border-radius:10px}
+.sk-line{height:12px;margin:8px 0;background:linear-gradient(90deg,#eef2f4 25%,#f8fafb 37%,#eef2f4 63%);background-size:840px 100%;animation:shimmer 1.15s linear infinite;border-radius:8px}
+.sk-line.w60{width:60%}.sk-line.w40{width:40%}.sk-line.w80{width:80%}
+.sk-row{display:flex;gap:12px;align-items:center;margin:10px 0}
+.sk-ava{width:34px;height:34px;border-radius:50%;flex:0 0 auto}
+.sk-kpi{height:78px;border-radius:var(--radius)}
+.sk-card{height:92px;border-radius:var(--radius)}
+.sk-col{min-width:265px;max-width:265px;height:220px;border-radius:var(--radius)}
+.sk-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(190px,1fr));gap:12px;margin-bottom:14px}
+
+/* ── пустые состояния ────────────────────────────────────────────────────── */
+.empty-state{text-align:center;padding:34px 18px;color:var(--muted)}
+.empty-state .ico{font-size:38px;display:block;margin-bottom:8px;filter:grayscale(.15)}
+.empty-state b{display:block;color:var(--ink);font-size:15px;margin-bottom:4px}
+.empty-state .btn{margin-top:12px}
+
+/* ── логин: аккуратный «живой» фон + карточка ────────────────────────────── */
+.login{overflow:hidden;background:radial-gradient(120% 120% at 15% 10%,#14532d 0%,#052e16 45%,#031a0d 100%)}
+.login::before,.login::after{content:'';position:absolute;width:60vw;height:60vw;border-radius:50%;filter:blur(60px);opacity:.55;pointer-events:none}
+.login::before{background:radial-gradient(circle at 30% 30%,rgba(34,197,94,.55),transparent 60%);top:-18vw;left:-10vw;animation:aurora 22s ease-in-out infinite}
+.login::after{background:radial-gradient(circle at 60% 40%,rgba(249,115,22,.5),transparent 60%);bottom:-22vw;right:-12vw;animation:aurora 26s ease-in-out infinite reverse}
+.login-card{position:relative;z-index:1;animation:fadeUp .35s ease both;background:color-mix(in srgb,var(--card) 94%,transparent);backdrop-filter:blur(10px)}
+.login-card h1{font-size:24px;letter-spacing:-.02em}
+.login-card .logo.big{animation:popIn .5s ease both}
+.login-badge{display:flex;align-items:center;gap:8px;font-size:12.5px;color:var(--muted)}
+.pw-wrap{position:relative}
+.pw-wrap input{padding-right:44px}
+.pw-wrap button{position:absolute;right:6px;top:50%;transform:translateY(-50%);all:unset;cursor:pointer;padding:6px 8px;font-size:15px;opacity:.7}
+.pw-wrap button:hover{opacity:1}
+.login .err.shake{animation:shake .45s ease}
+.login-hint{background:var(--green-l);border:1px dashed var(--green);border-radius:10px;padding:9px 11px;font-size:12.5px;color:#166534}
+html[data-theme=dark] .login-hint{color:#bbf7d0}
+
+/* ── палитра команд (⌘K / Ctrl+K) ────────────────────────────────────────── */
+.palette{position:fixed;inset:0;background:rgba(15,23,42,.42);backdrop-filter:blur(3px);z-index:70;display:flex;justify-content:center;align-items:flex-start;padding:10vh 16px}
+.palette-card{width:min(620px,100%);background:var(--card);border:1px solid var(--line);border-radius:16px;box-shadow:0 30px 70px -22px rgba(0,0,0,.6);overflow:hidden;animation:popIn .16s ease both}
+.palette-card input{border:0;border-radius:0;padding:16px 18px;font-size:15px;background:transparent}
+.palette-card input:focus{outline:none}
+.palette-list{max-height:52vh;overflow:auto;border-top:1px solid var(--line)}
+.palette-list .p-item{display:flex;gap:12px;align-items:center;padding:11px 16px;cursor:pointer;font-size:13.5px}
+.palette-list .p-item small{color:var(--muted)}
+.palette-list .p-item.active,.palette-list .p-item:hover{background:var(--green-l)}
+.palette-list .p-group{padding:8px 16px 2px;font-size:11px;text-transform:uppercase;letter-spacing:.04em;color:var(--muted)}
+.palette-foot{padding:8px 14px;border-top:1px solid var(--line);display:flex;gap:14px;font-size:11.5px;color:var(--muted)}
+kbd{background:#f1f5f9;border:1px solid var(--line);border-bottom-width:2px;border-radius:6px;padding:1px 6px;font-size:11px;font-family:inherit}
+html[data-theme=dark] kbd{background:#1c262c}
+
+/* ── календарь задач (неделя) ────────────────────────────────────────────── */
+.calendar{display:grid;grid-template-columns:repeat(7,minmax(150px,1fr));gap:10px;overflow-x:auto;padding-bottom:8px}
+.cal-day{background:var(--card);border:1px solid var(--line);border-radius:var(--radius);padding:10px;min-height:170px;display:flex;flex-direction:column;gap:6px}
+.cal-day.today{border-color:var(--green);box-shadow:inset 0 0 0 1px var(--green)}
+.cal-day h4{margin:0 0 2px;font-size:12.5px;display:flex;justify-content:space-between;align-items:center;color:var(--muted)}
+.cal-day.today h4{color:var(--green)}
+.cal-task{border-radius:9px;padding:7px 9px;font-size:12.5px;background:var(--green-l);border-left:3px solid var(--green);cursor:pointer}
+.cal-task.overdue{background:#fee2e2;border-left-color:#dc2626;color:#7f1d1d}
+.cal-task.done{opacity:.55;text-decoration:line-through;background:#f1f5f9;border-left-color:#94a3b8;color:var(--muted)}
+.cal-task small{display:block;color:inherit;opacity:.8}
+html[data-theme=dark] .cal-task.overdue{background:#3a1a1c;color:#fecaca}
+html[data-theme=dark] .cal-task.done{background:#1c262c}
+
+/* ── массовые действия ───────────────────────────────────────────────────── */
+.bulkbar{position:sticky;top:0;z-index:12;display:flex;gap:10px;align-items:center;flex-wrap:wrap;background:var(--green-l);border:1px solid var(--green);border-radius:12px;padding:8px 12px;margin-bottom:10px;animation:fadeUp .18s ease both}
+.bulkbar b{color:#166534}
+html[data-theme=dark] .bulkbar b{color:#86efac}
+td.sel,th.sel{width:34px}
+input[type=checkbox]{width:16px;height:16px;accent-color:var(--green);cursor:pointer}
+
+/* ── карточка клиента и таблицы ──────────────────────────────────────────── */
+.table-wrap{overflow-x:auto}
+.contact-head{display:flex;gap:12px;align-items:center;flex-wrap:wrap}
+.contact-head .avatar{width:46px;height:46px;font-size:18px}
+.chips{display:flex;gap:6px;flex-wrap:wrap}
+.timeline{list-style:none;margin:0;padding:0}
+.timeline li{position:relative;padding:0 0 14px 22px;border-left:2px solid var(--line)}
+.timeline li:last-child{border-left-color:transparent;padding-bottom:0}
+.timeline li::before{content:'';position:absolute;left:-7px;top:3px;width:12px;height:12px;border-radius:50%;background:var(--green);box-shadow:0 0 0 3px var(--bg)}
+.timeline .t-body{padding:2px 0 0}
+.timeline small{display:block;color:var(--muted)}
+@media(max-width:900px){
+  .calendar{grid-template-columns:repeat(7,minmax(140px,1fr))}
+  .palette{padding:6vh 10px}
+  .bulkbar{position:static}
+}

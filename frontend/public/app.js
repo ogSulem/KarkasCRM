@@ -1,7 +1,32 @@
 /* KarkasCRM v2 frontend — amoCRM-like SPA + Wazzup unified inbox */
 const $ = s => document.querySelector(s), $$ = s => [...document.querySelectorAll(s)];
+
+/* ── тема: светлая / тёмная / как в системе ── */
+const THEME_KEY = 'karkas_theme';
+function currentThemeMode() { return localStorage.getItem(THEME_KEY) || 'auto' }
+function resolvedTheme(mode = currentThemeMode()) {
+  if (mode === 'light' || mode === 'dark') return mode;
+  return (window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches) ? 'dark' : 'light';
+}
+function applyTheme(mode = currentThemeMode()) {
+  const dark = resolvedTheme(mode) === 'dark';
+  document.documentElement.dataset.theme = dark ? 'dark' : 'light';
+  document.documentElement.dataset.themeMode = mode;
+  const meta = document.querySelector('meta[name=theme-color]'); if (meta) meta.setAttribute('content', dark ? '#0d1417' : '#16a34a');
+  const b = $('#themeBtn'); if (b) b.textContent = mode === 'auto' ? '🌗' : (dark ? '🌙' : '☀️');
+}
+function toggleTheme() {
+  const cur = currentThemeMode();
+  // из «как в системе» сразу переключаемся на противоположную текущей, чтобы нажатие было заметным
+  const next = cur === 'auto' ? (resolvedTheme('auto') === 'dark' ? 'light' : 'dark') : (cur === 'light' ? 'dark' : 'auto');
+  if (next === 'auto') localStorage.removeItem(THEME_KEY); else localStorage.setItem(THEME_KEY, next);
+  applyTheme(next);
+  toast({ light: '☀️ Светлая тема', dark: '🌙 Тёмная тема', auto: '🌗 Как в системе' }[next]);
+}
+if (window.matchMedia) window.matchMedia('(prefers-color-scheme: dark)').addEventListener('change', () => { if (currentThemeMode() === 'auto') applyTheme('auto') });
+applyTheme();
 let token = localStorage.getItem('karkas_token') || '';
-const state = { view: 'dashboard', settingsTab: 'integrations', pipeline: 1, conv: null, deals: [], stages: [], pipelines: [], contacts: [], companies: [], channels: [], cache: {}, dealTab: 'details', meta: null, dupes: null, me: null, users: [], taskScope: 'mine', dealScope: 'all' };
+const state = { view: 'dashboard', settingsTab: 'integrations', pipeline: 1, conv: null, deals: [], stages: [], pipelines: [], contacts: [], companies: [], channels: [], cache: {}, dealTab: 'details', meta: null, dupes: null, me: null, users: [], taskScope: 'mine', dealScope: 'all', taskView: 'list', sel: {} };
 const CUR = () => (state.meta && state.meta.company && state.meta.company.currency) || '₽';
 const fmt = n => new Intl.NumberFormat('ru-RU').format(Math.round(n || 0)) + ' ' + CUR();
 const esc = (s = '') => String(s ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
@@ -59,17 +84,44 @@ function cfTable(entity, obj = {}) {
 }
 
 /* ---------- boot ---------- */
+function togglePass(btn) {
+  const i = btn.parentElement.querySelector('input');
+  i.type = i.type === 'password' ? 'text' : 'password';
+  btn.textContent = i.type === 'password' ? '👁' : '🙈';
+}
+async function loginScreen() {
+  $('#app').classList.add('hidden'); $('#login').classList.remove('hidden');
+  try {
+    const h = await (await fetch('/api/health')).json();
+    if (h.demo) {
+      $('#loginHint').innerHTML = 'Демо-доступ предзаполнен: <b>admin@example.com / admin12345</b>. Для рабочей базы выключите демо-данные (SEED_DEMO=0) — подсказка исчезнет.';
+      $('#loginHint').classList.remove('hidden');
+      const f = $('#loginForm'); if (f && !f.email.value) { f.email.value = 'admin@example.com'; f.password.value = 'admin12345' }
+      $('#loginNote').innerHTML = 'CRM запущена в демонстрационном режиме — данные примерные, вход уже заполнен.';
+    } else {
+      $('#loginHint').classList.add('hidden');
+      $('#loginNote').innerHTML = 'Логин и пароль администратора заданы в <code>.env</code> при развёртывании.';
+    }
+  } catch {}
+}
 $('#loginForm').onsubmit = async e => {
   e.preventDefault();
+  const btn = $('#loginBtn'), err = $('#loginErr'); err.textContent = '';
+  btn.classList.add('loading'); btn.disabled = true;
   try {
     const d = await api('/api/auth/login', { method: 'POST', body: JSON.stringify(Object.fromEntries(new FormData(e.target))) });
-    token = d.token; localStorage.setItem('karkas_token', token); boot();
-  } catch (err) { $('#loginErr').textContent = err.message }
+    token = d.token; localStorage.setItem('karkas_token', token);
+    btn.textContent = 'Открываем…';
+    await boot();
+  } catch (e2) {
+    err.textContent = e2.message;
+    err.classList.add('shake'); setTimeout(() => err.classList.remove('shake'), 500);
+  } finally { btn.classList.remove('loading'); btn.disabled = false }
 };
 $('#logout').onclick = logout;
 function logout() { token = ''; localStorage.removeItem('karkas_token'); location.reload() }
 async function boot() {
-  if (!token) { $('#app').classList.add('hidden'); $('#login').classList.remove('hidden'); return }
+  if (!token) { await loginScreen(); return }
   try {
     const me = await api('/api/me');
     $('#uName').textContent = me.user.name; $('#uEmail').textContent = me.user.email; $('#uAva').textContent = (me.user.name || 'A')[0].toUpperCase();
@@ -77,7 +129,7 @@ async function boot() {
     state.me = me.user;
     state.users = await api('/api/users').catch(() => []);
     $('#app').classList.remove('hidden'); $('#login').classList.add('hidden'); connectSSE(); render();
-  } catch { $('#login').classList.remove('hidden'); $('#app').classList.add('hidden') }
+  } catch { await loginScreen() }
 }
 $$('#nav button').forEach(b => b.onclick = () => go(b.dataset.view));
 function go(v, tab) { state.view = v; if (tab) state.settingsTab = tab; $$('#nav button').forEach(b => b.classList.toggle('active', b.dataset.view === v)); render() }
@@ -87,9 +139,20 @@ const TITLES = {
   companies: ['Компании', 'Юридические лица и организации'], tasks: ['Задачи', 'Звонки, встречи и письма по клиентам'],
   products: ['Товары и услуги', 'Прайс для быстрого наполнения сделок'], competitors: ['Конкуренты', 'Разведка: долги, суды, банкротство, отзывы и цены — по одному названию'], analytics: ['Аналитика', 'Конверсия, средний чек и источники'], settings: ['Настройки', 'Интеграции, воронки, автоматизации, команда и данные']
 };
+const SK_ROW = '<div class="sk-row" style="padding:10px"><div class="skeleton sk-ava"></div><div style="flex:1"><div class="sk-line"></div><div class="sk-line w60"></div></div></div>';
+const SKELETONS = {
+  dashboard: () => `<div class="sk-grid">${'<div class="skeleton sk-kpi"></div>'.repeat(4)}</div><div class="cols"><div class="card"><div class="sk-line w40"></div><div class="sk-line"></div><div class="sk-line w80"></div><div class="sk-line w60"></div></div><div class="card"><div class="sk-line w60"></div>${'<div class="sk-row"><div class="skeleton sk-ava"></div><div style="flex:1"><div class="sk-line"></div><div class="sk-line w60"></div></div></div>'.repeat(4)}</div></div>`,
+  pipe: () => `<div class="kanban">${'<div class="skeleton sk-col"></div>'.repeat(5)}</div>`,
+  inbox: () => `<div class="inbox"><div>${SK_ROW.repeat(7)}</div><div style="padding:14px"><div class="sk-line w40"></div><div class="sk-line"></div><div class="sk-line w80"></div></div></div>`,
+  contacts: () => `<div class="card">${'<div class="sk-row"><div class="skeleton sk-ava"></div><div style="flex:1"><div class="sk-line"></div><div class="sk-line w40"></div></div></div>'.repeat(8)}</div>`,
+  tasks: () => `<div class="card">${'<div class="sk-row"><div class="skeleton" style="width:16px;height:16px;border-radius:5px"></div><div style="flex:1"><div class="sk-line"></div><div class="sk-line w60"></div></div></div>'.repeat(8)}</div>`,
+  analytics: () => `<div class="sk-grid">${'<div class="skeleton sk-kpi"></div>'.repeat(4)}</div><div class="card"><div class="sk-line w40"></div><div class="skeleton" style="height:160px"></div></div>`,
+  competitors: () => `<div class="card">${'<div class="sk-row"><div style="flex:1"><div class="sk-line"></div><div class="sk-line w60"></div></div><div class="skeleton" style="width:80px;height:24px"></div></div>'.repeat(5)}</div>`,
+  settings: () => `<div class="settings-cols"><div class="card"><div class="sk-line w40"></div>${'<div class="sk-line"></div>'.repeat(5)}</div><div class="card"><div class="sk-line w60"></div>${'<div class="sk-line"></div>'.repeat(3)}</div></div>`,
+};
 async function render() {
   const [t, s] = TITLES[state.view] || ['', '']; $('#title').textContent = t; $('#subtitle').textContent = s;
-  const v = $('#view'); v.innerHTML = '<div class="card empty">Загрузка…</div>';
+  const v = $('#view'); v.innerHTML = (SKELETONS[state.view] || SKELETONS.dashboard)();
   try {
     if (state.view === 'dashboard') return await dashboard(v);
     if (state.view === 'pipe') return await pipe(v);
@@ -150,7 +213,7 @@ async function pipe(v) {
   const q = (state.dealQuery || '').toLowerCase();
   const shown = (state.dealScope === 'mine' ? d.deals.filter(x => x.responsible_id === meId()) : d.deals)
     .filter(x => !q || `${x.title} ${x.contact_name || ''} ${x.company_name || ''} ${x.responsible || ''}`.toLowerCase().includes(q));
-  v.innerHTML = `<div class="card" style="display:flex;gap:10px;align-items:center;flex-wrap:wrap">
+  v.innerHTML = `${bulkBar('deals', `${bulkStage()}${bulkOwner('deals')}`)}<div class="card" style="display:flex;gap:10px;align-items:center;flex-wrap:wrap">
     <b>Воронка:</b><select style="width:auto" onchange="state.pipeline=+this.value;render()">${d.pipelines.map(p => `<option value="${p.id}" ${p.id === state.pipeline ? 'selected' : ''}>${esc(p.name)}</option>`).join('')}</select>
     <span class="tabs" style="margin:0"><button class="${state.dealScope !== 'mine' ? 'active' : ''}" onclick="state.dealScope='all';render()">Все сделки</button><button class="${state.dealScope === 'mine' ? 'active' : ''}" onclick="state.dealScope='mine';render()">Мои (${d.deals.filter(x => x.responsible_id === meId()).length})</button></span>
     <span class="tag">В работе: ${shown.length}</span><span class="tag orange">Сумма: ${fmt(shown.filter(x => !['won', 'lost'].includes(x.stage)).reduce((a, x) => a + x.amount, 0))}</span>
@@ -158,16 +221,22 @@ async function pipe(v) {
     ${(state.me && state.me.role) === 'admin' ? '<button class="btn sm" onclick="openPipelineEditor()">⚙ Настроить воронку</button>' : ''}</div>
   <div class="kanban">${d.stages.map(s => `<div class="col" ondragover="dragOver(event,this)" ondragleave="this.classList.remove('drag-over')" ondrop="dropDeal(event,'${s.code}',this)">
    <h3><span style="color:${esc(s.color)}">● ${esc(s.name)}</span><span>${shown.filter(x => x.stage === s.code).length}</span></h3>
-   <div class="deals">${shown.filter(x => x.stage === s.code).map(x => `<article class="deal" draggable="true" ondragstart="event.dataTransfer.setData('text/plain',${x.id})" onclick="openDealCard(${x.id})" style="border-left-color:${esc(s.color)}">
-    <b>${esc(x.title)}</b><span class="sum">${fmt(x.amount)}</span>
+   <div class="deals">${shown.filter(x => x.stage === s.code).map(x => `<article class="deal ${selSet('deals').has(x.id) ? 'selected' : ''}" draggable="true" ondragstart="event.dataTransfer.setData('text/plain',${x.id})" onclick="openDealCard(${x.id})" style="border-left-color:${esc(s.color)}${selSet('deals').has(x.id) ? ';box-shadow:0 0 0 2px var(--green)' : ''}">
+    <b>${esc(x.title)}</b><input type="checkbox" title="Выбрать для массового действия" style="position:absolute;top:8px;right:8px" ${selSet('deals').has(x.id) ? 'checked' : ''} onclick="event.stopPropagation()" onchange="toggleSel('deals',${x.id})"><span class="sum">${fmt(x.amount)}</span>
     <small>👤 ${esc(x.contact_name || 'Без контакта')}${x.deadline ? ' · ⏰ ' + esc(x.deadline) : ''}</small>
-    <div class="deal-foot"><span class="prio ${esc(x.priority)}">${x.priority === 'high' ? 'высокий' : x.priority === 'low' ? 'низкий' : 'обычный'}</span><span><button class="btn sm" onclick="event.stopPropagation();moveDeal(${x.id},1)">→</button></span></div></article>`).join('') || '<small style="padding:6px">Пусто</small>'}</div></div>`).join('')}</div>`;
+    <div class="deal-foot"><span class="prio ${esc(x.priority)}">${x.priority === 'high' ? 'высокий' : x.priority === 'low' ? 'низкий' : 'обычный'}</span><span><button class="btn sm" onclick="event.stopPropagation();moveDeal(${x.id},1)">→</button></span></div></article>`).join('') || '<small style="padding:6px;color:var(--muted)">Пусто — перетащите сюда карточку</small>'}</div></div>`).join('')}</div>`;
 }
 function dragOver(e, el) { e.preventDefault(); el.classList.add('drag-over') }
 async function dropDeal(e, stage, el) { e.preventDefault(); el.classList.remove('drag-over'); await moveDeal(e.dataTransfer.getData('text/plain'), 0, stage) }
 async function moveDeal(id, dir, stage) {
-  if (!stage) { const cur = state.deals.find(x => x.id == id); const i = state.stages.findIndex(s => s.code === cur.stage); stage = state.stages[Math.min(state.stages.length - 1, i + dir)].code }
-  await api('/api/deals/' + id, { method: 'PATCH', body: JSON.stringify({ stage }) }); toast('Сделка переведена: ' + ((state.stages.find(s => s.code === stage) || {}).name || stage)); render();
+  const card = state.deals.find(x => x.id == id);
+  if (!stage) { const i = state.stages.findIndex(s => s.code === (card || {}).stage); stage = state.stages[Math.min(state.stages.length - 1, i + dir)].code }
+  const stageName = (state.stages.find(s => s.code === stage) || {}).name || stage;
+  // сначала показываем результат (карточка переезжает мгновенно), затем сохраняем на сервере
+  const before = card ? card.stage : null;
+  if (card) { card.stage = stage; if (state.view === 'pipe') pipe($('#view')) }
+  try { await api('/api/deals/' + id, { method: 'PATCH', body: JSON.stringify({ stage }) }); toast('Сделка переведена: ' + stageName) }
+  catch (e) { if (card && before) { card.stage = before; if (state.view === 'pipe') pipe($('#view')) } toast(e.message) }
 }
 async function openDeal(id) {
   if (!state.contacts.length) state.contacts = await api('/api/contacts');
@@ -301,6 +370,56 @@ async function sendEmail(e, convId) {
 async function simulate() { await api('/api/inbox/simulate', { method: 'POST', body: JSON.stringify({ channel: ['whatsapp', 'telegram', 'instagram'][Math.floor(Math.random() * 3)], phone: '+7 9' + Math.floor(100000000 + Math.random() * 899999999), name: 'Клиент ' + (Math.floor(Math.random() * 90) + 10), body: 'Здравствуйте! Интересует каркасный дом, пришлите расчёт, пожалуйста.' }) }); toast('Входящее сообщение получено'); if (state.view !== 'inbox') go('inbox'); else render() }
 
 /* ---------- contacts / companies ---------- */
+/* ── массовые действия: выделяем записи и меняем их одной панелью ─────────── */
+const selSet = table => (state.sel[table] = state.sel[table] || new Set());
+function toggleSel(table, id) {
+  const st = selSet(table); st.has(id) ? st.delete(id) : st.add(id); render();
+}
+function clearSel(table) { selSet(table).clear(); render() }
+function selCount(table) { return selSet(table).size }
+function bulkBar(table, extra = '') {
+  const n = selCount(table); if (!n) return '';
+  const del = table === 'products' ? '' : `<button class="btn sm danger" onclick="bulkApply('${table}','delete')">✕ Удалить (${n})</button>`;
+  return `<div class="bulkbar"><b>Выбрано: ${n}</b>${extra}${del}<button class="btn sm ghost" onclick="clearSel('${table}')">Снять выделение</button></div>`;
+}
+async function bulkApply(table, action, patch = {}) {
+  const ids = [...selSet(table)];
+  if (!ids.length) return;
+  if (action === 'delete' && !confirm(`Удалить выбранные записи (${ids.length})? Действие необратимо.`)) return;
+  try {
+    const r = await api('/api/bulk', { method: 'POST', body: JSON.stringify({ table, ids, action, patch }) });
+    toast(`${action === 'delete' ? 'Удалено' : 'Обновлено'} записей: ${r.count}`);
+    selSet(table).clear(); state.contacts = []; render();
+  } catch (e) { toast(e.message) }
+}
+function bulkOwner(table) {
+  return `<select style="max-width:210px" onchange="if(this.value!=='')bulkApply('${table}','update',{responsible_id:+this.value})"><option value="">Ответственный…</option>${state.users.map(u => `<option value="${u.id}">${esc(u.name)}</option>`).join('')}</select>`;
+}
+function bulkStage() {
+  return `<select style="max-width:210px" onchange="if(this.value!=='')bulkApply('deals','update',{stage:this.value})"><option value="">Перевести на этап…</option>${(state.stages || []).map(x => `<option value="${esc(x.code)}">${esc(x.name)}</option>`).join('')}</select>`;
+}
+/* ── календарь задач на неделю ───────────────────────────────────────────── */
+const taskDay = t => {
+  const due = String(t.due || '');
+  const today = new Date(); const iso = d => d.toISOString().slice(0, 10);
+  if (/^\d{4}-\d{2}-\d{2}/.test(due)) return due.slice(0, 10);
+  if (/^сегодня/i.test(due)) return iso(today);
+  if (/^завтра/i.test(due)) return iso(new Date(Date.now() + 864e5));
+  if (/^позавчера/i.test(due)) return iso(new Date(Date.now() - 864e5));
+  return '';
+};
+function weekCalendar(rows) {
+  const WD = ['вс', 'пн', 'вт', 'ср', 'чт', 'пт', 'сб'], MON = ['янв', 'фев', 'мар', 'апр', 'мая', 'июн', 'июл', 'авг', 'сен', 'окт', 'ноя', 'дек'];
+  const today = new Date().toISOString().slice(0, 10);
+  const days = [...Array(7)].map((_, i) => { const d = new Date(Date.now() + i * 864e5); return { iso: d.toISOString().slice(0, 10), d } });
+  return `<div class="calendar">${days.map(({ iso, d }) => {
+    const list = rows.filter(t => taskDay(t) === iso).sort((a, b) => Number(a.done) - Number(b.done));
+    return `<div class="cal-day ${iso === today ? 'today' : ''}"><h4><span>${WD[d.getDay()]}, ${d.getDate()} ${MON[d.getMonth()]}</span><span>${list.length || ''}</span></h4>
+      ${list.map(t => `<div class="cal-task ${t.done ? 'done' : (iso < today ? 'overdue' : '')}" onclick="openTask(${t.id})" title="${esc(t.title)}"><b>${esc(t.title)}</b><small>${esc(String(t.due || '').replace(/^\d{4}-\d{2}-\d{2}\s*/, ''))}${t.contact_name ? ' · ' + esc(t.contact_name) : ''}${t.responsible_name ? ' · 👤 ' + esc(t.responsible_name) : ''}</small></div>`).join('')}
+      ${list.length ? '' : '<small>—</small>'}</div>`;
+  }).join('')}</div>`;
+}
+
 async function contacts(v) {
   const rows = await api('/api/contacts'); state.contacts = rows; await team();
   const fl = state.contactFilter || (state.contactFilter = { q: ($('#globalSearch').value || '').toLowerCase(), owner: '', source: '', tag: '' });
@@ -320,8 +439,46 @@ async function contacts(v) {
     <select style="max-width:170px" onchange="state.contactFilter.source=this.value;render()"><option value="">Все источники</option>${sources.map(x => `<option value="${esc(x)}" ${fl.source === x ? 'selected' : ''}>${esc(x)}</option>`).join('')}</select>
     <select style="max-width:160px" onchange="state.contactFilter.tag=this.value;render()"><option value="">Все теги</option>${tags.map(x => `<option value="${esc(x)}" ${fl.tag === x ? 'selected' : ''}>${esc(x)}</option>`).join('')}</select>
     ${(fl.q || fl.owner || fl.source || fl.tag) ? '<button class="btn sm ghost" onclick="resetContactFilter()">Сбросить фильтры</button>' : ''}</div>
-   <table><tr><th>Клиент</th><th>Контакты</th><th>Компания / источник</th><th>Теги</th><th>Ответственный</th><th></th></tr>${f.map(c => `<tr><td><b>${esc(c.name)}</b>${c.position ? `<br><small>${esc(c.position)}</small>` : ''}</td><td>${esc(c.phone || '')}<br><small>${esc(c.email || '')}</small></td><td>${esc(c.company || '—')} <span class="tag grey">${esc(c.source || '')}</span></td><td>${(c.tags || '').split(',').filter(Boolean).map(t => `<span class="tag">${esc(t)}</span>`).join('')}</td><td><small>${esc(ownerName(c.responsible_id) || '—')}</small></td>
-   <td><button class="btn sm" onclick="openContactCard(${c.id})">Открыть</button>${c.phone ? ` <a class="btn sm" href="tel:${esc(c.phone.replace(/[^+\d]/g, ''))}" title="Позвонить">📞</a>` : ''}${(c.channels || '').length ? '' : ''} <button class="btn sm" onclick="openContact(${c.id})">✎</button> <button class="btn sm danger" onclick="del('contacts',${c.id})">✕</button></td></tr>`).join('') || `<tr><td colspan="6"><div class="empty">${rows.length ? 'Ничего не найдено по фильтрам — нажмите «Сбросить»' : 'Контактов нет'}</div></td></tr>`}</table></div>`;
+   ${bulkBar('contacts', `${bulkOwner('contacts')}<button class="btn sm" onclick="bulkAddTag()">🏷 Добавить тег</button>`)}
+   <table><tr><th class="sel"></th><th>Клиент</th><th>Контакты</th><th>Компания / источник</th><th>Теги</th><th>Ответственный</th><th></th></tr>${f.map(c => `<tr><td class="sel"><input type="checkbox" ${selSet('contacts').has(c.id) ? 'checked' : ''} onchange="toggleSel('contacts',${c.id})"></td><td><b>${esc(c.name)}</b>${c.position ? `<br><small>${esc(c.position)}</small>` : ''}</td><td>${esc(c.phone || '')}<br><small>${esc(c.email || '')}</small></td><td>${esc(c.company || '—')} <span class="tag grey">${esc(c.source || '')}</span></td><td>${(c.tags || '').split(',').filter(Boolean).map(t => `<span class="tag">${esc(t)}</span>`).join('')}</td><td><small>${esc(ownerName(c.responsible_id) || '—')}</small></td>
+   <td><button class="btn sm" onclick="openContactCard(${c.id})">Открыть</button>${c.phone ? ` <a class="btn sm" href="tel:${esc(c.phone.replace(/[^+\d]/g, ''))}" title="Позвонить">📞</a>` : ''}${(c.channels || '').length ? '' : ''} <button class="btn sm" onclick="openContact(${c.id})">✎</button> <button class="btn sm danger" onclick="del('contacts',${c.id})">✕</button></td></tr>`).join('') || `<tr><td colspan="7"><div class="empty">${rows.length ? 'Ничего не найдено по фильтрам — нажмите «Сбросить»' : 'Контактов нет'}</div></td></tr>`}</table></div>`;
+}
+async function bulkAddTag() {
+  const tag = prompt('Какой тег добавить выбранным клиентам?'); if (!tag) return;
+  const ids = [...selSet('contacts')], rows = await api('/api/contacts');
+  for (const id of ids) {
+    const c = rows.find(x => x.id === id); if (!c) continue;
+    const tags = [...new Set([...(c.tags || '').split(',').map(x => x.trim()).filter(Boolean), tag.trim()])].join(',');
+    await api('/api/contacts/' + id, { method: 'PATCH', body: JSON.stringify({ tags }) });
+  }
+  toast(`Тег «${tag}» добавлен клиентам: ${ids.length}`); clearSel('contacts');
+}
+function siteFormCode() {
+  const origin = location.origin;
+  return `<!-- KarkasCRM: заявка с сайта в CRM -->
+<form id="karkasForm" onsubmit="return sendToKarkas(event)">
+  <input name="name" placeholder="Ваше имя" required>
+  <input name="phone" placeholder="Телефон" required>
+  <textarea name="body" placeholder="Что нужно?"></textarea>
+  <button>Отправить</button>
+</form>
+<script>
+async function sendToKarkas(e) {
+  e.preventDefault();
+  const f = e.target, d = Object.fromEntries(new FormData(f));
+  await fetch('${origin}/webhooks/generic', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ channel: 'site', name: d.name, phone: d.phone, body: d.body || 'Заявка с сайта' })
+  });
+  f.innerHTML = '<b>Спасибо! Мы свяжемся с вами в ближайшее время.</b>';
+  return false;
+}
+<\/script>`;
+}
+async function copySiteFormCode() {
+  const code = siteFormCode();
+  try { await navigator.clipboard.writeText(code); toast('Код формы скопирован — вставьте его на сайт') }
+  catch { openModal(`<h3>Код формы для сайта</h3><p><small>Скопируйте и вставьте на страницу сайта.</small></p><textarea rows="16" onclick="this.select()">${esc(code)}</textarea>`) }
 }
 function resetContactFilter() { state.contactFilter = { q: '', owner: '', source: '', tag: '' }; render() }
 async function openContactCard(id) {
@@ -390,11 +547,19 @@ async function tasks(v) {
   const mineOpen = all.filter(t => !t.done && (t.responsible_id === meId() || !t.responsible_id)).length;
   v.innerHTML = `<div class="card"><div class="row" style="border:0;flex-wrap:wrap;gap:8px"><b>Задач: ${rows.length}</b>
    <span class="tabs" style="margin:0"><button class="${state.taskScope === 'mine' ? 'active' : ''}" onclick="state.taskScope='mine';render()">Мои (${mineOpen})</button><button class="${state.taskScope === 'all' ? 'active' : ''}" onclick="state.taskScope='all';render()">Все (${all.filter(t => !t.done).length})</button></span>
+   <span class="tabs" style="margin:0"><button class="${state.taskView === 'list' ? 'active' : ''}" onclick="state.taskView='list';render()">☰ Список</button><button class="${state.taskView === 'week' ? 'active' : ''}" onclick="state.taskView='week';render()">🗓 Неделя</button></span>
    <button class="btn sm primary" style="margin-left:auto" onclick="openTask()">+ Задача</button></div>
    <p><small>«Мои» — задачи, назначенные на вас (${esc((state.me && state.me.name) || '')})${state.taskScope === 'mine' ? '; неназначенные задачи тоже попадают в список' : ''}.</small></p>
-   ${groups.map(([t, list]) => list.length ? `<h3 style="margin-top:12px">${t} <small>${list.length}</small></h3>${list.map(x => `<div class="row"><label><input type="checkbox" ${x.done ? 'checked' : ''} onchange="toggleTask(${x.id},this.checked)"> <span style="${x.done ? 'text-decoration:line-through;color:#94a3b8' : ''}">${types[x.type] || '•'} ${esc(x.title)}</span> <small>${esc(x.due || '')}${x.contact_name ? ' · ' + esc(x.contact_name) : ''}${x.deal_title ? ' · ' + esc(x.deal_title) : ''}${x.responsible_name ? ' · 👤 ' + esc(x.responsible_name) : ''}</small></label><span style="display:flex;gap:6px"><button class="btn sm" onclick="openTask(${x.id})">✎</button><button class="btn sm danger" onclick="del('tasks',${x.id})">✕</button></span></div>`).join('')}` : '').join('') || '<div class="empty">Задач нет — добавьте первую!</div>'}</div>`;
+   ${state.taskView === 'week' ? weekCalendar(rows) : ''}
+   ${state.taskView === 'week' ? '' : bulkBar('tasks', `<button class="btn sm" onclick="bulkApply('tasks','update',{done:1})">✓ Выполнить</button>`)}
+   ${state.taskView === 'week' ? '' : groups.map(([t, list]) => list.length ? `<h3 style="margin-top:12px">${t} <small>${list.length}</small></h3>${list.map(x => `<div class="row"><label style="display:flex;gap:8px;align-items:center;margin:0"><input type="checkbox" style="width:16px" ${x.done ? 'checked' : ''} onchange="toggleTask(${x.id},this.checked)"> <input type="checkbox" style="width:16px" ${selSet('tasks').has(x.id) ? 'checked' : ''} onchange="toggleSel('tasks',${x.id})" title="Выбрать для массового действия"> <span style="${x.done ? 'text-decoration:line-through;color:#94a3b8' : ''}">${types[x.type] || '•'} ${esc(x.title)}</span> <small>${esc(x.due || '')}${x.contact_name ? ' · ' + esc(x.contact_name) : ''}${x.deal_title ? ' · ' + esc(x.deal_title) : ''}${x.responsible_name ? ' · 👤 ' + esc(x.responsible_name) : ''}</small></label><span style="display:flex;gap:6px"><button class="btn sm" onclick="openTask(${x.id})">✎</button><button class="btn sm danger" onclick="del('tasks',${x.id})">✕</button></span></div>`).join('')}` : '').join('') || '<div class="empty-state"><span class="ico">🎯</span><b>Задач нет</b>Поставьте первое дело — звонок, встречу или письмо.<br><button class="btn primary" onclick="openTask()">+ Задача</button></div>'}</div>`;
 }
-async function toggleTask(id, done, refreshId) { await api('/api/tasks/' + id, { method: 'PATCH', body: JSON.stringify({ done: done ? 1 : 0 }) }); toast(done ? 'Задача выполнена' : 'Задача возвращена'); if (refreshId) openDealCard(refreshId); else render() }
+async function toggleTask(id, done, refreshId) {
+  toast(done ? '✓ Задача выполнена' : '↩ Задача возвращена');
+  if (refreshId) openDealCard(refreshId); else if (state.view !== 'tasks' || state.taskView === 'week') render();
+  try { await api('/api/tasks/' + id, { method: 'PATCH', body: JSON.stringify({ done: done ? 1 : 0 }) }) }
+  catch (e) { toast(e.message); render() }
+}
 async function openTask(id, p = {}) {
   const t = id ? await api('/api/tasks/' + id) : p; if (!state.contacts.length) state.contacts = await api('/api/contacts');
   await team();
@@ -618,6 +783,8 @@ async function settings(v) {
       <label>Access Token<input id="waToken" placeholder="${esc(s.whatsapp.token || 'EAA…')}"></label>
       <button class="btn primary" onclick="saveWhatsApp()">Сохранить WhatsApp</button><hr><p>Callback URL Meta: <code>${origin}/webhooks/whatsapp</code></p></div>
      <div class="card"><h3>✈ Telegram (свой бот) и сайт</h3><p>Вебхук бота: <code>${origin}/webhooks/telegram</code><br>Универсальный вебхук для сайта/формы: <code>${origin}/webhooks/generic</code> (JSON <code>{channel, phone, name, body}</code>)</p>
+      <p><button class="btn sm" onclick="copySiteFormCode()">📋 Скопировать готовый код формы для сайта</button></p>
+      <p><small>Вставьте код на страницу сайта — заявка попадёт в «Чаты Wazzup» и создаст сделку в «Неразобранном».</small></p>
       <label>Токен бота Telegram<input id="tgToken" placeholder="123456:ABC…"></label><button class="btn" onclick="saveTelegram()">Сохранить</button></div>
      <div class="card"><h3>✉ Почта — письма клиентам прямо из CRM</h3>
       <p>Статус: <b style="color:${s.email.configured ? 'var(--green)' : 'var(--orange)'}">${s.email.configured ? 'SMTP настроен' : 'не настроено'}</b></p>
@@ -786,7 +953,7 @@ async function saveCompetitorUrls(e) { e.preventDefault(); const b = {}; for (co
 async function saveCompanySettings(e) { e.preventDefault(); await api('/api/settings', { method: 'PUT', body: JSON.stringify(Object.fromEntries(new FormData(e.target))) }); toast('Сохранено'); return false }
 async function savePassword(e) { e.preventDefault(); try { await api('/api/me/password', { method: 'POST', body: JSON.stringify(Object.fromEntries(new FormData(e.target))) }); toast('Пароль изменён'); closeModal(); } catch (err) { toast(err.message) } return false }
 async function addPipeline() { const name = prompt('Название воронки:', 'Новая воронка'); if (!name) return; await api('/api/pipelines', { method: 'POST', body: JSON.stringify({ name }) }); toast('Воронка создана'); render() }
-function openPipelineEditor() { editPipeline(state.pipeline || 1) }
+async function openPipelineEditor() { return editPipeline(state.pipeline || 1) }
 async function editPipeline(id) {
   const pl = (await api('/api/pipelines')).find(p => p.id === id); const stages = JSON.parse(JSON.stringify(pl.stages));
   const row = (s, i) => `<div class="st" data-i="${i}"><span>${i + 1}</span><input value="${esc(s.name)}" oninput="pkStage(${i},'name',this.value)"><input type="color" value="${esc(s.color)}" oninput="pkStage(${i},'color',this.value)"><select onchange="pkStage(${i},'kind',this.value)">${['open', 'won', 'lost'].map(k => `<option value="${k}" ${k === (s.kind || 'open') ? 'selected' : ''}>${({ open: 'обычный', won: 'успех', lost: 'отказ' })[k]}</option>`).join('')}</select><button class="btn sm danger" onclick="pkDel(${i})">✕</button></div>`;
@@ -872,6 +1039,87 @@ $('#globalSearch').oninput = e => {
   }, 200);
 };
 document.addEventListener('click', e => { if (!e.target.closest('.searchbox')) $('#searchResults')?.classList.add('hidden') });
+/* ══════════════════════════════════════════════════════════════════════════
+   Палитра команд: ⌘K / Ctrl+K — мгновенный переход, создание и поиск
+   ══════════════════════════════════════════════════════════════════════════ */
+let paletteSel = 0, paletteRows = [];
+function paletteCommands() {
+  return [
+    { ico: '◈', title: 'Дашборд', hint: 'обзор продаж', run: () => go('dashboard') },
+    { ico: '▦', title: 'Сделки', hint: 'канбан и воронки', run: () => go('pipe') },
+    { ico: '✉', title: 'Чаты Wazzup', hint: 'переписка с клиентами', run: () => go('inbox') },
+    { ico: '◎', title: 'Контакты', hint: 'база клиентов', run: () => go('contacts') },
+    { ico: '🏢', title: 'Компании', hint: 'организации', run: () => go('companies') },
+    { ico: '✓', title: 'Задачи', hint: 'звонки и встречи', run: () => go('tasks') },
+    { ico: '📦', title: 'Товары и услуги', hint: 'прайс', run: () => go('products') },
+    { ico: '🕵', title: 'Конкуренты', hint: 'долги, суды, отзывы, цены', run: () => go('competitors') },
+    { ico: '📊', title: 'Аналитика', hint: 'конверсия и средний чек', run: () => go('analytics') },
+    { ico: '⚙', title: 'Настройки', hint: 'интеграции, воронки, команда', run: () => go('settings') },
+    { ico: '➕', title: 'Новая сделка', hint: 'создать карточку сделки', run: () => openDeal() },
+    { ico: '➕', title: 'Новый контакт', hint: 'добавить клиента', run: () => openContact() },
+    { ico: '➕', title: 'Новая задача', hint: 'поставить себе дело', run: () => openTask() },
+    { ico: '⚙', title: 'Интеграции и каналы', hint: 'Wazzup, WhatsApp, Telegram, почта', run: () => go('settings', 'integrations') },
+    { ico: '🧩', title: 'Поля карточек', hint: 'свои поля контактов и сделок', run: () => go('settings', 'fields') },
+    { ico: '💾', title: 'Данные, копии и демо-данные', hint: 'бэкапы и обслуживание', run: () => go('settings', 'data') },
+    { ico: '👥', title: 'Команда и права', hint: 'пользователи и роли', run: () => go('settings', 'team') },
+    { ico: '🌗', title: 'Сменить тему', hint: 'светлая / тёмная / как в системе', run: () => toggleTheme() },
+    { ico: '⬇', title: 'Экспорт контактов (CSV)', hint: 'скачать файл', run: () => download('/api/export/contacts', 'contacts.csv') },
+  ];
+}
+function paletteShell() {
+  if ($('#palette')) return $('#palette');
+  const el = document.createElement('div');
+  el.id = 'palette'; el.className = 'palette hidden';
+  el.innerHTML = `<div class="palette-card"><input id="paletteInput" placeholder="Команда или поиск: клиент, сделка, компания…"><div class="palette-list" id="paletteList"></div><div class="palette-foot"><span><kbd>↑</kbd><kbd>↓</kbd> выбрать</span><span><kbd>Enter</kbd> открыть</span><span><kbd>Esc</kbd> закрыть</span><span><kbd>⌘K</kbd> палитра</span></div></div>`;
+  document.body.appendChild(el);
+  el.addEventListener('click', e => { if (e.target === el) closePalette() });
+  $('#paletteInput').addEventListener('input', e => paletteRender(e.target.value));
+  return el;
+}
+function openPalette(prefill = '') {
+  const el = paletteShell(); el.classList.remove('hidden');
+  const i = $('#paletteInput'); i.value = prefill; i.focus(); paletteRender(prefill);
+}
+function closePalette() { const el = $('#palette'); if (el) el.classList.add('hidden') }
+function paletteRender(q = '') {
+  const needle = q.trim().toLowerCase();
+  const cmds = paletteCommands().filter(c => !needle || (c.title + ' ' + c.hint).toLowerCase().includes(needle)).slice(0, 7);
+  const rows = cmds.map(c => ({ html: `<span>${c.ico}</span><span style="flex:1"><b>${esc(c.title)}</b><br><small>${esc(c.hint)}</small></span>`, run: c.run }));
+  const list = $('#paletteList');
+  const paint = () => {
+    paletteRows = rows;
+    if (paletteSel >= rows.length) paletteSel = 0;
+    list.innerHTML = rows.map((r, i) => r.group ? `<div class="p-group">${esc(r.group)}</div>` : `<div class="p-item ${i === paletteSel ? 'active' : ''}" data-i="${i}">${r.html}</div>`).join('') || '<div class="p-item"><small>Ничего не найдено</small></div>';
+    list.querySelectorAll('.p-item[data-i]').forEach(el => el.onclick = () => runPaletteRow(Number(el.dataset.i)));
+  };
+  paint();
+  if (needle.length >= 2) {
+    api('/api/search?q=' + encodeURIComponent(q.trim())).then(d => {
+      const found = [
+        ...(d.contacts || []).map(c => ({ group: 'Клиенты', html: `<span>◎</span><span style="flex:1"><b>${esc(c.name)}</b><br><small>${esc(c.phone || '')}</small></span>`, run: () => { closePalette(); openContactCard(c.id) } })),
+        ...(d.deals || []).map(x => ({ group: 'Сделки', html: `<span>▦</span><span style="flex:1"><b>${esc(x.title)}</b><br><small>${fmt(x.amount)}</small></span>`, run: () => { closePalette(); openDealCard(x.id) } })),
+        ...(d.companies || []).map(x => ({ group: 'Компании', html: `<span>🏢</span><span style="flex:1"><b>${esc(x.name)}</b></span>`, run: () => { closePalette(); openCompany(x.id) } })),
+      ];
+      rows.length = 0; rows.push(...cmds.map(c => ({ html: `<span>${c.ico}</span><span style="flex:1"><b>${esc(c.title)}</b><br><small>${esc(c.hint)}</small></span>`, run: c.run })), ...found);
+      paint();
+    }).catch(() => {});
+  }
+}
+function runPaletteRow(i) { const r = paletteRows[i]; if (!r) return; closePalette(); try { r.run() } catch (e) { toast(e.message) } }
+document.addEventListener('keydown', e => {
+  const cmdK = (e.key === 'k' || e.key === 'K') && (e.metaKey || e.ctrlKey);
+  if (cmdK) { e.preventDefault(); $('#palette') && !$('#palette').classList.contains('hidden') ? closePalette() : openPalette(); return }
+  const pal = $('#palette');
+  if (pal && !pal.classList.contains('hidden')) {
+    if (e.key === 'Escape') { e.preventDefault(); closePalette() }
+    if (e.key === 'ArrowDown') { e.preventDefault(); paletteSel = Math.min(paletteSel + 1, paletteRows.length - 1); paletteRender($('#paletteInput').value) }
+    if (e.key === 'ArrowUp') { e.preventDefault(); paletteSel = Math.max(paletteSel - 1, 0); paletteRender($('#paletteInput').value) }
+    if (e.key === 'Enter') { e.preventDefault(); runPaletteRow(paletteSel) }
+    return;
+  }
+  if (e.key === 'Escape' && !$('#modal').classList.contains('hidden')) closeModal();
+  if (e.key === '/' && !/^(INPUT|TEXTAREA|SELECT)$/.test((e.target.tagName || '')) && !e.metaKey && !e.ctrlKey) { e.preventDefault(); openPalette() }
+});
 function connectSSE() {
   const es = new EventSource('/api/events?token=' + encodeURIComponent(token));
   es.addEventListener('message', e => {

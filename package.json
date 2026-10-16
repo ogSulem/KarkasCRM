@@ -1,6 +1,6 @@
 {
   "name": "karkascrm",
-  "version": "2.3.0",
+  "version": "2.4.0",
   "private": true,
   "description": "KarkasCRM — CRM уровня amoCRM: сделки и воронки, клиенты, задачи, единый инбокс Wazzup (WhatsApp/Telegram/Instagram/Viber), почта, разведка конкурентов. Без внешних зависимостей, один контейнер.",
   "license": "UNLICENSED",
