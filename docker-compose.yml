@@ -1,24 +1,42 @@
 name: karkascrm
+# Значения подставляются из .env в этой же папке (см. .env.example).
+# Запуск: docker compose up -d --build   →   http://IP:${CRM_PORT}
 services:
   crm:
     build: .
     image: karkascrm:latest
     container_name: karkascrm
     restart: unless-stopped
-    env_file: [.env]
+    ports:
+      # Оставьте так для быстрого старта. За HTTPS-прокси (Caddy/nginx) замените на "127.0.0.1:8080:8080"
+      - "${CRM_PORT:-8080}:8080"
     environment:
       PORT: 8080
       HOST: 0.0.0.0
       DATA_DIR: /data
-    ports:
-      - "${CRM_PORT:-8080}:8080"
+      TZ: ${TZ:-Europe/Moscow}
+      JWT_SECRET: ${JWT_SECRET:-change-me-in-production-please-32-chars}
+      ADMIN_EMAIL: ${ADMIN_EMAIL:-admin@example.com}
+      ADMIN_PASSWORD: ${ADMIN_PASSWORD:-admin12345}
+      # Wazzup (WhatsApp, Telegram, Instagram, Viber)
+      WAZZUP_API_KEY: ${WAZZUP_API_KEY:-}
+      WAZZUP_CHANNEL_ID: ${WAZZUP_CHANNEL_ID:-}
+      WAZZUP_WEBHOOK_SECRET: ${WAZZUP_WEBHOOK_SECRET:-}
+      WAZZUP_API_URL: ${WAZZUP_API_URL:-https://api.wazzup24.com/v3}
+      # Прямой WhatsApp Cloud API (Meta) — альтернатива Wazzup
+      WHATSAPP_TOKEN: ${WHATSAPP_TOKEN:-}
+      WHATSAPP_PHONE_ID: ${WHATSAPP_PHONE_ID:-}
+      WHATSAPP_VERIFY_TOKEN: ${WHATSAPP_VERIFY_TOKEN:-karkas-verify}
+      TELEGRAM_BOT_TOKEN: ${TELEGRAM_BOT_TOKEN:-}
     volumes:
       - crm_data:/data
     healthcheck:
-      test: ["CMD","wget","-qO-","http://127.0.0.1:8080/api/health"]
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1:8080/api/health"]
       interval: 30s
       timeout: 5s
       retries: 3
+      start_period: 10s
+
 volumes:
   crm_data:
     name: karkascrm_data

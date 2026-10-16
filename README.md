@@ -1,164 +1,152 @@
-<p align="center">
-  <a href="https://www.twenty.com">
-    <img src="./packages/twenty-website/public/images/core/logo.svg" width="100px" alt="Twenty logo" />
-  </a>
-</p>
+# KarkasCRM
 
-<h2 align="center">The #1 Open-Source CRM</h2>
+**CRM уровня amoCRM за один `docker compose up`** — сделки и настраиваемые воронки, клиенты и компании, задачи, аналитика и **единый инбокс мессенджеров через Wazzup**: WhatsApp, Telegram, Instagram и Viber собираются в один чат клиента.
 
-<p align="center"><a href="https://twenty.com"><img src="./packages/twenty-website/public/images/readme/globe-icon.svg" width="12" height="12"/> Website</a> · <a href="https://docs.twenty.com"><img src="./packages/twenty-website/public/images/readme/book-icon.svg" width="12" height="12"/> Documentation</a> · <a href="https://github.com/orgs/twentyhq/projects/1"><img src="./packages/twenty-website/public/images/readme/map-icon.svg" width="12" height="12"/> Roadmap </a> · <a href="https://discord.gg/cx5n4Jzs57"><img src="./packages/twenty-website/public/images/readme/discord-icon.svg" width="12" height="12"/> Discord</a> · <a href="https://www.figma.com/file/xt8O9mFeLl46C5InWwoMrN/Twenty"><img src="./packages/twenty-website/public/images/readme/figma-icon.webp"  width="12" height="12"/>  Figma</a></p>
+Написана без внешних зависимостей: Node.js 22 + SQLite + статический SPA. Ни одного npm-пакета в рантайме — контейнер собирается за секунды и не ломается от обновлений зависимостей.
 
-<p align="center">
-  <a href="https://www.twenty.com">
-    <picture>
-      <source media="(prefers-color-scheme: dark)" srcset="./packages/twenty-website/public/images/readme/github-cover-dark.webp" />
-      <source media="(prefers-color-scheme: light)" srcset="./packages/twenty-website/public/images/readme/github-cover-light.webp" />
-      <img src="./packages/twenty-website/public/images/readme/github-cover-light.webp" alt="Twenty banner" />
-    </picture>
-  </a>
-</p>
+---
 
-<br />
-
-# Why Twenty
-
-Twenty gives technical teams the building blocks for a custom CRM that meets complex business needs and quickly adapts as the business evolves. Twenty is the CRM you build, ship, and version like the rest of your stack.
-
-<a href="https://twenty.com/resources/why-twenty"><img src="./packages/twenty-website/public/images/readme/star-icon.svg" width="14" height="14"/> Learn more about why we built Twenty</a>
-
-<br />
-
-# Installation
-
-### <img src="./packages/twenty-website/public/images/readme/globe-icon.svg" width="14" height="14"/> Cloud
-
-The fastest way to get started. Sign up at [twenty.com](https://twenty.com) and spin up a workspace in under a minute, with no infrastructure to manage and always up to date.
-
-### <img src="./packages/twenty-website/public/images/readme/book-icon.svg" width="14" height="14"/> Build an app
-
-Scaffold a new app with the Twenty CLI:
+## Быстрый старт
 
 ```bash
-npx create-twenty-app my-app
+git clone <ваш-репозиторий> KarkasCRM && cd KarkasCRM
+cp .env.example .env      # обязательно поменяйте JWT_SECRET и ADMIN_PASSWORD
+docker compose up -d --build
 ```
 
-Define objects, fields, and views as code:
+Откройте `http://<IP-сервера>:8080` → вход `admin@example.com` / `admin12345` (из `.env`).
 
-```ts
-import { defineObject, FieldType } from 'twenty-sdk/define';
+Скрипт-помощник: `./install.sh` — создаст `.env` и запустит всё одной командой.
+Без Docker: `DATA_DIR=./data node --experimental-sqlite backend/src/server.js`.
 
-export default defineObject({
-  nameSingular: 'deal',
-  namePlural: 'deals',
-  labelSingular: 'Deal',
-  labelPlural: 'Deals',
-  fields: [
-    { name: 'name', label: 'Name', type: FieldType.TEXT },
-    { name: 'amount', label: 'Amount', type: FieldType.CURRENCY },
-    { name: 'closeDate', label: 'Close Date', type: FieldType.DATE_TIME },
-  ],
-});
-```
+---
 
-Then ship it to your workspace:
+## Что внутри
+
+### Продажи
+- **Сделки на канбане** с drag-and-drop между этапами, суммой, сроками и приоритетами
+- **Настраиваемые воронки**: создавайте любые воронки и этапы (название, цвет, тип «обычный/успех/отказ») прямо в интерфейсе — Настройки → Воронки
+- **Товары и прайс**: добавление позиций в сделку, сумма пересчитывается автоматически
+- **Причины отказа**, дедлайны, ответственные, приоритеты
+
+### Клиенты
+- **Контакты** с тегами, источниками, поиском, карточкой клиента (сделки, заметки, задачи)
+- **Компании** (включая ИНН, сайт)
+- **Заметки** к контактам и сделкам, **лента активности** по каждому клиенту
+- **Импорт/экспорт CSV** и полный **бэкап JSON** из интерфейса
+
+### Задачи
+- Типы (звонок, встреча, сообщение, письмо), сроки, приоритеты, результат
+- Группировка: просроченные / активные / выполненные
+- Создаются вручную, из карточки сделки/клиента или **автоматизациями**
+
+### Единый инбокс (Wazzup)
+- **Один чат на клиента**: сообщения из WhatsApp, Telegram, Instagram и Viber склеиваются по телефону или chatId
+- Первое входящее **само создаёт контакт, чат и сделку** на первом этапе воронки
+- Отправка ответов клиенту через ваш номер Wazzup прямо из CRM
+- Статусы сообщений (`sent / delivered / read / error`), счётчики непрочитанного, реалтайм через SSE
+- История сохраняется даже если провайдер отключён — «локальный режим»
+- **Кнопка «🧪 Тестовое входящее»** — проверить всю логику без реального мессенджера
+
+### Аналитика
+- Конверсия в успех, средний чек, прогноз выручки по активным сделкам
+- Выручка по этапам, источники лидов, причины отказов
+
+### Команда и права
+- Роли: **Администратор** (всё), **Менеджер** (работа с клиентами и сделками), **Наблюдатель** (только чтение)
+- Смена пароля пользователем, управление командой в Настройках
+
+### Автоматизации
+- Триггеры: создана сделка, входящее сообщение, смена этапа
+- Действия: создать задачу, перевести сделку на этап, добавить тег
+- Готовые примеры уже включены после первого запуска
+
+---
+
+## Подключение Wazzup (5 шагов)
+
+1. **В Wazzup**: личный кабинет → «Интеграция с CRM» → API → **Подключить** → скопируйте API-ключ. (Каналы WhatsApp/Telegram/Instagram/Viber добавляются там же в разделе «Каналы».)
+2. **В CRM**: Настройки → **Интеграции и каналы** → вставьте API-ключ → «Сохранить ключ».
+3. Нажмите **«🔍 Проверить и синхронизировать каналы»** — CRM обратится к Wazzup, покажет ваши каналы и сохранит их. При необходимости выберите «Канал по умолчанию».
+4. Нажмите **«Отправить адрес вебхука в Wazzup автоматически»** (или укажите вручную в кабинете Wazzup URL вида `https://ваш-домен/webhooks/wazzup`).
+5. Пишите клиенту с телефона или из мессенджера — сообщение появится в разделе **Чаты Wazzup**; ответы из CRM уходят клиенту через ваш номер.
+
+> Для вебхуков нужен публичный HTTPS-адрес: см. раздел «Домен и HTTPS» в [DEPLOY.md](DEPLOY.md). Поддерживаются и старый (`messages[]`), и новый (`event: message.add`) формат вебхуков Wazzup.
+
+### Другие каналы
+- **Прямой WhatsApp Cloud API (Meta)** — если Wazzup не нужен: Настройки → Интеграции → укажите Phone Number ID, токен и Verify Token, а в Meta укажите `https://ваш-домен/webhooks/whatsapp`. Переключатель провайдера там же.
+- **Свой Telegram-бот**: вебхук на `https://ваш-домен/webhooks/telegram`.
+- **Сайт, Авито, любая форма**: `POST https://ваш-домен/webhooks/generic` с JSON `{ "channel": "site", "phone": "+7…", "name": "Имя", "body": "Текст" }` — сообщение попадёт в тот же инбокс и создаст сделку.
+- **Проверить без мессенджера**: кнопка «🧪 Тестовое входящее» в чате или `POST /api/inbox/simulate`.
+
+---
+
+## Развёртывание
+
+Подробная инструкция — **[DEPLOY.md](DEPLOY.md)**: публичный IP, HTTPS (Caddy/nginx + Let's Encrypt), обновление, бэкапы, диагностика.
+
+Коротко:
 
 ```bash
-npx twenty app:publish --private
+cp .env.example .env && nano .env      # JWT_SECRET, ADMIN_PASSWORD, WHATSAPP_*/WAZZUP_* по желанию
+docker compose up -d --build           # → http://IP:8080
 ```
 
-See the [app development guide](https://docs.twenty.com/developers/extend/apps/getting-started) for objects, views, agents, and logic functions.
+## Настройки (.env)
 
-### <img src="./packages/twenty-website/public/images/readme/rocket-icon.svg" width="14" height="14"/> Self-hosting
+| Переменная | Назначение | По умолчанию |
+|---|---|---|
+| `PORT` | порт приложения | `8080` |
+| `JWT_SECRET` | подпись токенов входа — **смените!** | dev-значение |
+| `ADMIN_EMAIL` / `ADMIN_PASSWORD` | первый администратор | `admin@example.com` / `admin12345` |
+| `CRM_PORT` | внешний порт compose | `8080` |
+| `DATA_DIR` | каталог базы SQLite (volume) | `/data` в Docker |
+| `WAZZUP_API_KEY` | ключ Wazzup (можно задать в UI) | — |
+| `WAZZUP_VERIFY` / `WAZZUP_WEBHOOK_SECRET` | секрет вебхука | — |
+| `WHATSAPP_TOKEN`, `WHATSAPP_PHONE_ID`, `WHATSAPP_VERIFY_TOKEN` | прямой WhatsApp Cloud API | — |
+| `TELEGRAM_BOT_TOKEN` | свой Telegram-бот | — |
 
-Run Twenty on your own infrastructure with [Docker Compose](https://docs.twenty.com/developers/self-host/capabilities/docker-compose), or contribute locally via the [local setup guide](https://docs.twenty.com/developers/contribute/capabilities/local-setup).
+Всё, что можно настроить в интерфейсе, хранится в базе (таблица настроек) и **не требует перезапуска**.
 
-<br />
-<br />
+---
 
-# Everything you need
+## API и вебхуки
 
-Twenty gives you the building blocks of a modern CRM (objects, views, workflows, and agents) and lets you extend them as code. Here's a tour of what's in the box.
+Все действия CRM доступны по REST с токеном `Authorization: Bearer <JWT>` (`POST /api/auth/login`):
 
-Want to go deeper? Read the <a href="https://docs.twenty.com/user-guide/introduction"><img src="./packages/twenty-website/public/images/readme/planner-icon.svg" width="14" height="14"/> User Guide</a> for product walkthroughs, or the <a href="https://docs.twenty.com"><img src="./packages/twenty-website/public/images/readme/book-icon.svg" width="14" height="14"/> Documentation</a> for developer reference.
+```
+GET/POST/PATCH/DELETE  /api/contacts  /api/companies  /api/deals  /api/tasks
+                       /api/products  /api/templates  /api/automations  /api/notes
+GET  /api/dashboard    GET /api/analytics    GET /api/search?q=
+GET/POST /api/pipelines  PUT/DELETE /api/pipelines/:id      # воронки и этапы
+GET/POST /api/conversations/:id/messages                    # единый инбокс
+GET/PUT  /api/settings  GET/POST /api/channels  /api/users
+POST /api/integrations/wazzup/test|sync|webhook             # Wazzup
+GET  /api/export/contacts|deals  POST /api/import/contacts  GET /api/backup
+POST /webhooks/wazzup  /webhooks/whatsapp  /webhooks/telegram  /webhooks/generic
+GET  /api/events                                            # SSE-реалтайм
+```
 
-<table align="center">
-  <tr>
-    <td width="50%">
-      <picture>
-        <source media="(prefers-color-scheme: dark)" srcset="./packages/twenty-website/public/images/readme/v2-build-apps-dark.webp" />
-        <source media="(prefers-color-scheme: light)" srcset="./packages/twenty-website/public/images/readme/v2-build-apps-light.webp" />
-        <img src="./packages/twenty-website/public/images/readme/v2-build-apps-light.webp" alt="Create your apps" />
-      </picture>
-      <p align="center"><a href="https://docs.twenty.com/developers/extend/apps/getting-started"><img src="./packages/twenty-website/public/images/readme/code-icon.svg" width="16" height="16"/> Learn more about apps in doc</a></p>
-    </td>
-    <td width="50%">
-      <picture>
-        <source media="(prefers-color-scheme: dark)" srcset="./packages/twenty-website/public/images/readme/v2-version-control-dark.webp" />
-        <source media="(prefers-color-scheme: light)" srcset="./packages/twenty-website/public/images/readme/v2-version-control-light.webp" />
-        <img src="./packages/twenty-website/public/images/readme/v2-version-control-light.webp" alt="Stay on top with version control" />
-      </picture>
-      <p align="center"><a href="https://docs.twenty.com/developers/extend/apps/publishing"><img src="./packages/twenty-website/public/images/readme/monitor-icon.svg" width="16" height="16"/> Learn more about version control in doc</a></p>
-    </td>
-  </tr>
-  <tr>
-    <td width="50%">
-      <picture>
-        <source media="(prefers-color-scheme: dark)" srcset="./packages/twenty-website/public/images/readme/v2-all-tools-dark.webp" />
-        <source media="(prefers-color-scheme: light)" srcset="./packages/twenty-website/public/images/readme/v2-all-tools-light.webp" />
-        <img src="./packages/twenty-website/public/images/readme/v2-all-tools-light.webp" alt="All the tools you need to build anything" />
-      </picture>
-      <p align="center"><a href="https://docs.twenty.com/developers/extend/apps/building"><img src="./packages/twenty-website/public/images/readme/rocket-icon.svg" width="16" height="16"/> Learn more about primitives in doc</a></p>
-    </td>
-    <td width="50%">
-      <picture>
-        <source media="(prefers-color-scheme: dark)" srcset="./packages/twenty-website/public/images/readme/v2-tools-dark.webp" />
-        <source media="(prefers-color-scheme: light)" srcset="./packages/twenty-website/public/images/readme/v2-tools-light.webp" />
-        <img src="./packages/twenty-website/public/images/readme/v2-tools-light.webp" alt="Customize your layouts" />
-      </picture>
-      <p align="center"><a href="https://docs.twenty.com/user-guide/layout/overview"><img src="./packages/twenty-website/public/images/readme/planner-icon.svg" width="16" height="16"/> Learn more about layouts in doc</a></p>
-    </td>
-  </tr>
-  <tr>
-    <td width="50%">
-      <picture>
-        <source media="(prefers-color-scheme: dark)" srcset="./packages/twenty-website/public/images/readme/v2-ai-agents-dark.webp" />
-        <source media="(prefers-color-scheme: light)" srcset="./packages/twenty-website/public/images/readme/v2-ai-agents-light.webp" />
-        <img src="./packages/twenty-website/public/images/readme/v2-ai-agents-light.webp" alt="AI agents and chats" />
-      </picture>
-      <p align="center"><a href="https://docs.twenty.com/user-guide/ai/overview"><img src="./packages/twenty-website/public/images/readme/message-icon.svg" width="16" height="16"/> Learn more about AI in doc</a></p>
-    </td>
-    <td width="50%">
-      <picture>
-        <source media="(prefers-color-scheme: dark)" srcset="./packages/twenty-website/public/images/readme/v2-crm-tools-dark.webp" />
-        <source media="(prefers-color-scheme: light)" srcset="./packages/twenty-website/public/images/readme/v2-crm-tools-light.webp" />
-        <img src="./packages/twenty-website/public/images/readme/v2-crm-tools-light.webp" alt="Plus all the tools of a good CRM" />
-      </picture>
-      <p align="center"><a href="https://docs.twenty.com/user-guide/introduction"><img src="./packages/twenty-website/public/images/readme/star-icon.svg" width="16" height="16"/> Learn more about CRM features in doc</a></p>
-    </td>
-  </tr>
-</table>
+## Тесты
 
-<br />
+```bash
+node --experimental-sqlite --test tests/*.test.js
+```
 
-# Stack
+Проверяются: авторизация и роли, склейка чатов Wazzup/WhatsApp/Telegram в один диалог, идемпотентность вебхуков, автосоздание сделки, товары и пересчёт суммы, настройка воронки, автоматизации, а также **сквозная отправка сообщения в API Wazzup** (на локальной заглушке — сверяется точный формат запроса).
 
-- <a href="https://www.typescriptlang.org/"><img src="./packages/twenty-website/public/images/readme/stack-typescript.svg" width="14" height="14"/> TypeScript</a>
-- <a href="https://nx.dev/"><img src="./packages/twenty-website/public/images/readme/stack-nx.svg" width="14" height="14"/> Nx</a>
-- <a href="https://nestjs.com/"><img src="./packages/twenty-website/public/images/readme/stack-nestjs.svg" width="14" height="14"/> NestJS</a>, with <a href="https://bullmq.io/">BullMQ</a>, <a href="https://www.postgresql.org/"><img src="./packages/twenty-website/public/images/readme/stack-postgresql.svg" width="14" height="14"/> PostgreSQL</a>, <a href="https://redis.io/"><img src="./packages/twenty-website/public/images/readme/stack-redis.svg" width="14" height="14"/> Redis</a>
-- <a href="https://reactjs.org/"><img src="./packages/twenty-website/public/images/readme/stack-react.svg" width="14" height="14"/> React</a>, with <a href="https://jotai.org/">Jotai</a>, <a href="https://linaria.dev/">Linaria</a> and <a href="https://lingui.dev/">Lingui</a>
+---
 
-# Thanks
+## Как это устроено
 
-<p align="center">
-  <a href="https://greptile.com"><img src="./packages/twenty-website/public/images/readme/greptile.webp" height="28" alt="Greptile" /></a>
-  &nbsp;&nbsp;&nbsp;&nbsp;
-  <a href="https://sentry.io/"><img src="./packages/twenty-website/public/images/readme/sentry.webp" height="28" alt="Sentry" /></a>
-  &nbsp;&nbsp;&nbsp;&nbsp;
-  <a href="https://crowdin.com/"><img src="./packages/twenty-website/public/images/readme/crowdin.webp" height="28" alt="Crowdin" /></a>
-</p>
+```
+backend/src/server.js     весь сервер: схема БД, REST, вебхуки, Wazzup/Meta, SSE (zero-deps)
+frontend/public/          SPA: index.html, style.css, app.js (без сборки)
+tests/api.test.js         интеграционные тесты на node:test
+deploy/                   конфиги Caddy и nginx для HTTPS
+Dockerfile, docker-compose.yml, install.sh, .env.example, DEPLOY.md
+```
 
-Thanks to these amazing services that we use and recommend for code review (Greptile), catching bugs (Sentry) and translating (Crowdin).
+Один контейнер, один файл базы (`/data/crm.db`, SQLite WAL) — бэкап сводится к копированию файла, обновление к `git pull && docker compose up -d --build`.
 
-# Join the Community
-
-<p><a href="https://github.com/twentyhq/twenty"><img src="./packages/twenty-website/public/images/readme/star-icon.svg" width="12" height="12"/> Star the repo</a> · <a href="https://discord.gg/cx5n4Jzs57"><img src="./packages/twenty-website/public/images/readme/discord-icon.svg" width="12" height="12"/> Discord</a> · <a href="https://github.com/twentyhq/twenty/discussions"><img src="./packages/twenty-website/public/images/readme/message-icon.svg" width="12" height="12"/> Feature requests</a> · <a href="https://github.com/orgs/twentyhq/projects/1/views/35"><img src="./packages/twenty-website/public/images/readme/rocket-icon.svg" width="12" height="12"/> Releases</a> · <a href="https://twitter.com/twentycrm"><img src="./packages/twenty-website/public/images/readme/x-icon.svg" width="12" height="12"/> X</a> · <a href="https://www.linkedin.com/company/twenty/"><img src="./packages/twenty-website/public/images/readme/linkedin-icon.svg" width="12" height="12"/> LinkedIn</a> · <a href="https://twenty.crowdin.com/twenty"><img src="./packages/twenty-website/public/images/readme/language-icon.svg" width="12" height="12"/> Crowdin</a> · <a href="https://github.com/twentyhq/twenty/contribute"><img src="./packages/twenty-website/public/images/readme/code-icon.svg" width="12" height="12"/> Contribute</a></p>
+Каталог `packages/` — исторический монорепозиторий Twenty CRM, из которого вырос этот репозиторий. В сборке KarkasCRM он не участвует (исключён через `.dockerignore`) и оставлен без изменений.
