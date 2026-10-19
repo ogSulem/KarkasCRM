@@ -15,7 +15,7 @@ const PORT = process.env.PORT || 8080, HOST = process.env.HOST || '0.0.0.0';
 const ROOT = fileURLToPath(new URL('.', import.meta.url));
 const DATA_DIR = process.env.DATA_DIR || join(ROOT, '../../data');
 const PUBLIC_DIR = process.env.PUBLIC_DIR || join(ROOT, '../../frontend/public');
-const BUNDLED_LOGO = join(ROOT, '../../logo.png');
+const BUNDLED_LOGO = join(ROOT, '../../logo.jpg');
 const CUSTOM_LOGO_DIR = join(DATA_DIR, 'logo');
 const UPLOAD_DIR = join(DATA_DIR, 'uploads');
 const ADMIN_EMAIL = (process.env.ADMIN_EMAIL || 'admin@example.com').toLowerCase();
@@ -74,6 +74,8 @@ const SCHEMA = [
   ['contacts', 'custom', "TEXT DEFAULT '{}'"], ['deals', 'custom', "TEXT DEFAULT '{}'"],
 ];
 const SCHEMA_COLUMNS = [...SCHEMA,
+  ['users', 'must_change_password', 'INTEGER NOT NULL DEFAULT 0'],
+  ['users', 'session_version', 'INTEGER NOT NULL DEFAULT 0'],
   ['contacts', 'company_id', 'INTEGER'], ['contacts', 'position', 'TEXT'], ['contacts', 'responsible_id', 'INTEGER'],
   ['contacts', 'tags', "TEXT DEFAULT ''"], ['contacts', 'notes', "TEXT DEFAULT ''"], ['contacts', 'source', "TEXT DEFAULT 'manual'"],
   ['deals', 'pipeline_id', 'INTEGER DEFAULT 1'], ['deals', 'priority', "TEXT DEFAULT 'normal'"], ['deals', 'loss_reason', 'TEXT'],
@@ -115,7 +117,7 @@ CREATE INDEX IF NOT EXISTS idx_conv_contact ON conversations(contact_id);
 `);
 try { db.exec('CREATE UNIQUE INDEX IF NOT EXISTS idx_msg_ext ON messages(external_id) WHERE external_id IS NOT NULL'); }
 catch (e) { console.error('Не удалось создать уникальный индекс по external_id (в базе есть дубли внешних id):', e.message); }
-const SCHEMA_VERSION = 3;
+const SCHEMA_VERSION = 4;
 
 function nowDue(offsetHours = 2) {
   const d = new Date(Date.now() + offsetHours * 3600 * 1000);
@@ -172,7 +174,7 @@ const setSetting = (k, v) => db.prepare('INSERT INTO settings(key,value) VALUES(
 const log = (text, et = null, eid = null, user = '') => db.prepare('INSERT INTO activities(text,entity_type,entity_id,user_name) VALUES(?,?,?,?)').run(text, et, eid, user);
 const hashPass = (p, salt = randomBytes(16).toString('hex')) => `${salt}:${scryptSync(p, salt, 64).toString('hex')}`;
 function checkPass(p, s) { try { const [salt, h] = String(s).split(':'); const a = Buffer.from(h, 'hex'), b = scryptSync(p, salt, 64); return a.length === b.length && timingSafeEqual(a, b); } catch { return false; } }
-const sign = p => { const b = Buffer.from(JSON.stringify({ ...p, exp: Date.now() + 7 * 864e5 })).toString('base64url'); return b + '.' + createHmac('sha256', SECRET).update(b).digest('base64url'); };
+const sign = p => { const b = Buffer.from(JSON.stringify({ ...p, sv: db.prepare('SELECT session_version FROM users WHERE id=?').get(p.id)?.session_version || 0, exp: Date.now() + 7 * 864e5 })).toString('base64url'); return b + '.' + createHmac('sha256', SECRET).update(b).digest('base64url'); };
 function verify(t) {
   try {
     const [b, s] = String(t || '').split('.');
@@ -180,7 +182,9 @@ function verify(t) {
     const expected = createHmac('sha256', SECRET).update(b).digest(), got = Buffer.from(s, 'base64url');
     if (got.length !== expected.length || !timingSafeEqual(got, expected)) return null;
     const p = JSON.parse(Buffer.from(b, 'base64url'));
-    return p.exp > Date.now() ? p : null;
+    if (p.exp <= Date.now()) return null;
+    const user = db.prepare('SELECT id,name,email,role,must_change_password,session_version FROM users WHERE id=? AND active=1').get(p.id);
+    return user && (p.sv ?? 0) === user.session_version ? user : null;
   } catch { return null; }
 }
 // httpOnly-cookie сессии: токен не доступен из JavaScript и не переживает XSS
@@ -218,6 +222,7 @@ const sanitizeFields = list => (Array.isArray(list) ? list : []).slice(0, 40).ma
 
 // ---------- realtime ----------
 const clients = new Set();
+function closeUserStreams(id) { for (const res of clients) if (res.userId === id) { clients.delete(res); res.end(); } }
 const staticGzip = new Map(); // кэш сжатых ассетов: gzip считается один раз на версию файла
 export function broadcast(ev, data) { const s = `event: ${ev}\ndata: ${JSON.stringify(data)}\n\n`; clients.forEach(r => { try { r.write(s); } catch {} }); }
 
@@ -481,7 +486,7 @@ ${deal.deadline ? `<p class="muted">Срок действия предложен
 </body></html>`;
 }
 const html = (res, code, body) => { res.writeHead(code, { 'Content-Type': 'text/html; charset=utf-8' }); res.end(body); };
-const json = (res, code, obj) => { res.writeHead(code, { 'Content-Type': 'application/json; charset=utf-8' }); res.end(JSON.stringify(obj)); };
+const json = (res, code, obj) => { res.writeHead(code, { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store' }); res.end(JSON.stringify(obj)); };
 // простое ограничение частоты: защита от перебора пароля и от шторма запросов к источникам
 const RL = new Map();
 function rateLimit(key, limit, windowMs) {
@@ -534,6 +539,14 @@ const ADMIN_ONLY = [
   /^\/api\/backups(\/.*)?$/, /^\/api\/integrations(\/.*)?$/, /^\/api\/prices\/ours(\/.*)?$/,
 ];
 function requireAdmin(user, res) { if (user.role !== 'admin') { json(res, 403, { error: 'Только для администратора' }); return false; } return true; }
+
+function validateUser(b, creating = false) {
+  if ((creating || b.name !== undefined) && (typeof b.name !== 'string' || !b.name.trim())) return 'Укажите имя';
+  if ((creating || b.email !== undefined) && (typeof b.email !== 'string' || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(b.email.trim()))) return 'Укажите корректный e-mail';
+  if ((creating || b.password) && (typeof b.password !== 'string' || b.password.length < 8 || b.password.length > 256)) return 'Пароль должен содержать от 8 до 256 символов';
+  if (b.role !== undefined && !['admin', 'manager', 'viewer'].includes(b.role)) return 'Неизвестная роль';
+  if (b.active !== undefined && ![0, 1].includes(b.active)) return 'Некорректный статус';
+}
 
 const competitorsApi = createCompetitors({ db, json, readBody, log, broadcast, getSetting, setSetting });
 export const server = http.createServer(async (req, res) => {
@@ -588,7 +601,7 @@ export const server = http.createServer(async (req, res) => {
       const b = await readBody(req); const user = db.prepare('SELECT * FROM users WHERE email=? AND active=1').get(String(b.email || '').toLowerCase()); if (!user || !checkPass(String(b.password || ''), user.pass)) return json(res, 401, { error: 'Неверный e-mail или пароль' });
       const token = sign({ id: user.id, email: user.email, name: user.name, role: user.role });
       res.setHeader('Set-Cookie', sessionCookie(req, token));
-      return json(res, 200, { token, user: { id: user.id, name: user.name, email: user.email, role: user.role } }); }
+      return json(res, 200, { token, user: { id: user.id, name: user.name, email: user.email, role: user.role, must_change_password: user.must_change_password } }); }
     if (p === '/api/auth/logout' && req.method === 'POST') {
       res.setHeader('Set-Cookie', clearSessionCookie(req));
       return json(res, 200, { ok: true });
@@ -597,7 +610,9 @@ export const server = http.createServer(async (req, res) => {
     const bearer = (req.headers.authorization || '').replace(/^Bearer\s+/i, '');
     const user = verify(bearer || cookieOf(req).karkas_token || u.searchParams.get('token') || '');
     if (p.startsWith('/api/') && !user) return json(res, 401, { error: 'Требуется авторизация' });
-    if (p === '/api/events') { res.writeHead(200, { 'Content-Type': 'text/event-stream', 'Cache-Control': 'no-cache', Connection: 'keep-alive' }); res.write('event: ready\ndata: {}\n\n'); clients.add(res); req.on('close', () => clients.delete(res)); return; }
+    if (user?.must_change_password && (p.startsWith('/api/') || p.startsWith('/uploads/')) && !['/api/me', '/api/me/password'].includes(p)) return json(res, 403, { code: 'PASSWORD_CHANGE_REQUIRED', error: 'Сначала смените временный пароль' });
+    if (user && user.role !== 'admin' && ['/api/settings', '/api/competitor-sources', '/api/backup', '/api/export/json', '/api/backups'].includes(p)) return json(res, 403, { error: 'Только для администратора' });
+    if (p === '/api/events') { res.writeHead(200, { 'Content-Type': 'text/event-stream', 'Cache-Control': 'no-cache', Connection: 'keep-alive' }); res.write('event: ready\ndata: {}\n\n'); res.userId = user.id; clients.add(res); req.on('close', () => clients.delete(res)); return; }
     if (p === '/api/me') return json(res, 200, { user });
     if (p === '/api/meta') return json(res, 200, {
       version: VERSION, schema: SCHEMA_VERSION, user,
@@ -608,7 +623,7 @@ export const server = http.createServer(async (req, res) => {
       features: { email: !!getSetting('SMTP_HOST'), wazzup: !!getSetting('WAZZUP_API_KEY'), whatsapp: !!(getSetting('WHATSAPP_TOKEN') && getSetting('WHATSAPP_PHONE_ID')) },
       salesTarget: Number(getSetting('SALES_TARGET', '0')) || 0,
     });
-    if (user && p.startsWith('/api/') && user.role === 'viewer' && req.method !== 'GET') return json(res, 403, { error: 'Роль «Наблюдатель» — только просмотр' });
+    if (user && p.startsWith('/api/') && user.role === 'viewer' && req.method !== 'GET' && p !== '/api/me/password') return json(res, 403, { error: 'Роль «Наблюдатель» — только просмотр' });
     // настройки, команда, воронки, шаблоны, автоматизации, ключи и обслуживание — только администратор
     if (user && user.role !== 'admin' && req.method !== 'GET' && ADMIN_ONLY.some(re => re.test(p))) return json(res, 403, { error: 'Это может менять только администратор (роль в Настройки → Команда)' });
 
@@ -799,10 +814,38 @@ export const server = http.createServer(async (req, res) => {
     // ===== users / team =====
     if (p === '/api/users') {
       if (req.method === 'GET') return json(res, 200, db.prepare('SELECT id,name,email,role,active FROM users ORDER BY id').all());
-      if (req.method === 'POST') { if (!requireAdmin(user, res)) return; const b = await readBody(req); if (String(b.password || '').length < 8) return json(res, 400, { error: 'Пароль должен быть не короче 8 символов' }); const r = db.prepare('INSERT INTO users(name,email,pass,role) VALUES(?,?,?,?)').run(b.name, String(b.email).toLowerCase(), hashPass(b.password || 'user12345'), b.role || 'manager'); return json(res, 201, { id: r.lastInsertRowid }); }
+      if (req.method === 'POST') {
+        if (!requireAdmin(user, res)) return;
+        const b = await readBody(req);
+        const error = validateUser(b, true);
+        if (error) return json(res, 400, { error });
+        const email = b.email.trim().toLowerCase();
+        if (db.prepare('SELECT id FROM users WHERE email=?').get(email)) return json(res, 409, { error: 'Этот e-mail уже используется' });
+        const r = db.prepare('INSERT INTO users(name,email,pass,role,active,must_change_password) VALUES(?,?,?,?,?,1)').run(b.name.trim(), email, hashPass(b.password), b.role || 'manager', b.active ?? 1);
+        return json(res, 201, { id: r.lastInsertRowid });
+      }
     }
     const mUser = p.match(/^\/api\/users\/(\d+)$/);
-    if (mUser && req.method === 'PATCH') { if (!requireAdmin(user, res) && Number(mUser[1]) !== user.id) return; const b = await readBody(req); if (b.password) db.prepare('UPDATE users SET pass=? WHERE id=?').run(hashPass(b.password), mUser[1]); const ks = ['name', 'role', 'active'].filter(k => b[k] !== undefined); if (ks.length) db.prepare(`UPDATE users SET ${ks.map(k => k + '=?')} WHERE id=?`).run(...ks.map(k => b[k]), mUser[1]); return json(res, 200, { saved: true }); }
+    if (mUser && req.method === 'PATCH') {
+      if (!requireAdmin(user, res)) return;
+      const b = await readBody(req), id = Number(mUser[1]);
+      const current = db.prepare('SELECT * FROM users WHERE id=?').get(id);
+      if (!current) return json(res, 404, { error: 'Пользователь не найден' });
+      const error = validateUser(b);
+      if (error) return json(res, 400, { error });
+      if (current.role === 'admin' && current.active && ((b.role && b.role !== 'admin') || b.active === 0)
+          && db.prepare("SELECT COUNT(*) n FROM users WHERE role='admin' AND active=1").get().n <= 1)
+        return json(res, 400, { error: 'Нельзя отключить последнего администратора' });
+      if (b.email !== undefined) {
+        b.email = b.email.trim().toLowerCase();
+        if (db.prepare('SELECT id FROM users WHERE email=? AND id!=?').get(b.email, id)) return json(res, 409, { error: 'Этот e-mail уже используется' });
+      }
+      if (b.password) db.prepare('UPDATE users SET pass=?,must_change_password=1,session_version=session_version+1 WHERE id=?').run(hashPass(b.password), id);
+      const ks = ['name', 'email', 'role', 'active'].filter(k => b[k] !== undefined);
+      if (ks.length) db.prepare(`UPDATE users SET ${ks.map(k => k + '=?')} WHERE id=?`).run(...ks.map(k => b[k]), id);
+      if (b.password || b.active === 0 || b.role !== undefined) closeUserStreams(id);
+      return json(res, 200, { saved: true });
+    }
     if (p === '/api/custom-fields') {
       if (req.method === 'GET') return json(res, 200, { fields: getCustomFields() });
       if (req.method === 'PUT') { if (!requireAdmin(user, res)) return; const b = await readBody(req); const fields = sanitizeFields(b.fields); setSetting('CUSTOM_FIELDS', JSON.stringify(fields)); log(`Настраиваемые поля обновлены (${fields.length})`, null, null, user.name); return json(res, 200, { saved: true, fields }) }
@@ -843,7 +886,19 @@ export const server = http.createServer(async (req, res) => {
       setTimeout(() => process.exit(0), 400);
       return;
     }
-    if (p === '/api/me/password' && req.method === 'POST') { const b = await readBody(req); const nextPass = String(b.new_password || b.next || ''); if (nextPass.length < 8) return json(res, 400, { error: 'Новый пароль должен быть не короче 8 символов' }); const me = db.prepare('SELECT * FROM users WHERE id=?').get(user.id); if (!checkPass(b.old_password || b.old || '', me.pass)) return json(res, 400, { error: 'Старый пароль неверен' }); db.prepare('UPDATE users SET pass=? WHERE id=?').run(hashPass(nextPass), user.id); log('Пользователь сменил пароль', 'users', user.id, user.name); return json(res, 200, { saved: true }); }
+    if (p === '/api/me/password' && req.method === 'POST') {
+      const b = await readBody(req), nextPass = String(b.new_password || b.next || '');
+      if (nextPass.length < 12 || nextPass.length > 256) return json(res, 400, { error: 'Новый пароль должен содержать от 12 до 256 символов' });
+      const me = db.prepare('SELECT * FROM users WHERE id=?').get(user.id);
+      if (!checkPass(String(b.old_password || b.old || ''), me.pass)) return json(res, 400, { error: 'Старый пароль неверен' });
+      if (checkPass(nextPass, me.pass)) return json(res, 400, { error: 'Новый пароль должен отличаться от временного или текущего' });
+      db.prepare('UPDATE users SET pass=?,must_change_password=0,session_version=session_version+1 WHERE id=?').run(hashPass(nextPass), user.id);
+      closeUserStreams(user.id);
+      log('Пользователь сменил пароль', 'users', user.id, user.name);
+      const token = sign({ id: user.id });
+      res.setHeader('Set-Cookie', sessionCookie(req, token));
+      return json(res, 200, { saved: true, token });
+    }
 
     // ===== inbox =====
     if (p === '/api/conversations' && req.method === 'GET') return json(res, 200, db.prepare(`SELECT cv.*,c.phone,c.email,(SELECT body FROM messages WHERE conversation_id=cv.id ORDER BY id DESC LIMIT 1) last_body FROM conversations cv LEFT JOIN contacts c ON c.id=cv.contact_id ORDER BY cv.last_at DESC, cv.id DESC`).all());

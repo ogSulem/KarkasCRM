@@ -6,12 +6,23 @@ const { server } = await import('../backend/src/server.js');
 const base = 'http://127.0.0.1:18099';
 let h;
 const call = (p, opt = {}) => fetch(base + p, { ...opt, headers: { 'Content-Type': 'application/json', ...(h || {}), ...(opt.headers || {}) } }).then(async r => ({ status: r.status, body: (r.headers.get('content-type') || '').includes('json') ? await r.json() : await r.text() }));
+// Existing business scenarios run after the explicit first-login password change.
+async function readyLogin(path, opt) {
+  const result = await call(path, opt);
+  if (result.body.user?.must_change_password) {
+    const old = JSON.parse(opt.body).password;
+    const changed = await call('/api/me/password', { method: 'POST', headers: { Authorization: 'Bearer ' + result.body.token }, body: JSON.stringify({ old_password: old, new_password: old + '-Personal-2026' }) });
+    assert.equal(changed.status, 200);
+    result.body.token = changed.body.token;
+  }
+  return result;
+}
 before(async () => { await new Promise(r => server.listening ? r() : server.once('listening', r)); });
 after(() => server.close());
 
 test('health и вход', async () => {
   assert.equal((await call('/api/health')).body.ok, true);
-  const l = await call('/api/auth/login', { method: 'POST', body: JSON.stringify({ email: 'admin@example.com', password: 'admin12345' }) });
+  const l = await readyLogin('/api/auth/login', { method: 'POST', body: JSON.stringify({ email: 'admin@example.com', password: 'admin12345' }) });
   assert.ok(l.body.token, 'получен JWT');
   h = { Authorization: 'Bearer ' + l.body.token };
   assert.equal((await fetch(base + '/api/contacts')).status, 401, 'без токена — 401');
@@ -105,8 +116,8 @@ test('автоматизации, шаблоны, интеграции, кома
   // команда и роли
   const mgr = (await call('/api/users', { method: 'POST', body: JSON.stringify({ name: 'Менеджер', email: 'mgr@example.com', password: 'manager12345', role: 'manager' }) })).body;
   const vw = (await call('/api/users', { method: 'POST', body: JSON.stringify({ name: 'Наблюдатель', email: 'view@example.com', password: 'viewer12345', role: 'viewer' }) })).body;
-  const mgrToken = (await call('/api/auth/login', { method: 'POST', body: JSON.stringify({ email: 'mgr@example.com', password: 'manager12345' }) })).body.token;
-  const vwToken = (await call('/api/auth/login', { method: 'POST', body: JSON.stringify({ email: 'view@example.com', password: 'viewer12345' }) })).body.token;
+  const mgrToken = (await readyLogin('/api/auth/login', { method: 'POST', body: JSON.stringify({ email: 'mgr@example.com', password: 'manager12345' }) })).body.token;
+  const vwToken = (await readyLogin('/api/auth/login', { method: 'POST', body: JSON.stringify({ email: 'view@example.com', password: 'viewer12345' }) })).body.token;
   assert.ok(mgrToken && vwToken);
   const adminH = h; h = { Authorization: 'Bearer ' + mgrToken };
   assert.equal((await call('/api/settings', { method: 'PUT', body: JSON.stringify({ COMPANY_NAME: 'x' }) })).status, 403, 'менеджер не меняет настройки');
@@ -253,7 +264,7 @@ test('права: менеджер ведёт клиентов, но не мен
   const admin = h;
   await call('/api/users', { method: 'POST', body: JSON.stringify({ name: 'Менеджер Пётр', email: 'petr@example.com', password: 'menedzher123', role: 'manager' }) });
   await call('/api/users', { method: 'POST', body: JSON.stringify({ name: 'Наблюдатель', email: 'viewer@example.com', password: 'nabludatel123', role: 'viewer' }) });
-  const login = async (email, password) => (await call('/api/auth/login', { method: 'POST', body: JSON.stringify({ email, password }) })).body.token;
+  const login = async (email, password) => (await readyLogin('/api/auth/login', { method: 'POST', body: JSON.stringify({ email, password }) })).body.token;
   const mToken = await login('petr@example.com', 'menedzher123');
   const vToken = await login('viewer@example.com', 'nabludatel123');
   const asM = (p, opt = {}) => call(p, { ...opt, headers: { ...(opt.headers || {}), Authorization: 'Bearer ' + mToken } });
@@ -353,10 +364,10 @@ test('массовые действия: одна операция на пачк
 
 test('менеджер не меняет правила и шаблоны, но работает с клиентами', async () => {
   const created = (await call('/api/users', { method: 'POST', body: JSON.stringify({ name: 'Менеджер Оля', email: `olya${Date.now()}@example.com`, password: 'manager12345', role: 'manager' }) })).body;
-  const login = (await call('/api/auth/login', { method: 'POST', body: JSON.stringify({ email: `olya${Date.now() - 1}@example.com`, password: 'manager12345' }) })).body;
+  const login = (await readyLogin('/api/auth/login', { method: 'POST', body: JSON.stringify({ email: `olya${Date.now() - 1}@example.com`, password: 'manager12345' }) })).body;
   // повторный вход с тем же e-mail, что и создавали
   const users = (await call('/api/users')).body; const u = users.find(x => x.id === created.id);
-  const l2 = (await call('/api/auth/login', { method: 'POST', body: JSON.stringify({ email: u.email, password: 'manager12345' }) })).body;
+  const l2 = (await readyLogin('/api/auth/login', { method: 'POST', body: JSON.stringify({ email: u.email, password: 'manager12345' }) })).body;
   const mh = { Authorization: 'Bearer ' + l2.token };
   const mcall = (path, opt = {}) => fetch(base + path, { ...opt, headers: { 'Content-Type': 'application/json', ...mh, ...(opt.headers || {}) } }).then(async r => ({ status: r.status, body: (r.headers.get('content-type') || '').includes('json') ? await r.json() : await r.text() }));
   assert.equal((await mcall('/api/contacts', { method: 'POST', body: JSON.stringify({ name: 'Клиент Оли' }) })).status, 201, 'менеджер ведёт клиентов');
@@ -410,9 +421,74 @@ test('повторяющиеся задачи: закрыл — появилас
   assert.ok(!plainDone.body.next_task_id, 'обычная задача не размножается');
 });
 
+test('управление командой: валидация, актуальные права и отключение', async () => {
+  const post = body => call('/api/users', { method: 'POST', body: JSON.stringify(body) });
+  const body = { name: 'Новый сотрудник', email: 'fresh@example.com', password: 'SafePassword123', role: 'manager' };
+  assert.equal((await post({ ...body, role: 'root' })).status, 400);
+  assert.equal((await post({ ...body, email: 'broken' })).status, 400);
+  const created = await post(body); assert.equal(created.status, 201);
+  assert.equal((await post(body)).status, 409);
+  const id = created.body.id;
+  const patch = body => call('/api/users/' + id, { method: 'PATCH', body: JSON.stringify(body) });
+  assert.equal((await patch({ password: 'short' })).status, 400);
+  assert.equal((await patch({ email: 'changed@example.com' })).status, 200);
+  const login = await readyLogin('/api/auth/login', { method: 'POST', body: JSON.stringify({ email: 'changed@example.com', password: body.password }) });
+  const headers = { Authorization: 'Bearer ' + login.body.token };
+  for (const path of ['/api/settings', '/api/backup', '/api/export/json', '/api/competitor-sources']) assert.equal((await call(path, { headers })).status, 403);
+  await patch({ role: 'viewer' });
+  assert.equal((await call('/api/me', { headers })).body.user.role, 'viewer');
+  assert.equal((await call('/api/contacts', { method: 'POST', headers, body: '{"name":"Forbidden"}' })).status, 403);
+  await patch({ active: 0 });
+  assert.equal((await call('/api/me', { headers })).status, 401);
+});
+
+test('встроенный логотип JPEG доступен без авторизации', async () => {
+  const r = await fetch(base + '/logo.png');
+  assert.equal(r.status, 200);
+  assert.equal(r.headers.get('content-type'), 'image/jpeg');
+  assert.equal(new Uint8Array(await r.arrayBuffer())[0], 255);
+});
+
+test('последний администратор защищён от отключения и понижения роли', async () => {
+  const me = (await call('/api/me')).body.user;
+  for (const body of [{ active: 0 }, { role: 'manager' }]) {
+    assert.equal((await call('/api/users/' + me.id, { method: 'PATCH', body: JSON.stringify(body) })).status, 400);
+  }
+});
+
+test('первый вход: серверная блокировка, смена пароля и отзыв старых токенов', async () => {
+  const account = { name: 'Первый вход', email: 'first-login@example.com', password: 'TemporaryPass123', role: 'viewer' };
+  const created = await call('/api/users', { method: 'POST', body: JSON.stringify(account) });
+  assert.equal(created.status, 201);
+  const login = await call('/api/auth/login', { method: 'POST', body: JSON.stringify(account) });
+  assert.equal(login.body.user.must_change_password, 1);
+  const headers = { Authorization: 'Bearer ' + login.body.token };
+  assert.equal((await call('/api/me', { headers })).body.user.must_change_password, 1);
+  for (const path of ['/api/contacts', '/api/meta', '/api/events', '/api/templates']) {
+    const denied = await call(path, { headers });
+    assert.equal(denied.status, 403); assert.equal(denied.body.code, 'PASSWORD_CHANGE_REQUIRED');
+  }
+  const change = (old_password, new_password) => call('/api/me/password', { method: 'POST', headers, body: JSON.stringify({ old_password, new_password }) });
+  assert.equal((await change('wrong', 'NewPersonalPass123')).status, 400);
+  assert.equal((await change(account.password, 'short')).status, 400);
+  assert.equal((await change(account.password, account.password)).status, 400);
+  const changed = await change(account.password, 'NewPersonalPass123');
+  assert.equal(changed.status, 200);
+  assert.equal((await call('/api/me', { headers })).status, 401, 'старый токен отозван');
+  const freshHeaders = { Authorization: 'Bearer ' + changed.body.token };
+  assert.equal((await call('/api/me', { headers: freshHeaders })).body.user.must_change_password, 0);
+  assert.equal((await call('/api/contacts', { headers: freshHeaders })).status, 200);
+  assert.equal((await call('/api/contacts', { method: 'POST', headers: freshHeaders, body: '{"name":"blocked"}' })).status, 403);
+  const reset = await call('/api/users/' + created.body.id, { method: 'PATCH', body: JSON.stringify({ password: 'AnotherTempPass123' }) });
+  assert.equal(reset.status, 200);
+  assert.equal((await call('/api/me', { headers: freshHeaders })).status, 401, 'админский сброс отзывает сессии');
+  const second = await call('/api/auth/login', { method: 'POST', body: JSON.stringify({ email: account.email, password: 'AnotherTempPass123' }) });
+  assert.equal(second.body.user.must_change_password, 1);
+});
+
 test('защита входа: ограничение попыток подбора пароля', async () => {
   const codes = [];
-  for (let i = 0; i < 16; i++) codes.push((await call('/api/auth/login', { method: 'POST', body: JSON.stringify({ email: 'admin@example.com', password: 'wrong-' + i }) })).status);
+  for (let i = 0; i < 16; i++) codes.push((await readyLogin('/api/auth/login', { method: 'POST', body: JSON.stringify({ email: 'admin@example.com', password: 'wrong-' + i }) })).status);
   assert.ok(codes.includes(429), 'после серии неудачных попыток вход блокируется (429)');
   const ok = await call('/api/health');
   assert.equal(ok.status, 200, 'сервис продолжает работать');

@@ -45,7 +45,7 @@ fi
 if [ ! -f .env ]; then
   cp .env.example .env
   if command -v openssl >/dev/null; then
-    SECRET=$(openssl rand -hex 32); PASS=$(openssl rand -base64 12 | tr -d '/+=' | cut -c1-14)
+    SECRET=$(openssl rand -hex 32); PASS=$(openssl rand -hex 12)
     sed -i "s|^JWT_SECRET=.*|JWT_SECRET=$SECRET|" .env
     sed -i "s|^ADMIN_PASSWORD=.*|ADMIN_PASSWORD=$PASS|" .env
   else

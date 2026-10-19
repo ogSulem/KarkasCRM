@@ -443,3 +443,8 @@ input[type=checkbox]{width:16px;height:16px;accent-color:var(--green);cursor:poi
   .palette{padding:6vh 10px}
   .bulkbar{position:static}
 }
+
+/* Центрирование фирменного блока и действий в пустых разделах. */
+.login-card .brand-login{flex-direction:column;align-items:center;justify-content:center;text-align:center;gap:12px}
+.login-note{font-size:12px;line-height:1.6;text-align:center;color:var(--muted);margin:16px 0 0}
+.empty-state .btn{display:inline-flex;align-items:center;justify-content:center}

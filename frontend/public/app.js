@@ -331,6 +331,7 @@ function openModal(html) {
 }
 function closeModal() {
   $('#modal').classList.add('hidden');
+  if ($('#createdCredentials')) $('#modalBody').replaceChildren();
 }
 // Единое аккуратное окно подтверждения вместо системного confirm().
 function askConfirm(message, onYes, { okText = 'Подтвердить', danger = true } = {}) {
@@ -404,9 +405,9 @@ function cfInputs(entity, obj = {}, grid = 2) {
   return `<div style="display:grid;grid-template-columns:repeat(${grid},1fr);gap:12px">${fields.map(f => {
     const v = esc(val[f.key] ?? '');
     const label = `${esc(f.label)}${f.required ? ' *' : ''}`;
-    if (f.type === 'select') return `<label>${label}<select name="cf_${esc(f.key)}">${['', ...(f.options || [])].map(o => `<option value="${esc(o)}" ${String(val[f.key] ?? '') === o ? 'selected' : ''}>${esc(o || '—')}</option>`).join('')}</select></label>`;
+    if (f.type === 'select') return `<label>${label}<select name="cf_${esc(f.key)}" ${f.required ? 'required' : ''}>${['', ...(f.options || [])].map(o => `<option value="${esc(o)}" ${String(val[f.key] ?? '') === o ? 'selected' : ''}>${esc(o || '—')}</option>`).join('')}</select></label>`;
     const t = f.type === 'number' ? 'number' : f.type === 'date' ? 'date' : f.type === 'email' ? 'email' : 'text';
-    return `<label>${label}<input name="cf_${esc(f.key)}" type="${t}" value="${v}"></label>`;
+    return `<label>${label}<input name="cf_${esc(f.key)}" type="${t}" value="${v}" ${f.required ? 'required' : ''}></label>`;
   }).join('')}</div>`;
 }
 function cfCollect(form) {
@@ -467,6 +468,8 @@ async function logout() {
 }
 
 async function loginScreen(note = '') {
+  $('#passwordChange').classList.add('hidden');
+  $('#passwordChangeForm').reset();
   $('#app').classList.add('hidden');
   $('#login').classList.remove('hidden');
   const err = $('#loginErr');
@@ -501,6 +504,24 @@ $('#loginForm').onsubmit = async e => {
   }
 };
 
+function storeSessionToken(value) {
+  token = value;
+  try { localStorage.setItem('karkas_token', token); } catch {}
+}
+$('#passwordChangeForm').onsubmit = async e => {
+  e.preventDefault();
+  const form = e.target, btn = form.querySelector('button'), error = $('#passwordChangeErr');
+  error.textContent = '';
+  const b = Object.fromEntries(new FormData(form));
+  if (b.new_password !== b.confirm_password) { error.textContent = 'Пароли не совпадают'; return; }
+  btn.disabled = true;
+  try {
+    const result = await api('/api/me/password', { method: 'POST', body: JSON.stringify(b) });
+    storeSessionToken(result.token); form.reset(); await boot();
+  } catch (err) { error.textContent = err.message; }
+  finally { btn.disabled = false; }
+};
+
 async function boot() {
   token = readToken();
   if (!token) { await loginScreen(); return; }
@@ -510,6 +531,12 @@ async function boot() {
     $('#uEmail').textContent = me.user.email;
     $('#uAva').textContent = (me.user.name || 'A')[0].toUpperCase();
     state.me = me.user;
+    if (me.user.must_change_password) {
+      $('#login').classList.add('hidden'); $('#app').classList.add('hidden');
+      $('#passwordChange').classList.remove('hidden');
+      return;
+    }
+    $('#passwordChange').classList.add('hidden');
     state.meta = await api('/api/meta');
     $('#login').classList.add('hidden');
     $('#app').classList.remove('hidden');
@@ -1602,6 +1629,7 @@ async function delReview(rid, cid) { await api('/api/reviews/' + rid, { method: 
 function openPriceImport(competitorId, scope) {
   openModal(`<h3>Загрузка прайс-таблицы (Excel / CSV)</h3>
    <p><small>${scope === 'ours' ? 'Наша таблица цен — используется для сравнения во всех отчётах.' : 'Прайс конкурента — для сравнения позиций.'}</small></p>
+   <p><small>Первая строка — заголовки: <code>Наименование;Цена;Ед</code>. Например: <code>Дом 8×10;3850000;шт</code>. CSV в UTF-8 или первый лист XLSX, цены числами. <a href="/examples/prices.csv" download>Скачать пример CSV</a>.</small></p>
    <div class="tabs"><button class="active" onclick="this.parentElement.nextElementSibling.classList.remove('hidden');this.nextElementSibling.classList.remove('active');this.classList.add('active');">Файл .xlsx / .csv</button><button onclick="openPriceTextForm(${competitorId},'${scope}')">Текст / ссылки</button></div>
    <div><form onsubmit="return importPriceFile(event,${competitorId || 'null'},'${scope}')">
      <label>Выберите файл таблицы (.xlsx или .csv)<input type="file" accept=".xlsx,.csv,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet,text/csv" required></label>
@@ -1644,8 +1672,8 @@ async function importPriceText(e, competitorId, scope) {
 
 /* ---------- settings ---------- */
 async function settings(v) {
-  const s = await api('/api/settings'); state.cache.settings = s; const origin = location.origin;
   const isAdmin = (state.me && state.me.role) === 'admin';
+  const s = isAdmin ? await api('/api/settings') : {}; state.cache.settings = s; const origin = location.origin;
   const allTabs = {
     integrations: 'Интеграции и каналы',
     fields: 'Поля карточек',
@@ -1657,9 +1685,9 @@ async function settings(v) {
     data: 'Данные и компания',
     profile: 'Профиль'
   };
-  const adminOnly = ['fields', 'pipelines', 'automations', 'templates', 'team', 'data'];
+  const adminOnly = ['integrations', 'competitors', 'fields', 'pipelines', 'automations', 'templates', 'team', 'data'];
   const tabs = Object.fromEntries(Object.entries(allTabs).filter(([k]) => isAdmin || !adminOnly.includes(k)));
-  if (!tabs[state.settingsTab]) state.settingsTab = 'integrations';
+  if (!tabs[state.settingsTab]) state.settingsTab = isAdmin ? 'integrations' : 'profile';
   let body = '';
 
   if (state.settingsTab === 'integrations') {
@@ -1776,7 +1804,7 @@ async function settings(v) {
        <div id="backupList" style="margin-top:10px">Загрузка…</div>
      </div>
     <div class="card"><h3>Логотип компании</h3>
-      <p><small>PNG, JPG, GIF или WebP, до 4 МБ. Логотип показывается на странице входа, в боковой панели, во вкладке браузера и на документах.</small></p>
+      <p><small>Загрузка необязательна: по умолчанию используется logo.jpg из комплекта. PNG, JPG, GIF или WebP, до 4 МБ. Логотип показывается на странице входа, в боковой панели, во вкладке браузера и на документах.</small></p>
       <div class="logo-admin">
         <img id="logoPreview" src="/logo.png?ts=${Date.now()}" alt="Логотип" class="logo-admin-img">
         <div class="logo-admin-actions">
@@ -1785,7 +1813,7 @@ async function settings(v) {
           <button type="button" class="btn danger sm" id="logoDeleteBtn" ${s.logo && s.logo.custom ? '' : 'disabled'} onclick="deleteLogo()">Удалить логотип</button>
         </div>
       </div>
-      ${s.logo && s.logo.env ? '<p><small>Задан системный логотип сервера: собственная загрузка будет иметь приоритет.</small></p>' : ''}
+      ${s.logo && s.logo.env ? '<p><small>Задан LOGO_FILE на сервере: он имеет приоритет над загрузкой.</small></p>' : ''}
     </div>
     </div></div>`;
   } else if (state.settingsTab === 'profile') {
@@ -1800,7 +1828,7 @@ async function settings(v) {
      <div class="card"><h3>${icon('key', 18)} Смена пароля</h3>
       <form onsubmit="return savePassword(event)">
         <label>Старый пароль<input name="old_password" type="password" required></label>
-        <label>Новый пароль<input name="new_password" type="password" required minlength="8" placeholder="минимум 8 знаков"></label>
+        <label>Новый пароль<input name="new_password" type="password" required minlength="12" maxlength="256" placeholder="минимум 12 знаков"></label>
         <button class="btn primary">Сохранить новый пароль</button>
       </form>
      </div>
@@ -1880,7 +1908,7 @@ async function registerWazzupWebhook() { const url = location.origin + '/webhook
 async function saveCompetitorKeys(e) { e.preventDefault(); const b = {}; for (const [k, v] of new FormData(e.target)) if (v && !String(v).includes('•')) b[k] = v; await api('/api/competitor-sources', { method: 'PUT', body: JSON.stringify(b) }); toast('Ключи сохранены'); render(); return false; }
 async function saveCompetitorUrls(e) { e.preventDefault(); const b = {}; for (const [k, v] of new FormData(e.target)) if (v) b[k] = v; await api('/api/competitor-sources', { method: 'PUT', body: JSON.stringify(b) }); toast('Адреса сохранены'); render(); return false; }
 async function saveCompanySettings(e) { e.preventDefault(); await api('/api/settings', { method: 'PUT', body: JSON.stringify(Object.fromEntries(new FormData(e.target))) }); toast('Сохранено'); return false; }
-async function savePassword(e) { e.preventDefault(); try { await api('/api/me/password', { method: 'POST', body: JSON.stringify(Object.fromEntries(new FormData(e.target))) }); toast('Пароль изменён'); closeModal(); } catch (err) { toast(err.message); } return false; }
+async function savePassword(e) { e.preventDefault(); try { const result = await api('/api/me/password', { method: 'POST', body: JSON.stringify(Object.fromEntries(new FormData(e.target))) }); storeSessionToken(result.token); e.target.reset(); toast('Пароль изменён, другие сеансы завершены'); closeModal(); } catch (err) { toast(err.message); } return false; }
 function addPipeline() { askInput({ title: 'Новая воронка', label: 'Название воронки', value: 'Новая воронка', okText: 'Создать' }, name => { if (!name) return; (async () => { await api('/api/pipelines', { method: 'POST', body: JSON.stringify({ name }) }); toast('Воронка создана'); render(); })(); }); }
 async function openPipelineEditor() { return editPipeline(state.pipeline || 1); }
 async function editPipeline(id) {
@@ -1923,9 +1951,48 @@ async function openUser(id) {
    <label>${id ? 'Новый пароль (оставьте пустым, чтобы не менять)' : 'Пароль (мин. 8 символов)'}
      <div class="pw-wrap"><input name="password" type="password" minlength="8" autocomplete="new-password" ${id ? '' : 'required'} placeholder="минимум 8 знаков"><button type="button" class="pw-eye" title="Показать/скрыть пароль" onclick="togglePass(this)">${icon('eye', 16)}</button></div>
    </label>
+   <button type="button" class="btn w" onclick="generateUserPassword(this.form)">Сгенерировать пароль</button>
+   <p><small>Сохраните пароль и передайте сотруднику по защищённому каналу. Он сможет изменить его в профиле.</small></p>
    <button class="btn primary w">Сохранить</button></form>`);
 }
-async function saveUser(e, id) { e.preventDefault(); const b = Object.fromEntries(new FormData(e.target)); if (!b.password) delete b.password; b.active = b.active ? 1 : 0; b.id = id; await api(id ? '/api/users/' + id : '/api/users', { method: id ? 'PATCH' : 'POST', body: JSON.stringify(b) }); closeModal(); toast('Пользователь сохранён'); render(); return false; }
+function generateUserPassword(form) {
+  const bytes = crypto.getRandomValues(new Uint8Array(20));
+  const alphabet = 'ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz23456789!@#$%&*?';
+  const input = form.elements.password;
+  input.value = Array.from(bytes, n => alphabet[n & 63] || '_').join('');
+  input.type = 'text';
+  input.focus(); input.select();
+}
+async function saveUser(e, id) {
+  e.preventDefault();
+  const b = Object.fromEntries(new FormData(e.target));
+  if (!b.password) delete b.password;
+  b.active = b.active ? 1 : 0;
+  const btn = e.target.querySelector('button[type="submit"]') || e.target.querySelector('.btn.primary');
+  btn.disabled = true;
+  try {
+    await api(id ? '/api/users/' + id : '/api/users', { method: id ? 'PATCH' : 'POST', body: JSON.stringify(b) });
+    closeModal();
+    if (b.password) {
+      const credentials = `КаркасCRM — данные для входа\nАдрес: ${location.origin}\nИмя: ${b.name}\nE-mail: ${b.email}\nВременный пароль: ${b.password}\n\nПри первом входе задайте личный пароль (не менее 12 символов). Не передавайте эти данные другим людям.`;
+      openModal(`<h3>${id ? 'Пароль обновлён' : 'Пользователь создан'}</h3><p>Передайте данные сотруднику по защищённому каналу. После закрытия окна пароль повторно не показывается.</p>${!b.active ? '<p class="err">Вход отключён. Разрешите вход в карточке сотрудника.</p>' : ''}<label>Данные для входа<textarea id="createdCredentials" rows="9" readonly>${esc(credentials)}</textarea></label><button type="button" class="btn primary w" onclick="copyCreatedCredentials()">Скопировать данные</button><p id="copyCredentialsStatus" role="status"></p>`);
+    } else toast('Пользователь сохранён');
+    render();
+  } catch (err) { toast(err.message); }
+  finally { btn.disabled = false; }
+  return false;
+}
+async function copyCreatedCredentials() {
+  const field = $('#createdCredentials'), status = $('#copyCredentialsStatus');
+  try {
+    await navigator.clipboard.writeText(field.value);
+    status.textContent = 'Данные скопированы. Передайте их сотруднику лично.';
+  } catch {
+    field.focus(); field.select();
+    status.textContent = 'Автоматическое копирование недоступно. Нажмите Ctrl+C или скопируйте выделенный текст вручную.';
+  }
+}
+
 async function loadBackups() {
   const host = $('#backupList'); if (!host) return;
   try { const d = await api('/api/backups');
