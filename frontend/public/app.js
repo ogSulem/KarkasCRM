@@ -718,9 +718,10 @@ async function dashboard(v) {
   <div class="card"><h3>Лента активности</h3><div class="list">${d.activities.map(a => `<div class="row"><span>• ${esc(a.text)}<br><small>${esc(dt(a.created_at))}${a.user_name ? ' · ' + esc(a.user_name) : ''}</small></span></div>`).join('') || '<small>Пока пусто</small>'}</div><hr>
    <h3>Мои задачи</h3><div class="list">${myTasksBlock()}</div><hr>
    <h3>Быстрые действия</h3><div style="display:flex;flex-direction:column;gap:8px">
-   <button class="btn primary" onclick="openDeal()">${icon('plus', 14)} Новая сделка</button>
+   <button class="btn orange" onclick="openDeal()">${icon('plus', 14)} Новая сделка</button>
+   <button class="btn primary" onclick="openContact()">${icon('plus', 14)} Контакт</button>
    <button class="btn" onclick="openTask()">${icon('plus', 14)} Задача</button>
-   <button class="btn orange" onclick="go('settings','integrations')">${icon('settings', 14)} Настроить каналы связи</button>
+   <button class="btn" onclick="go('settings','integrations')">${icon('settings', 14)} Настроить каналы связи</button>
    <button class="btn" onclick="go('competitors')">${icon('competitor', 14)} Проверить конкурента</button></div></div></div>`;
 }
 
