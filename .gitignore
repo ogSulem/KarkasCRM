@@ -1,0 +1,23 @@
+# Переменные окружения: .env в репозиторий не попадает
+**/.env
+!.env.example
+
+# База данных и резервные копии (живут в томе Docker или в ./data локально)
+/data/
+*.db
+*.db-wal
+*.db-shm
+*.sqlite
+
+# Служебное
+**/node_modules/
+.DS_Store
+*.log
+logs/
+coverage/
+test-results/
+.tmp/
+/downloads/
+/frontend/public/downloads/
+*.zip
+*.patch

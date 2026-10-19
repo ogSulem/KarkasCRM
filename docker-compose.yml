@@ -1,0 +1,93 @@
+name: karkascrm
+# Значения подставляются из .env в этой же папке (см. .env.example).
+# Запуск: docker compose up -d --build   →   http://IP:${CRM_PORT}
+services:
+  crm:
+    build: .
+    image: karkascrm:latest
+    container_name: karkascrm
+    restart: unless-stopped
+    ports:
+      # Локально: http://localhost:${CRM_PORT}. На сервере с доменом (профиль tls) поставьте CRM_BIND=127.0.0.1,
+      # чтобы CRM была доступна только через Caddy с HTTPS.
+      - "${CRM_BIND:-0.0.0.0}:${CRM_PORT:-8080}:8080"
+    environment:
+      PORT: 8080
+      HOST: 0.0.0.0
+      DATA_DIR: /data
+      TZ: ${TZ:-Europe/Moscow}
+      JWT_SECRET: ${JWT_SECRET:-change-me-in-production-please-32-chars}
+      ADMIN_EMAIL: ${ADMIN_EMAIL:-admin@example.com}
+      ADMIN_PASSWORD: ${ADMIN_PASSWORD:-admin12345}
+      # Wazzup (WhatsApp, Telegram, Instagram, Viber)
+      WAZZUP_API_KEY: ${WAZZUP_API_KEY:-}
+      WAZZUP_CHANNEL_ID: ${WAZZUP_CHANNEL_ID:-}
+      WAZZUP_WEBHOOK_SECRET: ${WAZZUP_WEBHOOK_SECRET:-}
+      WAZZUP_API_URL: ${WAZZUP_API_URL:-https://api.wazzup24.com/v3}
+      # Прямой WhatsApp Cloud API (Meta) — альтернатива Wazzup
+      WHATSAPP_TOKEN: ${WHATSAPP_TOKEN:-}
+      WHATSAPP_PHONE_ID: ${WHATSAPP_PHONE_ID:-}
+      WHATSAPP_VERIFY_TOKEN: ${WHATSAPP_VERIFY_TOKEN:-karkas-verify}
+      TELEGRAM_BOT_TOKEN: ${TELEGRAM_BOT_TOKEN:-}
+      # Вкладка «Конкуренты» (можно задать в интерфейсе: Настройки → Конкуренты и источники)
+      FNS_API_KEY: ${FNS_API_KEY:-}
+      FSSP_TOKEN: ${FSSP_TOKEN:-}
+      GOOGLE_PLACES_KEY: ${GOOGLE_PLACES_KEY:-}
+      TWOGIS_KEY: ${TWOGIS_KEY:-}
+      YANDEX_API_KEY: ${YANDEX_API_KEY:-}
+      # Почта: письма клиентам из CRM (и то же самое в интерфейсе: Настройки → Интеграции)
+      SMTP_HOST: ${SMTP_HOST:-}
+      SMTP_PORT: ${SMTP_PORT:-587}
+      SMTP_SECURE: ${SMTP_SECURE:-}
+      SMTP_USER: ${SMTP_USER:-}
+      SMTP_PASS: ${SMTP_PASS:-}
+      MAIL_FROM: ${MAIL_FROM:-}
+      EMAIL_WEBHOOK_SECRET: ${EMAIL_WEBHOOK_SECRET:-}
+      # План продаж, резервные копии, защита входа
+      SALES_TARGET: ${SALES_TARGET:-0}
+      AUTO_DEAL: ${AUTO_DEAL:-1}
+      AUTO_ASSIGN: ${AUTO_ASSIGN:-0}
+      BACKUP_KEEP_DAYS: ${BACKUP_KEEP_DAYS:-7}
+      BACKUP_HOUR: ${BACKUP_HOUR:-3}
+      NOTIFY_WEBHOOK: ${NOTIFY_WEBHOOK:-}
+      LOGIN_RATE_LIMIT: ${LOGIN_RATE_LIMIT:-12}
+      FRAME_ANCESTORS: ${FRAME_ANCESTORS:-}
+    volumes:
+      - crm_data:/data
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1:8080/api/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+
+  # ── HTTPS и домен: docker compose --profile tls up -d --build ─────────────
+  # Caddy сам получает сертификат Let's Encrypt для CRM_DOMAIN и проксирует на CRM.
+  caddy:
+    profiles: ["tls"]
+    image: caddy:2-alpine
+    container_name: karkascrm-caddy
+    restart: unless-stopped
+    depends_on:
+      crm:
+        condition: service_healthy
+    ports:
+      - "80:80"
+      - "443:443"
+      - "443:443/udp"
+    environment:
+      # домен обязателен для профиля tls: CRM_DOMAIN=crm.вашдомен.ru в .env
+      CRM_DOMAIN: "${CRM_DOMAIN:?укажите CRM_DOMAIN в .env}"
+      ACME_EMAIL: ${ACME_EMAIL:-}
+    volumes:
+      - ./deploy/Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+
+volumes:
+  crm_data:
+    name: karkascrm_data
+  caddy_data:
+    name: karkascrm_caddy_data
+  caddy_config:
+    name: karkascrm_caddy_config

@@ -1,0 +1,40 @@
+name: КаркасCRM — проверки
+
+on:
+  push:
+    branches: ['**']
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  tests:
+    name: Синтаксис, API, миграции базы и интерфейс
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22.22'
+
+      - name: Проверка синтаксиса
+        run: |
+          node --check backend/src/server.js
+          node --check backend/src/competitors.js
+          node --check backend/src/smtp.js
+          node --check frontend/public/app.js
+          node --check tests/api.test.js
+          node --check tests/competitors.test.js
+          node --check tests/ui.smoke.mjs
+          node --check tests/migrate.test.mjs
+
+      - name: Интеграционные тесты (API и конкуренты)
+        run: node --experimental-sqlite --test tests/api.test.js tests/competitors.test.js
+
+      - name: Тест миграций базы данных
+        run: node --experimental-sqlite tests/migrate.test.mjs
+
+      - name: Smoke-тест интерфейса (jsdom)
+        run: |
+          npm i --prefix /tmp/jsdomtest jsdom
+          JSDOM_PATH=/tmp/jsdomtest/node_modules/jsdom/lib/api.js node --experimental-sqlite tests/ui.smoke.mjs

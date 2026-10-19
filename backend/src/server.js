@@ -1,0 +1,1043 @@
+// КаркасCRM — ядро системы: воронки и сделки, клиенты и компании, задачи, единый инбокс
+// мессенджеров и почты, аналитика, разведка конкурентов. Без внешних зависимостей:
+// Node >= 22.5 (http, node:sqlite, crypto, fetch).
+import http from 'node:http';
+import { DatabaseSync } from 'node:sqlite';
+import { createHmac, randomBytes, scryptSync, timingSafeEqual } from 'node:crypto';
+import { gzipSync } from 'node:zlib';
+import { readFileSync, writeFileSync, existsSync, mkdirSync, chmodSync, statSync, readdirSync, unlinkSync, copyFileSync, mkdirSync as mkdir, createReadStream } from 'node:fs';
+import { extname, join, normalize, basename } from 'node:path';
+import { fileURLToPath } from 'node:url';
+import { createCompetitors } from './competitors.js';
+import { sendMail } from './smtp.js';
+
+const PORT = process.env.PORT || 8080, HOST = process.env.HOST || '0.0.0.0';
+const ROOT = fileURLToPath(new URL('.', import.meta.url));
+const DATA_DIR = process.env.DATA_DIR || join(ROOT, '../../data');
+const PUBLIC_DIR = process.env.PUBLIC_DIR || join(ROOT, '../../frontend/public');
+const BUNDLED_LOGO = join(ROOT, '../../logo.png');
+const CUSTOM_LOGO_DIR = join(DATA_DIR, 'logo');
+const UPLOAD_DIR = join(DATA_DIR, 'uploads');
+const ADMIN_EMAIL = (process.env.ADMIN_EMAIL || 'admin@example.com').toLowerCase();
+const ADMIN_PASSWORD = process.env.ADMIN_PASSWORD || 'admin12345';
+
+const VERSION = '1';
+const STARTED = Date.now();
+mkdirSync(DATA_DIR, { recursive: true });
+mkdirSync(UPLOAD_DIR, { recursive: true });
+// Секрет подписи токенов: берём из окружения; если он не задан — генерируем постоянный
+// случайный секрет и сохраняем в каталоге данных, чтобы сессии переживали перезапуск.
+function loadSecret() {
+  if (process.env.JWT_SECRET) {
+    if (process.env.JWT_SECRET.length >= 16 && !/смените|change.?me/i.test(process.env.JWT_SECRET)) return process.env.JWT_SECRET;
+    console.warn('JWT_SECRET задан, но он слишком короткий или похож на шаблонный пример — используется постоянный секрет из каталога данных. Задайте случайную строку от 32 символов (openssl rand -hex 32).');
+  }
+  const secretFile = join(DATA_DIR, '.jwt-secret');
+  try { if (existsSync(secretFile)) { const v = readFileSync(secretFile, 'utf8').trim(); if (v) return v; } } catch { }
+  const generated = randomBytes(48).toString('hex');
+  try { writeFileSync(secretFile, generated, { mode: 0o600 }); chmodSync(secretFile, 0o600); }
+  catch (e) { console.error('JWT_SECRET не задан и не удалось сохранить сгенерированный секрет:', e.message); }
+    console.warn('JWT_SECRET не задан в окружении — использован постоянный секрет, сохранённый в каталоге данных. При запуске нескольких серверов задайте JWT_SECRET в окружении');
+  return generated;
+}
+const SECRET = loadSecret();
+const db = new DatabaseSync(join(DATA_DIR, 'crm.db'));
+db.exec(`PRAGMA journal_mode=WAL; PRAGMA foreign_keys=ON;
+PRAGMA busy_timeout=5000;      -- не падать, если запись идёт параллельно
+PRAGMA synchronous=NORMAL;     -- быстрая запись при WAL и при этом безопасная
+PRAGMA temp_store=MEMORY;      -- временные таблицы в памяти
+PRAGMA cache_size=-16000;      -- кэш страниц ~16 МБ
+PRAGMA mmap_size=268435456;    -- файл базы читается через память, SELECT быстрее`);
+db.exec(`
+CREATE TABLE IF NOT EXISTS users(id INTEGER PRIMARY KEY,name TEXT,email TEXT UNIQUE,pass TEXT,role TEXT DEFAULT 'manager',active INTEGER DEFAULT 1);
+CREATE TABLE IF NOT EXISTS companies(id INTEGER PRIMARY KEY,name TEXT NOT NULL,inn TEXT,phone TEXT,email TEXT,site TEXT,notes TEXT DEFAULT '',created_at TEXT DEFAULT (datetime('now')));
+CREATE TABLE IF NOT EXISTS contacts(id INTEGER PRIMARY KEY,name TEXT NOT NULL,phone TEXT,email TEXT,company TEXT,company_id INTEGER REFERENCES companies(id) ON DELETE SET NULL,position TEXT,source TEXT DEFAULT 'manual',tags TEXT DEFAULT '',notes TEXT DEFAULT '',responsible_id INTEGER,demo INTEGER DEFAULT 0,custom TEXT DEFAULT '{}',created_at TEXT DEFAULT (datetime('now')));
+CREATE TABLE IF NOT EXISTS pipelines(id INTEGER PRIMARY KEY,name TEXT NOT NULL,is_default INTEGER DEFAULT 0);
+CREATE TABLE IF NOT EXISTS stages(id INTEGER PRIMARY KEY,pipeline_id INTEGER REFERENCES pipelines(id) ON DELETE CASCADE,code TEXT,name TEXT,color TEXT DEFAULT '#16a34a',sort INTEGER DEFAULT 0,kind TEXT DEFAULT 'open');
+CREATE TABLE IF NOT EXISTS deals(id INTEGER PRIMARY KEY,title TEXT NOT NULL,amount INTEGER DEFAULT 0,stage TEXT DEFAULT 'new',pipeline_id INTEGER DEFAULT 1,contact_id INTEGER REFERENCES contacts(id) ON DELETE SET NULL,company_id INTEGER, responsible TEXT DEFAULT 'Администратор',responsible_id INTEGER,priority TEXT DEFAULT 'normal',loss_reason TEXT,deadline TEXT,closed_at TEXT,demo INTEGER DEFAULT 0,custom TEXT DEFAULT '{}',created_at TEXT DEFAULT (datetime('now')),updated_at TEXT DEFAULT (datetime('now')));
+CREATE TABLE IF NOT EXISTS tasks(id INTEGER PRIMARY KEY,title TEXT NOT NULL,type TEXT DEFAULT 'call',due TEXT,priority TEXT DEFAULT 'normal',done INTEGER DEFAULT 0,deal_id INTEGER,contact_id INTEGER,responsible_id INTEGER,result TEXT,demo INTEGER DEFAULT 0,notified_at TEXT,created_at TEXT DEFAULT (datetime('now')));
+CREATE TABLE IF NOT EXISTS notes(id INTEGER PRIMARY KEY,entity_type TEXT,entity_id INTEGER,body TEXT,author TEXT,created_at TEXT DEFAULT (datetime('now')));
+CREATE TABLE IF NOT EXISTS products(id INTEGER PRIMARY KEY,name TEXT NOT NULL,sku TEXT,price INTEGER DEFAULT 0,unit TEXT DEFAULT 'шт',active INTEGER DEFAULT 1);
+CREATE TABLE IF NOT EXISTS deal_products(id INTEGER PRIMARY KEY,deal_id INTEGER REFERENCES deals(id) ON DELETE CASCADE,product_id INTEGER,name TEXT,price INTEGER,qty REAL DEFAULT 1);
+CREATE TABLE IF NOT EXISTS templates(id INTEGER PRIMARY KEY,name TEXT NOT NULL,body TEXT,channel TEXT DEFAULT 'whatsapp');
+CREATE TABLE IF NOT EXISTS automations(id INTEGER PRIMARY KEY,name TEXT NOT NULL,trigger_type TEXT NOT NULL,trigger_value TEXT,action_type TEXT NOT NULL,action_value TEXT,active INTEGER DEFAULT 1);
+CREATE TABLE IF NOT EXISTS channels(id INTEGER PRIMARY KEY,provider TEXT DEFAULT 'wazzup',external_id TEXT UNIQUE,name TEXT,transport TEXT,phone TEXT,state TEXT,raw TEXT);
+CREATE TABLE IF NOT EXISTS conversations(id INTEGER PRIMARY KEY,contact_id INTEGER REFERENCES contacts(id) ON DELETE CASCADE,title TEXT,channels TEXT DEFAULT '',channel_id TEXT,external_chat_id TEXT,chat_type TEXT,unread INTEGER DEFAULT 0,assigned_id INTEGER,demo INTEGER DEFAULT 0,last_at TEXT DEFAULT (datetime('now')),UNIQUE(contact_id));
+CREATE TABLE IF NOT EXISTS messages(id INTEGER PRIMARY KEY,conversation_id INTEGER REFERENCES conversations(id) ON DELETE CASCADE,channel TEXT DEFAULT 'whatsapp',direction TEXT DEFAULT 'in',body TEXT,content_uri TEXT,status TEXT,external_id TEXT,author TEXT,subject TEXT,created_at TEXT DEFAULT (datetime('now')));
+CREATE TABLE IF NOT EXISTS settings(key TEXT PRIMARY KEY,value TEXT);
+CREATE TABLE IF NOT EXISTS activities(id INTEGER PRIMARY KEY,text TEXT,entity_type TEXT,entity_id INTEGER,user_name TEXT,created_at TEXT DEFAULT (datetime('now')));
+`);
+// мягкие миграции: дополняем ранее созданные таблицы недостающими колонками
+const SCHEMA = [
+  ['contacts', 'demo', 'INTEGER DEFAULT 0'], ['deals', 'demo', 'INTEGER DEFAULT 0'], ['tasks', 'demo', 'INTEGER DEFAULT 0'],
+  ['conversations', 'demo', 'INTEGER DEFAULT 0'], ['tasks', 'notified_at', 'TEXT'], ['messages', 'subject', 'TEXT'],
+  ['contacts', 'custom', "TEXT DEFAULT '{}'"], ['deals', 'custom', "TEXT DEFAULT '{}'"],
+];
+const SCHEMA_COLUMNS = [...SCHEMA,
+  ['contacts', 'company_id', 'INTEGER'], ['contacts', 'position', 'TEXT'], ['contacts', 'responsible_id', 'INTEGER'],
+  ['contacts', 'tags', "TEXT DEFAULT ''"], ['contacts', 'notes', "TEXT DEFAULT ''"], ['contacts', 'source', "TEXT DEFAULT 'manual'"],
+  ['deals', 'pipeline_id', 'INTEGER DEFAULT 1'], ['deals', 'priority', "TEXT DEFAULT 'normal'"], ['deals', 'loss_reason', 'TEXT'],
+  ['deals', 'company_id', 'INTEGER'], ['deals', 'responsible', "TEXT DEFAULT 'Администратор'"], ['deals', 'updated_at', 'TEXT'],
+  ['tasks', 'type', "TEXT DEFAULT 'call'"], ['tasks', 'priority', "TEXT DEFAULT 'normal'"], ['tasks', 'responsible_id', 'INTEGER'],
+  ['tasks', 'done', 'INTEGER DEFAULT 0'], ['tasks', 'repeat', "TEXT DEFAULT 'none'"],
+  ['messages', 'content_uri', 'TEXT'], ['messages', 'status', 'TEXT'], ['messages', 'external_id', 'TEXT'],
+  ['messages', 'channel', "TEXT DEFAULT 'whatsapp'"], ['messages', 'direction', "TEXT DEFAULT 'in'"], ['messages', 'author', 'TEXT'],
+  ['messages', 'content_name', 'TEXT'], ['messages', 'content_type', 'TEXT'],
+  ['conversations', 'channel_id', 'TEXT'], ['conversations', 'external_chat_id', 'TEXT'], ['conversations', 'chat_type', 'TEXT'],
+  ['conversations', 'last_at', 'TEXT'], ['conversations', 'assigned_id', 'INTEGER'], ['conversations', 'title', 'TEXT'], ['conversations', 'channels', "TEXT DEFAULT ''"],
+];
+
+// чего не хватает в этой базе: если она из старой версии — сначала копия, потом изменения
+const missingColumns = [];
+for (const [t, c] of SCHEMA_COLUMNS) {
+  const cols = db.prepare(`PRAGMA table_info(${t})`).all().map(r => r.name);
+  if (!cols.includes(c)) missingColumns.push([t, c]);
+}
+if (missingColumns.length) {
+  try {
+    mkdir(join(DATA_DIR, 'backups'), { recursive: true });
+    const pre = join(DATA_DIR, 'backups', `pre-upgrade-${new Date().toISOString().slice(0, 19).replace(/[:T]/g, '-')}.db`);
+    copyFileSync(join(DATA_DIR, 'crm.db'), pre);
+    console.log(`Обновление схемы базы — страховочная копия: ${pre}`);
+  } catch (e) { console.error('Не удалось сделать копию перед обновлением схемы:', e.message) }
+}
+for (const [t, c, d] of SCHEMA_COLUMNS) {
+  const cols = db.prepare(`PRAGMA table_info(${t})`).all().map(r => r.name); if (!cols.includes(c)) db.exec(`ALTER TABLE ${t} ADD COLUMN ${c} ${d}`);
+}
+if (missingColumns.length) console.log(`Схема базы обновлена: заполнено полей — ${missingColumns.length}`);
+// индексы создаём ПОСЛЕ миграций: иначе база прошлой версии упадёт на отсутствующей колонке
+db.exec(`
+CREATE INDEX IF NOT EXISTS idx_msg_conv ON messages(conversation_id,id);
+CREATE INDEX IF NOT EXISTS idx_deals_stage ON deals(stage);
+CREATE INDEX IF NOT EXISTS idx_contacts_phone ON contacts(phone);
+CREATE INDEX IF NOT EXISTS idx_tasks_done ON tasks(done,due);
+CREATE INDEX IF NOT EXISTS idx_conv_contact ON conversations(contact_id);
+`);
+try { db.exec('CREATE UNIQUE INDEX IF NOT EXISTS idx_msg_ext ON messages(external_id) WHERE external_id IS NOT NULL'); }
+catch (e) { console.error('Не удалось создать уникальный индекс по external_id (в базе есть дубли внешних id):', e.message); }
+const SCHEMA_VERSION = 3;
+
+function nowDue(offsetHours = 2) {
+  const d = new Date(Date.now() + offsetHours * 3600 * 1000);
+  const pad = n => String(n).padStart(2, '0');
+  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(d.getHours())}:00`;
+}
+
+function normalizeDue(raw) {
+  if (!raw || typeof raw !== 'string') return '';
+  const s = raw.trim();
+  if (!s) return '';
+  const now = new Date();
+  const pad = n => String(n).padStart(2, '0');
+  const todayStr = `${now.getFullYear()}-${pad(now.getMonth() + 1)}-${pad(now.getDate())}`;
+  const tmrw = new Date(now.getTime() + 86400000);
+  const tmrwStr = `${tmrw.getFullYear()}-${pad(tmrw.getMonth() + 1)}-${pad(tmrw.getDate())}`;
+
+  const mSeg = s.match(/^сегодня(?:\s+(\d{1,2}:\d{2}))?$/i);
+  if (mSeg) {
+    const time = mSeg[1] ? (mSeg[1].length === 4 ? '0' + mSeg[1] : mSeg[1]) : '14:00';
+    return `${todayStr} ${time}`;
+  }
+  const mZav = s.match(/^завтра(?:\s+(\d{1,2}:\d{2}))?$/i);
+  if (mZav) {
+    const time = mZav[1] ? (mZav[1].length === 4 ? '0' + mZav[1] : mZav[1]) : '10:00';
+    return `${tmrwStr} ${time}`;
+  }
+  const mRu = s.match(/^(\d{2})\.(\d{2})\.(\d{4})(?:\s+(\d{1,2}:\d{2}))?$/);
+  if (mRu) {
+    const time = mRu[4] ? (mRu[4].length === 4 ? '0' + mRu[4] : mRu[4]) : '10:00';
+    return `${mRu[3]}-${mRu[2]}-${mRu[1]} ${time}`;
+  }
+  const mIso = s.match(/^(\d{4}-\d{2}-\d{2})(?:[T\s](\d{2}:\d{2}))?/);
+  if (mIso) {
+    return `${mIso[1]} ${mIso[2] || '10:00'}`;
+  }
+  return s;
+}
+
+function fixTaskDues() {
+  try {
+    const rows = db.prepare("SELECT id, due FROM tasks WHERE due IS NOT NULL AND due != ''").all();
+    const stmt = db.prepare('UPDATE tasks SET due=? WHERE id=?');
+    for (const r of rows) {
+      const norm = normalizeDue(r.due);
+      if (norm && norm !== r.due) stmt.run(norm, r.id);
+    }
+  } catch {}
+}
+fixTaskDues();
+
+const getSetting = (k, d = '') => db.prepare('SELECT value FROM settings WHERE key=?').get(k)?.value ?? process.env[k] ?? d;
+const setSetting = (k, v) => db.prepare('INSERT INTO settings(key,value) VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value').run(k, String(v ?? ''));
+const log = (text, et = null, eid = null, user = '') => db.prepare('INSERT INTO activities(text,entity_type,entity_id,user_name) VALUES(?,?,?,?)').run(text, et, eid, user);
+const hashPass = (p, salt = randomBytes(16).toString('hex')) => `${salt}:${scryptSync(p, salt, 64).toString('hex')}`;
+function checkPass(p, s) { try { const [salt, h] = String(s).split(':'); const a = Buffer.from(h, 'hex'), b = scryptSync(p, salt, 64); return a.length === b.length && timingSafeEqual(a, b); } catch { return false; } }
+const sign = p => { const b = Buffer.from(JSON.stringify({ ...p, exp: Date.now() + 7 * 864e5 })).toString('base64url'); return b + '.' + createHmac('sha256', SECRET).update(b).digest('base64url'); };
+function verify(t) {
+  try {
+    const [b, s] = String(t || '').split('.');
+    if (!b || !s) return null;
+    const expected = createHmac('sha256', SECRET).update(b).digest(), got = Buffer.from(s, 'base64url');
+    if (got.length !== expected.length || !timingSafeEqual(got, expected)) return null;
+    const p = JSON.parse(Buffer.from(b, 'base64url'));
+    return p.exp > Date.now() ? p : null;
+  } catch { return null; }
+}
+// httpOnly-cookie сессии: токен не доступен из JavaScript и не переживает XSS
+const isHttps = req => ((req.headers['x-forwarded-proto'] || '').split(',')[0].trim() || '').toLowerCase() === 'https';
+function sessionCookie(req, token) {
+  return `karkas_token=${encodeURIComponent(token)}; HttpOnly; SameSite=Lax; Path=/; Max-Age=${7 * 86400}${isHttps(req) ? '; Secure' : ''}`;
+}
+const clearSessionCookie = req => `karkas_token=; HttpOnly; SameSite=Lax; Path=/; Max-Age=0${isHttps(req) ? '; Secure' : ''}`;
+const cookieOf = req => Object.fromEntries((req.headers.cookie || '').split(';').map(x => x.trim().split('=').map(decodeURIComponent)).filter(([k]) => k));
+const digits = s => String(s || '').replace(/\D/g, '').replace(/^8(?=\d{10}$)/, '7');
+
+// ---------- seed ----------
+if (!db.prepare('SELECT id FROM pipelines LIMIT 1').get()) {
+  db.prepare('INSERT INTO pipelines(id,name,is_default) VALUES(1,?,1)').run('Основная воронка');
+  const st = db.prepare('INSERT INTO stages(pipeline_id,code,name,color,sort,kind) VALUES(1,?,?,?,?,?)');
+  [['new','Неразобранное','#f97316',0,'open'],['contact','Контакт установлен','#fb923c',1,'open'],['offer','Предложение / расчёт','#eab308',2,'open'],['negotiation','Переговоры','#22c55e',3,'open'],['decision','Принимают решение','#16a34a',4,'open'],['won','Успешно реализовано','#15803d',5,'won'],['lost','Закрыто и не реализовано','#78716c',6,'lost']].forEach(x => st.run(...x));
+}
+
+
+if (!db.prepare('SELECT id FROM users LIMIT 1').get()) {
+  db.prepare('INSERT INTO users(name,email,pass,role) VALUES(?,?,?,?)').run('Администратор', ADMIN_EMAIL, hashPass(ADMIN_PASSWORD), 'admin');
+  if (!getSetting('COMPANY_NAME')) { setSetting('COMPANY_NAME', 'Каркас — каркасные дома'); setSetting('CURRENCY', '₽'); setSetting('AUTO_DEAL', '1'); setSetting('AUTO_DEAL_STAGE', 'new'); }
+  log('Система инициализирована: создана чистая база и учётная запись администратора');
+}
+export function getStages(pipeline_id = 1) { return db.prepare('SELECT * FROM stages WHERE pipeline_id=? ORDER BY sort,id').all(pipeline_id); }
+export function getCustomFields() { try { const v = JSON.parse(getSetting('CUSTOM_FIELDS', '[]')); return Array.isArray(v) ? v.filter(f => f && f.key && f.label) : [] } catch { return [] } }
+const sanitizeFields = list => (Array.isArray(list) ? list : []).slice(0, 40).map(f => ({
+  key: String(f.key || '').replace(/[^a-zA-Z0-9_]/g, '').slice(0, 40),
+  label: String(f.label || '').slice(0, 80),
+  type: ['text', 'number', 'date', 'select', 'phone', 'email'].includes(f.type) ? f.type : 'text',
+  entity: ['contacts', 'deals', 'both'].includes(f.entity) ? f.entity : 'both',
+  options: Array.isArray(f.options) ? f.options.map(String).slice(0, 40) : [],
+  required: !!f.required,
+})).filter(f => f.key && f.label);
+
+// ---------- realtime ----------
+const clients = new Set();
+const staticGzip = new Map(); // кэш сжатых ассетов: gzip считается один раз на версию файла
+export function broadcast(ev, data) { const s = `event: ${ev}\ndata: ${JSON.stringify(data)}\n\n`; clients.forEach(r => { try { r.write(s); } catch {} }); }
+
+// ---------- automations ----------
+function runAutomations(trigger, ctx = {}) {
+  for (const a of db.prepare('SELECT * FROM automations WHERE active=1 AND trigger_type=?').all(trigger)) {
+    if (a.trigger_value && ctx.stage && a.trigger_value !== ctx.stage) continue;
+    try {
+      if (a.action_type === 'create_task' && (ctx.contact_id || ctx.deal_id)) {
+        const owner = (ctx.deal_id && db.prepare('SELECT responsible_id FROM deals WHERE id=?').get(ctx.deal_id)?.responsible_id) || (ctx.contact_id && db.prepare('SELECT responsible_id FROM contacts WHERE id=?').get(ctx.contact_id)?.responsible_id) || null;
+        db.prepare('INSERT INTO tasks(title,due,contact_id,deal_id,responsible_id) VALUES(?,?,?,?,?)').run(a.action_value || a.name, 'Сегодня', ctx.contact_id || null, ctx.deal_id || null, owner);
+      }
+      if (a.action_type === 'change_stage' && ctx.deal_id && a.action_value) db.prepare('UPDATE deals SET stage=? WHERE id=?').run(a.action_value, ctx.deal_id);
+      if (a.action_type === 'add_tag' && ctx.contact_id && a.action_value) { const c = db.prepare('SELECT tags FROM contacts WHERE id=?').get(ctx.contact_id); const tags = [...new Set([...(c?.tags || '').split(',').filter(Boolean), a.action_value])].join(','); db.prepare('UPDATE contacts SET tags=? WHERE id=?').run(tags, ctx.contact_id); }
+      log(`Автоматизация «${a.name}» сработала`);
+    } catch (e) { console.error('automation', e); }
+  }
+}
+
+// ---------- unified inbox ----------
+// «Неразобранное»: при первом обращении (или если открытых сделок нет) создаём сделку в воронке
+// свободный менеджер: у кого меньше всего сделок в работе (распределение лидов)
+export function nextManager() {
+  const users = db.prepare("SELECT id,name FROM users WHERE active=1 AND role IN ('manager','admin') ORDER BY id").all();
+  if (!users.length) return null;
+  const load = db.prepare("SELECT COUNT(*) n FROM deals WHERE responsible_id=? AND stage NOT IN ('won','lost')");
+  return users.map(u => ({ u, n: load.get(u.id).n })).sort((a, b) => a.n - b.n || a.u.id - b.u.id)[0].u;
+}
+export function ensureDeal(contact) {
+  if (getSetting('AUTO_DEAL', '1') !== '1' || !contact) return null;
+  const open = db.prepare("SELECT id FROM deals WHERE contact_id=? AND stage NOT IN ('won','lost') ORDER BY id DESC").get(contact.id);
+  if (open) return null;
+  const stage = getSetting('AUTO_DEAL_STAGE', 'new');
+  let ownerId = contact.responsible_id || null, ownerName = '';
+  if (ownerId) ownerName = db.prepare('SELECT name FROM users WHERE id=?').get(ownerId)?.name || '';
+  if (!ownerId && getSetting('AUTO_ASSIGN', '0') === '1') {
+    const m = nextManager();
+    if (m) { ownerId = m.id; ownerName = m.name; db.prepare('UPDATE contacts SET responsible_id=? WHERE id=?').run(ownerId, contact.id); log(`Обращение «${contact.name}» назначено на ${m.name}`, 'contacts', contact.id); }
+  }
+  const dr = db.prepare('INSERT INTO deals(title,amount,stage,contact_id,responsible,responsible_id) VALUES(?,?,?,?,?,?)').run('Обращение: ' + contact.name, 0, stage, contact.id, ownerName, ownerId);
+  log(`Новое обращение «${contact.name}» → сделка в этапе «${stage}»`, 'deals', Number(dr.lastInsertRowid));
+  runAutomations('deal_created', { deal_id: Number(dr.lastInsertRowid), contact_id: contact.id });
+  broadcast('change', { table: 'deals' });
+  return Number(dr.lastInsertRowid);
+}
+
+export function upsertIncoming({ channel = 'whatsapp', chatType = '', phone = '', chatId = '', name = '', body = '', external_id = null, channelId = '', contentUri = '', author = '', email = '', subject = '', direction = 'in' }) {
+  if (!body && !contentUri) return null;
+  const ph = phone || (['whatsapp', 'viber'].includes(chatType || channel) ? chatId : '');
+  let contact = ph ? db.prepare('SELECT * FROM contacts').all().find(c => digits(c.phone) && digits(c.phone) === digits(ph)) : null;
+  if (!contact && email) contact = db.prepare('SELECT * FROM contacts').all().find(c => (c.email || '').toLowerCase() === String(email).toLowerCase());
+  if (!contact && chatId) { const conv0 = db.prepare('SELECT * FROM conversations WHERE external_chat_id=?').get(String(chatId)); if (conv0) contact = db.prepare('SELECT * FROM contacts WHERE id=?').get(conv0.contact_id); }
+  if (!contact) { const r = db.prepare('INSERT INTO contacts(name,phone,email,source) VALUES(?,?,?,?)').run(name || ph || chatId || email || 'Новый клиент', ph, email || '', channel === 'email' ? 'email' : 'wazzup-' + (chatType || channel)); contact = db.prepare('SELECT * FROM contacts WHERE id=?').get(r.lastInsertRowid); log(`Новый контакт (${channel === 'email' ? 'email' : chatType || channel}): ${contact.name}`, 'contact', contact.id); }
+  let conv = db.prepare('SELECT * FROM conversations WHERE contact_id=?').get(contact.id);
+  let dealId = null;
+  if (!conv) {
+    const r = db.prepare('INSERT INTO conversations(contact_id,title,channels,channel_id,external_chat_id,chat_type) VALUES(?,?,?,?,?,?)').run(contact.id, contact.name, channel, channelId, String(chatId || ph || ''), chatType || channel);
+    conv = db.prepare('SELECT * FROM conversations WHERE id=?').get(r.lastInsertRowid);
+    dealId = ensureDeal(contact);
+  }
+  const channels = [...new Set([...(conv.channels || '').split(',').filter(Boolean), channel])].join(',');
+  try { db.prepare('INSERT INTO messages(conversation_id,channel,direction,body,subject,content_uri,status,external_id,author) VALUES(?,?,?,?,?,?,?,?,?)').run(conv.id, channel, 'in', body || '[вложение]', subject, contentUri, channel === 'email' ? 'received' : 'inbound', external_id, author); }
+  catch (e) { if (/UNIQUE/i.test(e.message)) return conv; console.error('message insert', e); throw e; }
+  db.prepare("UPDATE conversations SET channels=?,channel_id=COALESCE(NULLIF(?,''),channel_id),external_chat_id=COALESCE(NULLIF(?,''),external_chat_id),chat_type=COALESCE(NULLIF(?,''),chat_type),unread=unread+1,last_at=datetime('now') WHERE id=?").run(channels, channelId, String(chatId || ''), chatType, conv.id);
+  if (!dealId) dealId = ensureDeal(contact); // клиент вернулся, а открытой сделки нет — заводим новое обращение
+  const openDeal = db.prepare("SELECT id FROM deals WHERE contact_id=? AND stage NOT IN ('won','lost') ORDER BY id DESC").get(contact.id);
+  runAutomations('message_in', { contact_id: contact.id, deal_id: dealId || openDeal?.id });
+  broadcast('message', { conversation_id: conv.id });
+  return conv;
+}
+
+// ---------- providers ----------
+async function wazzupFetch(path, opt = {}) {
+  const key = getSetting('WAZZUP_API_KEY'); if (!key) throw new Error('Wazzup API-ключ не настроен');
+  const base = (getSetting('WAZZUP_API_URL', 'https://api.wazzup24.com/v3')).replace(/\/$/, '');
+  const res = await fetch(base + path, { ...opt, headers: { Authorization: 'Bearer ' + key, 'Content-Type': 'application/json', ...(opt.headers || {}) } });
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) { const e = new Error(data?.description || data?.error || `Wazzup API ${res.status}`); e.status = res.status; throw e; }
+  return data;
+}
+const isUuid = s => /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(String(s || ''));
+const WZ_TYPES = ['whatsapp', 'viber', 'telegram', 'instagram', 'whatsgroup'];
+const normChatType = t => WZ_TYPES.includes(String(t || '').toLowerCase()) ? String(t).toLowerCase() : 'whatsapp';
+// понятные ошибки вместо «Wazzup API 401»
+function wazzupError(e, status) {
+  const m = String(e?.message || e || '');
+  if (status === 401 || /401|unauthor/i.test(m)) return 'Wazzup: ключ не подошёл (401). Проверьте API-ключ в Настройках — возможно, он перевыпущен в кабинете Wazzup.';
+  if (status === 403 || /403|forbidden/i.test(m)) return 'Wazzup: доступ запрещён (403). Проверьте, что канал подключён и тариф активен.';
+  if (status === 429) return 'Wazzup: слишком много запросов (429). Повторите через минуту.';
+  if (/chatId|chat_id/i.test(m) && /400|invalid/i.test(m)) return 'Wazzup: не принял адресата. Для WhatsApp/Viber нужен номер телефона цифрами, для Telegram/Instagram — идентификатор чата из переписки.';
+  return 'Wazzup: ' + m;
+}
+export async function sendViaWazzup(conv, text, user, chatTypeOverride = '', file = null) {
+  // Wazzup принимает только id канала в формате uuid — иначе отвечаем каналом по умолчанию из настроек
+  const channelId = (isUuid(conv.channel_id) ? conv.channel_id : '') || getSetting('WAZZUP_CHANNEL_ID');
+  if (!channelId) throw new Error('Не выбран канал Wazzup. Настройки → Интеграции → «Проверить и синхронизировать каналы», затем выберите канал по умолчанию.');
+  const chatType = normChatType(chatTypeOverride || conv.chat_type);
+  // whatsapp/viber/whatsgroup адресуются по номеру телефона или id чата, telegram/instagram — по chatId из вебхука
+  const chatId = ['whatsapp', 'viber', 'whatsgroup'].includes(chatType) ? (conv.external_chat_id || digits(conv.phone)) : (conv.external_chat_id || digits(conv.phone));
+  if (!chatId) throw new Error('Нет адресата: у клиента не заполнен телефон или не пришло ни одного сообщения из этого канала.');
+  const payload = {
+    channelId, chatType, chatId,
+    crmMessageId: 'karkas-' + Date.now().toString(36) + '-' + randomBytes(4).toString('hex'),
+    crmUserId: String(user?.id || ''),
+  };
+  if (file?.contentUri) { payload.contentUri = file.contentUri; if (text) payload.text = text }
+  else payload.text = text || '';
+  let data;
+  try { data = await wazzupFetch('/message', { method: 'POST', body: JSON.stringify(payload) }); }
+  catch (e) { throw new Error(wazzupError(e, e.status)); }
+  return { delivered: true, mode: 'wazzup', id: data.messageId || data.id };
+}
+async function sendWhatsAppDirect(to, text) {
+  const token = getSetting('WHATSAPP_TOKEN'), phoneId = getSetting('WHATSAPP_PHONE_ID'); if (!token || !phoneId) return null;
+  const res = await fetch(`https://graph.facebook.com/v21.0/${phoneId}/messages`, { method: 'POST', headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' }, body: JSON.stringify({ messaging_product: 'whatsapp', to: digits(to), type: 'text', text: { body: text } }) });
+  const data = await res.json().catch(() => ({})); if (!res.ok) throw new Error(data?.error?.message || 'WhatsApp API ' + res.status);
+  return { delivered: true, mode: 'whatsapp-cloud', id: data?.messages?.[0]?.id };
+}
+async function deliver(conv, channel, text, user, file = null) {
+  const provider = getSetting('MESSENGER_PROVIDER', 'wazzup');
+  if (provider === 'wazzup') { try { return await sendViaWazzup(conv, text, user, channel && channel !== 'site' ? channel : '', file); } catch (e) { if (channel !== 'whatsapp' || file) throw e; const d = await sendWhatsAppDirect(conv.phone, text).catch(() => null); if (d) return d; throw e; } }
+  if (channel === 'whatsapp' && !file) { const d = await sendWhatsAppDirect(conv.phone, text); if (d) return d; }
+  return { delivered: false, mode: 'local-only' };
+}
+
+// ---------- обслуживание: бэкапы и напоминания ----------
+function makeBackup(force = false) {
+  const dir = join(DATA_DIR, 'backups'); mkdir(dir, { recursive: true });
+  const name = `crm-${new Date().toISOString().slice(0, 10)}.db`;
+  const target = join(dir, name);
+  if (!force && existsSync(target)) return null;
+  try { db.exec('PRAGMA wal_checkpoint(TRUNCATE)') } catch {}
+  copyFileSync(join(DATA_DIR, 'crm.db'), target);
+  const keep = Number(getSetting('BACKUP_KEEP_DAYS', '7')) || 0;
+  if (keep > 0) {
+    const limit = Date.now() - keep * 864e5;
+    for (const f of readdirSync(dir).filter(x => x.endsWith('.db'))) { try { if (statSync(join(dir, f)).mtimeMs < limit) unlinkSync(join(dir, f)) } catch {} }
+  }
+  log(`Резервная копия базы создана: ${name}`);
+  return name;
+}
+async function overdueTick() {
+  const today = new Date().toISOString().slice(0, 10);
+  const rows = db.prepare("SELECT t.*, c.name contact_name FROM tasks t LEFT JOIN contacts c ON c.id=t.contact_id WHERE t.done=0 AND t.due IS NOT NULL AND t.due != '' AND (t.notified_at IS NULL OR t.notified_at != ?)").all(today);
+  const overdue = rows.filter(t => t.due.slice(0, 10) < today || /^\d{2}\.\d{2}\.\d{4}/.test(t.due));
+  if (!overdue.length) return;
+  const ids = overdue.map(t => t.id);
+  db.prepare(`UPDATE tasks SET notified_at=? WHERE id IN (${ids.map(() => '?').join(',')})`).run(today, ...ids);
+  const list = overdue.map(t => ({ id: t.id, title: t.title, due: t.due, contact: t.contact_name || '' }));
+  log(`Просроченные задачи: ${list.length} (${list.map(t => t.title).slice(0, 3).join('; ')})`);
+  broadcast('notify', { type: 'overdue_tasks', count: list.length, tasks: list });
+  const hook = getSetting('NOTIFY_WEBHOOK');
+  if (hook) fetch(hook, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ type: 'overdue_tasks', count: list.length, tasks: list, company: getSetting('COMPANY_NAME') }) }).catch(() => {});
+}
+let lastBackupDay = '';
+function startScheduler() {
+  const tick = async () => {
+    try {
+      const hourly = getSetting('BACKUP_HOUR', '3');
+      const now = new Date();
+      const day = now.toISOString().slice(0, 10);
+      if (lastBackupDay !== day && now.getHours() >= Number(hourly)) { lastBackupDay = day; try { makeBackup() } catch (e) { console.error('backup', e) } }
+      await overdueTick();
+    } catch (e) { console.error('scheduler', e) }
+  };
+  tick();
+  const timer = setInterval(tick, Number(getSetting('SCHEDULER_INTERVAL_MS', '60000')));
+  timer.unref?.();
+  return timer;
+}
+export const scheduler = startScheduler();
+
+// ---------- http ----------
+// Заголовки безопасности на каждый ответ: CSP под собственный SPA без внешних скриптов,
+// запрет фреймов (кроме явного FRAME_ANCESTORS), nosniff, закрытая индексация.
+function applySecurityHeaders(req, res) {
+  const frame = getSetting('FRAME_ANCESTORS');
+  const csp = [
+    "default-src 'self'",
+    "script-src 'self' 'unsafe-inline'",
+    "style-src 'self' 'unsafe-inline'",
+    "img-src 'self' data: blob: https:",
+    "font-src 'self' data:",
+    "connect-src 'self'",
+    "media-src 'self' blob:",
+    "object-src 'none'",
+    "base-uri 'self'",
+    "form-action 'self'",
+    frame ? `frame-ancestors ${frame}` : "frame-ancestors 'none'",
+  ].join('; ');
+  const headers = {
+    'X-Content-Type-Options': 'nosniff',
+    'Referrer-Policy': 'same-origin',
+    'X-Robots-Tag': 'noindex, nofollow',
+    'Permissions-Policy': 'camera=(), microphone=(), geolocation=(), browsing-topics=()',
+    'Cross-Origin-Opener-Policy': 'same-origin',
+    'Content-Security-Policy': csp,
+  };
+  if (!frame) headers['X-Frame-Options'] = 'DENY';
+  if (isHttps(req)) headers['Strict-Transport-Security'] = 'max-age=31536000; includeSubDomains';
+  for (const [k, v] of Object.entries(headers)) res.setHeader(k, v);
+}
+// реквизиты компании для печатных документов (задаются в интерфейсе: Настройки → Данные и компания)
+function companyRequisites() {
+  const g = k => getSetting(k, '');
+  return {
+    name: g('COMPANY_NAME') || 'Моя компания', inn: g('COMPANY_INN'), kpp: g('COMPANY_KPP'), ogrn: g('COMPANY_OGRN'),
+    address: g('COMPANY_ADDRESS'), phone: g('COMPANY_PHONE'), email: g('COMPANY_EMAIL'), site: g('COMPANY_SITE'),
+    bank: g('COMPANY_BANK'), account: g('COMPANY_ACCOUNT'), signer: g('COMPANY_SIGNER'), signer_position: g('COMPANY_SIGNER_POSITION'),
+    currency: g('CURRENCY') || '₽', doc_prefix: g('DOC_PREFIX') || 'КП',
+  };
+}
+const escHtml = (v = '') => String(v ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+const money = (n, cur = '₽') => new Intl.NumberFormat('ru-RU').format(Math.round(Number(n) || 0)) + ' ' + cur;
+// печатная страница А4: открывается в новой вкладке и сразу готова к печати или сохранению в PDF
+function dealDocument({ deal, items, doc, company }) {
+  const isInvoice = doc === 'invoice';
+  const sum = items.reduce((a, x) => a + x.price * x.qty, 0);
+  const vat = Math.round(sum * 20 / 120);
+  const number = `${company.doc_prefix}-${String(deal.id).padStart(4, '0')}`;
+  const rows = items.map((x, i) => `<tr><td>${i + 1}</td><td>${escHtml(x.name)}</td><td>шт</td><td class="r">${money(x.price, company.currency)}</td><td class="r">${x.qty}</td><td class="r">${money(x.price * x.qty, company.currency)}</td></tr>`).join('');
+  return `<!doctype html><html lang="ru"><head><meta charset="utf-8"><title>${isInvoice ? 'Счёт' : 'КП'} № ${escHtml(number)} — ${escHtml(company.name)}</title>
+<style>
+  @page{margin:16mm}
+  body{font:13px/1.5 -apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,Arial,sans-serif;color:#0f172a;margin:0;padding:24px;max-width:900px}
+  h1{font-size:20px;margin:0 0 4px}h2{font-size:15px;margin:22px 0 8px}
+  .head{display:flex;justify-content:space-between;gap:24px;border-bottom:2px solid #16a34a;padding-bottom:12px}
+  .brand{font-weight:800;color:#16a34a;font-size:18px}.muted{color:#64748b}
+  table{width:100%;border-collapse:collapse;margin-top:8px}
+  th,td{border:1px solid #cbd5e1;padding:7px 9px;text-align:left;vertical-align:top}
+  th{background:#f1f5f9;font-size:12px;text-transform:uppercase;letter-spacing:.03em}
+  td.r,th.r{text-align:right;white-space:nowrap}
+  .total{margin-top:10px;text-align:right;font-size:15px;font-weight:700}
+  .grid{display:grid;grid-template-columns:1fr 1fr;gap:6px 24px;margin-top:10px}
+  .sign{margin-top:40px;display:flex;justify-content:space-between;gap:24px}
+  .sign div{flex:1}.line{border-bottom:1px solid #94a3b8;height:26px}
+  .noprint{margin:0 0 18px;padding:10px 12px;background:#f0fdf4;border:1px solid #16a34a;border-radius:10px;display:flex;gap:10px;align-items:center}
+  .noprint button{cursor:pointer;border:0;background:#16a34a;color:#fff;padding:8px 14px;border-radius:8px;font:inherit;font-weight:600}
+  @media print{.noprint{display:none}body{padding:0}}
+</style></head><body>
+<div class="noprint"><button onclick="window.print()">Печать / сохранить в PDF</button><span class="muted">Документ сформирован CRM ${new Date().toLocaleString('ru-RU')}</span></div>
+<div class="head">
+  <div><div class="brand">${escHtml(company.name)}</div>
+    ${company.inn ? `<div class="muted">ИНН ${escHtml(company.inn)}${company.kpp ? ' · КПП ' + escHtml(company.kpp) : ''}${company.ogrn ? ' · ОГРН ' + escHtml(company.ogrn) : ''}</div>` : ''}
+    ${company.address ? `<div class="muted">${escHtml(company.address)}</div>` : ''}
+    <div class="muted">${[company.phone, company.email, company.site].filter(Boolean).map(escHtml).join(' · ')}</div></div>
+  <div style="text-align:right"><h1>${isInvoice ? 'Счёт на оплату' : 'Коммерческое предложение'} № ${escHtml(number)}</h1>
+    <div class="muted">от ${new Date().toLocaleDateString('ru-RU')}</div></div>
+</div>
+<h2>${isInvoice ? 'Плательщик' : 'Заказчик'}</h2>
+<div class="grid"><div><b>${escHtml(deal.contact_name || '—')}</b>${deal.company_name ? `<br>${escHtml(deal.company_name)}` : ''}</div>
+<div>${deal.contact_phone ? `Тел.: ${escHtml(deal.contact_phone)}<br>` : ''}${deal.contact_email ? `E-mail: ${escHtml(deal.contact_email)}` : ''}</div></div>
+<h2>${isInvoice ? 'Предмет счёта' : 'Предложение'}${deal.title ? ' — ' + escHtml(deal.title) : ''}</h2>
+<table><tr><th style="width:34px">№</th><th>Наименование</th><th style="width:70px">Ед.</th><th class="r" style="width:120px">Цена</th><th class="r" style="width:64px">Кол-во</th><th class="r" style="width:130px">Сумма</th></tr>
+${rows || '<tr><td colspan="6" class="muted">Позиции не добавлены — заполните состав в карточке сделки</td></tr>'}</table>
+<div class="total">Итого: ${money(sum, company.currency)}${isInvoice ? `<br><span class="muted">в том числе НДС 20%: ${money(vat, company.currency)}</span>` : ''}</div>
+${isInvoice ? `<h2>Реквизиты для оплаты</h2><div class="grid"><div>${company.bank ? escHtml(company.bank) + '<br>' : ''}${company.account ? 'Р/с ' + escHtml(company.account) : ''}</div><div>${company.signer ? `Подписант: ${escHtml(company.signer_position || 'Руководитель')} ${escHtml(company.signer)}` : ''}</div></div>` : ''}
+${deal.deadline ? `<p class="muted">Срок действия предложения / срок выполнения: ${escHtml(deal.deadline)}</p>` : ''}
+<div class="sign"><div>${isInvoice ? 'Руководитель' : 'Исполнитель'}<div class="line"></div>${company.signer ? escHtml(company.signer) : ''}</div>
+<div>Заказчик<div class="line"></div>${escHtml(deal.contact_name || '')}</div></div>
+</body></html>`;
+}
+const html = (res, code, body) => { res.writeHead(code, { 'Content-Type': 'text/html; charset=utf-8' }); res.end(body); };
+const json = (res, code, obj) => { res.writeHead(code, { 'Content-Type': 'application/json; charset=utf-8' }); res.end(JSON.stringify(obj)); };
+// простое ограничение частоты: защита от перебора пароля и от шторма запросов к источникам
+const RL = new Map();
+function rateLimit(key, limit, windowMs) {
+  const now = Date.now(), rec = RL.get(key);
+  if (!rec || now > rec.resetAt) { RL.set(key, { count: 1, resetAt: now + windowMs }); return { ok: true, left: limit - 1 } }
+  rec.count++;
+  return { ok: rec.count <= limit, left: Math.max(0, limit - rec.count), retryAfter: Math.ceil((rec.resetAt - now) / 1000) };
+}
+const readBody = async (req, maxBytes = 5e6) => { let s = ''; for await (const ch of req) { s += ch; if (s.length > maxBytes) throw new Error('Слишком большой запрос'); } try { return s ? JSON.parse(s) : {}; } catch { return {}; } };
+const MIME = { '.html': 'text/html', '.js': 'text/javascript', '.css': 'text/css', '.svg': 'image/svg+xml', '.png': 'image/png', '.jpg': 'image/jpeg', '.jpeg': 'image/jpeg', '.gif': 'image/gif', '.webp': 'image/webp', '.ico': 'image/x-icon', '.pdf': 'application/pdf', '.zip': 'application/zip', '.txt': 'text/plain', '.csv': 'text/csv', '.doc': 'application/msword', '.docx': 'application/vnd.openxmlformats-officedocument.wordprocessingml.document', '.xls': 'application/vnd.ms-excel', '.xlsx': 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet', '.patch': 'text/plain', '.diff': 'text/plain' };
+// Определение типа изображения по сигнатуре файла: расширению доверять нельзя
+// (логотип могут загрузить в .jpg, .png или любом другом формате).
+function sniffImage(buf, fallback = 'application/octet-stream') {
+  if (!Buffer.isBuffer(buf) || buf.length < 12) return fallback;
+  if (buf.subarray(0, 8).equals(Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]))) return 'image/png';
+  if (buf[0] === 0xff && buf[1] === 0xd8 && buf[2] === 0xff) return 'image/jpeg';
+  if (buf.toString('ascii', 0, 6) === 'GIF87a' || buf.toString('ascii', 0, 6) === 'GIF89a') return 'image/gif';
+  if (buf.toString('ascii', 0, 4) === 'RIFF' && buf.toString('ascii', 8, 12) === 'WEBP') return 'image/webp';
+  if (buf.subarray(0, 4).equals(Buffer.from([0, 0, 1, 0]))) return 'image/x-icon';
+  return fallback;
+}
+// Логотип: явный путь из LOGO_FILE → загруженный в интерфейсе → логотип из комплекта поставки.
+function findCustomLogo() {
+  try {
+    if (!existsSync(CUSTOM_LOGO_DIR)) return null;
+    const f = readdirSync(CUSTOM_LOGO_DIR).find(x => /^logo\.(png|jpe?g|gif|webp|ico)$/i.test(x));
+    return f ? join(CUSTOM_LOGO_DIR, f) : null;
+  } catch { return null; }
+}
+function resolveLogo() {
+  if (process.env.LOGO_FILE && existsSync(process.env.LOGO_FILE)) return process.env.LOGO_FILE;
+  return findCustomLogo() || (existsSync(BUNDLED_LOGO) ? BUNDLED_LOGO : null);
+}
+const IMAGE_UPLOAD_TYPES = ['image/png', 'image/jpeg', 'image/gif', 'image/webp'];
+const FILE_UPLOAD_TYPES = [...IMAGE_UPLOAD_TYPES, 'application/pdf', 'text/plain', 'text/csv', 'application/zip',
+  'application/msword', 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+  'application/vnd.ms-excel', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'];
+const safeFileName = name => String(name || 'файл').normalize('NFKD').replace(/[^\wа-яё ._\-()]/gi, '_').replace(/\s+/g, ' ').trim().slice(0, 120) || 'файл';
+// Имя файла на диске и в URL — только ASCII (кириллица транслитерируется), исходное имя остаётся в content_name.
+const TRANSLIT = { а: 'a', б: 'b', в: 'v', г: 'g', д: 'd', е: 'e', ё: 'e', ж: 'zh', з: 'z', и: 'i', й: 'y', к: 'k', л: 'l', м: 'm', н: 'n', о: 'o', п: 'p', р: 'r', с: 's', т: 't', у: 'u', ф: 'f', х: 'h', ц: 'ts', ч: 'ch', ш: 'sh', щ: 'sch', ъ: '', ы: 'y', ь: '', э: 'e', ю: 'yu', я: 'ya' };
+const asciiFileName = name => String(name || 'file').normalize('NFKD').toLowerCase().split('').map(ch => {
+  if (/[a-z0-9._-]/.test(ch)) return ch;
+  if (ch === ' ') return '_';
+  return TRANSLIT[ch] || TRANSLIT[ch.toLowerCase()] || '_';
+}).join('').replace(/_+/g, '_').replace(/^[._-]+|[._-]+$/g, '').slice(0, 120) || 'file';
+const csv = rows => { if (!rows.length) return ''; const ks = Object.keys(rows[0]); const q = v => `"${String(v ?? '').replace(/"/g, '""')}"`; return [ks.join(';'), ...rows.map(r => ks.map(k => q(r[k])).join(';'))].join('\n'); };
+const ADMIN_ONLY = [
+  /^\/api\/settings(\/.*)?$/, /^\/api\/users(\/.*)?$/, /^\/api\/pipelines(\/.*)?$/, /^\/api\/automations(\/.*)?$/,
+  /^\/api\/templates(\/.*)?$/, /^\/api\/custom-fields(\/.*)?$/, /^\/api\/competitor-sources(\/.*)?$/,
+  /^\/api\/backups(\/.*)?$/, /^\/api\/integrations(\/.*)?$/, /^\/api\/prices\/ours(\/.*)?$/,
+];
+function requireAdmin(user, res) { if (user.role !== 'admin') { json(res, 403, { error: 'Только для администратора' }); return false; } return true; }
+
+const competitorsApi = createCompetitors({ db, json, readBody, log, broadcast, getSetting, setSetting });
+export const server = http.createServer(async (req, res) => {
+  const u = new URL(req.url, `http://${req.headers.host}`), p = u.pathname;
+  applySecurityHeaders(req, res);
+  try {
+    // ===== публичные вебхуки =====
+    if (p === '/webhooks/wazzup' && req.method === 'POST') {
+      const secret = getSetting('WAZZUP_WEBHOOK_SECRET'); if (secret && u.searchParams.get('secret') !== secret && req.headers['x-webhook-secret'] !== secret) return json(res, 403, { error: 'bad secret' });
+      const b = await readBody(req);
+      const legacy = b.messages || [];
+      const modern = (b.data || []).concat(!b.data && (b.message_id || b.messageId) ? [b] : []).map(m => ({
+        messageId: m.message_id || m.messageId, channelId: m.channel_id || m.channelId, chatType: m.recipient?.chat_type || m.sender?.chat_type || m.chatType || 'whatsapp',
+        chatId: m.recipient?.chat_id || m.sender?.chat_id || m.chatId, isEcho: (m.direction === 'outbound') || m.isEcho,
+        text: m.text, type: m.attachment ? 'file' : 'text', contentUri: m.attachment?.url || m.contentUri, status: m.direction === 'inbound' ? 'inbound' : (m.status || 'sent'),
+        authorName: m.sender?.name, contact: { name: m.sender?.name || m.recipient?.name, phone: m.sender?.phone || m.recipient?.phone }
+      }));
+      for (const m of legacy.concat(modern)) {
+        if (m.status && m.status !== 'inbound') { db.prepare('UPDATE messages SET status=? WHERE external_id=?').run(m.status, m.messageId); continue; }
+        if (m.isEcho) continue;
+        upsertIncoming({ channel: m.chatType || 'whatsapp', chatType: m.chatType, phone: m.contact?.phone || '', chatId: m.chatId || '', name: m.contact?.name || m.authorName || '', body: m.text || (m.contentUri ? '[вложение: ' + (m.type || 'файл') + ']' : ''), contentUri: m.contentUri || '', external_id: m.messageId, channelId: m.channelId, author: m.authorName || '' });
+      }
+      for (const s of b.statuses || []) db.prepare('UPDATE messages SET status=? WHERE external_id=?').run(s.status, s.messageId);
+      for (const cu of b.channelsUpdates || []) db.prepare('INSERT INTO channels(provider,external_id,state) VALUES(?,?,?) ON CONFLICT(external_id) DO UPDATE SET state=excluded.state').run('wazzup', cu.channelId, cu.state);
+      return json(res, 200, { received: true });
+    }
+    if (p === '/webhooks/whatsapp') {
+      if (req.method === 'GET') { const ok = u.searchParams.get('hub.mode') === 'subscribe' && u.searchParams.get('hub.verify_token') === getSetting('WHATSAPP_VERIFY_TOKEN', 'karkas-verify'); res.writeHead(ok ? 200 : 403); return res.end(ok ? u.searchParams.get('hub.challenge') : 'forbidden'); }
+      const payload = await readBody(req);
+      for (const e of payload.entry || []) for (const ch of e.changes || []) for (const msg of ch.value?.messages || []) upsertIncoming({ channel: 'whatsapp', chatType: 'whatsapp', phone: '+' + msg.from, name: ch.value.contacts?.find(c => c.wa_id === msg.from)?.profile?.name || '', body: msg.text?.body || '[медиа]', external_id: msg.id });
+      return json(res, 200, { received: true });
+    }
+    if ((p === '/webhooks/telegram' || p === '/webhooks/generic') && req.method === 'POST') { const b = await readBody(req); const msg = b.message || b; upsertIncoming({ channel: p.includes('telegram') ? 'telegram' : (b.channel || 'site'), chatType: b.chatType || '', phone: b.phone || msg.chat?.id || '', chatId: b.chatId || '', name: msg.from?.first_name || b.name || '', body: msg.text || b.body || '', external_id: msg.message_id ? `tg-${msg.message_id}` : (b.external_id || null) }); return json(res, 200, { received: true }); }
+    if (p === '/webhooks/email' && req.method === 'POST') {
+      const secret = getSetting('EMAIL_WEBHOOK_SECRET');
+      if (secret && u.searchParams.get('secret') !== secret && req.headers['x-webhook-secret'] !== secret) return json(res, 403, { error: 'bad secret' });
+      const b = await readBody(req);
+      upsertIncoming({ channel: 'email', chatType: 'email', email: String(b.from || b.email || '').trim(), name: b.name || String(b.from || '').split('@')[0] || 'E-mail', subject: b.subject || '', body: b.text || b.body || b.html || '', external_id: b.message_id || b.external_id || null, direction: 'in' });
+      return json(res, 200, { received: true });
+    }
+    if (p === '/api/health') {
+      let dbSize = 0; try { dbSize = statSync(join(DATA_DIR, 'crm.db')).size } catch {}
+      let backupsCount = 0, lastBackup = null;
+      try { const dir = join(DATA_DIR, 'backups'); const files = existsSync(dir) ? readdirSync(dir).filter(f => f.endsWith('.db')).sort() : []; backupsCount = files.length; lastBackup = files.length ? files[files.length - 1] : null } catch {}
+      const h = { ok: true, service: 'KarkasCRM', version: VERSION, schema: SCHEMA_VERSION, time: new Date().toISOString(), uptimeSec: Math.round((Date.now() - STARTED) / 1000), dbSizeBytes: dbSize, backups: { count: backupsCount, last: lastBackup }, counts: { users: db.prepare('SELECT COUNT(*) n FROM users').get().n, contacts: db.prepare('SELECT COUNT(*) n FROM contacts').get().n, deals: db.prepare('SELECT COUNT(*) n FROM deals').get().n, tasks: db.prepare('SELECT COUNT(*) n FROM tasks WHERE done=0').get().n, messages: db.prepare('SELECT COUNT(*) n FROM messages').get().n } };
+      return json(res, 200, h, true);
+    }
+    if (p === '/api/auth/login' && req.method === 'POST') {
+      const ip = (req.headers['x-forwarded-for'] || '').split(',')[0].trim() || req.socket.remoteAddress || 'local';
+      const rl = rateLimit('login:' + ip, Number(getSetting('LOGIN_RATE_LIMIT', '12')), 300000);
+      if (!rl.ok) { res.setHeader('Retry-After', String(rl.retryAfter || 300)); return json(res, 429, { error: `Слишком много попыток входа. Повторите через ${rl.retryAfter || 300} с.` }) }
+      const b = await readBody(req); const user = db.prepare('SELECT * FROM users WHERE email=? AND active=1').get(String(b.email || '').toLowerCase()); if (!user || !checkPass(String(b.password || ''), user.pass)) return json(res, 401, { error: 'Неверный e-mail или пароль' });
+      const token = sign({ id: user.id, email: user.email, name: user.name, role: user.role });
+      res.setHeader('Set-Cookie', sessionCookie(req, token));
+      return json(res, 200, { token, user: { id: user.id, name: user.name, email: user.email, role: user.role } }); }
+    if (p === '/api/auth/logout' && req.method === 'POST') {
+      res.setHeader('Set-Cookie', clearSessionCookie(req));
+      return json(res, 200, { ok: true });
+    }
+
+    const bearer = (req.headers.authorization || '').replace(/^Bearer\s+/i, '');
+    const user = verify(bearer || cookieOf(req).karkas_token || u.searchParams.get('token') || '');
+    if (p.startsWith('/api/') && !user) return json(res, 401, { error: 'Требуется авторизация' });
+    if (p === '/api/events') { res.writeHead(200, { 'Content-Type': 'text/event-stream', 'Cache-Control': 'no-cache', Connection: 'keep-alive' }); res.write('event: ready\ndata: {}\n\n'); clients.add(res); req.on('close', () => clients.delete(res)); return; }
+    if (p === '/api/me') return json(res, 200, { user });
+    if (p === '/api/meta') return json(res, 200, {
+      version: VERSION, schema: SCHEMA_VERSION, user,
+      company: { name: getSetting('COMPANY_NAME', 'Моя компания'), currency: getSetting('CURRENCY', '₽') },
+      taskTypes: [{ id: 'call', name: 'Звонок' }, { id: 'meeting', name: 'Встреча' }, { id: 'message', name: 'Сообщение' }, { id: 'email', name: 'Письмо' }, { id: 'other', name: 'Другое' }],
+      sources: ['manual', 'wazzup-whatsapp', 'wazzup-telegram', 'wazzup-instagram', 'wazzup-viber', 'whatsapp', 'telegram', 'email', 'site', 'avito', 'import'],
+      customFields: getCustomFields(),
+      features: { email: !!getSetting('SMTP_HOST'), wazzup: !!getSetting('WAZZUP_API_KEY'), whatsapp: !!(getSetting('WHATSAPP_TOKEN') && getSetting('WHATSAPP_PHONE_ID')) },
+      salesTarget: Number(getSetting('SALES_TARGET', '0')) || 0,
+    });
+    if (user && p.startsWith('/api/') && user.role === 'viewer' && req.method !== 'GET') return json(res, 403, { error: 'Роль «Наблюдатель» — только просмотр' });
+    // настройки, команда, воронки, шаблоны, автоматизации, ключи и обслуживание — только администратор
+    if (user && user.role !== 'admin' && req.method !== 'GET' && ADMIN_ONLY.some(re => re.test(p))) return json(res, 403, { error: 'Это может менять только администратор (роль в Настройки → Команда)' });
+
+    // ===== dashboard / analytics =====
+    if (p === '/api/dashboard') {
+      const deals = db.prepare('SELECT * FROM deals').all(), stages = getStages(Number(u.searchParams.get('pipeline') || 1));
+      const today = new Date().toISOString().slice(0, 10);
+      const myId = user?.id;
+      const myTasksOpen = db.prepare("SELECT COUNT(*) n FROM tasks WHERE done=0 AND (responsible_id=? OR (responsible_id IS NULL AND ? IS NULL))").get(myId, myId)?.n || 0;
+      const myTasksOverdue = db.prepare("SELECT COUNT(*) n FROM tasks WHERE done=0 AND (responsible_id=? OR (responsible_id IS NULL AND ? IS NULL)) AND due IS NOT NULL AND due != '' AND due < ?").get(myId, myId, today)?.n || 0;
+      const tasksToday = db.prepare("SELECT COUNT(*) n FROM tasks WHERE done=0 AND due LIKE ?").get(today + '%')?.n || 0;
+      const tasksOverdue = db.prepare("SELECT COUNT(*) n FROM tasks WHERE done=0 AND due IS NOT NULL AND due != '' AND due < ?").get(today)?.n || 0;
+      const activeDeals = deals.filter(d => !['won', 'lost'].includes(d.stage));
+      const activeDealsSum = activeDeals.reduce((a, d) => a + d.amount, 0);
+      return json(res, 200, {
+        stages: stages.map(s => ({ ...s, count: deals.filter(d => d.stage === s.code).length, sum: deals.filter(d => d.stage === s.code).reduce((a, d) => a + d.amount, 0) })),
+        dealsTotal: activeDeals.length,
+        activeDealsSum,
+        revenue: deals.filter(d => d.stage === 'won').reduce((a, d) => a + d.amount, 0),
+        lostSum: deals.filter(d => d.stage === 'lost').reduce((a, d) => a + d.amount, 0),
+        contacts: db.prepare('SELECT COUNT(*) n FROM contacts').get().n,
+        companies: db.prepare('SELECT COUNT(*) n FROM companies').get().n,
+        unread: db.prepare('SELECT COALESCE(SUM(unread),0) n FROM conversations').get().n,
+        tasksOpen: db.prepare('SELECT COUNT(*) n FROM tasks WHERE done=0').get().n,
+        tasksToday,
+        tasksOverdue,
+        myTasksOpen,
+        myTasksOverdue,
+        activities: db.prepare('SELECT * FROM activities ORDER BY id DESC LIMIT 10').all(),
+        recentDeals: db.prepare('SELECT d.*,c.name contact_name FROM deals d LEFT JOIN contacts c ON c.id=d.contact_id ORDER BY d.id DESC LIMIT 6').all()
+      });
+    }
+    if (p === '/api/analytics') {
+      const deals = db.prepare('SELECT d.*,c.source FROM deals d LEFT JOIN contacts c ON c.id=d.contact_id').all(); const won = deals.filter(d => d.stage === 'won'), lost = deals.filter(d => d.stage === 'lost');
+      const by = (arr, key) => Object.values(arr.reduce((a, x) => { const k = x[key] || '—'; a[k] = a[k] || { name: k, count: 0, sum: 0 }; a[k].count++; a[k].sum += x.amount || 0; return a; }, {}));
+      const month = new Date().toISOString().slice(0, 7);
+      const monthWon = won.filter(d => String(d.closed_at || d.updated_at || '').slice(0, 7) === month);
+      const target = Number(getSetting('SALES_TARGET', '0')) || 0;
+      const plan = { target, fact: monthWon.reduce((a, d) => a + d.amount, 0), month, deals: monthWon.length, percent: target ? Math.round(monthWon.reduce((a, d) => a + d.amount, 0) / target * 100) : null };
+      return json(res, 200, { plan, conversion: deals.length ? Math.round(won.length / Math.max(1, won.length + lost.length) * 100) : 0, avgCheck: won.length ? Math.round(won.reduce((a, d) => a + d.amount, 0) / won.length) : 0, forecast: deals.filter(d => !['won', 'lost'].includes(d.stage)).reduce((a, d) => a + d.amount, 0), bySource: by(deals, 'source'), byManager: by(deals, 'responsible'), byLoss: by(lost, 'loss_reason'), stages: getStages().map(s => ({ name: s.name, code: s.code, count: deals.filter(d => d.stage === s.code).length, sum: deals.filter(d => d.stage === s.code).reduce((a, x) => a + x.amount, 0) })) });
+    }
+    if (p === '/api/contacts/duplicates') {
+      const all = db.prepare('SELECT * FROM contacts ORDER BY id').all();
+      const groups = new Map();
+      const put = (k, c) => { if (!k) return; if (!groups.has(k)) groups.set(k, []); groups.get(k).push(c) };
+      for (const c of all) {
+        const p = digits(c.phone), e = String(c.email || '').toLowerCase().trim();
+        if (p && p.length >= 6) put('phone:' + p, c);
+        if (e.includes('@')) put('email:' + e, c);
+      }
+      const dupes = [...groups.entries()].filter(([, list]) => list.length > 1).map(([key, list]) => ({ key, type: key.split(':')[0], contacts: list }));
+      return json(res, 200, { groups: dupes, total: dupes.reduce((a, g) => a + g.contacts.length - 1, 0) });
+    }
+    if (p === '/api/contacts/merge' && req.method === 'POST') {
+      const b = await readBody(req);
+      const keepId = Number(b.keep), mergeIds = (b.ids || []).map(Number).filter(id => id && id !== keepId);
+      const keep = db.prepare('SELECT * FROM contacts WHERE id=?').get(keepId);
+      if (!keep || !mergeIds.length) return json(res, 400, { error: 'Укажите основного контакта и что с ним объединить' });
+      const others = mergeIds.map(id => db.prepare('SELECT * FROM contacts WHERE id=?').get(id)).filter(Boolean);
+      db.exec('BEGIN');
+      try {
+        for (const o of others) {
+          // переносим сделки, задачи, заметки
+          db.prepare('UPDATE deals SET contact_id=? WHERE contact_id=?').run(keepId, o.id);
+          db.prepare('UPDATE tasks SET contact_id=? WHERE contact_id=?').run(keepId, o.id);
+          db.prepare("UPDATE notes SET entity_id=? WHERE entity_type='contacts' AND entity_id=?").run(keepId, o.id);
+          // чаты: сообщения переносим в чат основного контакта, дубликат чата удаляем
+          const mine = db.prepare('SELECT * FROM conversations WHERE contact_id=?').get(keepId);
+          const theirs = db.prepare('SELECT * FROM conversations WHERE contact_id=?').get(o.id);
+          if (theirs && mine) {
+            db.prepare('UPDATE messages SET conversation_id=? WHERE conversation_id=?').run(mine.id, theirs.id);
+            db.prepare('UPDATE conversations SET channels=?, unread=unread+? WHERE id=?').run([...new Set([...(mine.channels || '').split(','), ...(theirs.channels || '').split(',')].filter(Boolean))].join(','), theirs.unread || 0, mine.id);
+            db.prepare('DELETE FROM conversations WHERE id=?').run(theirs.id);
+          } else if (theirs && !mine) db.prepare('UPDATE conversations SET contact_id=? WHERE id=?').run(keepId, theirs.id);
+          // объединяем теги и заполняем пустые поля
+          const tags = [...new Set([...(keep.tags || '').split(','), ...(o.tags || '').split(',')].map(x => x.trim()).filter(Boolean))].join(',');
+          db.prepare('UPDATE contacts SET tags=? WHERE id=?').run(tags, keepId); keep.tags = tags;
+          for (const f of ['phone', 'email', 'company', 'position', 'notes', 'company_id']) {
+            if (!keep[f] && o[f]) { db.prepare(`UPDATE contacts SET ${f}=? WHERE id=?`).run(o[f], keepId); keep[f] = o[f]; }
+          }
+          db.prepare('DELETE FROM contacts WHERE id=?').run(o.id);
+        }
+        db.exec('COMMIT');
+      } catch (e) { db.exec('ROLLBACK'); throw e }
+      log(`Контакты объединены: ${others.map(o => o.name).join(', ')} → ${keep.name}`, 'contacts', keepId, user.name);
+      broadcast('change', { table: 'contacts' });
+      return json(res, 200, { kept: keepId, merged: mergeIds.length, contact: db.prepare('SELECT * FROM contacts WHERE id=?').get(keepId) });
+    }
+    if (p === '/api/search') {
+      // SQLite сравнивает кириллицу в LIKE с учётом регистра, поэтому фильтруем по строке в JS —
+      // так «ирина», «Ирина» и «ИРИНА» находят одного клиента
+      const raw = String(u.searchParams.get('q') || '').trim();
+      if (raw.length < 2) return json(res, 200, { contacts: [], deals: [], companies: [], tasks: [] });
+      const needle = raw.toLowerCase();
+      const hit = (...vals) => vals.some(v => String(v ?? '').toLowerCase().includes(needle));
+      const contacts = db.prepare('SELECT id,name,phone,email,company FROM contacts ORDER BY id DESC LIMIT 2000').all().filter(c => hit(c.name, c.phone, c.email, c.company)).slice(0, 8);
+      const deals = db.prepare('SELECT id,title,amount FROM deals ORDER BY id DESC LIMIT 2000').all().filter(d => hit(d.title, d.amount)).slice(0, 8);
+      const companies = db.prepare('SELECT id,name,inn FROM companies ORDER BY id DESC LIMIT 1000').all().filter(c => hit(c.name, c.inn)).slice(0, 5);
+      const tasks = db.prepare('SELECT id,title,due,done,type FROM tasks ORDER BY id DESC LIMIT 2000').all().filter(t => hit(t.title)).slice(0, 6);
+      return json(res, 200, { contacts, deals, companies, tasks });
+    }
+    if (p === '/api/export/json' || p === '/api/backup') { const tables = ['users', 'companies', 'contacts', 'pipelines', 'stages', 'deals', 'tasks', 'notes', 'products', 'templates', 'automations', 'conversations', 'messages', 'channels', 'competitors', 'competitor_checks', 'competitor_reports', 'reviews', 'price_rows']; const out = {}; tables.forEach(t => out[t] = db.prepare(`SELECT * FROM ${t}`).all()); res.writeHead(200, { 'Content-Type': 'application/json', 'Content-Disposition': 'attachment; filename=karkas-backup.json' }); return res.end(JSON.stringify(out, null, 2)); }
+
+    // ===== generic CRUD =====
+    const CRUD = { contacts: ['name', 'phone', 'email', 'company', 'company_id', 'position', 'source', 'tags', 'notes', 'responsible_id', 'custom'], companies: ['name', 'inn', 'phone', 'email', 'site', 'notes'], tasks: ['title', 'type', 'due', 'priority', 'done', 'deal_id', 'contact_id', 'responsible_id', 'result', 'repeat'], products: ['name', 'sku', 'price', 'unit', 'active'], templates: ['name', 'body', 'channel'], automations: ['name', 'trigger_type', 'trigger_value', 'action_type', 'action_value', 'active'], notes: ['entity_type', 'entity_id', 'body', 'author'] };
+    const mCrud = p.match(/^\/api\/(contacts|companies|tasks|products|templates|automations|notes)(?:\/(\d+))?$/);
+    if (mCrud) { const [, table, id] = mCrud; const fields = CRUD[table];
+      // шаблоны и автоматизации меняет только администратор, товары удаляет тоже он —
+      // иначе правила и прайс может случайно переписать любой менеджер
+      if (req.method !== 'GET' && ['templates', 'automations'].includes(table) && !requireAdmin(user, res)) return;
+      if (req.method === 'DELETE' && table === 'products' && !requireAdmin(user, res)) return;
+      if (req.method === 'GET' && !id) { if (table === 'tasks') return json(res, 200, db.prepare('SELECT t.*,c.name contact_name,d.title deal_title,u.name responsible_name FROM tasks t LEFT JOIN contacts c ON c.id=t.contact_id LEFT JOIN deals d ON d.id=t.deal_id LEFT JOIN users u ON u.id=t.responsible_id ORDER BY done,due,id DESC').all()); if (table === 'notes') return json(res, 200, db.prepare('SELECT * FROM notes WHERE entity_type=? AND entity_id=? ORDER BY id DESC').all(u.searchParams.get('type'), u.searchParams.get('entity'))); return json(res, 200, db.prepare(`SELECT * FROM ${table} ORDER BY id DESC`).all()); }
+      if (req.method === 'GET') return json(res, 200, db.prepare(`SELECT * FROM ${table} WHERE id=?`).get(id) || {});
+      if (req.method === 'POST') { const b = await readBody(req); if (table === 'notes') b.author = user.name; const ks = fields.filter(f => b[f] !== undefined); const r = db.prepare(`INSERT INTO ${table}(${ks}) VALUES(${ks.map(() => '?')})`).run(...ks.map(k => b[k])); log(`Создано (${table} #${r.lastInsertRowid})`, table, Number(r.lastInsertRowid), user.name); broadcast('change', { table }); return json(res, 201, db.prepare(`SELECT * FROM ${table} WHERE id=?`).get(r.lastInsertRowid)); }
+      if (req.method === 'PATCH' && id) {
+        const b = await readBody(req); const ks = Object.keys(b).filter(k => fields.includes(k));
+        if (ks.length) db.prepare(`UPDATE ${table} SET ${ks.map(k => k + '=?')} WHERE id=?`).run(...ks.map(k => b[k]), id);
+        // закрыли повторяющуюся задачу — сразу создаём следующую по расписанию
+        let nextTaskId = null;
+        if (table === 'tasks' && Number(b.done) === 1) {
+          const t = db.prepare('SELECT * FROM tasks WHERE id=?').get(id);
+          if (t && t.repeat && t.repeat !== 'none') {
+            const days = { daily: 1, weekly: 7, monthly: 30 }[t.repeat] || 0;
+            const base = /^\d{4}-\d{2}-\d{2}/.test(t.due || '') ? new Date(String(t.due).replace(' ', 'T')) : new Date();
+            const next = new Date(Math.max(base.getTime(), Date.now()) + days * 864e5);
+            const time = /\d{2}:\d{2}/.test(t.due || '') ? String(t.due).slice(-5) : '10:00';
+            const due = `${next.toISOString().slice(0, 10)} ${time}`;
+            const r = db.prepare('INSERT INTO tasks(title,type,due,priority,done,deal_id,contact_id,responsible_id,result,repeat) VALUES(?,?,?,?,0,?,?,?,?,?)')
+              .run(t.title, t.type, due, t.priority || 'normal', t.deal_id, t.contact_id, t.responsible_id, t.result, t.repeat);
+            nextTaskId = Number(r.lastInsertRowid);
+            log(`Повторяющаяся задача «${t.title}» продлена до ${due}`, 'tasks', nextTaskId, user.name);
+            broadcast('change', { table: 'tasks' });
+          }
+        }
+        broadcast('change', { table });
+        const row = db.prepare(`SELECT * FROM ${table} WHERE id=?`).get(id);
+        return json(res, 200, nextTaskId ? { ...row, next_task_id: nextTaskId } : row);
+      }
+      if (req.method === 'DELETE' && id) { db.prepare(`DELETE FROM ${table} WHERE id=?`).run(id); broadcast('change', { table }); return json(res, 200, { deleted: true }); }
+    }
+    // ===== pipelines & stages (configurable) =====
+    if (p === '/api/pipelines') {
+      if (req.method === 'GET') return json(res, 200, db.prepare('SELECT * FROM pipelines ORDER BY id').all().map(pl => ({ ...pl, stages: getStages(pl.id) })));
+      if (req.method === 'POST') { if (!requireAdmin(user, res)) return; const b = await readBody(req); const r = db.prepare('INSERT INTO pipelines(name) VALUES(?)').run(b.name || 'Новая воронка'); const st = db.prepare('INSERT INTO stages(pipeline_id,code,name,color,sort,kind) VALUES(?,?,?,?,?,?)'); [['new', 'Неразобранное', '#f97316', 0, 'open'], ['won', 'Успешно реализовано', '#15803d', 1, 'won'], ['lost', 'Закрыто и не реализовано', '#78716c', 2, 'lost']].forEach(x => st.run(r.lastInsertRowid, ...x)); return json(res, 201, { id: r.lastInsertRowid }); }
+    }
+    const mPipe = p.match(/^\/api\/pipelines\/(\d+)$/);
+    if (mPipe && req.method === 'PUT') { if (!requireAdmin(user, res)) return; const b = await readBody(req); db.prepare('UPDATE pipelines SET name=? WHERE id=?').run(b.name, mPipe[1]); db.prepare('DELETE FROM stages WHERE pipeline_id=?').run(mPipe[1]); const st = db.prepare('INSERT INTO stages(pipeline_id,code,name,color,sort,kind) VALUES(?,?,?,?,?,?)'); (b.stages || []).forEach((s, i) => st.run(mPipe[1], s.code || ('s' + Date.now() + i), s.name, s.color || '#16a34a', i, s.kind || 'open')); log('Воронка и этапы обновлены', 'pipelines', Number(mPipe[1]), user.name); return json(res, 200, { saved: true }); }
+    if (mPipe && req.method === 'DELETE') { if (!requireAdmin(user, res)) return; db.prepare('DELETE FROM pipelines WHERE id=?').run(mPipe[1]); return json(res, 200, { deleted: true }); }
+
+    // ===== deals =====
+    if (p === '/api/deals') {
+      if (req.method === 'GET') return json(res, 200, { pipelines: db.prepare('SELECT * FROM pipelines').all(), stages: getStages(Number(u.searchParams.get('pipeline') || 1)), deals: db.prepare('SELECT d.*,c.name contact_name,c.phone contact_phone,co.name company_name,(SELECT COUNT(*) FROM tasks t WHERE t.deal_id=d.id AND t.done=0) as tasks_open,(SELECT MIN(t.due) FROM tasks t WHERE t.deal_id=d.id AND t.done=0) as next_task_due FROM deals d LEFT JOIN contacts c ON c.id=d.contact_id LEFT JOIN companies co ON co.id=d.company_id ORDER BY d.id DESC').all() });
+      if (req.method === 'POST') { const b = await readBody(req); const fields = ['title', 'amount', 'stage', 'pipeline_id', 'contact_id', 'company_id', 'responsible', 'responsible_id', 'priority', 'loss_reason', 'deadline', 'custom']; const ks = fields.filter(f => b[f] !== undefined); const r = db.prepare(`INSERT INTO deals(${ks}) VALUES(${ks.map(() => '?')})`).run(...ks.map(k => b[k])); log(`Сделка создана: ${b.title}`, 'deals', Number(r.lastInsertRowid), user.name); runAutomations('deal_created', { deal_id: Number(r.lastInsertRowid), contact_id: b.contact_id }); broadcast('change', { table: 'deals' }); return json(res, 201, db.prepare('SELECT * FROM deals WHERE id=?').get(r.lastInsertRowid)); }
+    }
+    // ===== печать документов по сделке: коммерческое предложение или счёт =====
+    if (/^\/api\/deals\/\d+\/print$/.test(p) && req.method === 'GET') {
+      const id = Number(p.split('/')[3]);
+      const deal = db.prepare('SELECT d.*,c.name contact_name,c.phone contact_phone,c.email contact_email,co.name company_name FROM deals d LEFT JOIN contacts c ON c.id=d.contact_id LEFT JOIN companies co ON co.id=d.company_id WHERE d.id=?').get(id);
+      if (!deal) return json(res, 404, { error: 'Сделка не найдена' });
+      const doc = u.searchParams.get('doc') === 'invoice' ? 'invoice' : 'quote';
+      const items = db.prepare('SELECT * FROM deal_products WHERE deal_id=? ORDER BY id').all(id);
+      return html(res, 200, dealDocument({ deal, items, doc, company: companyRequisites() }));
+    }
+
+    const mDeal = p.match(/^\/api\/deals\/(\d+)(?:\/(products))?$/);
+    if (mDeal) { const id = mDeal[1];
+      if (mDeal[2] === 'products') {
+        if (req.method === 'GET') return json(res, 200, db.prepare('SELECT * FROM deal_products WHERE deal_id=?').all(id));
+        if (req.method === 'POST') { const b = await readBody(req); const pr = b.product_id ? db.prepare('SELECT * FROM products WHERE id=?').get(b.product_id) : null; const r = db.prepare('INSERT INTO deal_products(deal_id,product_id,name,price,qty) VALUES(?,?,?,?,?)').run(id, b.product_id || null, b.name || pr?.name, b.price ?? pr?.price ?? 0, b.qty || 1); const sum = db.prepare('SELECT COALESCE(SUM(price*qty),0) s FROM deal_products WHERE deal_id=?').get(id).s; db.prepare('UPDATE deals SET amount=? WHERE id=?').run(sum, id); broadcast('change', { table: 'deals' }); return json(res, 201, db.prepare('SELECT * FROM deal_products WHERE id=?').get(r.lastInsertRowid)); }
+        return json(res, 405, { error: 'Метод не поддерживается' });
+      }
+      if (req.method === 'GET') {
+        const deal = db.prepare('SELECT d.*,c.name contact_name,c.phone contact_phone,c.email contact_email,u.name responsible_name FROM deals d LEFT JOIN contacts c ON c.id=d.contact_id LEFT JOIN users u ON u.id=d.responsible_id WHERE d.id=?').get(id);
+        const products = db.prepare('SELECT dp.*,pr.name product_name FROM deal_products dp LEFT JOIN products pr ON pr.id=dp.product_id WHERE dp.deal_id=?').all(id);
+        // переписка клиента по этой сделке — единый диалог прямо в карточке
+        const conv = deal?.contact_id ? db.prepare('SELECT id,channels,unread,chat_type FROM conversations WHERE contact_id=? ORDER BY last_at DESC').get(deal.contact_id) : null;
+        const messages = conv ? db.prepare('SELECT * FROM messages WHERE conversation_id=? ORDER BY id DESC LIMIT 40').all(conv.id).reverse() : [];
+        return json(res, 200, { deal, notes: db.prepare("SELECT * FROM notes WHERE entity_type='deals' AND entity_id=? ORDER BY id DESC").all(id), tasks: db.prepare('SELECT * FROM tasks WHERE deal_id=? ORDER BY id DESC').all(id), products, history: db.prepare("SELECT * FROM activities WHERE entity_type='deals' AND entity_id=? ORDER BY id DESC LIMIT 20").all(id), conversation: conv, messages });
+      }
+      if (req.method === 'PATCH') { const b = await readBody(req); const old = db.prepare('SELECT * FROM deals WHERE id=?').get(id); const fields = ['title', 'amount', 'stage', 'pipeline_id', 'contact_id', 'company_id', 'responsible', 'responsible_id', 'priority', 'loss_reason', 'deadline', 'custom']; const ks = Object.keys(b).filter(k => fields.includes(k)); if (ks.length) db.prepare(`UPDATE deals SET ${ks.map(k => k + '=?')},updated_at=datetime('now')${b.stage && ['won', 'lost'].includes(b.stage) ? ",closed_at=datetime('now')" : ''} WHERE id=?`).run(...ks.map(k => b[k]), id); if (b.stage && old && b.stage !== old.stage) { const s = db.prepare('SELECT name FROM stages WHERE code=?').get(b.stage); log(`Сделка «${old.title}» → этап «${s?.name || b.stage}»`, 'deals', Number(id), user.name); runAutomations('stage_changed', { deal_id: Number(id), contact_id: old.contact_id, stage: b.stage }); } broadcast('change', { table: 'deals' }); return json(res, 200, db.prepare('SELECT * FROM deals WHERE id=?').get(id)); }
+      if (req.method === 'DELETE') { db.prepare('DELETE FROM deals WHERE id=?').run(id); return json(res, 200, { deleted: true }); }
+    }
+    const mDp = p.match(/^\/api\/deal_products\/(\d+)$/);
+    if (mDp) { const id = mDp[1]; const row = db.prepare('SELECT * FROM deal_products WHERE id=?').get(id); if (!row) return json(res, 404, { error: 'Позиция не найдена' });
+      if (req.method === 'PATCH') { const b = await readBody(req); db.prepare('UPDATE deal_products SET qty=?,price=? WHERE id=?').run(b.qty ?? row.qty, b.price ?? row.price, id); }
+      if (req.method === 'DELETE') db.prepare('DELETE FROM deal_products WHERE id=?').run(id);
+      const sum = db.prepare('SELECT COALESCE(SUM(price*qty),0) s FROM deal_products WHERE deal_id=?').get(row.deal_id).s; db.prepare('UPDATE deals SET amount=? WHERE id=?').run(sum, row.deal_id); return json(res, 200, { saved: true, amount: sum }); }
+    // ===== users / team =====
+    if (p === '/api/users') {
+      if (req.method === 'GET') return json(res, 200, db.prepare('SELECT id,name,email,role,active FROM users ORDER BY id').all());
+      if (req.method === 'POST') { if (!requireAdmin(user, res)) return; const b = await readBody(req); if (String(b.password || '').length < 8) return json(res, 400, { error: 'Пароль должен быть не короче 8 символов' }); const r = db.prepare('INSERT INTO users(name,email,pass,role) VALUES(?,?,?,?)').run(b.name, String(b.email).toLowerCase(), hashPass(b.password || 'user12345'), b.role || 'manager'); return json(res, 201, { id: r.lastInsertRowid }); }
+    }
+    const mUser = p.match(/^\/api\/users\/(\d+)$/);
+    if (mUser && req.method === 'PATCH') { if (!requireAdmin(user, res) && Number(mUser[1]) !== user.id) return; const b = await readBody(req); if (b.password) db.prepare('UPDATE users SET pass=? WHERE id=?').run(hashPass(b.password), mUser[1]); const ks = ['name', 'role', 'active'].filter(k => b[k] !== undefined); if (ks.length) db.prepare(`UPDATE users SET ${ks.map(k => k + '=?')} WHERE id=?`).run(...ks.map(k => b[k]), mUser[1]); return json(res, 200, { saved: true }); }
+    if (p === '/api/custom-fields') {
+      if (req.method === 'GET') return json(res, 200, { fields: getCustomFields() });
+      if (req.method === 'PUT') { if (!requireAdmin(user, res)) return; const b = await readBody(req); const fields = sanitizeFields(b.fields); setSetting('CUSTOM_FIELDS', JSON.stringify(fields)); log(`Настраиваемые поля обновлены (${fields.length})`, null, null, user.name); return json(res, 200, { saved: true, fields }) }
+    }
+    if (p === '/api/backups') {
+      const dir = join(DATA_DIR, 'backups');
+      if (req.method === 'GET') return json(res, 200, { dir: '/data/backups', keepDays: Number(getSetting('BACKUP_KEEP_DAYS', '7')) || 0, files: existsSync(dir) ? readdirSync(dir).filter(f => f.endsWith('.db')).sort().reverse().map(f => ({ name: f, sizeBytes: statSync(join(dir, f)).size, created_at: statSync(join(dir, f)).mtime.toISOString() })) : [] });
+      if (req.method === 'POST') { if (!requireAdmin(user, res)) return; const file = makeBackup(true); return json(res, 200, { created: file }) }
+    }
+    if (p === '/api/backups/download') {
+      if (!requireAdmin(user, res)) return;
+      const name = String(u.searchParams.get('file') || '');
+      if (!/^[A-Za-z0-9._-]+\.db$/.test(name)) return json(res, 400, { error: 'Некорректное имя файла копии' });
+      const src = join(DATA_DIR, 'backups', name);
+      if (!existsSync(src)) return json(res, 404, { error: 'Копия не найдена' });
+      res.writeHead(200, { 'Content-Type': 'application/vnd.sqlite3', 'Content-Disposition': `attachment; filename="${name}"`, 'Content-Length': statSync(src).size });
+      return createReadStream(src).pipe(res);
+    }
+    // восстановление базы из копии: кладём файл на место crm.db и перезапускаем службу
+    // (в Docker стоит restart: unless-stopped — контейнер поднимется сам; локально перезапустите ./run-local.sh)
+    if (p === '/api/backups/restore' && req.method === 'POST') {
+      if (!requireAdmin(user, res)) return;
+      const b = await readBody(req);
+      const name = String((b && b.file) || '');
+      if (!/^[A-Za-z0-9._-]+\.db$/.test(name)) return json(res, 400, { error: 'Некорректное имя файла копии' });
+      const src = join(DATA_DIR, 'backups', name);
+      if (!existsSync(src)) return json(res, 404, { error: 'Копия не найдена' });
+      // снимок выбранной копии делаем ДО страховочной копии: имена копий за день совпадают
+      const tmp = join(DATA_DIR, '.restore-src.db');
+      copyFileSync(src, tmp);
+      const safety = `before-restore-${new Date().toISOString().slice(0, 19).replace(/[:T]/g, '-')}.db`;
+      try { db.exec('PRAGMA wal_checkpoint(TRUNCATE)'); copyFileSync(join(DATA_DIR, 'crm.db'), join(DATA_DIR, 'backups', safety)) } catch (e) { console.error('restore: страховочная копия', e.message) }
+      try { db.close() } catch {}
+      copyFileSync(tmp, join(DATA_DIR, 'crm.db'));
+      unlinkSync(tmp);
+      for (const suffix of ['-wal', '-shm']) { const f = join(DATA_DIR, 'crm.db' + suffix); if (existsSync(f)) unlinkSync(f) }
+      json(res, 200, { ok: true, restored: name, safety_copy: safety, restarting: true, message: 'База восстановлена из копии, служба перезапускается — обновите страницу через несколько секунд' });
+      setTimeout(() => process.exit(0), 400);
+      return;
+    }
+    if (p === '/api/me/password' && req.method === 'POST') { const b = await readBody(req); const nextPass = String(b.new_password || b.next || ''); if (nextPass.length < 8) return json(res, 400, { error: 'Новый пароль должен быть не короче 8 символов' }); const me = db.prepare('SELECT * FROM users WHERE id=?').get(user.id); if (!checkPass(b.old_password || b.old || '', me.pass)) return json(res, 400, { error: 'Старый пароль неверен' }); db.prepare('UPDATE users SET pass=? WHERE id=?').run(hashPass(nextPass), user.id); log('Пользователь сменил пароль', 'users', user.id, user.name); return json(res, 200, { saved: true }); }
+
+    // ===== inbox =====
+    if (p === '/api/conversations' && req.method === 'GET') return json(res, 200, db.prepare(`SELECT cv.*,c.phone,c.email,(SELECT body FROM messages WHERE conversation_id=cv.id ORDER BY id DESC LIMIT 1) last_body FROM conversations cv LEFT JOIN contacts c ON c.id=cv.contact_id ORDER BY cv.last_at DESC, cv.id DESC`).all());
+    const mConv = p.match(/^\/api\/conversations\/(\d+)\/messages$/);
+    if (mConv) { const id = mConv[1];
+      if (req.method === 'GET') { db.prepare('UPDATE conversations SET unread=0 WHERE id=?').run(id); return json(res, 200, db.prepare('SELECT * FROM messages WHERE conversation_id=? ORDER BY id').all(id)); }
+      if (req.method === 'POST') { const b = await readBody(req); const conv = db.prepare('SELECT cv.*,c.phone FROM conversations cv LEFT JOIN contacts c ON c.id=cv.contact_id WHERE cv.id=?').get(id); if (!conv) return json(res, 404, { error: 'Чат не найден' }); if (b.channel_id) conv.channel_id = b.channel_id; if (b.chat_type) conv.chat_type = b.chat_type; if (b.chatId) conv.external_chat_id = b.chatId;
+        const file = b.contentUri ? { contentUri: String(b.contentUri) } : (b.fileUrl ? { contentUri: String(b.fileUrl) } : null);
+        if (!String(b.body || '').trim() && !file) return json(res, 400, { error: 'Пустое сообщение: введите текст или приложите ссылку на файл' });
+        let send = { delivered: false, mode: 'local' }, status = 'local'; const wantChannel = b.chat_type || b.channel || conv.chat_type || 'whatsapp';
+        try { send = await deliver(conv, wantChannel, b.body || '', user, file); status = send.delivered ? 'sent' : 'local'; } catch (e) { status = 'error'; send = { delivered: false, mode: 'error: ' + e.message }; }
+        const body = String(b.body || '').trim() || (file ? '[вложение]' : '');
+        const r = db.prepare('INSERT INTO messages(conversation_id,channel,direction,body,content_uri,content_name,content_type,status,external_id,author) VALUES(?,?,?,?,?,?,?,?,?,?)').run(id, wantChannel, 'out', body, file?.contentUri || null, b.contentName ? safeFileName(b.contentName) : null, b.contentType || null, status, send.id || null, user.name);
+        db.prepare("UPDATE conversations SET last_at=datetime('now') WHERE id=?").run(id); broadcast('message', { conversation_id: Number(id) }); return json(res, 201, { message: db.prepare('SELECT * FROM messages WHERE id=?').get(r.lastInsertRowid), send }); }
+    }
+    const mEmail = p.match(/^\/api\/conversations\/(\d+)\/email$/);
+    if (mEmail && req.method === 'POST') {
+      const b = await readBody(req);
+      const conv = db.prepare('SELECT cv.*,c.phone,c.email FROM conversations cv LEFT JOIN contacts c ON c.id=cv.contact_id WHERE cv.id=?').get(mEmail[1]);
+      if (!conv) return json(res, 404, { error: 'Чат не найден' });
+      const to = b.to || conv.email;
+      if (!to) return json(res, 400, { error: 'У контакта не указан e-mail — добавьте его в карточке клиента' });
+      if (!getSetting('SMTP_HOST')) return json(res, 400, { error: 'Почта не настроена: Настройки → Интеграции → Почта (SMTP)' });
+      let send = { delivered: false, mode: 'not-configured' }, status = 'error';
+      try {
+        const r = await sendMail({ host: getSetting('SMTP_HOST'), port: Number(getSetting('SMTP_PORT', '587')), secure: getSetting('SMTP_SECURE') === '1' ? true : getSetting('SMTP_SECURE') === '0' ? false : undefined, user: getSetting('SMTP_USER'), pass: getSetting('SMTP_PASS'), from: getSetting('MAIL_FROM') || getSetting('SMTP_USER'), fromName: getSetting('COMPANY_NAME', 'CRM'), to, toName: conv.title || '', subject: b.subject || 'Письмо от ' + getSetting('COMPANY_NAME', 'CRM'), text: b.body || '' });
+        send = { delivered: true, mode: 'smtp', id: r.messageId }; status = 'sent';
+      } catch (e) { send = { delivered: false, mode: 'error: ' + e.message } }
+      const ins = db.prepare('INSERT INTO messages(conversation_id,channel,direction,body,subject,status,author) VALUES(?,?,?,?,?,?,?)').run(conv.id, 'email', 'out', b.body || '', b.subject || '', status, user.name);
+      db.prepare("UPDATE conversations SET channels=?, last_at=datetime('now') WHERE id=?").run([...new Set([...(conv.channels || '').split(',').filter(Boolean), 'email'])].join(','), conv.id);
+      broadcast('message', { conversation_id: conv.id });
+      return json(res, 201, { message: db.prepare('SELECT * FROM messages WHERE id=?').get(ins.lastInsertRowid), send });
+    }
+    // ===== загрузка файла в чат (фото, документы) =====
+    const mUpload = p.match(/^\/api\/conversations\/(\d+)\/upload$/);
+    if (mUpload && req.method === 'POST') {
+      const cid = Number(mUpload[1]);
+      if (!db.prepare('SELECT id FROM conversations WHERE id=?').get(cid)) return json(res, 404, { error: 'Чат не найден' });
+      const b = await readBody(req, 22e6);
+      const contentType = String(b.contentType || 'application/octet-stream').split(';')[0].trim().toLowerCase();
+      if (!FILE_UPLOAD_TYPES.includes(contentType)) return json(res, 400, { error: 'Такой тип файла загружать нельзя. Доступны изображения, PDF, документы Word/Excel, CSV, TXT и ZIP.' });
+      const raw = Buffer.from(String(b.dataBase64 || '').split(',').pop() || '', 'base64');
+      if (!raw.length || raw.length > 15 * 1024 * 1024) return json(res, 400, { error: 'Файл пустой или превышает 15 МБ' });
+      const extByType = { 'image/png': 'png', 'image/jpeg': 'jpg', 'image/gif': 'gif', 'image/webp': 'webp', 'application/pdf': 'pdf', 'text/plain': 'txt', 'text/csv': 'csv', 'application/zip': 'zip', 'application/msword': 'doc', 'application/vnd.openxmlformats-officedocument.wordprocessingml.document': 'docx', 'application/vnd.ms-excel': 'xls', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet': 'xlsx' };
+      const ext = extByType[contentType] || 'bin';
+      const safeName = safeFileName(b.filename || ('файл.' + ext));
+      const stored = `${new Date().toISOString().slice(0, 10).replace(/-/g, '')}-${randomBytes(6).toString('hex')}-${asciiFileName(b.filename || ('file.' + ext))}`;
+      mkdir(UPLOAD_DIR, { recursive: true });
+      writeFileSync(join(UPLOAD_DIR, stored), raw);
+      log(`Файл загружен в чат #${cid}: ${safeName}`, 'conversations', cid, user.name);
+      return json(res, 201, { url: '/uploads/' + stored, name: safeName, contentType, size: raw.length });
+    }
+    // ===== логотип компании: загрузка и возврат к стандартному =====
+    if (p === '/api/logo' && req.method === 'POST') {
+      if (!requireAdmin(user, res)) return;
+      const b = await readBody(req, 8e6);
+      const contentType = String(b.contentType || '').split(';')[0].trim().toLowerCase();
+      if (!IMAGE_UPLOAD_TYPES.includes(contentType)) return json(res, 400, { error: 'Логотип: только PNG, JPEG, GIF или WebP' });
+      const raw = Buffer.from(String(b.dataBase64 || '').split(',').pop() || '', 'base64');
+      if (!raw.length || raw.length > 4 * 1024 * 1024) return json(res, 400, { error: 'Логотип пустой или больше 4 МБ' });
+      const realType = sniffImage(raw);
+      if (!IMAGE_UPLOAD_TYPES.includes(realType)) return json(res, 400, { error: 'Содержимое файла не является изображением' });
+      const ext = { 'image/png': 'png', 'image/jpeg': 'jpg', 'image/gif': 'gif', 'image/webp': 'webp' }[realType];
+      mkdir(CUSTOM_LOGO_DIR, { recursive: true });
+      for (const f of readdirSync(CUSTOM_LOGO_DIR)) if (/^logo\.(png|jpe?g|gif|webp|ico)$/i.test(f)) { try { unlinkSync(join(CUSTOM_LOGO_DIR, f)); } catch { } }
+      writeFileSync(join(CUSTOM_LOGO_DIR, 'logo.' + ext), raw);
+      log('Логотип компании обновлён', null, null, user.name);
+      return json(res, 200, { saved: true, url: '/logo.png?ts=' + Date.now() });
+    }
+    if (p === '/api/logo' && req.method === 'DELETE') {
+      if (!requireAdmin(user, res)) return;
+      if (existsSync(CUSTOM_LOGO_DIR)) for (const f of readdirSync(CUSTOM_LOGO_DIR)) if (/^logo\.(png|jpe?g|gif|webp|ico)$/i.test(f)) { try { unlinkSync(join(CUSTOM_LOGO_DIR, f)); } catch { } }
+      log('Логотип сброшен на стандартный', null, null, user.name);
+      return json(res, 200, { saved: false, url: '/logo.png' });
+    }
+    if ((p === '/api/inbox/simulate' || p === '/api/simulate/incoming') && req.method === 'POST') {
+      if (!requireAdmin(user, res)) return;
+      const b = await readBody(req); const conv = upsertIncoming({ channel: b.channel || 'whatsapp', chatType: b.channel || 'whatsapp', phone: b.phone || '+7 900 000-00-00', name: b.name || 'Тестовый клиент', body: b.body || 'Здравствуйте! Хочу расчёт дома.' }); return json(res, 201, { conversation_id: conv?.id });
+    }
+    // CSV export/import
+    if (p === '/api/export/contacts') { res.writeHead(200, { 'Content-Type': 'text/csv; charset=utf-8', 'Content-Disposition': 'attachment; filename=contacts.csv' }); return res.end('﻿' + csv(db.prepare('SELECT name,phone,email,company,source,tags FROM contacts').all())); }
+    if (p === '/api/export/deals') { res.writeHead(200, { 'Content-Type': 'text/csv; charset=utf-8', 'Content-Disposition': 'attachment; filename=deals.csv' }); return res.end('﻿' + csv(db.prepare('SELECT title,amount,stage,priority,deadline,created_at FROM deals').all())); }
+    if (p === '/api/import/contacts' && req.method === 'POST') { const b = await readBody(req); const lines = String(b.csv || '').split(/\r?\n/).slice(1).filter(Boolean); let n = 0; for (const line of lines) { const [name, phone, email, company] = line.split(/;|,/).map(x => x.replace(/^"|"$/g, '')); if (name) { db.prepare('INSERT INTO contacts(name,phone,email,company,source) VALUES(?,?,?,?,?)').run(name, phone || '', email || '', company || '', 'import'); n++; } } return json(res, 200, { imported: n }); }
+
+    // ===== channels & integrations (all configurable from UI) =====
+    if (p === '/api/channels') return json(res, 200, db.prepare('SELECT * FROM channels ORDER BY id DESC').all());
+    if (p === '/api/integrations/wazzup/test' && req.method === 'POST') { try { const data = await wazzupFetch('/channels'); const list = data.channels || data.data || data || []; return json(res, 200, { ok: true, channels: list }); } catch (e) { return json(res, 400, { ok: false, error: e.message }); } }
+    if (p === '/api/integrations/wazzup/sync' && req.method === 'POST') { try { const data = await wazzupFetch('/channels'); const list = data.channels || data.data || []; for (const ch of list) db.prepare('INSERT INTO channels(provider,external_id,name,transport,phone,state,raw) VALUES(?,?,?,?,?,?,?) ON CONFLICT(external_id) DO UPDATE SET name=excluded.name,transport=excluded.transport,phone=excluded.phone,state=excluded.state').run('wazzup', ch.channelId || ch.id, ch.name || ch.plainId || '', ch.transport || ch.type || '', ch.plainId || ch.phone || '', ch.state || '', JSON.stringify(ch)); if (list[0] && !getSetting('WAZZUP_CHANNEL_ID')) setSetting('WAZZUP_CHANNEL_ID', list[0].channelId || list[0].id); return json(res, 200, { synced: list.length, channels: db.prepare("SELECT * FROM channels WHERE provider='wazzup'").all() }); } catch (e) { return json(res, 400, { error: e.message }); } }
+    if (p === '/api/integrations/wazzup/webhook' && req.method === 'POST') { const b = await readBody(req); try { await wazzupFetch('/webhooks', { method: 'PATCH', body: JSON.stringify({ webhooksUri: b.url }) }); setSetting('WAZZUP_WEBHOOK_URL', b.url); return json(res, 200, { saved: true }); } catch (e) { return json(res, 400, { error: e.message + ' — можно указать вебхук вручную в кабинете Wazzup' }); } }
+    if (p === '/api/integrations/email/test' && req.method === 'POST') {
+      if (!requireAdmin(user, res)) return;
+      const rl = rateLimit('mailtest', 10, 60000); if (!rl.ok) return json(res, 429, { error: 'Слишком часто — подождите минуту' });
+      const b = await readBody(req);
+      if (b.host) setSetting('SMTP_HOST', String(b.host)); if (b.port) setSetting('SMTP_PORT', String(b.port));
+      if (b.secure !== undefined) setSetting('SMTP_SECURE', String(b.secure)); if (b.user !== undefined) setSetting('SMTP_USER', String(b.user));
+      if (b.pass && !String(b.pass).includes('•')) setSetting('SMTP_PASS', String(b.pass)); if (b.from !== undefined) setSetting('MAIL_FROM', String(b.from));
+      const to = b.to || getSetting('SMTP_TEST_TO') || getSetting('SMTP_USER') || getSetting('MAIL_FROM');
+      if (!to) return json(res, 400, { error: 'Укажите адрес получателя тестового письма' });
+      try {
+        const out = await sendMail({ host: getSetting('SMTP_HOST'), port: Number(getSetting('SMTP_PORT', '587')), secure: getSetting('SMTP_SECURE') === '1' ? true : getSetting('SMTP_SECURE') === '0' ? false : undefined, user: getSetting('SMTP_USER'), pass: getSetting('SMTP_PASS'), from: getSetting('MAIL_FROM') || getSetting('SMTP_USER'), fromName: getSetting('COMPANY_NAME', 'CRM'), to, subject: 'КаркасCRM: проверка почты', text: `Почта настроена верно. Письмо отправлено ${new Date().toLocaleString('ru-RU')}.` });
+        setSetting('SMTP_TEST_TO', to); log(`Проверочное письмо отправлено на ${to}`, null, null, user.name);
+        return json(res, 200, { ok: true, to, messageId: out.messageId });
+      } catch (e) { return json(res, 400, { ok: false, error: e.message }) }
+    }
+    if (p === '/api/settings') {
+      if (req.method === 'GET') { const mask = v => v ? '••••••' + String(v).slice(-4) : ''; return json(res, 200, { version: VERSION, company: { name: getSetting('COMPANY_NAME'), currency: getSetting('CURRENCY', '₽') }, sales_target: Number(getSetting('SALES_TARGET', '0')) || 0, email: { host: getSetting('SMTP_HOST'), port: getSetting('SMTP_PORT', '587'), secure: getSetting('SMTP_SECURE', ''), user: getSetting('SMTP_USER'), pass: mask(getSetting('SMTP_PASS')), from: getSetting('MAIL_FROM'), webhook_secret: getSetting('EMAIL_WEBHOOK_SECRET'), test_to: getSetting('SMTP_TEST_TO'), configured: !!getSetting('SMTP_HOST') }, maintenance: { backup_keep_days: getSetting('BACKUP_KEEP_DAYS', '7'), backup_hour: getSetting('BACKUP_HOUR', '3'), notify_webhook: getSetting('NOTIFY_WEBHOOK') }, requisites: companyRequisites(), advanced: { frame_ancestors: getSetting('FRAME_ANCESTORS'), login_rate_limit: getSetting('LOGIN_RATE_LIMIT', '12') }, messenger_provider: getSetting('MESSENGER_PROVIDER', 'wazzup'), auto_deal: getSetting('AUTO_DEAL', '1'), auto_assign: getSetting('AUTO_ASSIGN', '0'), logo: { custom: !!findCustomLogo(), env: !!process.env.LOGO_FILE }, wazzup: { api_key: mask(getSetting('WAZZUP_API_KEY')), api_url: getSetting('WAZZUP_API_URL', 'https://api.wazzup24.com/v3'), channel_id: getSetting('WAZZUP_CHANNEL_ID'), webhook_secret: getSetting('WAZZUP_WEBHOOK_SECRET'), configured: !!getSetting('WAZZUP_API_KEY') }, whatsapp: { token: mask(getSetting('WHATSAPP_TOKEN')), phone_id: getSetting('WHATSAPP_PHONE_ID'), verify_token: getSetting('WHATSAPP_VERIFY_TOKEN', 'karkas-verify'), configured: !!(getSetting('WHATSAPP_TOKEN') && getSetting('WHATSAPP_PHONE_ID')) }, telegram: { configured: !!getSetting('TELEGRAM_BOT_TOKEN') } }); }
+      if (req.method === 'PUT') { if (!requireAdmin(user, res)) return; const b = await readBody(req); const clean = v => (v && !String(v).includes('•')) ? v : null; if (clean(b.WAZZUP_API_KEY)) setSetting('WAZZUP_API_KEY', b.WAZZUP_API_KEY); for (const k of ['WAZZUP_API_URL', 'WAZZUP_CHANNEL_ID', 'WAZZUP_WEBHOOK_SECRET', 'WHATSAPP_PHONE_ID', 'WHATSAPP_VERIFY_TOKEN', 'COMPANY_NAME', 'CURRENCY', 'MESSENGER_PROVIDER', 'AUTO_DEAL', 'AUTO_DEAL_STAGE', 'AUTO_ASSIGN']) if (b[k] !== undefined) setSetting(k, b[k]); if (clean(b.WHATSAPP_TOKEN)) setSetting('WHATSAPP_TOKEN', b.WHATSAPP_TOKEN); if (clean(b.TELEGRAM_BOT_TOKEN)) setSetting('TELEGRAM_BOT_TOKEN', b.TELEGRAM_BOT_TOKEN);
+        for (const k of ['SMTP_HOST', 'SMTP_PORT', 'SMTP_SECURE', 'SMTP_USER', 'MAIL_FROM', 'EMAIL_WEBHOOK_SECRET', 'SALES_TARGET', 'BACKUP_KEEP_DAYS', 'BACKUP_HOUR', 'NOTIFY_WEBHOOK', 'FRAME_ANCESTORS', 'LOGIN_RATE_LIMIT', 'SMTP_TEST_TO', 'COMPANY_INN', 'COMPANY_KPP', 'COMPANY_OGRN', 'COMPANY_ADDRESS', 'COMPANY_PHONE', 'COMPANY_EMAIL', 'COMPANY_SITE', 'COMPANY_BANK', 'COMPANY_ACCOUNT', 'COMPANY_SIGNER', 'COMPANY_SIGNER_POSITION', 'DOC_PREFIX']) if (b[k] !== undefined) {
+          if (k === 'SALES_TARGET') { setSetting('SALES_TARGET', String(Number(String(b[k]).replace(/[^\d.]/g, '')) || 0)); continue }
+          setSetting(k, String(b[k]));
+        }
+        if (clean(b.SMTP_PASS)) setSetting('SMTP_PASS', b.SMTP_PASS);
+        log('Настройки обновлены', null, null, user.name); return json(res, 200, { saved: true }); }
+    }
+    // ===== массовые действия: выделили записи и применили к ним одно изменение =====
+    if (p === '/api/bulk' && req.method === 'POST') {
+      const b = await readBody(req);
+      const table = String(b.table || ''), ids = (b.ids || []).map(Number).filter(Boolean);
+      const fields = CRUD[table];
+      if (!fields || !ids.length) return json(res, 400, { error: 'Нечего обрабатывать: укажите таблицу и хотя бы одну запись' });
+      if (ids.length > 500) return json(res, 400, { error: 'За один раз можно изменить не больше 500 записей' });
+      if ((b.action === 'delete' && (table === 'products' || table === 'templates' || table === 'automations')) && !requireAdmin(user, res)) return;
+      if (b.action === 'delete') { const st = db.prepare(`DELETE FROM ${table} WHERE id=?`); for (const id of ids) st.run(id) }
+      else {
+        const patch = {}; for (const k of Object.keys(b.patch || {})) if (fields.includes(k) && b.patch[k] !== undefined) patch[k] = b.patch[k];
+        const ks = Object.keys(patch);
+        if (!ks.length) return json(res, 400, { error: 'Не передано ни одного допустимого поля' });
+        const st = db.prepare(`UPDATE ${table} SET ${ks.map(k => k + '=?').join(',')} WHERE id=?`);
+        for (const id of ids) st.run(...ks.map(k => patch[k]), id);
+        log(`Массовое изменение (${table}): ${ids.length} записей — ${ks.join(', ')}`, table, null, user.name);
+      }
+      broadcast('change', { table });
+      return json(res, 200, { table, action: b.action === 'delete' ? 'delete' : 'update', count: ids.length });
+    }
+
+    // ===== конкуренты: разведка (долги, суды, банкротство, отзывы, прайс-таблицы) =====
+    if (/^\/api\/(competitors|competitor-sources|competitor-links|competitors\/find|prices|reviews)/.test(p)) {
+      const handled = await competitorsApi.handle(req, res, { p, u, user });
+      if (handled !== false) return;
+    }
+    if (p.startsWith('/api/')) return json(res, 404, { error: 'Не найдено' });
+
+    // загруженные файлы чатов: только для авторизованных (токен в cookie, заголовке или ?token=)
+    if (p.startsWith('/uploads/')) {
+      if (!user) return json(res, 401, { error: 'Требуется авторизация' });
+      const name = basename(decodeURIComponent(p));
+      if (!/^[A-Za-z0-9._-]+$/.test(name)) return json(res, 400, { error: 'Некорректное имя файла' });
+      const src = join(UPLOAD_DIR, name);
+      if (!src.startsWith(UPLOAD_DIR) || !existsSync(src)) return json(res, 404, { error: 'Файл не найден' });
+      const st = statSync(src);
+      const type = MIME[extname(src).toLowerCase()] || 'application/octet-stream';
+      const inline = type.startsWith('image/') || type === 'application/pdf';
+      res.writeHead(200, { 'Content-Type': type, 'Content-Length': st.size, 'Cache-Control': 'private, max-age=3600', 'Content-Disposition': `${inline ? 'inline' : 'attachment'}; filename*=UTF-8''${encodeURIComponent(name)}` });
+      return createReadStream(src).pipe(res);
+    }
+
+    // логотип и favicon: путь один (/logo.png), а формат определяем по содержимому —
+    // поэтому загрузка JPEG/PNG/WebP не ломает отображение
+    if (p === '/logo.png' || p === '/favicon.ico') {
+      const logoPath = resolveLogo();
+      if (logoPath && existsSync(logoPath)) {
+        const buf = readFileSync(logoPath);
+        const type = sniffImage(buf, 'image/png');
+        res.writeHead(200, { 'Content-Type': type, 'Cache-Control': 'no-cache', 'Content-Length': buf.length });
+        return res.end(buf);
+      }
+    }
+
+    let file = normalize(join(PUBLIC_DIR, p === '/' ? 'index.html' : p));
+    if (existsSync(file) && statSync(file).isDirectory()) {
+      file = join(file, 'index.html');
+    }
+    if (!file.startsWith(PUBLIC_DIR) || !existsSync(file)) {
+      file = join(PUBLIC_DIR, 'index.html');
+    }
+    const st = statSync(file);
+    const ext = extname(file).toLowerCase();
+    const isCode = ext === '.html' || ext === '.js' || ext === '.css';
+    const cacheControl = isCode ? 'no-store, must-revalidate' : 'no-cache';
+    // ETag = размер+время файла: браузер переиспользует копию и страница открывается мгновенно
+    const etag = `W/"${st.size.toString(16)}-${Math.round(st.mtimeMs).toString(16)}"`;
+    const headers = { 'Content-Type': MIME[ext] || 'application/octet-stream', 'Cache-Control': cacheControl, ETag: etag };
+    if (req.headers['if-none-match'] === etag) { res.writeHead(304, headers); return res.end(); }
+    const type = MIME[extname(file)] || '';
+    const compressible = /^(text|application\/(javascript|json|xml)|image\/svg)/.test(type);
+    if (compressible && /gzip/.test(String(req.headers['accept-encoding'] || '')) && st.size > 1024) {
+      const cached = staticGzip.get(file);
+      const gz = (cached && cached.mtimeMs === st.mtimeMs) ? cached.gz : (() => { const g = gzipSync(readFileSync(file), { level: 6 }); staticGzip.set(file, { mtimeMs: st.mtimeMs, gz: g }); return g })();
+      res.writeHead(200, { ...headers, 'Content-Encoding': 'gzip', 'Content-Length': gz.length, Vary: 'Accept-Encoding' });
+      return res.end(gz);
+    }
+    res.writeHead(200, { ...headers, 'Content-Length': st.size });
+    res.end(readFileSync(file));
+  } catch (e) { console.error(e); json(res, 500, { error: e.message }); }
+});
+server.listen(PORT, HOST, () => console.log(`КаркасCRM запущена: http://${HOST}:${PORT} | администратор: ${ADMIN_EMAIL}`));
+export { db, getSetting, nowDue, normalizeDue, fixTaskDues, VERSION };
