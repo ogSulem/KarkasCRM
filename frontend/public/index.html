@@ -2,13 +2,13 @@
 <title>КаркасCRM — сделки, клиенты и задачи в единой CRM-системе</title>
 <meta name="description" content="CRM: воронки и сделки, клиенты, задачи, единый инбокс мессенджеров, почта, разведка конкурентов.">
 <meta name="theme-color" content="#16a34a"><meta name="color-scheme" content="light dark">
-<link rel="icon" type="image/png" href="/logo.png">
+<link rel="icon" href="/logo.png">
 <link rel="stylesheet" href="/style.css"></head><body>
 
 <!-- ── вход ─────────────────────────────────────────────────────────────── -->
 <div id="login" class="login hidden">
   <form id="loginForm" class="login-card" autocomplete="on">
-    <div class="brand brand-login" onclick="go('dashboard')" style="cursor:pointer" title="На главную">
+    <div class="brand brand-login">
       <img src="/logo.png" alt="КаркасCRM" class="logo-img big">
       <div class="brand-text"><span class="brand-part-karkas">Каркас</span><span class="brand-part-crm">CRM</span></div>
     </div>
@@ -17,7 +17,22 @@
       <div class="pw-wrap"><input name="password" id="loginPassword" type="password" autocomplete="current-password" placeholder="••••••••" required><button type="button" class="pw-eye" id="loginEye" title="Показать/скрыть пароль" onclick="togglePass(this)"></button></div>
     </label>
     <button class="btn primary w" id="loginBtn">Войти</button>
-    <div class="err" id="loginErr"></div>
+    <p class="login-note">Для безопасности учётные записи создаёт только администратор. Обратитесь к нему, чтобы получить доступ.</p>
+    <div class="err" id="loginErr" role="alert"></div>
+  </form>
+</div>
+
+<div id="passwordChange" class="login hidden">
+  <form id="passwordChangeForm" class="login-card">
+    <h2>Задайте личный пароль</h2>
+    <p>Администратор выдал вам временный пароль. Для безопасности замените его перед началом работы.</p>
+    <label>Временный пароль<input name="old_password" type="password" autocomplete="current-password" required></label>
+    <label>Новый пароль<input name="new_password" type="password" autocomplete="new-password" minlength="12" maxlength="256" required></label>
+    <label>Повторите новый пароль<input name="confirm_password" type="password" autocomplete="new-password" minlength="12" maxlength="256" required></label>
+    <small>Не менее 12 символов. Используйте уникальную парольную фразу или менеджер паролей.</small>
+    <button class="btn primary w">Сохранить и войти</button>
+    <button type="button" class="btn w" onclick="logout()">Выйти</button>
+    <div id="passwordChangeErr" class="err" role="alert"></div>
   </form>
 </div>
 

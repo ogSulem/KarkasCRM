@@ -14,6 +14,7 @@ node --check frontend/public/app.js
 echo "▶ 2/4 Интеграционные тесты (API + конкуренты + миграции базы)"
 node --experimental-sqlite --test tests/api.test.js tests/competitors.test.js
 node --experimental-sqlite tests/migrate.test.mjs
+node --experimental-sqlite tests/seed.test.mjs
 
 echo "▶ 3/4 Проверка docker-compose и Caddyfile"
 if python3 -c 'import yaml' 2>/dev/null; then

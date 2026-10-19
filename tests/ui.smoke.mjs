@@ -243,13 +243,22 @@ try {
 
   // ── бренд, логотип, фавикон ──────────────────────────────────────────────
   const logoRes = await fetch(BASE + '/logo.png');
-  check('/logo.png отдаётся как image/png', logoRes.status === 200 && (logoRes.headers.get('content-type') || '').includes('image/png'));
+  check('/logo.png отдаёт встроенный JPEG', logoRes.status === 200 && (logoRes.headers.get('content-type') || '').includes('image/jpeg'));
   const favRes = await fetch(BASE + '/favicon.ico');
   check('/favicon.ico доступен', favRes.status === 200);
   check('бренд: Каркас + CRM', $('.brand-part-karkas')?.textContent === 'Каркас' && $('.brand-part-crm')?.textContent === 'CRM');
-  check('клик по бренду ведёт на дашборд', ($('.brand')?.getAttribute('onclick') || '').includes("go('dashboard')"));
+  check('клик по бренду ведёт на дашборд', ($('aside .brand')?.getAttribute('onclick') || '').includes("go('dashboard')"));
   check('логотип в бренде имеет класс logo-img', Boolean($('.brand img.logo-img')));
   check('CSS содержит реакцию бренда на наведение', cssText.includes('.brand:hover .brand-part-karkas'));
+
+  check('вход: логотип над названием и подсказка о доступе', cssText.includes('.login-card .brand-login{flex-direction:column') && $('.login-note')?.textContent.includes('администратор'));
+  await window.openUser();
+  const userForm = $('#modalBody form');
+  window.generateUserPassword(userForm);
+  const firstPassword = userForm.elements.password.value;
+  window.generateUserPassword(userForm);
+  check('генератор выдаёт разные длинные пароли', firstPassword.length === 20 && userForm.elements.password.value.length === 20 && firstPassword !== userForm.elements.password.value);
+  window.closeModal();
 
   // ── безопасность и заголовки ─────────────────────────────────────────────
   const root = await fetch(BASE + '/');
@@ -279,7 +288,7 @@ try {
   window.__state.me = { id: 99, name: 'Менеджер', role: 'manager' };
   window.go('settings'); await wait(350);
   const mSet = $('#view').innerHTML;
-  check('менеджер видит только доступные вкладки настроек', /Интеграции и каналы/.test(mSet) && !/>Команда</.test(mSet) && !/>Воронки и этапы</.test(mSet));
+  check('менеджер видит только доступные вкладки настроек', /Мой профиль/.test(mSet) && !/Интеграции и каналы/.test(mSet) && !/>Команда</.test(mSet) && !/>Воронки и этапы</.test(mSet));
   window.__state.me = admin; window.__state.settingsTab = 'integrations';
 
   // ── форма для сайта, скелетоны ───────────────────────────────────────────
@@ -356,6 +365,35 @@ try {
 
   // ── навигация работает на inline-обработчиках, не завися от boot() ───────
   check('все пункты меню несут inline-обработчик go()', $$('#nav button').length >= 9 && $$('#nav button').every(b => /^go\('/.test(b.getAttribute('onclick') || '')));
+
+  // Полный сценарий: администратор выдаёт данные, сотрудник меняет пароль.
+  await window.openUser();
+  const createdForm = $('#modalBody form');
+  createdForm.elements.name.value = 'Первый вход UI';
+  createdForm.elements.email.value = 'onboard-ui@example.com';
+  window.generateUserPassword(createdForm);
+  const temporary = createdForm.elements.password.value;
+  await window.saveUser({ preventDefault() {}, target: createdForm }, null);
+  check('после создания показаны данные для входа', $('#createdCredentials')?.value.includes(temporary) && $('#createdCredentials')?.value.includes('onboard-ui@example.com'));
+  await window.copyCreatedCredentials();
+  check('копирование даёт результат или понятную инструкцию', Boolean($('#copyCredentialsStatus')?.textContent));
+  window.closeModal();
+  check('временный пароль удалён из DOM после закрытия', !$('#createdCredentials'));
+  await window.logout();
+  $('#loginForm [name=email]').value = 'onboard-ui@example.com';
+  $('#loginForm [name=password]').value = temporary;
+  $('#loginForm').dispatchEvent(new window.Event('submit', { bubbles: true, cancelable: true }));
+  await wait(600);
+  check('первый вход показывает смену пароля, а не CRM', !$('#passwordChange').classList.contains('hidden') && $('#app').classList.contains('hidden'));
+  const changeForm = $('#passwordChangeForm');
+  changeForm.elements.old_password.value = temporary;
+  changeForm.elements.new_password.value = 'PersonalPassword2026!';
+  changeForm.elements.confirm_password.value = 'MismatchPassword2026!';
+  await changeForm.onsubmit({ preventDefault() {}, target: changeForm });
+  check('несовпадение паролей объяснено', $('#passwordChangeErr').textContent.includes('не совпадают'));
+  changeForm.elements.confirm_password.value = 'PersonalPassword2026!';
+  await changeForm.onsubmit({ preventDefault() {}, target: changeForm });
+  check('после смены пароля CRM открывается', $('#passwordChange').classList.contains('hidden') && !$('#app').classList.contains('hidden'));
 
 } catch (e) { checks.push({ name: 'выполнение сценариев', ok: false, extra: e.message + '\n' + (e.stack || '') }) }
 

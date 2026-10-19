@@ -10,7 +10,7 @@ services:
     ports:
       # Локально: http://localhost:${CRM_PORT}. На сервере с доменом (профиль tls) поставьте CRM_BIND=127.0.0.1,
       # чтобы CRM была доступна только через Caddy с HTTPS.
-      - "${CRM_BIND:-0.0.0.0}:${CRM_PORT:-8080}:8080"
+      - "${CRM_BIND:-127.0.0.1}:${CRM_PORT:-8080}:8080"
     environment:
       PORT: 8080
       HOST: 0.0.0.0
@@ -75,11 +75,15 @@ services:
       - "80:80"
       - "443:443"
       - "443:443/udp"
+    entrypoint: ["/bin/sh", "/etc/caddy/start.sh"]
     environment:
+      JWT_SECRET: ${JWT_SECRET:-}
+      ADMIN_PASSWORD: ${ADMIN_PASSWORD:-}
       # домен обязателен для профиля tls: CRM_DOMAIN=crm.вашдомен.ru в .env
-      CRM_DOMAIN: "${CRM_DOMAIN:?укажите CRM_DOMAIN в .env}"
+      CRM_DOMAIN: "${CRM_DOMAIN:-}"
       ACME_EMAIL: ${ACME_EMAIL:-}
     volumes:
+      - ./deploy/start-caddy.sh:/etc/caddy/start.sh:ro
       - ./deploy/Caddyfile:/etc/caddy/Caddyfile:ro
       - caddy_data:/data
       - caddy_config:/config

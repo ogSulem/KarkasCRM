@@ -32,9 +32,35 @@ jobs:
         run: node --experimental-sqlite --test tests/api.test.js tests/competitors.test.js
 
       - name: Тест миграций базы данных
-        run: node --experimental-sqlite tests/migrate.test.mjs
+        run: |
+          node --experimental-sqlite tests/migrate.test.mjs
+          node --experimental-sqlite tests/seed.test.mjs
 
       - name: Smoke-тест интерфейса (jsdom)
         run: |
           npm i --prefix /tmp/jsdomtest jsdom
           JSDOM_PATH=/tmp/jsdomtest/node_modules/jsdom/lib/api.js node --experimental-sqlite tests/ui.smoke.mjs
+
+  docker:
+    name: Docker без .env и проверка TLS-конфигурации
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Локальный старт без домена
+        run: |
+          docker compose config --quiet
+          docker compose up -d --build --wait
+          curl --fail http://127.0.0.1:8080/api/health
+          curl --fail http://127.0.0.1:8080/logo.png -o /tmp/logo.jpg
+          cmp logo.jpg /tmp/logo.jpg
+      - name: TLS без домена отклоняется при запуске, не при разборе Compose
+        run: |
+          docker compose --profile tls config --quiet
+          if docker compose --profile tls run --rm --no-deps caddy; then
+            echo 'Ошибка: TLS без домена разрешён'; exit 1
+          fi
+      - name: Синтаксис Caddy с доменом
+        run: docker run --rm -e CRM_DOMAIN=crm.example.com -v "$PWD/deploy/Caddyfile:/etc/caddy/Caddyfile:ro" caddy:2-alpine caddy adapt --config /etc/caddy/Caddyfile --validate
+      - name: Остановка
+        if: always()
+        run: docker compose --profile tls down -v
