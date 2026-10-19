@@ -3,7 +3,7 @@ WORKDIR /app
 ENV NODE_ENV=production PORT=8080 HOST=0.0.0.0 DATA_DIR=/data PUBLIC_DIR=/app/frontend/public
 COPY backend ./backend
 COPY frontend ./frontend
-COPY logo.png VERSION ./
+COPY logo.jpg VERSION ./
 RUN mkdir -p /data && chown -R node:node /data /app
 USER node
 EXPOSE 8080
