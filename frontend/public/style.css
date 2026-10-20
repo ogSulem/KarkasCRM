@@ -202,6 +202,18 @@ code{background:#f1f5f9;border-radius:6px;padding:2px 6px;font-size:12px;word-br
 #toast.show{opacity:1;transform:translate(-50%,0)}
 #toast.error{background:#b91c1c}
 #toast{pointer-events:none}
+.tpl-row{display:flex;gap:10px;align-items:flex-start;justify-content:space-between;padding:12px 0;border-top:1px solid var(--line)}
+.tpl-row:first-of-type{border-top:0}
+.tpl-main{min-width:0}
+.tpl-main p{margin:6px 0 0;color:var(--muted);font-size:13px;line-height:1.45;white-space:pre-wrap;overflow-wrap:anywhere}
+.tpl-actions{display:flex;gap:6px;flex:none}
+@media(max-width:520px){.tpl-row{flex-direction:column}.tpl-actions{align-self:flex-end}}
+.hook-line{display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin:8px 0}
+.hook-line code{flex:1;min-width:220px}
+.hook-line .btn{flex:none}
+.notice{border-radius:10px;padding:10px 12px;font-size:13px;line-height:1.45}
+.notice.warn{background:#fffbeb;border:1px solid #fde68a;color:#78350f}
+html[data-theme=dark] .notice.warn{background:#3a2f10;border-color:#6b5717;color:#fde68a}
 .empty{padding:24px;text-align:center;color:var(--muted)}
 
 
@@ -486,3 +498,13 @@ html[data-theme=dark] .all-clear{background:#123326;color:#86efac}
 .link-btn:hover{color:var(--green)}
 html[data-theme=dark] .link-btn{color:#86efac}
 @media(max-width:560px){.task-links{grid-template-columns:1fr}}
+
+/* экран ожидания после восстановления базы из копии */
+.restart-screen{position:fixed;inset:0;background:rgba(3,26,13,.55);backdrop-filter:blur(3px);display:grid;place-items:center;z-index:120;padding:20px}
+.restart-card{background:var(--card);border:1px solid var(--line);border-radius:16px;box-shadow:0 30px 70px -22px rgba(0,0,0,.6);padding:22px 24px;max-width:420px;width:100%}
+.restart-card h3{margin:0 0 6px}
+.restart-card p{margin:0 0 12px;color:var(--muted);font-size:13.5px}
+.restart-card .bar i{width:35%;animation:restartSlide 1.1s ease-in-out infinite}
+.restart-card small{display:block;margin-top:10px;color:var(--muted);line-height:1.5}
+@keyframes restartSlide{0%{margin-left:0}50%{margin-left:65%}100%{margin-left:0}}
+@media (prefers-reduced-motion: reduce){.restart-card .bar i{animation:none;width:100%}}

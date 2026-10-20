@@ -6,8 +6,7 @@ import { spawnSync } from 'node:child_process';
 import { DatabaseSync } from 'node:sqlite';
 import assert from 'node:assert/strict';
 
-const boot = (mode) => {
-  const dir = mkdtempSync(join(tmpdir(), 'karkas-seed-'));
+const startIn = (dir, mode) => {
   const env = { ...process.env, DATA_DIR: dir, PORT: '0', SEED_MODE: mode };
   const r = spawnSync(process.execPath, ['--experimental-sqlite', '-e', `
     process.env.DATA_DIR=${JSON.stringify(dir)}; process.env.PORT='0'; process.env.SEED_MODE=${JSON.stringify(mode)};
@@ -29,6 +28,7 @@ const boot = (mode) => {
   const m = String(r.stdout).match(/SEEDOUT (\{.*\})/);
   return { dir, out: m ? JSON.parse(m[1]) : null, stderr: r.stderr };
 };
+const boot = mode => startIn(mkdtempSync(join(tmpdir(), 'karkas-seed-')), mode);
 
 let failed = 0;
 const ok = (name, cond, extra = '') => { console.log(`${cond ? '✅' : '❌'} ${name}${extra ? ' — ' + extra : ''}`); if (!cond) failed++ };
@@ -43,7 +43,19 @@ ok('demo: каталог, шаблоны, правило, конкуренты',
   const msgs = db.prepare('SELECT COUNT(*) n FROM messages').get().n;
   ok('demo: история сообщений в чатах', msgs === 7, 'сообщений: ' + msgs);
   ok('demo: есть просроченная задача', db.prepare("SELECT COUNT(*) n FROM tasks WHERE due < datetime('now') AND done=0").get().n >= 1);
+  // шаблон — это текст ответа, а не код канала (раньше аргументы вставки были перепутаны)
+  const codes = ['whatsapp', 'telegram', 'instagram', 'viber', 'email', 'any'];
+  const tpls = db.prepare('SELECT name, body, channel FROM templates').all();
+  ok('demo: в шаблонах текст ответа, а не код канала', tpls.every(t => String(t.body || '').length > 20 && !codes.includes(String(t.body))), JSON.stringify(tpls.map(t => t.body.slice(0, 12))));
+  ok('demo: канал шаблона — известный код', tpls.every(t => codes.includes(String(t.channel))), JSON.stringify(tpls.map(t => t.channel)));
+  // имитируем базу ранней версии: текст и канал перепутаны
+  db.prepare('UPDATE templates SET body=channel, channel=body WHERE id=1').run();
   db.close();
+  const again = startIn(r.dir, 'demo');
+  const fixed = new DatabaseSync(join(r.dir, 'crm.db'));
+  const row = fixed.prepare('SELECT body, channel FROM templates WHERE id=1').get();
+  ok('старая база: перепутанные текст и канал исправляются при запуске', /Здравствуйте/.test(String(row.body)) && ['whatsapp', 'telegram'].includes(row.channel), JSON.stringify(row).slice(0, 80));
+  fixed.close();
 }
 rmSync(r.dir, { recursive: true, force: true });
 
@@ -80,6 +92,25 @@ rmSync(r.dir, { recursive: true, force: true });
   const m = String(res.stdout).match(/SEEDOUT (\{.*\})/);
   const out = m ? JSON.parse(m[1]) : null;
   ok('с доменом (прод) — base без клиентов', out && out.contacts === 0 && out.products > 0, JSON.stringify(out));
+  rmSync(dir, { recursive: true, force: true });
+}
+
+// опечатка в режиме не должна молча включать демо-данные: при CRM_DOMAIN берём base
+{
+  const dir = mkdtempSync(join(tmpdir(), 'karkas-seed-'));
+  const env = { ...process.env, DATA_DIR: dir, PORT: '0', SEED_MODE: 'производство', CRM_DOMAIN: 'crm.example.ru' };
+  const res = spawnSync(process.execPath, ['--experimental-sqlite', '-e', `
+    process.env.DATA_DIR=${JSON.stringify(dir)}; process.env.PORT='0';
+    process.env.SEED_MODE='производство'; process.env.CRM_DOMAIN='crm.example.ru';
+    const { server, db } = await import(${JSON.stringify(join(process.cwd(), 'backend/src/server.js'))});
+    await new Promise(r2 => server.listening ? r2() : server.once('listening', r2));
+    console.log('SEEDOUT ' + JSON.stringify({ contacts: db.prepare('SELECT COUNT(*) n FROM contacts').get().n, products: db.prepare('SELECT COUNT(*) n FROM products').get().n }));
+    server.close(() => process.exit(0));
+  `], { env, encoding: 'utf8' });
+  const m = String(res.stdout).match(/SEEDOUT (\{.*\})/);
+  const out = m ? JSON.parse(m[1]) : null;
+  ok('неизвестный SEED_MODE на проде не включает демо-данные', out && out.contacts === 0 && out.products > 0, JSON.stringify(out));
+  ok('о неизвестном режиме предупреждают в логе', /SEED_MODE=.*не распознан/.test(String(res.stderr || '') + String(res.stdout || '')));
   rmSync(dir, { recursive: true, force: true });
 }
 

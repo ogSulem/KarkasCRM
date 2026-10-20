@@ -3,7 +3,8 @@
 // Node >= 22.5 (http, node:sqlite, crypto, fetch).
 import http from 'node:http';
 import { DatabaseSync } from 'node:sqlite';
-import { createHmac, randomBytes, scryptSync, timingSafeEqual } from 'node:crypto';
+import { createHmac, randomBytes, scrypt, scryptSync, timingSafeEqual } from 'node:crypto';
+import { promisify } from 'node:util';
 import { gzipSync } from 'node:zlib';
 import { readFileSync, writeFileSync, existsSync, mkdirSync, chmodSync, statSync, readdirSync, unlinkSync, copyFileSync, mkdirSync as mkdir, createReadStream } from 'node:fs';
 import { extname, join, normalize, basename } from 'node:path';
@@ -15,7 +16,15 @@ import { seedBase, seedDemo, demoCounts, cleanDemo } from './seed.js';
 const PORT = process.env.PORT || 8080, HOST = process.env.HOST || '0.0.0.0';
 // Режим начальных данных: demo (локально, примеры) / base (прод, правовая основа) / off (чистая база).
 // По умолчанию: если задан домен — base, иначе demo. Переопределяется в SEED_MODE.
-const SEED_MODE = (process.env.SEED_MODE || (process.env.CRM_DOMAIN ? 'base' : 'demo')).toLowerCase();
+const SEED_MODE_RAW = String(process.env.SEED_MODE || '').trim().toLowerCase();
+// Неизвестное значение (опечатка в .env) раньше молча включало демо-данные на проде —
+// теперь такой режим игнорируется с предупреждением и работает автоопределение.
+const SEED_MODE = ['demo', 'base', 'off'].includes(SEED_MODE_RAW)
+  ? SEED_MODE_RAW
+  : (process.env.CRM_DOMAIN ? 'base' : 'demo');
+if (SEED_MODE_RAW && !['demo', 'base', 'off'].includes(SEED_MODE_RAW)) {
+  console.warn(`SEED_MODE="${process.env.SEED_MODE}" не распознан (допустимо demo, base, off) — используется режим по умолчанию: ${SEED_MODE}.`);
+}
 const ROOT = fileURLToPath(new URL('.', import.meta.url));
 const DATA_DIR = process.env.DATA_DIR || join(ROOT, '../../data');
 const PUBLIC_DIR = process.env.PUBLIC_DIR || join(ROOT, '../../frontend/public');
@@ -25,10 +34,24 @@ const UPLOAD_DIR = join(DATA_DIR, 'uploads');
 const ADMIN_EMAIL = (process.env.ADMIN_EMAIL || 'admin@example.com').toLowerCase();
 const ADMIN_PASSWORD = process.env.ADMIN_PASSWORD || 'admin12345';
 
-const VERSION = '1';
+// Версия продукта: единый источник — файл VERSION в корне (он же попадает в Docker-образ).
+const VERSION = (() => { try { return readFileSync(join(ROOT, '../../VERSION'), 'utf8').trim() || '1'; } catch { return '1'; } })();
 const STARTED = Date.now();
-mkdirSync(DATA_DIR, { recursive: true });
-mkdirSync(UPLOAD_DIR, { recursive: true });
+// Понятная ошибка вместо стектрейса, если каталог данных недоступен (не смонтирован том,
+// права root вместо пользователя node, диск только для чтения).
+function ensureDataDir() {
+  try {
+    mkdirSync(DATA_DIR, { recursive: true });
+    mkdirSync(UPLOAD_DIR, { recursive: true });
+    const probe = join(DATA_DIR, '.write-test');
+    writeFileSync(probe, 'ok');
+    unlinkSync(probe);
+  } catch (e) {
+    console.error(`Каталог данных недоступен для записи: ${DATA_DIR}\n${e.message}\nПроверьте права: в Docker это том /data (владелец — пользователь node, uid 1000), локально — папка ./data.`);
+    process.exit(1);
+  }
+}
+ensureDataDir();
 // Секрет подписи токенов: берём из окружения; если он не задан — генерируем постоянный
 // случайный секрет и сохраняем в каталоге данных, чтобы сессии переживали перезапуск.
 function loadSecret() {
@@ -45,7 +68,13 @@ function loadSecret() {
   return generated;
 }
 const SECRET = loadSecret();
-const db = new DatabaseSync(join(DATA_DIR, 'crm.db'));
+const db = (() => {
+  try { return new DatabaseSync(join(DATA_DIR, 'crm.db')); }
+  catch (e) {
+    console.error(`Не удалось открыть базу ${join(DATA_DIR, 'crm.db')}: ${e.message}\nЕсли файл повреждён, восстановите его из резервной копии в ${join(DATA_DIR, 'backups')} или начните с пустой базы, убрав файл crm.db.`);
+    process.exit(1);
+  }
+})();
 db.exec(`PRAGMA journal_mode=WAL; PRAGMA foreign_keys=ON;
 PRAGMA busy_timeout=5000;      -- не падать, если запись идёт параллельно
 PRAGMA synchronous=NORMAL;     -- быстрая запись при WAL и при этом безопасная
@@ -228,6 +257,13 @@ const setSetting = (k, v) => db.prepare('INSERT INTO settings(key,value) VALUES(
 const log = (text, et = null, eid = null, user = '') => db.prepare('INSERT INTO activities(text,entity_type,entity_id,user_name) VALUES(?,?,?,?)').run(text, et, eid, user);
 const hashPass = (p, salt = randomBytes(16).toString('hex')) => `${salt}:${scryptSync(p, salt, 64).toString('hex')}`;
 function checkPass(p, s) { try { const [salt, h] = String(s).split(':'); const a = Buffer.from(h, 'hex'), b = scryptSync(p, salt, 64); return a.length === b.length && timingSafeEqual(a, b); } catch { return false; } }
+// Проверка пароля при входе — асинхронная: 50 одновременных входов утром не
+// блокируют обработку остальных запросов (scrypt считается в пуле потоков).
+const scryptAsync = promisify(scrypt);
+async function checkPassAsync(p, s) {
+  try { const [salt, h] = String(s).split(':'); const a = Buffer.from(h, 'hex'), b = await scryptAsync(p, salt, 64); return a.length === b.length && timingSafeEqual(a, b); }
+  catch { return false; }
+}
 const sign = p => { const b = Buffer.from(JSON.stringify({ ...p, sv: db.prepare('SELECT session_version FROM users WHERE id=?').get(p.id)?.session_version || 0, exp: Date.now() + 7 * 864e5 })).toString('base64url'); return b + '.' + createHmac('sha256', SECRET).update(b).digest('base64url'); };
 function verify(t) {
   try {
@@ -665,6 +701,26 @@ if (!process.env.KARKAS_NO_SEED && SEED_MODE !== 'off' && !getSetting('SEED_DONE
     } catch (e) { console.error('Не удалось заполнить начальные данные:', e) }
   }
 }
+// Разовая починка шаблонов из ранних сборок: при вставке были перепутаны
+// текст и канал, поэтому в поле «текст» оказывался код канала (telegram, any),
+// а сам текст — в поле «канал». Меняем местами только явно испорченные записи,
+// поэтому повторный запуск ничего не портит.
+try {
+  const CODES = ['whatsapp', 'telegram', 'instagram', 'viber', 'email', 'any'];
+  const holes = CODES.map(() => '?').join(',');
+  const broken = db.prepare(`SELECT id, body, channel FROM templates WHERE lower(trim(COALESCE(body,''))) IN (${holes})
+      AND lower(trim(COALESCE(channel,''))) NOT IN (${holes})`).all(...CODES, ...CODES);
+  if (broken.length) {
+    const fix = db.prepare('UPDATE templates SET body=?, channel=? WHERE id=?');
+    db.exec('BEGIN IMMEDIATE');
+    try {
+      for (const t of broken) fix.run(String(t.channel || ''), String(t.body || '').trim().toLowerCase(), t.id);
+      db.exec('COMMIT');
+      console.log(`Шаблоны: исправлен текст у ${broken.length} зап. (в ранней версии текст и канал были перепутаны).`);
+    } catch (e) { db.exec('ROLLBACK'); throw e }
+  }
+} catch (e) { console.error('Не удалось проверить шаблоны:', e.message) }
+
 export const server = http.createServer(async (req, res) => {
   const u = new URL(req.url, `http://${req.headers.host}`), p = u.pathname;
   applySecurityHeaders(req, res);
@@ -716,25 +772,50 @@ export const server = http.createServer(async (req, res) => {
       return json(res, 200, { received: true });
     }
     if (p === '/api/health') {
-      let dbSize = 0; try { dbSize = statSync(join(DATA_DIR, 'crm.db')).size } catch {}
-      let backupsCount = 0, lastBackup = null;
-      try { const dir = join(DATA_DIR, 'backups'); const files = existsSync(dir) ? readdirSync(dir).filter(f => f.endsWith('.db')).sort() : []; backupsCount = files.length; lastBackup = files.length ? files[files.length - 1] : null } catch {}
-      const h = { ok: true, service: 'KarkasCRM', version: VERSION, schema: SCHEMA_VERSION, time: new Date().toISOString(), uptimeSec: Math.round((Date.now() - STARTED) / 1000), dbSizeBytes: dbSize, backups: { count: backupsCount, last: lastBackup }, counts: { users: db.prepare('SELECT COUNT(*) n FROM users').get().n, contacts: db.prepare('SELECT COUNT(*) n FROM contacts').get().n, deals: db.prepare('SELECT COUNT(*) n FROM deals').get().n, tasks: db.prepare('SELECT COUNT(*) n FROM tasks WHERE done=0').get().n, messages: db.prepare('SELECT COUNT(*) n FROM messages').get().n } };
-      return json(res, 200, h, true);
+      // Публичный ответ — только факт работы и версия: этот адрес открыт без входа
+      // (Docker healthcheck, мониторинг) и не должен раскрывать объём базы клиентов.
+      const h = { ok: true, service: 'KarkasCRM', version: VERSION, schema: SCHEMA_VERSION, time: new Date().toISOString(), uptimeSec: Math.round((Date.now() - STARTED) / 1000) };
+      const hToken = (req.headers.authorization || '').replace(/^Bearer\s+/i, '') || cookieOf(req).karkas_token || (req.method === 'GET' ? u.searchParams.get('token') : '');
+      const hUser = verify(hToken || '');
+      if (hUser && hUser.role === 'admin') {
+        let dbSize = 0; try { dbSize = statSync(join(DATA_DIR, 'crm.db')).size } catch {}
+        let backupsCount = 0, lastBackup = null;
+        try { const dir = join(DATA_DIR, 'backups'); const files = existsSync(dir) ? readdirSync(dir).filter(f => f.endsWith('.db')).sort() : []; backupsCount = files.length; lastBackup = files.length ? files[files.length - 1] : null } catch {}
+        Object.assign(h, {
+          dbSizeBytes: dbSize, backups: { count: backupsCount, last: lastBackup },
+          counts: {
+            users: db.prepare('SELECT COUNT(*) n FROM users').get().n, contacts: db.prepare('SELECT COUNT(*) n FROM contacts').get().n,
+            deals: db.prepare('SELECT COUNT(*) n FROM deals').get().n, tasks: db.prepare('SELECT COUNT(*) n FROM tasks WHERE done=0').get().n,
+            messages: db.prepare('SELECT COUNT(*) n FROM messages').get().n,
+          },
+        });
+      }
+      return json(res, 200, h);
     }
     if (p === '/api/auth/login' && req.method === 'POST') {
       const ip = clientIp(req);
-      const limit = Number(getSetting('LOGIN_RATE_LIMIT', '12'));
-      const rl = rateLimit('login:' + ip, limit, 300000);
-      if (!rl.ok) { res.setHeader('Retry-After', String(rl.retryAfter || 300)); return json(res, 429, { error: `Слишком много попыток входа. Повторите через ${rl.retryAfter || 300} с.` }) }
+      // Жёсткий потолок на все запросы входа с одного IP: защищает от лавины запросов
+      // (каждый требует вычисления scrypt). 300 за 5 минут — с запасом для офиса за одним IP.
+      const flood = rateLimit('login-flood:' + ip, 300, 300000);
+      if (!flood.ok) { res.setHeader('Retry-After', String(flood.retryAfter || 300)); return json(res, 429, { error: `Слишком много запросов на вход. Повторите через ${flood.retryAfter || 300} с.` }) }
+      // Лимит из настроек считает только НЕУДАЧНЫЕ попытки: 50 сотрудников за одним
+      // офисным IP могут войти одновременно, а подбор пароля всё равно упирается в предел.
+      const limit = Math.max(1, Number(getSetting('LOGIN_RATE_LIMIT', '12')) || 12);
       const b = await readBody(req);
-      // второй лимит — на конкретный аккаунт: распределённый перебор с разных IP тоже упирается в предел
       const emailKey = String(b.email || '').trim().toLowerCase().slice(0, 160);
-      if (emailKey) { const rlAcc = rateLimit('login-acc:' + emailKey, Math.max(limit * 3, 30), 300000); if (!rlAcc.ok) { res.setHeader('Retry-After', String(rlAcc.retryAfter || 300)); return json(res, 429, { error: 'Слишком много попыток входа в этот аккаунт. Подождите несколько минут.' }) } }
       const user = db.prepare('SELECT * FROM users WHERE email=? AND active=1').get(String(b.email || '').toLowerCase());
       // проверяем пароль даже для несуществующего e-mail: время ответа не выдаёт, зарегистрирован ли адрес
-      const passOk = checkPass(String(b.password || ''), user ? user.pass : 'fake-salt:00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000');
-      if (!user || !passOk) return json(res, 401, { error: 'Неверный e-mail или пароль' });
+      const passOk = await checkPassAsync(String(b.password || ''), user ? user.pass : 'fake-salt:00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000');
+      if (!user || !passOk) {
+        const rlIp = rateLimit('login:' + ip, limit, 300000);
+        // второй лимит — на конкретный аккаунт: распределённый перебор с разных IP тоже упирается в предел
+        const rlAcc = emailKey ? rateLimit('login-acc:' + emailKey, Math.max(limit * 2, 24), 300000) : { ok: true };
+        if (!rlIp.ok || !rlAcc.ok) { res.setHeader('Retry-After', String(rlIp.retryAfter || rlAcc.retryAfter || 300)); return json(res, 429, { error: 'Слишком много неудачных попыток входа. Подождите несколько минут или обратитесь к администратору.' }) }
+        return json(res, 401, { error: 'Неверный e-mail или пароль' });
+      }
+      // успешный вход обнуляет счётчики неудач — опечатка в пароле не блокирует офис
+      RL.delete('login:' + ip);
+      if (emailKey) RL.delete('login-acc:' + emailKey);
       const token = sign({ id: user.id, email: user.email, name: user.name, role: user.role });
       res.setHeader('Set-Cookie', sessionCookie(req, token));
       return json(res, 200, { token, user: { id: user.id, name: user.name, email: user.email, role: user.role, must_change_password: user.must_change_password } }); }
@@ -1259,7 +1340,9 @@ export const server = http.createServer(async (req, res) => {
     }
 
     // ===== inbox =====
-    if (p === '/api/conversations' && req.method === 'GET') return json(res, 200, db.prepare(`SELECT cv.*,c.phone,c.email,(SELECT body FROM messages WHERE conversation_id=cv.id ORDER BY id DESC LIMIT 1) last_body FROM conversations cv LEFT JOIN contacts c ON c.id=cv.contact_id ORDER BY cv.last_at DESC, cv.id DESC`).all());
+    if (p === '/api/conversations' && req.method === 'GET') return json(res, 200, db.prepare(`SELECT cv.*,c.phone,c.email,(SELECT body FROM messages WHERE conversation_id=cv.id ORDER BY id DESC LIMIT 1) last_body,
+      (SELECT d.amount FROM deals d WHERE d.contact_id=cv.contact_id AND d.stage NOT IN ('won','lost') ORDER BY d.id DESC LIMIT 1) deal_amount
+      FROM conversations cv LEFT JOIN contacts c ON c.id=cv.contact_id ORDER BY cv.last_at DESC, cv.id DESC`).all());
     const mConv = p.match(/^\/api\/conversations\/(\d+)\/messages$/);
     if (mConv) { const id = mConv[1];
       if (req.method === 'GET') { db.prepare('UPDATE conversations SET unread=0 WHERE id=?').run(id); return json(res, 200, db.prepare('SELECT * FROM messages WHERE conversation_id=? ORDER BY id').all(id)); }
@@ -1347,7 +1430,18 @@ export const server = http.createServer(async (req, res) => {
       return json(res, 200, { saved: false, url: '/logo.png' });
     }
     // CSV export/import
-    if (p === '/api/export/contacts') { res.writeHead(200, { 'Content-Type': 'text/csv; charset=utf-8', 'Content-Disposition': 'attachment; filename=contacts.csv' }); return res.end('﻿' + csv(db.prepare('SELECT name,phone,email,company,source,tags FROM contacts').all())); }
+    if (p === '/api/export/contacts') {
+      // свои поля тоже попадают в выгрузку: колонки называются так, как их назвал пользователь
+      const fields = getCustomFields().filter(f => f.entity === 'contacts' || f.entity === 'both');
+      const rows = db.prepare('SELECT name,phone,email,company,source,tags,custom FROM contacts').all().map(c => {
+        let val = {}; try { val = JSON.parse(c.custom || '{}') } catch {}
+        const out = { 'Имя': c.name, 'Телефон': c.phone, 'E-mail': c.email, 'Компания': c.company, 'Источник': c.source, 'Теги': c.tags };
+        for (const f of fields) out[f.label] = val[f.key] ?? '';
+        return out;
+      });
+      res.writeHead(200, { 'Content-Type': 'text/csv; charset=utf-8', 'Content-Disposition': 'attachment; filename=contacts.csv' });
+      return res.end('\ufeff' + csv(rows));
+    }
     if (p === '/api/export/deals') {
       res.writeHead(200, { 'Content-Type': 'text/csv; charset=utf-8', 'Content-Disposition': 'attachment; filename=deals.csv' });
       const rows = db.prepare(`SELECT d.title 'Название', d.amount 'Сумма', COALESCE(c.name,'') 'Клиент', COALESCE(c.phone,'') 'Телефон', d.stage 'Этап', d.priority 'Приоритет', COALESCE(d.deadline,'') 'Срок', COALESCE(d.loss_reason,'') 'Причина отказа', datetime(d.created_at,'localtime') 'Создана' FROM deals d LEFT JOIN contacts c ON c.id=d.contact_id ORDER BY d.id DESC`).all();
@@ -1406,6 +1500,9 @@ export const server = http.createServer(async (req, res) => {
         const num = (k, d) => { const n = Number(getSetting(k, String(d))); return Number.isFinite(n) ? n : d };
         return json(res, 200, {
           version: VERSION,
+          // адрес, по которому CRM видна из интернета: из настроек, иначе из CRM_DOMAIN,
+          // иначе пусто — тогда интерфейс берёт адрес из строки браузера
+          public_url: String(getSetting('PUBLIC_URL') || (process.env.CRM_DOMAIN ? `https://${process.env.CRM_DOMAIN}` : '')).replace(/\/+$/, ''),
           company: { name: getSetting('COMPANY_NAME'), currency: getSetting('CURRENCY', '₽') },
           sales_target: num('SALES_TARGET', 0),
           seed_mode: SEED_MODE,
@@ -1425,6 +1522,12 @@ export const server = http.createServer(async (req, res) => {
         const b = await readBody(req);
         const clean = v => (v && !String(v).includes('•')) ? String(v).slice(0, 512) : null;
         const putNum = (k, v, min, max, d) => { const n = Number(String(v).replace(/[^\d.-]/g, '')); if (Number.isFinite(n)) setSetting(k, String(Math.min(max, Math.max(min, n)))); };
+        if (b.PUBLIC_URL !== undefined) {
+          const v = String(b.PUBLIC_URL || '').trim().replace(/\/+$/, '');
+          if (v && !/^https?:\/\/[a-z0-9.-]+(:\d+)?(\/.*)?$/i.test(v)) return json(res, 400, { error: 'Адрес CRM должен начинаться с http:// или https:// — например, https://crm.company.ru' });
+          // пусто — удаляем настройку, чтобы снова работал CRM_DOMAIN или адрес браузера
+          if (v) setSetting('PUBLIC_URL', v.slice(0, 255)); else db.prepare("DELETE FROM settings WHERE key='PUBLIC_URL'").run();
+        }
         if (clean(b.WAZZUP_API_KEY)) setSetting('WAZZUP_API_KEY', clean(b.WAZZUP_API_KEY));
         for (const k of ['WAZZUP_API_URL', 'WAZZUP_CHANNEL_ID', 'WAZZUP_WEBHOOK_SECRET', 'COMPANY_NAME', 'CURRENCY', 'AUTO_DEAL', 'AUTO_DEAL_STAGE', 'AUTO_ASSIGN', 'SMTP_HOST', 'SMTP_PORT', 'SMTP_SECURE', 'SMTP_USER', 'MAIL_FROM', 'EMAIL_WEBHOOK_SECRET', 'NOTIFY_WEBHOOK', 'COMPANY_INN', 'COMPANY_KPP', 'COMPANY_OGRN', 'COMPANY_ADDRESS', 'COMPANY_PHONE', 'COMPANY_EMAIL', 'COMPANY_SITE', 'COMPANY_BANK', 'COMPANY_ACCOUNT', 'COMPANY_CORR', 'COMPANY_SIGNER', 'COMPANY_SIGNER_POSITION', 'DOC_PREFIX', 'SMTP_TEST_TO', 'WEBHOOK_SECRET']) if (b[k] !== undefined) setSetting(k, clean(b[k]) ?? String(b[k]).slice(0, 512));
         if (clean(b.SMTP_PASS)) setSetting('SMTP_PASS', clean(b.SMTP_PASS));
@@ -1522,9 +1625,17 @@ export const server = http.createServer(async (req, res) => {
     if (p === '/logo.png' || p === '/favicon.ico') {
       const logoPath = resolveLogo();
       if (logoPath && existsSync(logoPath)) {
+        const stLogo = statSync(logoPath);
+        // ETag по содержимому: браузер не скачивает логотип заново, но мгновенно
+        // подхватывает замену (новый файл — новый ETag, старый — ответ 304).
+        const etag = `"${stLogo.size.toString(16)}-${Math.round(stLogo.mtimeMs).toString(16)}"`;
+        const headers = {
+          'Cache-Control': 'no-cache', ETag: etag,
+          'Last-Modified': new Date(stLogo.mtimeMs).toUTCString(),
+        };
+        if (req.headers['if-none-match'] === etag) { res.writeHead(304, headers); return res.end(); }
         const buf = readFileSync(logoPath);
-        const type = sniffImage(buf, 'image/png');
-        res.writeHead(200, { 'Content-Type': type, 'Cache-Control': 'no-cache', 'Content-Length': buf.length });
+        res.writeHead(200, { ...headers, 'Content-Type': sniffImage(buf, 'image/png'), 'Content-Length': buf.length });
         return res.end(buf);
       }
     }

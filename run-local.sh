@@ -28,7 +28,21 @@ if [ ! -f .env ]; then
   echo "Без файла настроек система запустится с демонстрационными данными: admin@example.com / admin12345 (смените пароль после входа)."
 fi
 
-if [ -f .env ]; then set -a; . ./.env; set +a; fi
+# Читаем .env построчно: значения с пробелами и решёткой не ломают запуск,
+# как это бывает при обычном `source` файла окружения.
+if [ -f .env ]; then
+  while IFS= read -r line || [ -n "$line" ]; do
+    case "$line" in ''|'#'*) continue ;; esac
+    case "$line" in *=*) ;; *) continue ;; esac
+    key=${line%%=*}; val=${line#*=}
+    case "$val" in
+      \"*\") val=${val#\"}; val=${val%\"} ;;
+      \'*\') val=${val#\'}; val=${val%\'} ;;
+    esac
+    case "$key" in [!A-Za-z_]*|*[!A-Za-z0-9_]*) continue ;; esac
+    export "$key=$val"
+  done < .env
+fi
 export DATA_DIR PORT HOST
 
 echo "KarkasCRM → http://localhost:${PORT}   (база: ${DATA_DIR}/crm.db, Ctrl+C — остановить)"

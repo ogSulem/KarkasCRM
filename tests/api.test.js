@@ -22,7 +22,11 @@ before(async () => { await new Promise(r => server.listening ? r() : server.once
 after(() => server.close());
 
 test('health и вход', async () => {
-  assert.equal((await call('/api/health')).body.ok, true);
+  const anon = (await call('/api/health')).body;
+  assert.equal(anon.ok, true);
+  // публичный health доступен без входа (Docker healthcheck), но не раскрывает бизнес-данные
+  assert.equal(anon.counts, undefined, 'счётчики клиентов не видны без входа');
+  assert.equal(anon.backups, undefined, 'имена резервных копий не видны без входа');
   const l = await readyLogin('/api/auth/login', { method: 'POST', body: JSON.stringify({ email: 'admin@example.com', password: 'admin12345' }) });
   assert.ok(l.body.token, 'получен JWT');
   h = { Authorization: 'Bearer ' + l.body.token };
@@ -43,6 +47,22 @@ test('объединение чатов WhatsApp + Telegram в один диал
   assert.equal(msgs.length, 2, 'дубликат вебхука не создал сообщение');
   const deals = (await call('/api/deals')).body.deals.filter(d => d.contact_name === 'Клиент Wazzup');
   assert.equal(deals.length, 1, 'автосоздана сделка на первом обращении');
+});
+
+test('логотип: отдаётся как изображение и кэшируется по ETag', async () => {
+  const first = await fetch(base + '/logo.png');
+  const bytes = (await first.arrayBuffer()).byteLength; // тело обязательно читаем: иначе сокет держит процесс
+  assert.equal(first.status, 200);
+  assert.ok(bytes > 100, 'логотип не пустой');
+  assert.match(first.headers.get('content-type') || '', /^image\//, 'логотип отдаётся изображением');
+  const etag = first.headers.get('etag');
+  assert.ok(etag, 'у логотипа есть ETag');
+  const second = await fetch(base + '/logo.png', { headers: { 'If-None-Match': etag } });
+  await second.arrayBuffer();
+  assert.equal(second.status, 304, 'неизменённый логотип не скачивается повторно');
+  const favicon = await fetch(base + '/favicon.ico');
+  await favicon.arrayBuffer();
+  assert.equal(favicon.status, 200, 'иконка вкладки отдаётся по /favicon.ico');
 });
 
 test('сделки, товары и пересчёт суммы', async () => {
@@ -160,10 +180,20 @@ test('автоматизации, шаблоны, интеграции, кома
   assert.ok((c.tags || '').includes('новый-лид'), 'автоматизация добавила тег при создании сделки');
   const tpl = (await call('/api/templates', { method: 'POST', body: JSON.stringify({ name: 'Тест', body: 'Здравствуйте, {name}!' }) })).body;
   assert.ok(tpl.id);
+  // текст шаблона и канал не должны меняться местами
+  assert.equal(tpl.body, 'Здравствуйте, {name}!', 'в шаблоне сохраняется текст ответа');
+  assert.equal(tpl.channel, 'any', 'канал по умолчанию — «любой»');
+  assert.equal((await call('/api/templates', { method: 'POST', body: JSON.stringify({ name: 'WA', body: 'Текст для WhatsApp', channel: 'whatsapp' }) })).body.channel, 'whatsapp');
   // Wazzup: маскировка ключа и синхронизация каналов
   await call('/api/settings', { method: 'PUT', body: JSON.stringify({ WAZZUP_API_KEY: 'test-api-key-123456', WAZZUP_CHANNEL_ID: 'e0629e11-0f67-4567-92a9-2237e91ec1b9' }) });
   const set = (await call('/api/settings')).body;
   assert.ok(set.wazzup.api_key.startsWith('••••••'), 'ключ Wazzup маскируется');
+  // публичный адрес CRM для ссылок и вебхуков
+  assert.equal((await call('/api/settings', { method: 'PUT', body: JSON.stringify({ PUBLIC_URL: 'ftp://crm.local' }) })).status, 400, 'кривой публичный адрес не принимается');
+  await call('/api/settings', { method: 'PUT', body: JSON.stringify({ PUBLIC_URL: 'https://crm.example.ru/' }) });
+  assert.equal((await call('/api/settings')).body.public_url, 'https://crm.example.ru', 'адрес сохраняется без хвостового слэша');
+  await call('/api/settings', { method: 'PUT', body: JSON.stringify({ PUBLIC_URL: '' }) });
+  assert.equal((await call('/api/settings')).body.public_url, '', 'пустой адрес возвращает автоопределение');
   assert.equal(set.wazzup.configured, true);
   const test = await call('/api/integrations/wazzup/test', { method: 'POST' });
   assert.equal(test.status, 400, 'без реального ключа Wazzup возвращается понятная ошибка');

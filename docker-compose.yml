@@ -19,7 +19,20 @@ services:
       # Начальные данные: demo (примеры) / base (правовая основа) / off (пусто).
       # Пусто = авто: с доменом — base, без домена — demo.
       SEED_MODE: ${SEED_MODE:-}
+      # Домен нужен приложению, чтобы авто-режим правильно выбирал base вместо demo
+      # (и чтобы в логах/письмах было видно, для какого адреса развёрнута CRM).
+      CRM_DOMAIN: ${CRM_DOMAIN:-}
       JWT_SECRET: ${JWT_SECRET:-change-me-in-production-please-32-chars}
+      # Необязательно: свой файл логотипа, смонтированный в контейнер (иначе —
+      # логотип из комплекта или загруженный в интерфейсе в томе /data/logo).
+      LOGO_FILE: ${LOGO_FILE:-}
+      # Публичный адрес для ссылок и вебхуков (можно задать и в интерфейсе:
+      # Настройки → Интеграции → Адрес CRM в интернете). Пусто — из CRM_DOMAIN/браузера.
+      PUBLIC_URL: ${PUBLIC_URL:-}
+      # 1 — разрешить проверке конкурентов локальные адреса (только для тестов/шлюзов)
+      ALLOW_PRIVATE_FETCH: ${ALLOW_PRIVATE_FETCH:-}
+      # 1 — не создавать начальные данные (совсем пустая база)
+      KARKAS_NO_SEED: ${KARKAS_NO_SEED:-}
       ADMIN_EMAIL: ${ADMIN_EMAIL:-admin@example.com}
       ADMIN_PASSWORD: ${ADMIN_PASSWORD:-admin12345}
       # Wazzup — один ключ на WhatsApp, Telegram, Instagram и Viber
@@ -44,6 +57,21 @@ services:
       timeout: 5s
       retries: 3
       start_period: 10s
+    # ── устойчивость и безопасность ────────────────────────────────────────
+    init: true                      # корректная обработка сигналов и «сирот» от healthcheck
+    read_only: true                 # код приложения неизменяем, данные — только в томе /data
+    tmpfs:
+      - /tmp:size=64m
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    stop_grace_period: 20s          # сервер успевает дописать WAL и закрыть базу
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"             # логи не растут бесконечно и не забивают диск
+        max-file: "3"
 
   # ── HTTPS и домен: docker compose --profile tls up -d --build ─────────────
   # Caddy сам получает сертификат Let's Encrypt для CRM_DOMAIN и проксирует на CRM.
@@ -71,6 +99,13 @@ services:
       - ./deploy/Caddyfile:/etc/caddy/Caddyfile:ro
       - caddy_data:/data
       - caddy_config:/config
+    security_opt:
+      - no-new-privileges:true
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
 
 volumes:
   crm_data:

@@ -87,15 +87,18 @@ ok('переписка из старой базы сохранена', m.body ==
 ok('настройки компании перенесены', db.prepare("SELECT value FROM settings WHERE key='COMPANY_NAME'").get().value === 'Старая компания');
 
 // ── 4. API поверх мигрированной базы ─────────────────────────────────────────
-const health = await (await fetch(`http://127.0.0.1:${PORT}/api/health`)).json();
-ok('сервер отвечает /api/health', health.ok === true && health.counts.contacts >= 1, `схема ${health.schema}`);
-ok('перед обновлением схемы сделана страховочная копия базы', health.backups.count >= 1 && String(health.backups.last || '').startsWith('pre-upgrade'), JSON.stringify(health.backups));
-ok('в мигрированную базу не добавляются посторонние записи', health.counts.contacts === 1 && health.counts.deals === 1, JSON.stringify(health.counts));
+const healthPublic = await (await fetch(`http://127.0.0.1:${PORT}/api/health`)).json();
+ok('сервер отвечает /api/health', healthPublic.ok === true && healthPublic.schema >= 3, `схема ${healthPublic.schema}`);
+ok('публичный health не раскрывает счётчики клиентов и имена копий', healthPublic.counts === undefined && healthPublic.backups === undefined, JSON.stringify(healthPublic));
 ok('без токена данные закрыты', (await fetch(`http://127.0.0.1:${PORT}/api/contacts`)).status === 401);
 
 const login = await (await fetch(`http://127.0.0.1:${PORT}/api/auth/login`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ email: 'admin@example.com', password: 'admin12345' }) })).json();
 ok('администратор создан для базы без пользователей', !!login.token, login.error || '');
 const H = { Authorization: 'Bearer ' + login.token, 'Content-Type': 'application/json' };
+const health = await (await fetch(`http://127.0.0.1:${PORT}/api/health`, { headers: H })).json();
+ok('администратор видит подробности health', health.counts.contacts >= 1, JSON.stringify(health.counts));
+ok('перед обновлением схемы сделана страховочная копия базы', health.backups.count >= 1 && String(health.backups.last || '').startsWith('pre-upgrade'), JSON.stringify(health.backups));
+ok('в мигрированную базу не добавляются посторонние записи', health.counts.contacts === 1 && health.counts.deals === 1, JSON.stringify(health.counts));
 const meta = await fetch(`http://127.0.0.1:${PORT}/api/meta`, { headers: H });
 ok('новые эндпоинты работают на мигрированной базе', meta.status === 200);
 const contacts = await (await fetch(`http://127.0.0.1:${PORT}/api/contacts`, { headers: H })).json();

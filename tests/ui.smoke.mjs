@@ -107,6 +107,64 @@ try {
     check('настройки → ' + tab, $('#view').innerHTML.length > 300 && !/class="card err"/.test($('#view').innerHTML));
   }
 
+  // ── чат: сообщение отправляется, сохраняется и не пропадает ──────────────
+  {
+    window.go('inbox'); await wait(500);
+    const input = $('#msgText');
+    check('чат: поле ввода сообщения на месте', Boolean(input && $('.composer')));
+    input.value = 'Проверка сохранения сообщения';
+    $('.composer').dispatchEvent(new window.Event('submit', { bubbles: true, cancelable: true }));
+    await wait(700);
+    const saved = await (await fetch(BASE + '/api/conversations/' + window.__state.conv + '/messages', { headers: authH() })).json();
+    check('чат: сообщение сохранилось в базе', saved.some(m => m.body === 'Проверка сохранения сообщения' && m.direction === 'out'));
+    check('чат: сообщение видно в переписке', /Проверка сохранения сообщения/.test($('#chatMsgs').textContent));
+    check('чат: поле ввода очищено после отправки', $('#msgText').value === '');
+    window.go('inbox'); await wait(500);
+    check('чат: после перерисовки сообщение на месте', /Проверка сохранения сообщения/.test($('#chatMsgs').textContent));
+  }
+
+  // ── шаблоны: в списке текст ответа и понятный канал, а не коды ───────────
+  const tplDemo = await apiPost('/api/templates', { name: 'Проверка шаблона', body: 'Здравствуйте, {name}! Это текст ответа для проверки.', channel: 'any' });
+  window.__state.settingsTab = 'templates'; window.go('settings'); await wait(400);
+  {
+    const rows = $$('#view .tpl-row');
+    const tags = rows.map(r => r.querySelector('.tag')?.textContent.trim() || '');
+    const bodies = rows.map(r => r.querySelector('p')?.textContent.trim() || '');
+    check('шаблоны: все строки отрисованы', rows.length >= 1, rows.length + ' шт.');
+    check('шаблоны: канал подписан по-русски', tags.length > 0 && tags.every(t => /Любой канал|WhatsApp|Telegram|Instagram|Viber|Почта/.test(t)), tags.join(', '));
+    check('шаблоны: в тексте нет кода канала', bodies.every(b => !/^(whatsapp|telegram|instagram|viber|email|any)$/i.test(b)), bodies.map(b => b.slice(0, 12)).join(' | '));
+    check('шаблоны: текст ответа длиннее кода', bodies.length > 0 && bodies.every(b => b.length > 20));
+  }
+  await fetch(BASE + '/api/templates/' + tplDemo.id, { method: 'DELETE', headers: authH() });
+
+  // ── вебхуки: полный адрес, понятное объяснение, кнопка «копировать» ──────
+  window.__state.settingsTab = 'integrations'; window.go('settings'); await wait(400);
+  {
+    const links = $$('#view .hook-line code').map(c => c.textContent.trim());
+    check('вебхуки: адреса собраны с хостом', links.length === 3 && links.every(u => /^https?:\/\//.test(u)) && links.some(u => /\/webhooks\/wazzup$/.test(u)) && links.some(u => /\/webhooks\/email$/.test(u)));
+    check('вебхуки: у каждого адреса есть кнопка копирования', $$('#view .hook-line button[data-copy]').length === links.length);
+    const txt = $('#view').textContent;
+    check('вебхуки: объяснено простыми словами', /входная дверь/.test(txt) && /пароль приложения/.test(txt) && /пересылк/i.test(txt));
+    check('вебхуки: поле публичного адреса доступно в интерфейсе', Boolean($('#publicUrl')));
+  }
+
+  // ── свои поля: создаются в настройках и появляются в форме и карточке ────
+  {
+    const saved = await (await fetch(BASE + '/api/custom-fields', { headers: authH() })).json();
+    await fetch(BASE + '/api/custom-fields', { method: 'PUT', headers: authH(), body: JSON.stringify({ fields: [{ key: 'plot_area', label: 'Площадь участка', type: 'number', entity: 'both', required: false, options: [] }] }) });
+    window.__state.meta = await (await fetch(BASE + '/api/meta', { headers: authH() })).json();
+    await window.openContact(conv.contact_id); await wait(350);
+    const input = $('#modalBody [name=cf_plot_area]');
+    check('своё поле появилось в форме контакта', Boolean(input) && !input.closest('details'));
+    check('своё поле подписано понятным названием', /Площадь участка/.test($('#modalBody').textContent));
+    window.closeModal();
+    await window.openContactCard(conv.contact_id); await wait(350);
+    check('своё поле видно в карточке клиента', /Площадь участка/.test($('#modalBody').textContent));
+    window.closeModal();
+    await fetch(BASE + '/api/custom-fields', { method: 'PUT', headers: authH(), body: JSON.stringify({ fields: saved.fields || [] }) });
+    window.__state.meta = await (await fetch(BASE + '/api/meta', { headers: authH() })).json();
+  }
+
   // ── навигация: клик по кнопке меню реально переключает раздел ────────────
   const navBtn = $('#nav button[data-view="tasks"]');
   navBtn.dispatchEvent(new window.MouseEvent('click', { bubbles: true }));

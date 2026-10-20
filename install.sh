@@ -44,6 +44,8 @@ fi
 # ── .env: создаём из шаблона и заполняем секреты/режим ──────────────────────
 if [ ! -f .env ]; then
   cp .env.example .env
+  # секреты не должны быть читаемы другим пользователям сервера
+  chmod 600 .env 2>/dev/null || true
   if command -v openssl >/dev/null; then
     SECRET=$(openssl rand -hex 32); PASS=$(openssl rand -hex 12)
   else
@@ -59,6 +61,8 @@ if [ ! -f .env ]; then
   echo " Логин:                 $(grep '^ADMIN_EMAIL=' .env | cut -d= -f2-)"
   echo "──────────────────────────────────────────────"
 fi
+
+chmod 600 .env 2>/dev/null || true
 
 set_env() { # set_env KEY VALUE — заменяет строку в .env или добавляет её
   local key="$1" value="$2"
