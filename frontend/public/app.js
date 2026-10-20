@@ -2170,7 +2170,7 @@ async function settings(v) {
         <img id="logoPreview" src="/logo.png?ts=${Date.now()}" alt="Логотип" class="logo-admin-img">
         <div class="logo-admin-actions">
           <button type="button" class="btn primary sm" onclick="$('#logoFile').click()">${icon('upload', 13)} Загрузить логотип</button>
-          <input type="file" id="logoFile" class="hidden" accept="image/png,image/jpeg,image/gif,image/webp,image/x-icon" onchange="uploadLogo(this)">
+          <input type="file" id="logoFile" class="hidden" accept="image/png,image/jpeg,image/gif,image/webp" onchange="uploadLogo(this)">
           <button type="button" class="btn danger sm" id="logoDeleteBtn" ${s.logo && s.logo.custom ? '' : 'disabled'} onclick="deleteLogo()">Удалить логотип</button>
         </div>
       </div>
@@ -2447,13 +2447,34 @@ function cleanDemo() {
     render();
   }, { okText: 'Удалить демо-данные' });
 }
+// После восстановления базы сервер завершает процесс (Docker поднимает контейнер сам).
+// Вместо «слепой» перезагрузки ждём, пока CRM снова ответит, и только тогда обновляем страницу.
+function waitServerBack() {
+  const el = document.createElement('div');
+  el.className = 'restart-screen';
+  el.innerHTML = `<div class="restart-card"><h3>База восстановлена</h3>
+    <p>Сервер перезапускается — обычно это занимает несколько секунд.</p>
+    <div class="bar"><i></i></div>
+    <small id="restartHint">Ждём ответа CRM…</small></div>`;
+  document.body.appendChild(el);
+  let tries = 0;
+  const timer = setInterval(async () => {
+    tries++;
+    try { const r = await fetch('/api/health', { cache: 'no-store' }); if (r.ok) { clearInterval(timer); location.reload(); return; } } catch { }
+    if (tries > 40) {
+      clearInterval(timer);
+      const hint = el.querySelector('#restartHint');
+      if (hint) hint.innerHTML = 'CRM не поднялась автоматически. Запустите её снова: <code>docker compose up -d</code> (или <code>./run-local.sh</code>) и обновите страницу.';
+    }
+  }, 1500);
+}
 function restoreBackup(file) {
   askConfirm(`Восстановить базу из копии «${file}»? Текущие данные будут заменены. Перед восстановлением система сохранит страховочную копию.`, () => {
     (async () => {
       try {
         const r = await api('/api/backups/restore', { method: 'POST', body: JSON.stringify({ file }) });
-        toast(r.message || 'База восстановлена, страница перезагрузится');
-        setTimeout(() => location.reload(), 3500);
+        toast(r.message || 'База восстановлена');
+        waitServerBack();
       } catch (e) { toast(e.message, 'err'); }
     })();
   }, { okText: 'Восстановить', danger: false });

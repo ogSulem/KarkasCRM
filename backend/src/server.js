@@ -15,7 +15,15 @@ import { seedBase, seedDemo, demoCounts, cleanDemo } from './seed.js';
 const PORT = process.env.PORT || 8080, HOST = process.env.HOST || '0.0.0.0';
 // Режим начальных данных: demo (локально, примеры) / base (прод, правовая основа) / off (чистая база).
 // По умолчанию: если задан домен — base, иначе demo. Переопределяется в SEED_MODE.
-const SEED_MODE = (process.env.SEED_MODE || (process.env.CRM_DOMAIN ? 'base' : 'demo')).toLowerCase();
+const SEED_MODE_RAW = String(process.env.SEED_MODE || '').trim().toLowerCase();
+// Неизвестное значение (опечатка в .env) раньше молча включало демо-данные на проде —
+// теперь такой режим игнорируется с предупреждением и работает автоопределение.
+const SEED_MODE = ['demo', 'base', 'off'].includes(SEED_MODE_RAW)
+  ? SEED_MODE_RAW
+  : (process.env.CRM_DOMAIN ? 'base' : 'demo');
+if (SEED_MODE_RAW && !['demo', 'base', 'off'].includes(SEED_MODE_RAW)) {
+  console.warn(`SEED_MODE="${process.env.SEED_MODE}" не распознан (допустимо demo, base, off) — используется режим по умолчанию: ${SEED_MODE}.`);
+}
 const ROOT = fileURLToPath(new URL('.', import.meta.url));
 const DATA_DIR = process.env.DATA_DIR || join(ROOT, '../../data');
 const PUBLIC_DIR = process.env.PUBLIC_DIR || join(ROOT, '../../frontend/public');
@@ -25,10 +33,24 @@ const UPLOAD_DIR = join(DATA_DIR, 'uploads');
 const ADMIN_EMAIL = (process.env.ADMIN_EMAIL || 'admin@example.com').toLowerCase();
 const ADMIN_PASSWORD = process.env.ADMIN_PASSWORD || 'admin12345';
 
-const VERSION = '1';
+// Версия продукта: единый источник — файл VERSION в корне (он же попадает в Docker-образ).
+const VERSION = (() => { try { return readFileSync(join(ROOT, '../../VERSION'), 'utf8').trim() || '1'; } catch { return '1'; } })();
 const STARTED = Date.now();
-mkdirSync(DATA_DIR, { recursive: true });
-mkdirSync(UPLOAD_DIR, { recursive: true });
+// Понятная ошибка вместо стектрейса, если каталог данных недоступен (не смонтирован том,
+// права root вместо пользователя node, диск только для чтения).
+function ensureDataDir() {
+  try {
+    mkdirSync(DATA_DIR, { recursive: true });
+    mkdirSync(UPLOAD_DIR, { recursive: true });
+    const probe = join(DATA_DIR, '.write-test');
+    writeFileSync(probe, 'ok');
+    unlinkSync(probe);
+  } catch (e) {
+    console.error(`Каталог данных недоступен для записи: ${DATA_DIR}\n${e.message}\nПроверьте права: в Docker это том /data (владелец — пользователь node, uid 1000), локально — папка ./data.`);
+    process.exit(1);
+  }
+}
+ensureDataDir();
 // Секрет подписи токенов: берём из окружения; если он не задан — генерируем постоянный
 // случайный секрет и сохраняем в каталоге данных, чтобы сессии переживали перезапуск.
 function loadSecret() {
@@ -45,7 +67,13 @@ function loadSecret() {
   return generated;
 }
 const SECRET = loadSecret();
-const db = new DatabaseSync(join(DATA_DIR, 'crm.db'));
+const db = (() => {
+  try { return new DatabaseSync(join(DATA_DIR, 'crm.db')); }
+  catch (e) {
+    console.error(`Не удалось открыть базу ${join(DATA_DIR, 'crm.db')}: ${e.message}\nЕсли файл повреждён, восстановите его из резервной копии в ${join(DATA_DIR, 'backups')} или начните с пустой базы, убрав файл crm.db.`);
+    process.exit(1);
+  }
+})();
 db.exec(`PRAGMA journal_mode=WAL; PRAGMA foreign_keys=ON;
 PRAGMA busy_timeout=5000;      -- не падать, если запись идёт параллельно
 PRAGMA synchronous=NORMAL;     -- быстрая запись при WAL и при этом безопасная
@@ -716,11 +744,25 @@ export const server = http.createServer(async (req, res) => {
       return json(res, 200, { received: true });
     }
     if (p === '/api/health') {
-      let dbSize = 0; try { dbSize = statSync(join(DATA_DIR, 'crm.db')).size } catch {}
-      let backupsCount = 0, lastBackup = null;
-      try { const dir = join(DATA_DIR, 'backups'); const files = existsSync(dir) ? readdirSync(dir).filter(f => f.endsWith('.db')).sort() : []; backupsCount = files.length; lastBackup = files.length ? files[files.length - 1] : null } catch {}
-      const h = { ok: true, service: 'KarkasCRM', version: VERSION, schema: SCHEMA_VERSION, time: new Date().toISOString(), uptimeSec: Math.round((Date.now() - STARTED) / 1000), dbSizeBytes: dbSize, backups: { count: backupsCount, last: lastBackup }, counts: { users: db.prepare('SELECT COUNT(*) n FROM users').get().n, contacts: db.prepare('SELECT COUNT(*) n FROM contacts').get().n, deals: db.prepare('SELECT COUNT(*) n FROM deals').get().n, tasks: db.prepare('SELECT COUNT(*) n FROM tasks WHERE done=0').get().n, messages: db.prepare('SELECT COUNT(*) n FROM messages').get().n } };
-      return json(res, 200, h, true);
+      // Публичный ответ — только факт работы и версия: этот адрес открыт без входа
+      // (Docker healthcheck, мониторинг) и не должен раскрывать объём базы клиентов.
+      const h = { ok: true, service: 'KarkasCRM', version: VERSION, schema: SCHEMA_VERSION, time: new Date().toISOString(), uptimeSec: Math.round((Date.now() - STARTED) / 1000) };
+      const hToken = (req.headers.authorization || '').replace(/^Bearer\s+/i, '') || cookieOf(req).karkas_token || (req.method === 'GET' ? u.searchParams.get('token') : '');
+      const hUser = verify(hToken || '');
+      if (hUser && hUser.role === 'admin') {
+        let dbSize = 0; try { dbSize = statSync(join(DATA_DIR, 'crm.db')).size } catch {}
+        let backupsCount = 0, lastBackup = null;
+        try { const dir = join(DATA_DIR, 'backups'); const files = existsSync(dir) ? readdirSync(dir).filter(f => f.endsWith('.db')).sort() : []; backupsCount = files.length; lastBackup = files.length ? files[files.length - 1] : null } catch {}
+        Object.assign(h, {
+          dbSizeBytes: dbSize, backups: { count: backupsCount, last: lastBackup },
+          counts: {
+            users: db.prepare('SELECT COUNT(*) n FROM users').get().n, contacts: db.prepare('SELECT COUNT(*) n FROM contacts').get().n,
+            deals: db.prepare('SELECT COUNT(*) n FROM deals').get().n, tasks: db.prepare('SELECT COUNT(*) n FROM tasks WHERE done=0').get().n,
+            messages: db.prepare('SELECT COUNT(*) n FROM messages').get().n,
+          },
+        });
+      }
+      return json(res, 200, h);
     }
     if (p === '/api/auth/login' && req.method === 'POST') {
       const ip = clientIp(req);
@@ -1522,9 +1564,17 @@ export const server = http.createServer(async (req, res) => {
     if (p === '/logo.png' || p === '/favicon.ico') {
       const logoPath = resolveLogo();
       if (logoPath && existsSync(logoPath)) {
+        const stLogo = statSync(logoPath);
+        // ETag по содержимому: браузер не скачивает логотип заново, но мгновенно
+        // подхватывает замену (новый файл — новый ETag, старый — ответ 304).
+        const etag = `"${stLogo.size.toString(16)}-${Math.round(stLogo.mtimeMs).toString(16)}"`;
+        const headers = {
+          'Cache-Control': 'no-cache', ETag: etag,
+          'Last-Modified': new Date(stLogo.mtimeMs).toUTCString(),
+        };
+        if (req.headers['if-none-match'] === etag) { res.writeHead(304, headers); return res.end(); }
         const buf = readFileSync(logoPath);
-        const type = sniffImage(buf, 'image/png');
-        res.writeHead(200, { 'Content-Type': type, 'Cache-Control': 'no-cache', 'Content-Length': buf.length });
+        res.writeHead(200, { ...headers, 'Content-Type': sniffImage(buf, 'image/png'), 'Content-Length': buf.length });
         return res.end(buf);
       }
     }

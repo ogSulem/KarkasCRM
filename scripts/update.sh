@@ -7,6 +7,13 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 
 command -v docker >/dev/null || { echo "Docker не установлен"; exit 1; }
+if [ ! -d .git ]; then
+  echo "Это копия без git-истории (например, скачанный архив). Обновление:"
+  echo "  1) скачайте новую версию и распакуйте поверх;"
+  echo "  2) docker compose up -d --build"
+  echo "Данные в томе karkascrm_data при этом не затрагиваются."
+  exit 1
+fi
 
 echo "▶ Забираем изменения из git"
 git pull --ff-only

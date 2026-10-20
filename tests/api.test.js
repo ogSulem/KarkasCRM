@@ -22,7 +22,11 @@ before(async () => { await new Promise(r => server.listening ? r() : server.once
 after(() => server.close());
 
 test('health и вход', async () => {
-  assert.equal((await call('/api/health')).body.ok, true);
+  const anon = (await call('/api/health')).body;
+  assert.equal(anon.ok, true);
+  // публичный health доступен без входа (Docker healthcheck), но не раскрывает бизнес-данные
+  assert.equal(anon.counts, undefined, 'счётчики клиентов не видны без входа');
+  assert.equal(anon.backups, undefined, 'имена резервных копий не видны без входа');
   const l = await readyLogin('/api/auth/login', { method: 'POST', body: JSON.stringify({ email: 'admin@example.com', password: 'admin12345' }) });
   assert.ok(l.body.token, 'получен JWT');
   h = { Authorization: 'Bearer ' + l.body.token };
@@ -43,6 +47,22 @@ test('объединение чатов WhatsApp + Telegram в один диал
   assert.equal(msgs.length, 2, 'дубликат вебхука не создал сообщение');
   const deals = (await call('/api/deals')).body.deals.filter(d => d.contact_name === 'Клиент Wazzup');
   assert.equal(deals.length, 1, 'автосоздана сделка на первом обращении');
+});
+
+test('логотип: отдаётся как изображение и кэшируется по ETag', async () => {
+  const first = await fetch(base + '/logo.png');
+  const bytes = (await first.arrayBuffer()).byteLength; // тело обязательно читаем: иначе сокет держит процесс
+  assert.equal(first.status, 200);
+  assert.ok(bytes > 100, 'логотип не пустой');
+  assert.match(first.headers.get('content-type') || '', /^image\//, 'логотип отдаётся изображением');
+  const etag = first.headers.get('etag');
+  assert.ok(etag, 'у логотипа есть ETag');
+  const second = await fetch(base + '/logo.png', { headers: { 'If-None-Match': etag } });
+  await second.arrayBuffer();
+  assert.equal(second.status, 304, 'неизменённый логотип не скачивается повторно');
+  const favicon = await fetch(base + '/favicon.ico');
+  await favicon.arrayBuffer();
+  assert.equal(favicon.status, 200, 'иконка вкладки отдаётся по /favicon.ico');
 });
 
 test('сделки, товары и пересчёт суммы', async () => {

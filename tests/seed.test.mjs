@@ -83,6 +83,25 @@ rmSync(r.dir, { recursive: true, force: true });
   rmSync(dir, { recursive: true, force: true });
 }
 
+// опечатка в режиме не должна молча включать демо-данные: при CRM_DOMAIN берём base
+{
+  const dir = mkdtempSync(join(tmpdir(), 'karkas-seed-'));
+  const env = { ...process.env, DATA_DIR: dir, PORT: '0', SEED_MODE: 'производство', CRM_DOMAIN: 'crm.example.ru' };
+  const res = spawnSync(process.execPath, ['--experimental-sqlite', '-e', `
+    process.env.DATA_DIR=${JSON.stringify(dir)}; process.env.PORT='0';
+    process.env.SEED_MODE='производство'; process.env.CRM_DOMAIN='crm.example.ru';
+    const { server, db } = await import(${JSON.stringify(join(process.cwd(), 'backend/src/server.js'))});
+    await new Promise(r2 => server.listening ? r2() : server.once('listening', r2));
+    console.log('SEEDOUT ' + JSON.stringify({ contacts: db.prepare('SELECT COUNT(*) n FROM contacts').get().n, products: db.prepare('SELECT COUNT(*) n FROM products').get().n }));
+    server.close(() => process.exit(0));
+  `], { env, encoding: 'utf8' });
+  const m = String(res.stdout).match(/SEEDOUT (\{.*\})/);
+  const out = m ? JSON.parse(m[1]) : null;
+  ok('неизвестный SEED_MODE на проде не включает демо-данные', out && out.contacts === 0 && out.products > 0, JSON.stringify(out));
+  ok('о неизвестном режиме предупреждают в логе', /SEED_MODE=.*не распознан/.test(String(res.stderr || '') + String(res.stdout || '')));
+  rmSync(dir, { recursive: true, force: true });
+}
+
 // ручной CLI: защита непустой базы и режим --base
 {
   const dir = mkdtempSync(join(tmpdir(), 'karkas-cli-'));
