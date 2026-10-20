@@ -466,14 +466,13 @@ input[type=checkbox]{width:16px;height:16px;accent-color:var(--green);cursor:poi
 .login-note{font-size:12px;line-height:1.6;text-align:center;color:var(--muted);margin:16px 0 0}
 .empty-state .btn{display:inline-flex;align-items:center;justify-content:center}
 
-/* ── формы: обязательные поля сверху, необязательные — ниже разделителя ──── */
+/* ── формы: обязательные поля сверху, необязательные — ниже ─────────────── */
 label.req{font-weight:700;color:var(--ink)}
+/* необязательные поля чуть спокойнее, но не бледные: форма читается сверху вниз */
 label.opt{font-weight:500;color:#475569}
 label .star,.star{color:#dc2626;font-weight:700;margin-left:3px}
 .form-grid2{display:grid;grid-template-columns:1fr 1fr;gap:12px}
 .form-grid2>label{margin-bottom:10px;min-width:0}
-.form-sep{display:flex;align-items:center;gap:10px;margin:4px 0 12px;color:var(--muted);font-size:11.5px;letter-spacing:.03em;text-transform:uppercase}
-.form-sep::after{content:'';flex:1;height:1px;background:var(--line)}
 .form-hint{font-size:12px;color:var(--muted);margin:-2px 0 12px;line-height:1.5}
 .form-hint .star{margin:0 2px 0 0}
 .check-line{display:flex;align-items:flex-start;gap:8px;font-weight:500!important;margin-bottom:12px;cursor:pointer}
@@ -481,14 +480,14 @@ label .star,.star{color:#dc2626;font-weight:700;margin-left:3px}
 @media(max-width:560px){.form-grid2{grid-template-columns:1fr}}
 html[data-theme=dark] label.req{color:var(--ink)}
 html[data-theme=dark] label.opt{color:var(--muted)}
-/* ── второстепенные блоки настроек можно сворачивать ─────────────────────── */
-details.form-more{margin:6px 0 4px;border-top:1px dashed var(--line);padding-top:8px}
-details.form-more>summary{cursor:pointer;font-size:13px;color:var(--muted);list-style:none;display:flex;align-items:center;gap:6px;user-select:none}
-details.form-more>summary::-webkit-details-marker{display:none}
-details.form-more>summary::before{content:'▸';font-size:11px;transition:transform .15s}
-details.form-more[open]>summary::before{transform:rotate(90deg)}
-details.form-more>summary:hover{color:var(--green)}
-details.form-more[open]>summary{margin-bottom:8px}
+/* сворачиваемый второстепенный блок настроек (не формы) */
+details.settings-more{margin:6px 0 4px;border-top:1px dashed var(--line);padding-top:8px}
+details.settings-more>summary{cursor:pointer;font-size:13px;color:var(--muted);list-style:none;display:flex;align-items:center;gap:6px;user-select:none}
+details.settings-more>summary::-webkit-details-marker{display:none}
+details.settings-more>summary::before{content:'▸';font-size:11px;transition:transform .15s}
+details.settings-more[open]>summary::before{transform:rotate(90deg)}
+details.settings-more>summary:hover{color:var(--green)}
+details.settings-more[open]>summary{margin-bottom:8px}
 /* карточка сделки: шапка с быстрыми решениями */
 .card-actions{display:flex;gap:6px;flex-wrap:wrap;margin:10px 0 2px}
 .card-actions .btn{white-space:nowrap}

@@ -54,7 +54,7 @@ Object.assign(window, {
   toggleUserMenu, closeUserMenu, toggleTaskSelect, ICON_PATHS, msgHtml, channelOptions,
   uploadChatFile, uploadLogo, deleteLogo, checkHealth, refreshLogo,
   sourceLabel, channelLabel, roleLabel, askConfirm, askInput, translit, SOURCE_LABELS, CHANNEL_LABELS, ROLE_LABELS,
-  isoDate, todayISO, fmtDayMonth, kindStage, fld, grid2, formSep, formLegend, pushToast, notify, captureFocus, restoreFocus
+  isoDate, todayISO, fmtDayMonth, kindStage, fld, grid2, formLegend, pushToast, notify, captureFocus, restoreFocus, PALETTE_ACTIONS
 });`;
 const dom = new JSDOM(htmlClean, { runScripts: 'dangerously', url: BASE + '/', pretendToBeVisual: true, virtualConsole: new VirtualConsole() });
 const { window } = dom;
@@ -178,9 +178,24 @@ try {
       const rows = $$('#view table tr').slice(1).map(r => [...r.children].map(td => td.textContent.trim()));
       const reqRow = rows.find(r => /Площадь участка/.test(r[0]));
       const optRow = rows.find(r => /Тип фундамента/.test(r[0]));
-      check('в таблице полей видно, что обязательное идёт сверху', Boolean(reqRow) && /Сверху/.test(reqRow[3]) && /звёздочк/i.test(reqRow[3]), reqRow && reqRow[3]);
-      check('в таблице полей видно, что необязательное идёт ниже', Boolean(optRow) && /Ниже/i.test(optRow[3]), optRow && optRow[3]);
+      check('в таблице полей видно, что обязательное идёт сверху', Boolean(reqRow) && /Да/.test(reqRow[3]) && /сначала/i.test(reqRow[3]) && /звёздочк/i.test(reqRow[3]), reqRow && reqRow[3]);
+      check('в таблице полей видно, что необязательное идёт ниже', Boolean(optRow) && /Нет/.test(optRow[3]) && /ниже/i.test(optRow[3]), optRow && optRow[3]);
       check('объяснение для неспециалиста есть', /подписано жирным и звёздочкой/i.test($('#view').textContent));
+      check('у каждого поля есть понятная кнопка «Изменить»', $$('#view table tr').slice(1).every(r => /Изменить/.test(r.textContent)));
+    }
+    // редактирование уже существующего поля: кнопка в строке таблицы
+    {
+      const row = $$('#view table tr').find(r => /Тип фундамента/.test(r.textContent));
+      const btn = row && [...row.querySelectorAll('button')].find(b => /Изменить/.test(b.textContent));
+      check('у существующего поля есть кнопка «Изменить»', Boolean(btn));
+      if (btn) {
+        btn.click(); await wait(350);
+        check('«Изменить» открывает поле с текущими настройками', Boolean($('#modalBody [name=label]')) && $('#modalBody [name=label]').value === 'Тип фундамента');
+        $('#modalBody [name=label]').value = 'Тип фундамента (обновлён)';
+        $('#modalBody form').dispatchEvent(new window.Event('submit', { bubbles: true, cancelable: true }));
+        await wait(700);
+        check('изменение существующего поля сохраняется', /Тип фундамента \(обновлён\)/.test($('#view').textContent));
+      }
     }
     await window.openContact(conv.contact_id); await wait(350);
     const req = $('#modalBody [name=cf_plot_area]');
@@ -188,6 +203,7 @@ try {
     check('обязательное своё поле есть в форме', Boolean(req));
     check('необязательное своё поле тоже видно без раскрытия', Boolean(opt) && !opt.closest('details'));
     check('в форме нет сворачиваемого блока «Дополнительно»', !$('#modalBody details.form-more'));
+    check('в форме нет разделителя «Необязательные поля»', !$('#modalBody .form-sep') && !/Необязательные поля/.test($('#modalBody').textContent));
     check('обязательное своё поле идёт раньше необязательного',
       Boolean(req) && Boolean(opt) && (req.compareDocumentPosition(opt) & window.Node.DOCUMENT_POSITION_FOLLOWING) !== 0);
     check('подпись обязательного поля жирная и со звёздочкой', Boolean(req.closest('label.req')) && req.closest('label').querySelector('.star'));
@@ -241,7 +257,7 @@ try {
   check('название сделки подписано как обязательное', Boolean($('#modalBody label.req input[name=title]')));
   check('обязательное поле идёт раньше необязательных',
     ($('#modalBody input[name=title]').compareDocumentPosition($('#modalBody input[name=amount]')) & window.Node.DOCUMENT_POSITION_FOLLOWING) !== 0);
-  check('необязательные поля отделены подписью', /Необязательные поля/.test($('#modalBody').textContent));
+  check('обязательные и необязательные поля идут подряд, без разделителя', !$('#modalBody .form-sep') && !/Необязательные поля/.test($('#modalBody').textContent));
   await window.openCompany(); await wait(250);
   check('в компании название обязательно и первое', Boolean($('#modalBody label.req input[name=name]')) && !$('#modalBody details.form-more'));
   check('в компании видны ИНН, телефон, почта, сайт и заметки', ['inn', 'phone', 'email', 'site', 'notes'].every(n => Boolean($('#modalBody [name=' + n + ']'))));
@@ -509,6 +525,17 @@ try {
   const integText = $('#view').textContent;
   check('интеграции: вместо «Локальный режим» — «не подключено»', !integText.includes('Локальный режим') && integText.includes('не подключено'));
   check('интеграции: термин webhook объяснён по-русски', integText.includes('(это называется вебхук)') && integText.includes('Адрес, по которому Wazzup присылает сообщения'), integText.slice(0, 120));
+
+  // ── в продукте нет упоминаний нейросетей и ИИ-помощников ─────────────────
+  check('в интерфейсе и коде нет упоминаний нейросетей',
+    !/нейросет|нейронн|искусственн\w*\s+интеллект|AI-powered|ChatGPT|GPT-4/i.test(appJsRaw + ' ' + $('#app').textContent));
+
+  // ── палитра команд повторяет меню и его порядок ─────────────────────────
+  {
+    const navLabels = $$('#nav button').map(b => b.textContent.replace(/\s*\d+\s*$/, '').trim());
+    const paletteLabels = (window.PALETTE_ACTIONS?.[0]?.items || []).map(i => i.title);
+    check('палитра команд повторяет пункты и порядок меню', paletteLabels.join('|') === navLabels.join('|'), navLabels.join(' / ') + ' ↔ ' + paletteLabels.join(' / '));
+  }
 
   // ── навигация работает на inline-обработчиках, не завися от boot() ───────
   check('все пункты меню несут inline-обработчик go()', $$('#nav button').length >= 9 && $$('#nav button').every(b => /^go\('/.test(b.getAttribute('onclick') || '')));

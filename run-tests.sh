@@ -11,8 +11,8 @@ node --check backend/src/competitors.js
 node --check backend/src/smtp.js
 node --check frontend/public/app.js
 
-echo "▶ 2/4 Интеграционные тесты (API + конкуренты + миграции базы + копия в S3)"
-node --experimental-sqlite --test tests/api.test.js tests/competitors.test.js
+echo "▶ 2/4 Интеграционные тесты (API, уведомления, гигиена базы, конкуренты, миграции, S3)"
+node --experimental-sqlite --test tests/api.test.js tests/competitors.test.js tests/notifications.test.mjs tests/db-hygiene.test.mjs
 node --experimental-sqlite tests/migrate.test.mjs
 node --experimental-sqlite tests/seed.test.mjs
 node --test tests/backup-s3.test.mjs

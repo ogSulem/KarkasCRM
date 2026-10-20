@@ -529,6 +529,69 @@ test('массовые действия: одна операция на пачк
   assert.equal((await call('/api/contacts')).body.filter(c => ids.includes(c.id)).length, 0, 'записи удалены');
 });
 
+test('сделка, заведённая сразу закрытой, получает дату закрытия', async () => {
+  const won = await call('/api/deals', { method: 'POST', body: JSON.stringify({ title: 'Продажа задним числом', stage: 'won', amount: 5000 }) });
+  assert.equal(won.status, 201);
+  assert.match(won.body.closed_at || '', /^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$/, 'у выигранной сделки есть дата закрытия');
+  const lost = (await call('/api/deals', { method: 'POST', body: JSON.stringify({ title: 'Отказ задним числом', stage: 'lost', amount: 100 }) })).body;
+  assert.ok(lost.closed_at, 'у проигранной сделки тоже есть дата закрытия');
+  const open = (await call('/api/deals', { method: 'POST', body: JSON.stringify({ title: 'Ещё в работе', stage: 'new' }) })).body;
+  assert.equal(open.closed_at, null, 'открытая сделка дату закрытия не получает');
+  // дата закрытия не переписывается при повторном сохранении уже закрытой сделки
+  await new Promise(r => setTimeout(r, 1100));
+  const saved = (await call('/api/deals/' + won.body.id, { method: 'PATCH', body: JSON.stringify({ amount: 5100 }) })).body;
+  assert.equal(saved.closed_at, won.body.closed_at, 'дата закрытия не «уезжает» при правке суммы');
+  // а возврат в работу её очищает — иначе выручка посчитается дважды
+  const reopened = (await call('/api/deals/' + won.body.id, { method: 'PATCH', body: JSON.stringify({ stage: 'negotiation' }) })).body;
+  assert.equal(reopened.closed_at, null, 'возврат в работу очищает дату закрытия');
+});
+
+test('массовые действия со сделками: этап, ответственный, закрытие и удаление', async () => {
+  const ids = [];
+  for (let i = 0; i < 3; i++) ids.push((await call('/api/deals', { method: 'POST', body: JSON.stringify({ title: `Пачка сделок ${i}`, stage: 'new', amount: 1000 * (i + 1) }) })).body.id);
+  // повторяющиеся id — одна запись, иначе счётчик и уведомления врут
+  const won = await call('/api/bulk', { method: 'POST', body: JSON.stringify({ table: 'deals', ids: [ids[0], ids[0], ids[1]], action: 'update', patch: { stage: 'won' } }) });
+  assert.equal(won.status, 200, 'этап меняется пачкой');
+  assert.equal(won.body.count, 2, 'повторяющиеся id считаются один раз');
+  assert.equal((await call('/api/bulk', { method: 'POST', body: JSON.stringify({ table: 'deals', ids: [ids[0], 999999], action: 'update', patch: { amount: 4000 } }) })).body.count, 1, 'в ответе — сколько записей реально изменилось');
+  const first = (await call('/api/deals/' + ids[0])).body.deal, second = (await call('/api/deals/' + ids[1])).body.deal, third = (await call('/api/deals/' + ids[2])).body.deal;
+  assert.equal(first.stage, 'won'); assert.equal(second.stage, 'won');
+  assert.match(first.closed_at || '', /^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$/, 'массовый перевод в «Успешно» ставит дату закрытия');
+  assert.equal(third.stage, 'new'); assert.equal(third.closed_at, null, 'невыбранные сделки не тронуты');
+  const back = await call('/api/bulk', { method: 'POST', body: JSON.stringify({ table: 'deals', ids: [ids[0], ids[1]], action: 'update', patch: { stage: 'negotiation' } }) });
+  assert.equal(back.status, 200);
+  assert.equal((await call('/api/deals/' + ids[0])).body.deal.closed_at, null, 'возврат в работу очищает дату закрытия');
+  // ошибочные значения отбиваются до записи: пачка не должна измениться частично
+  assert.equal((await call('/api/bulk', { method: 'POST', body: JSON.stringify({ table: 'deals', ids: [ids[2]], action: 'update', patch: { responsible_id: 999999 } }) })).status, 400, 'несуществующий ответственный отклоняется');
+  assert.equal((await call('/api/bulk', { method: 'POST', body: JSON.stringify({ table: 'deals', ids: [ids[2]], action: 'update', patch: { amount: -5 } }) })).status, 400, 'отрицательная сумма отклоняется');
+  assert.equal((await call('/api/bulk', { method: 'POST', body: JSON.stringify({ table: 'deals', ids: [ids[2]], action: 'update', patch: { priority: 'срочно' } }) })).status, 400, 'неизвестный приоритет отклоняется');
+  assert.equal((await call('/api/deals/' + ids[2])).body.deal.stage, 'new', 'после ошибок сделка не изменилась');
+  const admin = (await call('/api/users')).body.find(u => u.role === 'admin');
+  const owner = await call('/api/bulk', { method: 'POST', body: JSON.stringify({ table: 'deals', ids, action: 'update', patch: { responsible_id: admin.id } }) });
+  assert.equal(owner.status, 200);
+  const owned = (await call('/api/deals/' + ids[2])).body.deal;
+  assert.equal(owned.responsible_id, admin.id); assert.equal(owned.responsible, admin.name, 'имя ответственного не расходится с id');
+  // смена воронки без выбора этапа не ломает пачку: этап берётся из новой воронки
+  const pipe = (await call('/api/pipelines', { method: 'POST', body: JSON.stringify({ name: 'Воронка для пачки' }) })).body;
+  const moved = await call('/api/bulk', { method: 'POST', body: JSON.stringify({ table: 'deals', ids: [ids[2]], action: 'update', patch: { pipeline_id: pipe.id } }) });
+  assert.equal(moved.status, 200, 'перенос в другую воронку работает пачкой');
+  assert.equal((await call('/api/deals/' + ids[2])).body.deal.pipeline_id, pipe.id);
+  // удаление пачкой не оставляет висячих задач, позиций и заметок
+  const doomed = (await call('/api/deals', { method: 'POST', body: JSON.stringify({ title: 'Сделка под удаление', stage: 'new' }) })).body;
+  const product = (await call('/api/products', { method: 'POST', body: JSON.stringify({ name: 'Товар под удаление', price: 700 }) })).body;
+  await call(`/api/deals/${doomed.id}/products`, { method: 'POST', body: JSON.stringify({ product_id: product.id, qty: 2 }) });
+  const task = (await call('/api/tasks', { method: 'POST', body: JSON.stringify({ title: 'Задача по удаляемой сделке', deal_id: doomed.id }) })).body;
+  await call('/api/notes', { method: 'POST', body: JSON.stringify({ entity_type: 'deals', entity_id: doomed.id, body: 'Заметка по удаляемой сделке' }) });
+  const del = await call('/api/bulk', { method: 'POST', body: JSON.stringify({ table: 'deals', ids: [doomed.id], action: 'delete' }) });
+  assert.equal(del.status, 200, 'сделки удаляются пачкой');
+  assert.equal((await call('/api/deals/' + doomed.id)).status, 404, 'сделка удалена');
+  assert.equal((await call('/api/tasks/' + task.id)).body.deal_id, null, 'задача осталась, но без ссылки на удалённую сделку');
+  assert.equal((await call('/api/deals/' + doomed.id + '/products')).body.length, 0, 'позиции удалённой сделки убраны');
+  assert.equal((await call('/api/notes?type=deals&entity=' + doomed.id)).body.length, 0, 'заметки удалённой сделки убраны');
+  await call('/api/tasks/' + task.id, { method: 'DELETE' });
+  await call('/api/bulk', { method: 'POST', body: JSON.stringify({ table: 'deals', ids, action: 'delete' }) });
+});
+
 test('менеджер не меняет правила и шаблоны, но работает с клиентами', async () => {
   const created = (await call('/api/users', { method: 'POST', body: JSON.stringify({ name: 'Менеджер Оля', email: `olya${Date.now()}@example.com`, password: 'manager12345', role: 'manager' }) })).body;
   const login = (await readyLogin('/api/auth/login', { method: 'POST', body: JSON.stringify({ email: `olya${Date.now() - 1}@example.com`, password: 'manager12345' }) })).body;

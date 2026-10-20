@@ -11,11 +11,14 @@
   "scripts": {
     "start": "node --experimental-sqlite backend/src/server.js",
     "dev": "DATA_DIR=./data node --experimental-sqlite backend/src/server.js",
-    "test": "node --experimental-sqlite --test tests/api.test.js tests/competitors.test.js",
-    "test:db": "node --experimental-sqlite tests/migrate.test.mjs",
+    "test": "node --experimental-sqlite --test tests/api.test.js tests/competitors.test.js tests/notifications.test.mjs tests/db-hygiene.test.mjs",
+    "test:db": "node --experimental-sqlite --test tests/db-hygiene.test.mjs tests/migrate.test.mjs",
     "test:ui": "node --experimental-sqlite tests/ui.smoke.mjs",
     "test:all": "./run-tests.sh",
     "start:local": "./run-local.sh",
-    "check": "node --check backend/src/server.js && node --check backend/src/competitors.js && node --check backend/src/smtp.js && node --check frontend/public/app.js"
+    "check": "node --check backend/src/server.js && node --check backend/src/competitors.js && node --check backend/src/smtp.js && node --check frontend/public/app.js",
+    "test:notify": "node --experimental-sqlite --test tests/notifications.test.mjs",
+    "db:check": "node --experimental-sqlite scripts/db-check.mjs",
+    "db:clean": "node --experimental-sqlite scripts/db-check.mjs --clean"
   }
 }

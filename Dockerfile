@@ -29,7 +29,7 @@ COPY backend ./backend
 COPY frontend ./frontend
 # В образ нужны только скрипты сопровождения, которые запускаются внутри контейнера
 # (выгрузка резервных копий в S3); pack/update остаются на хосте.
-COPY scripts/s3-sign.mjs scripts/upload-backup.mjs ./scripts/
+COPY scripts/s3-sign.mjs scripts/upload-backup.mjs scripts/db-check.mjs ./scripts/
 COPY logo.jpg VERSION package.json ./
 
 # tzdata — чтобы TZ=Europe/Moscow реально работал: в alpine по умолчанию нет базы
