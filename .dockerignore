@@ -10,7 +10,6 @@ tests
 licenses
 *.md
 docker-compose.yml
-scripts
 run-local.sh
 run-tests.sh
 install.sh

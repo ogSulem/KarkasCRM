@@ -51,6 +51,35 @@ if missing:
 print('  ✅ Caddyfile: домен из .env, прокси на crm:8080, https://домен/.well-known/health → ok, HSTS')
 CADDYCHECK
 
+echo "  • файлы для Dockerfile не исключены из контекста сборки"
+python3 << 'DOCKERCTX'
+import sys
+lines = open('Dockerfile').read().splitlines()
+dockerignore = [l.strip().rstrip('/') for l in open('.dockerignore').read().splitlines()
+                if l.strip() and not l.strip().startswith('#')]
+errors = []
+for line in lines:
+    if not line.startswith('COPY '):
+        continue
+    parts = line[5:].split()
+    if len(parts) < 2:
+        continue
+    for src in parts[:-1]:
+        if src.startswith('--'):
+            continue
+        import os
+        if not os.path.exists(src):
+            errors.append(f'{src}: нет такого файла или каталога'); continue
+        for ign in dockerignore:
+            if ign.startswith('*'):
+                continue  # шаблоны вида *.md проверять смысла нет
+            if src == ign or src.startswith(ign + '/'):
+                errors.append(f'{src}: исключён .dockerignore («{ign}») — сборка упадёт')
+if errors:
+    print('  ❌ Dockerfile и .dockerignore:', '; '.join(errors)); sys.exit(1)
+print('  ✅ Dockerfile: все COPY-источники есть и не отсечены .dockerignore')
+DOCKERCTX
+
 echo "  • nginx-пример для сервера с уже занятыми 80/443"
 NGINX=deploy/nginx.conf
 for frag in 'X-Forwarded-For' 'proxy_buffering off' 'client_max_body_size' 'proxy_read_timeout'; do
