@@ -47,15 +47,15 @@
     <div class="brand-text"><span class="brand-part-karkas">Каркас</span><span class="brand-part-crm">CRM</span></div>
   </div>
   <nav id="nav">
-    <button type="button" data-view="dashboard" class="active" onclick="go('dashboard')"><span class="nav-ico" data-icon="dashboard"></span> Дашборд</button>
+    <button type="button" data-view="dashboard" class="active" onclick="go('dashboard')"><span class="nav-ico" data-icon="dashboard"></span> Рабочий стол</button>
     <button type="button" data-view="pipe" onclick="go('pipe')"><span class="nav-ico" data-icon="pipe"></span> Сделки <span class="pill" id="navDeals"></span></button>
+    <button type="button" data-view="tasks" onclick="go('tasks')"><span class="nav-ico" data-icon="tasks"></span> Задачи <span class="pill" id="navTasks"></span></button>
     <button type="button" data-view="inbox" onclick="go('inbox')"><span class="nav-ico" data-icon="inbox"></span> Чаты <span class="pill orange" id="navUnread"></span></button>
     <button type="button" data-view="contacts" onclick="go('contacts')"><span class="nav-ico" data-icon="contacts"></span> Контакты</button>
     <button type="button" data-view="companies" onclick="go('companies')"><span class="nav-ico" data-icon="companies"></span> Компании</button>
-    <button type="button" data-view="tasks" onclick="go('tasks')"><span class="nav-ico" data-icon="tasks"></span> Задачи <span class="pill" id="navTasks"></span></button>
-    <button type="button" data-view="products" onclick="go('products')"><span class="nav-ico" data-icon="products"></span> Товары</button>
-    <button type="button" data-view="competitors" onclick="go('competitors')"><span class="nav-ico" data-icon="competitors"></span> Конкуренты</button>
+    <button type="button" data-view="products" onclick="go('products')"><span class="nav-ico" data-icon="products"></span> Каталог</button>
     <button type="button" data-view="analytics" onclick="go('analytics')"><span class="nav-ico" data-icon="analytics"></span> Аналитика</button>
+    <button type="button" data-view="competitors" onclick="go('competitors')"><span class="nav-ico" data-icon="competitors"></span> Конкуренты</button>
     <button type="button" data-view="settings" onclick="go('settings')"><span class="nav-ico" data-icon="settings"></span> Настройки</button>
   </nav>
   <div class="side-card" id="sideIntegrations"><b>Интеграции и каналы</b><p>Мессенджеры, почта, ключи источников, воронки, свои поля и права — в разделе «Настройки».</p><button class="btn orange w" onclick="go('settings','integrations')">Интеграции</button></div>
@@ -73,7 +73,7 @@
 </aside>
 <main>
   <header>
-    <div><h2 id="title">Дашборд</h2><p id="subtitle"></p></div>
+    <div><h2 id="title">Рабочий стол</h2><p id="subtitle"></p></div>
     <div class="head-actions">
       <div class="searchbox"><span class="search-ico" id="searchIco"></span><input id="globalSearch" placeholder="Поиск: клиенты, сделки, компании, задачи" autocomplete="off" aria-label="Глобальный поиск по клиентам, сделкам, компаниям и задачам"><div id="searchResults" class="search-results hidden"></div></div>
       <button class="btn orange" onclick="openDeal()">+ Сделка</button>
