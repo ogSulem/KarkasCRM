@@ -563,6 +563,13 @@ function companyRequisites() {
 const escHtml = (v = '') => String(v ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 const money = (n, cur = '₽') => new Intl.NumberFormat('ru-RU').format(Math.round(Number(n) || 0)) + ' ' + cur;
 // печатная страница А4: открывается в новой вкладке и сразу готова к печати или сохранению в PDF
+// Дата для документов и писем — привычная: 05.11.2026 вместо 2026-11-05.
+// В базе и API остаётся ISO: по нему сортируют и сравнивают.
+function displayDate(value) {
+  const raw = String(value ?? '').trim();
+  const m = raw.match(/^(\d{4})-(\d{2})-(\d{2})(?:[ T](\d{2}):(\d{2}))?/);
+  return m ? `${m[3]}.${m[2]}.${m[1]}${m[4] ? ' ' + m[4] + ':' + m[5] : ''}` : raw;
+}
 function dealDocument({ deal, items, doc, company }) {
   const isInvoice = doc === 'invoice';
   const sum = items.reduce((a, x) => a + x.price * x.qty, 0);
@@ -605,7 +612,7 @@ function dealDocument({ deal, items, doc, company }) {
 ${rows || '<tr><td colspan="6" class="muted">Позиции не добавлены — заполните состав в карточке сделки</td></tr>'}</table>
 <div class="total">Итого: ${money(sum, company.currency)}${isInvoice ? `<br><span class="muted">в том числе НДС 20%: ${money(vat, company.currency)}</span>` : ''}</div>
 ${isInvoice ? `<h2>Реквизиты для оплаты</h2><div class="grid"><div>${company.bank ? escHtml(company.bank) + '<br>' : ''}${company.account ? 'Р/с ' + escHtml(company.account) : ''}</div><div>${company.signer ? `Подписант: ${escHtml(company.signer_position || 'Руководитель')} ${escHtml(company.signer)}` : ''}</div></div>` : ''}
-${deal.deadline ? `<p class="muted">Срок действия предложения / срок выполнения: ${escHtml(deal.deadline)}</p>` : ''}
+${deal.deadline ? `<p class="muted">Срок действия предложения / срок выполнения: ${escHtml(displayDate(deal.deadline))}</p>` : ''}
 <div class="sign"><div>${isInvoice ? 'Руководитель' : 'Исполнитель'}<div class="line"></div>${company.signer ? escHtml(company.signer) : ''}</div>
 <div>Заказчик<div class="line"></div>${escHtml(deal.contact_name || '')}</div></div>
 </body></html>`;
@@ -703,8 +710,9 @@ if (!process.env.KARKAS_NO_SEED && SEED_MODE !== 'off' && !getSetting('SEED_DONE
 }
 // Разовая починка шаблонов из ранних сборок: при вставке были перепутаны
 // текст и канал, поэтому в поле «текст» оказывался код канала (telegram, any),
-// а сам текст — в поле «канал». Меняем местами только явно испорченные записи,
-// поэтому повторный запуск ничего не портит.
+// а сам текст — в поле «канал». Возвращаем текст на место, а канал обнуляем:
+// у шаблона его больше нет (куда отправить, выбирают в чате). Правим только
+// явно испорченные записи, поэтому повторный запуск ничего не портит.
 try {
   const CODES = ['whatsapp', 'telegram', 'instagram', 'viber', 'email', 'any'];
   const holes = CODES.map(() => '?').join(',');
@@ -714,7 +722,7 @@ try {
     const fix = db.prepare('UPDATE templates SET body=?, channel=? WHERE id=?');
     db.exec('BEGIN IMMEDIATE');
     try {
-      for (const t of broken) fix.run(String(t.channel || ''), String(t.body || '').trim().toLowerCase(), t.id);
+      for (const t of broken) fix.run(String(t.channel || ''), 'any', t.id);
       db.exec('COMMIT');
       console.log(`Шаблоны: исправлен текст у ${broken.length} зап. (в ранней версии текст и канал были перепутаны).`);
     } catch (e) { db.exec('ROLLBACK'); throw e }
@@ -981,7 +989,7 @@ export const server = http.createServer(async (req, res) => {
       const tables = ['users', 'companies', 'contacts', 'pipelines', 'stages', 'deals', 'tasks', 'notes', 'products', 'templates', 'automations', 'conversations', 'messages', 'channels', 'competitors', 'competitor_checks', 'competitor_reports', 'reviews', 'price_rows']; const out = {}; tables.forEach(t => out[t] = db.prepare(`SELECT * FROM ${t}`).all()); res.writeHead(200, { 'Content-Type': 'application/json', 'Content-Disposition': 'attachment; filename=karkas-backup.json' }); return res.end(JSON.stringify(out, null, 2)); }
 
     // ===== generic CRUD =====
-    const CRUD = { contacts: ['name', 'phone', 'email', 'company', 'company_id', 'position', 'source', 'tags', 'notes', 'responsible_id', 'custom'], companies: ['name', 'inn', 'phone', 'email', 'site', 'notes'], tasks: ['title', 'type', 'due', 'priority', 'done', 'deal_id', 'contact_id', 'responsible_id', 'result', 'repeat'], products: ['name', 'sku', 'price', 'unit', 'active'], templates: ['name', 'body', 'channel'], automations: ['name', 'trigger_type', 'trigger_value', 'action_type', 'action_value', 'active'], notes: ['entity_type', 'entity_id', 'body', 'author'] };
+    const CRUD = { contacts: ['name', 'phone', 'email', 'company', 'company_id', 'position', 'source', 'tags', 'notes', 'responsible_id', 'custom'], companies: ['name', 'inn', 'phone', 'email', 'site', 'notes'], tasks: ['title', 'type', 'due', 'priority', 'done', 'deal_id', 'contact_id', 'responsible_id', 'result', 'repeat'], products: ['name', 'sku', 'price', 'unit', 'active'], templates: ['name', 'body'], automations: ['name', 'trigger_type', 'trigger_value', 'action_type', 'action_value', 'active'], notes: ['entity_type', 'entity_id', 'body', 'author'] };
     const mCrud = p.match(/^\/api\/(contacts|companies|tasks|products|templates|automations|notes)(?:\/(\d+))?$/);
     if (mCrud) { const [, table, id] = mCrud; const fields = CRUD[table];
       if (table === 'templates') {
@@ -989,9 +997,9 @@ export const server = http.createServer(async (req, res) => {
         if (req.method === 'GET' && !id) return json(res, 200, db.prepare('SELECT * FROM templates WHERE user_id=? ORDER BY id DESC').all(user.id));
         if (req.method === 'POST') {
           const b = await readBody(req);
-          const r = db.prepare('INSERT INTO templates(name,body,channel,user_id) VALUES(?,?,?,?)')
-            .run(String(b.name || '').slice(0, 80) || 'Шаблон', String(b.body || '').slice(0, 20000),
-              ['whatsapp', 'telegram', 'instagram', 'viber', 'email', 'any'].includes(b.channel) ? b.channel : 'any', user.id);
+          // канал у шаблона больше не спрашивается: куда отправить, выбирается в чате
+          const r = db.prepare("INSERT INTO templates(name,body,channel,user_id) VALUES(?,?,'any',?)")
+            .run(String(b.name || '').slice(0, 80) || 'Шаблон', String(b.body || '').slice(0, 20000), user.id);
           log('Создан шаблон', 'templates', Number(r.lastInsertRowid), user.name);
           broadcast('change', { table });
           return json(res, 201, db.prepare('SELECT * FROM templates WHERE id=?').get(r.lastInsertRowid));
@@ -1000,7 +1008,7 @@ export const server = http.createServer(async (req, res) => {
           const tpl = db.prepare('SELECT * FROM templates WHERE id=?').get(id);
           if (!tpl) return json(res, 404, { error: 'Шаблон не найден' });
           if (tpl.user_id !== user.id) return json(res, 403, { error: 'Это чужой шаблон — можно менять только свои' });
-          if (req.method === 'PATCH') { const b = await readBody(req); const ks = Object.keys(b).filter(k => ['name', 'body', 'channel'].includes(k)); if (ks.length) db.prepare(`UPDATE templates SET ${ks.map(k => k + '=?')} WHERE id=?`).run(...ks.map(k => k === 'name' ? String(b[k]).slice(0, 80) : k === 'body' ? String(b[k]).slice(0, 20000) : b[k]), id); broadcast('change', { table }); return json(res, 200, db.prepare('SELECT * FROM templates WHERE id=?').get(id)); }
+          if (req.method === 'PATCH') { const b = await readBody(req); const ks = Object.keys(b).filter(k => ['name', 'body'].includes(k)); if (ks.length) db.prepare(`UPDATE templates SET ${ks.map(k => k + '=?')} WHERE id=?`).run(...ks.map(k => k === 'name' ? String(b[k]).slice(0, 80) : String(b[k]).slice(0, 20000)), id); broadcast('change', { table }); return json(res, 200, db.prepare('SELECT * FROM templates WHERE id=?').get(id)); }
           if (req.method === 'DELETE') { db.prepare('DELETE FROM templates WHERE id=?').run(id); log('Шаблон удалён', 'templates', Number(id), user.name); broadcast('change', { table }); return json(res, 200, { deleted: true }); }
         }
         return json(res, 405, { error: 'Метод не поддерживается' });
@@ -1444,7 +1452,9 @@ export const server = http.createServer(async (req, res) => {
     }
     if (p === '/api/export/deals') {
       res.writeHead(200, { 'Content-Type': 'text/csv; charset=utf-8', 'Content-Disposition': 'attachment; filename=deals.csv' });
-      const rows = db.prepare(`SELECT d.title 'Название', d.amount 'Сумма', COALESCE(c.name,'') 'Клиент', COALESCE(c.phone,'') 'Телефон', d.stage 'Этап', d.priority 'Приоритет', COALESCE(d.deadline,'') 'Срок', COALESCE(d.loss_reason,'') 'Причина отказа', datetime(d.created_at,'localtime') 'Создана' FROM deals d LEFT JOIN contacts c ON c.id=d.contact_id ORDER BY d.id DESC`).all();
+      const rows = db.prepare(`SELECT d.title 'Название', d.amount 'Сумма', COALESCE(c.name,'') 'Клиент', COALESCE(c.phone,'') 'Телефон', d.stage 'Этап', d.priority 'Приоритет', COALESCE(d.deadline,'') 'Срок', COALESCE(d.loss_reason,'') 'Причина отказа', datetime(d.created_at,'localtime') 'Создана' FROM deals d LEFT JOIN contacts c ON c.id=d.contact_id ORDER BY d.id DESC`).all()
+        // даты в таблице для человека: Excel с русской локалью понимает 05.11.2026, а ISO — нет
+        .map(r => ({ ...r, 'Срок': displayDate(r['Срок']), 'Создана': displayDate(r['Создана']) }));
       return res.end('﻿' + csv(rows));
     }
     if (p === '/api/import/contacts' && req.method === 'POST') {

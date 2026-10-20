@@ -123,17 +123,21 @@ try {
     check('чат: после перерисовки сообщение на месте', /Проверка сохранения сообщения/.test($('#chatMsgs').textContent));
   }
 
-  // ── шаблоны: в списке текст ответа и понятный канал, а не коды ───────────
-  const tplDemo = await apiPost('/api/templates', { name: 'Проверка шаблона', body: 'Здравствуйте, {name}! Это текст ответа для проверки.', channel: 'any' });
+  // ── шаблоны: только текст ответа, без привязки к каналу ──────────────────
+  const tplDemo = await apiPost('/api/templates', { name: 'Проверка шаблона', body: 'Здравствуйте, {name}! Это текст ответа для проверки.', channel: 'telegram' });
+  check('шаблон сохраняется без канала (канал выбирается в чате)', tplDemo.channel === 'any', String(tplDemo.channel));
   window.__state.settingsTab = 'templates'; window.go('settings'); await wait(400);
   {
     const rows = $$('#view .tpl-row');
-    const tags = rows.map(r => r.querySelector('.tag')?.textContent.trim() || '');
     const bodies = rows.map(r => r.querySelector('p')?.textContent.trim() || '');
     check('шаблоны: все строки отрисованы', rows.length >= 1, rows.length + ' шт.');
-    check('шаблоны: канал подписан по-русски', tags.length > 0 && tags.every(t => /Любой канал|WhatsApp|Telegram|Instagram|Viber|Почта/.test(t)), tags.join(', '));
+    check('шаблоны: в списке нет ярлыка канала', $$('#view .tpl-row .tag').length === 0);
     check('шаблоны: в тексте нет кода канала', bodies.every(b => !/^(whatsapp|telegram|instagram|viber|email|any)$/i.test(b)), bodies.map(b => b.slice(0, 12)).join(' | '));
     check('шаблоны: текст ответа длиннее кода', bodies.length > 0 && bodies.every(b => b.length > 20));
+    await window.openTemplate(tplDemo.id); await wait(300);
+    check('в форме шаблона нет выбора канала', !$('#modalBody [name=channel]') && /Подстановки/.test($('#modalBody').textContent));
+    window.closeModal();
+    check('в подсказке объяснено, что канал выбирается в чате', /канал.*выбирается в чате|Куда отправить/i.test($('#view').textContent));
   }
   await fetch(BASE + '/api/templates/' + tplDemo.id, { method: 'DELETE', headers: authH() });
 
@@ -148,18 +152,36 @@ try {
     check('вебхуки: поле публичного адреса доступно в интерфейсе', Boolean($('#publicUrl')));
   }
 
-  // ── свои поля: создаются в настройках и появляются в форме и карточке ────
+  // ── свои поля: обязательные сразу в форме, необязательные под «Дополнительно» ──
   {
     const saved = await (await fetch(BASE + '/api/custom-fields', { headers: authH() })).json();
-    await fetch(BASE + '/api/custom-fields', { method: 'PUT', headers: authH(), body: JSON.stringify({ fields: [{ key: 'plot_area', label: 'Площадь участка', type: 'number', entity: 'both', required: false, options: [] }] }) });
+    await fetch(BASE + '/api/custom-fields', { method: 'PUT', headers: authH(), body: JSON.stringify({ fields: [
+      { key: 'plot_area', label: 'Площадь участка', type: 'number', entity: 'both', required: true, options: [] },
+      { key: 'foundation', label: 'Тип фундамента', type: 'text', entity: 'both', required: false, options: [] },
+    ] }) });
     window.__state.meta = await (await fetch(BASE + '/api/meta', { headers: authH() })).json();
+    window.__state.settingsTab = 'fields'; window.go('settings'); await wait(400);
+    {
+      const rows = $$('#view table tr').slice(1).map(r => [...r.children].map(td => td.textContent.trim()));
+      const reqRow = rows.find(r => /Площадь участка/.test(r[0]));
+      const optRow = rows.find(r => /Тип фундамента/.test(r[0]));
+      check('в таблице полей видно, что показывается сразу', Boolean(reqRow) && /Сразу/.test(reqRow[3]) && /обязательн/i.test(reqRow[3]), reqRow && reqRow[3]);
+      check('в таблице полей видно, что убрано под «Дополнительно»', Boolean(optRow) && /Дополнительно/i.test(optRow[3]), optRow && optRow[3]);
+      check('объяснение для неспециалиста есть', /показывается сразу в основной части формы/i.test($('#view').textContent));
+    }
     await window.openContact(conv.contact_id); await wait(350);
-    const input = $('#modalBody [name=cf_plot_area]');
-    check('своё поле появилось в форме контакта', Boolean(input) && !input.closest('details'));
+    const req = $('#modalBody [name=cf_plot_area]');
+    const opt = $('#modalBody [name=cf_foundation]');
+    check('обязательное своё поле — сразу в основной форме', Boolean(req) && !req.closest('details'));
+    check('необязательное своё поле — под «Дополнительно»', Boolean(opt) && !!opt.closest('details'));
     check('своё поле подписано понятным названием', /Площадь участка/.test($('#modalBody').textContent));
     window.closeModal();
+    await window.openDeal(); await wait(350);
+    check('в сделке тоже: обязательное сверху, необязательное в «Дополнительно»',
+      Boolean($('#modalBody [name=cf_plot_area]')) && !$('#modalBody [name=cf_plot_area]').closest('details') && !!$('#modalBody [name=cf_foundation]').closest('details'));
+    window.closeModal();
     await window.openContactCard(conv.contact_id); await wait(350);
-    check('своё поле видно в карточке клиента', /Площадь участка/.test($('#modalBody').textContent));
+    check('свои поля видны в карточке клиента', /Площадь участка/.test($('#modalBody').textContent) && /Тип фундамента/.test($('#modalBody').textContent));
     window.closeModal();
     await fetch(BASE + '/api/custom-fields', { method: 'PUT', headers: authH(), body: JSON.stringify({ fields: saved.fields || [] }) });
     window.__state.meta = await (await fetch(BASE + '/api/meta', { headers: authH() })).json();
@@ -210,13 +232,15 @@ try {
   // локальная дата не зависит от UTC
   check('isoDate возвращает локальную дату', window.isoDate(new Date(2026, 0, 1)) === '2026-01-01' && window.isoDate(new Date(2026, 11, 31)) === '2026-12-31');
   check('todayISO совпадает с локальным днём', window.todayISO() === `${new Date().getFullYear()}-${String(new Date().getMonth() + 1).padStart(2, '0')}-${String(new Date().getDate()).padStart(2, '0')}`);
-  await modal('ссылка на файл', () => { window.__state.conv = conv.id; window.openAttachment() });
 
   // ── чат: компоновщик как в мессенджере ───────────────────────────────────
   window.go('inbox'); await wait(400);
   check('скрепка прикрепления файла стоит рядом с полем ввода', Boolean($('#chatFile')) && Boolean($('.composer-ico [data-lucide], .composer-ico svg')));
   check('кнопка отправки — круглая со стрелкой вверх, без бумажного самолётика', Boolean($('.send-btn svg')) && !appJsRaw.includes("icon('send'"));
   check('под полем ввода есть выбор канала и шаблонов', Boolean($('#msgChannel')) && Boolean($('#msgTmpl')));
+  check('в композере нет кнопки «ссылка на файл»', !window.openAttachment && !$$('.composer-ico').some(b => /ссылк/i.test(b.title)));
+  check('выбор канала подписан «Куда отправить»', /Куда отправить/.test($('.composer-sub').textContent));
+  check('в композере ровно три действия: файл, поле, отправка', $$('.composer-row:first-child > *').length === 4);
   check('есть быстрый переход к настройке шаблонов', Boolean($('.tmpl-settings')));
   const opts = window.channelOptions({ channels: 'whatsapp,telegram' });
   check('channelOptions сначала показывает каналы клиента', opts.indexOf('whatsapp') < opts.indexOf('email'));
@@ -373,6 +397,20 @@ try {
   const code = window.siteFormCode();
   check('код формы для сайта ссылается на вебхук', /webhooks\/generic/.test(code) && /sendToKarkas/.test(code));
   check('скелетоны описаны для всех разделов', ['dashboard', 'pipe', 'inbox', 'contacts', 'tasks', 'analytics', 'competitors', 'settings'].every(v => typeof window.SKELETONS?.[v] === 'function'));
+
+  // ── даты в формате СНГ и цифры KPI отдельной строкой ────────────────────
+  check('дата показывается как дд.мм.гггг', window.dateText('2026-10-20') === '20.10.2026' && window.dateText('2026-10-20 09:30') === '20.10.2026 09:30');
+  check('месяц записан как 10.2026, а подсказка по-русски', window.monthShort('2026-10') === '10.2026' && window.monthText('2026-10') === 'октябрь 2026');
+  check('в дашборде и KPI нет сырых ISO-дат', !/\b20\d{2}-\d{2}-\d{2}\b/.test($('#view').textContent));
+  window.go('analytics'); await wait(500);
+  {
+    const kpi = $$('#view .kpi').map(k => ({ title: k.querySelector('span')?.textContent.trim() || '', value: k.querySelector('b')?.textContent.trim() || '', note: [...k.querySelectorAll('small')].map(s2 => s2.textContent.trim()).join(' ') }));
+    const plan = kpi.find(k => /Продано|План/i.test(k.title));
+    check('в аналитике крупная цифра — факт продаж, план — подписью', Boolean(plan) && /₽/.test(plan.value) && /план/i.test(plan.note), JSON.stringify(plan));
+    check('месяц в плане — в формате 10.2026', Boolean(plan) && /\b(0[1-9]|1[0-2])\.20\d{2}\b/.test(plan.title), plan && plan.title);
+    check('подпись KPI не приклеена к цифре', kpi.every(k => !/\d\s?₽.*(?:успешных|план)/.test(k.value)));
+  }
+  window.go('dashboard'); await wait(400);
 
   // ── health без признака демонстрационных данных ──────────────────────────
   const h = await (await fetch(BASE + '/api/health')).json();
