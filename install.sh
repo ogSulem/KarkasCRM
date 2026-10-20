@@ -46,11 +46,13 @@ if [ ! -f .env ]; then
   cp .env.example .env
   if command -v openssl >/dev/null; then
     SECRET=$(openssl rand -hex 32); PASS=$(openssl rand -hex 12)
-    sed -i "s|^JWT_SECRET=.*|JWT_SECRET=$SECRET|" .env
-    sed -i "s|^ADMIN_PASSWORD=.*|ADMIN_PASSWORD=$PASS|" .env
   else
-    PASS="admin12345 (смените в .env!)"
+    # openssl есть не всегда — берём ту же энтропию из /dev/urandom
+    SECRET=$(tr -dc 'a-f0-9' </dev/urandom | head -c 64)
+    PASS=$(tr -dc 'A-Za-z0-9' </dev/urandom | head -c 24)
   fi
+  sed -i "s|^JWT_SECRET=.*|JWT_SECRET=$SECRET|" .env
+  sed -i "s|^ADMIN_PASSWORD=.*|ADMIN_PASSWORD=$PASS|" .env
   echo "──────────────────────────────────────────────"
   echo " Создан .env с автоматическими секретами."
   echo " Пароль администратора: $(grep '^ADMIN_PASSWORD=' .env | cut -d= -f2-)"
@@ -72,13 +74,17 @@ if [ "$MODE" = "tls" ]; then
   [ -n "$EMAIL" ] && set_env ACME_EMAIL "$EMAIL"
   # CRM доступна только через HTTPS-прокси, наружу порт 8080 не торчит
   set_env CRM_BIND "127.0.0.1"
-  echo "Режим: домен с HTTPS → https://${DOMAIN}"
+  # прод: чистая база с правовой основой (каталог, шаблоны, правило)
+  set_env SEED_MODE "base"
+  echo "Режим: домен с HTTPS → https://${DOMAIN} (начальные данные — правовая основа, без демо)"
   echo "Проверьте, что DNS домена указывает на этот сервер, а порты 80 и 443 открыты."
   docker compose --profile tls up -d --build
   ADDRESS="https://${DOMAIN}"
 else
   set_env CRM_BIND "0.0.0.0"
-  echo "Режим: локальный запуск / по IP без домена"
+  # локально: сразу живые примеры, чтобы всё посмотреть и потрогать
+  set_env SEED_MODE "demo"
+  echo "Режим: локальный запуск / по IP без домена (с демонстрационными данными)"
   docker compose up -d --build
   IP=$(curl -s --max-time 4 ifconfig.me || hostname -I | awk '{print $1}')
   PORT=$(grep -E '^CRM_PORT=' .env | cut -d= -f2- || true); PORT=${PORT:-8080}

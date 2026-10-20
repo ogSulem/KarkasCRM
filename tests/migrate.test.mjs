@@ -9,6 +9,7 @@ const DATA = mkdtempSync(join(tmpdir(), 'karkas-migrate-'));
 const PORT = 18077;
 process.env.DATA_DIR = DATA;
 process.env.PORT = String(PORT);
+process.env.SEED_MODE = 'off'; // миграция проверяется на чистой базе
 
 let failed = 0;
 const ok = (name, cond, extra = '') => { console.log(`${cond ? '✅' : '❌'} ${name}${extra ? ' — ' + extra : ''}`); if (!cond) failed++ };

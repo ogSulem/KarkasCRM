@@ -19,11 +19,13 @@ fi
 export DATA_DIR="${DATA_DIR:-$PWD/data}"
 export PORT="${PORT:-8080}"
 export HOST="${HOST:-127.0.0.1}"
+# локальный запуск — сразу с демонстрационными данными (SEED_MODE=demo/base/off)
+export SEED_MODE="${SEED_MODE:-demo}"
 mkdir -p "$DATA_DIR"
 
 if [ ! -f .env ]; then
   echo "Совет: cp .env.example .env — там секреты, пароль администратора, ключи каналов связи и почты."
-  echo "Без файла настроек система запустится с чистой базой: admin@example.com / admin12345 (смените пароль после входа)."
+  echo "Без файла настроек система запустится с демонстрационными данными: admin@example.com / admin12345 (смените пароль после входа)."
 fi
 
 if [ -f .env ]; then set -a; . ./.env; set +a; fi

@@ -8,6 +8,8 @@ import { fileURLToPath } from 'node:url';
 
 process.env.DATA_DIR = '/tmp/karkas-competitors-' + Date.now();
 process.env.PORT = '18088';
+// внешние источники замоканы на localhost — разрешаем внутренние адреса
+process.env.ALLOW_PRIVATE_FETCH = '1';
 const { server } = await import('../backend/src/server.js');
 const base = 'http://127.0.0.1:18088';
 const INN = '7700000001', OGRN = '1027700000001';
@@ -156,6 +158,20 @@ test('цены: Excel-файл конкурента и наша таблица �
   assert.equal(pr.expensive, 2); assert.equal(pr.cheaper, 1);
   assert.ok(typeof pr.avgDiff === 'number' && pr.avgDiff > 0, 'средняя разница цен посчитана: ' + pr.avgDiff + '%');
   assert.ok(r.body.report.verdict.length > 20);
+});
+
+test('прайс можно вставить текстом — без файла', async () => {
+  const list = await call('/api/competitors');
+  const comp = list.body.find(c => c.inn === INN);
+  const ins = await call(`/api/competitors/${comp.id}/prices`, { method: 'POST', body: JSON.stringify({
+    text: 'Наименование;Цена;Ед.\nКаркасный дом 8×10 «Север»;4000000;шт\nБаня 4×6;900000;шт\n',
+    scope: 'competitor'
+  }) });
+  assert.equal(ins.status, 201, 'текстовая таблица принимается');
+  assert.equal(ins.body.imported, 2, 'обе строки распознаны');
+  assert.ok(ins.body.rows.every(r => r.price > 0), 'цены — числа');
+  const bad = await call(`/api/competitors/${comp.id}/prices`, { method: 'POST', body: JSON.stringify({ text: '', scope: 'competitor' }) });
+  assert.equal(bad.status, 400, 'пустая таблица — понятная ошибка');
 });
 
 test('отзывы добавляются вручную и удаляются', async () => {

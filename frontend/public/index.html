@@ -2,6 +2,10 @@
 <title>КаркасCRM — сделки, клиенты и задачи в единой CRM-системе</title>
 <meta name="description" content="CRM: воронки и сделки, клиенты, задачи, единый инбокс мессенджеров, почта, разведка конкурентов.">
 <meta name="theme-color" content="#16a34a"><meta name="color-scheme" content="light dark">
+<!-- рабочая CRM не должна попадать в поисковые системы и соцсети -->
+<meta name="robots" content="noindex,nofollow,noarchive"><meta name="referrer" content="same-origin">
+<!-- тема применяется до отрисовки: нет вспышки белым в тёмном режиме -->
+<script>try{var t=localStorage.getItem('karkas_theme');document.documentElement.dataset.theme=(t==='dark'||t==='light')?t:(matchMedia('(prefers-color-scheme: dark)').matches?'dark':'light')}catch(e){}</script>
 <link rel="icon" href="/logo.png">
 <link rel="stylesheet" href="/style.css"></head><body>
 
@@ -54,7 +58,7 @@
     <button type="button" data-view="analytics" onclick="go('analytics')"><span class="nav-ico" data-icon="analytics"></span> Аналитика</button>
     <button type="button" data-view="settings" onclick="go('settings')"><span class="nav-ico" data-icon="settings"></span> Настройки</button>
   </nav>
-  <div class="side-card"><b>Интеграции и каналы</b><p>Мессенджеры, почта, ключи источников, воронки, свои поля и права — в разделе «Настройки».</p><button class="btn orange w" onclick="go('settings','integrations')">Интеграции</button></div>
+  <div class="side-card" id="sideIntegrations"><b>Интеграции и каналы</b><p>Мессенджеры, почта, ключи источников, воронки, свои поля и права — в разделе «Настройки».</p><button class="btn orange w" onclick="go('settings','integrations')">Интеграции</button></div>
   <div class="user-wrap">
     <button class="user-btn" id="userBtn" type="button" aria-haspopup="true" onclick="toggleUserMenu(event)">
       <div class="avatar" id="uAva">А</div>
@@ -71,7 +75,7 @@
   <header>
     <div><h2 id="title">Дашборд</h2><p id="subtitle"></p></div>
     <div class="head-actions">
-      <div class="searchbox"><span class="search-ico" id="searchIco"></span><input id="globalSearch" placeholder="Поиск: клиенты, сделки, компании, задачи" autocomplete="off"><div id="searchResults" class="search-results hidden"></div></div>
+      <div class="searchbox"><span class="search-ico" id="searchIco"></span><input id="globalSearch" placeholder="Поиск: клиенты, сделки, компании, задачи" autocomplete="off" aria-label="Глобальный поиск по клиентам, сделкам, компаниям и задачам"><div id="searchResults" class="search-results hidden"></div></div>
       <button class="btn orange" onclick="openDeal()">+ Сделка</button>
       <button class="btn primary" onclick="openContact()">+ Контакт</button>
       <button class="btn" onclick="openTask()">+ Задача</button>
@@ -82,6 +86,6 @@
   <section id="view"></section>
 </main></div>
 
-<div id="modal" class="modal hidden"><div class="modal-card"><button class="x" onclick="closeModal()" title="Закрыть">×</button><div id="modalBody"></div></div></div>
-<div id="toast"></div>
+<div id="modal" class="modal hidden" role="dialog" aria-modal="true" aria-label="Окно КаркасCRM"><div class="modal-card"><button class="x" onclick="closeModal()" title="Закрыть">×</button><div id="modalBody"></div></div></div>
+<div id="toast" role="status" aria-live="polite"></div>
 <script src="/app.js"></script></body></html>

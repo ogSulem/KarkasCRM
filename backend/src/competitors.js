@@ -3,6 +3,7 @@
 //   ok | skipped (нет ключа) | blocked (сайт не отдал данные) | error
 // Для любого источника всегда формируются прямые ссылки ручной проверки — они работают без API.
 import zlib from 'node:zlib';
+import dns from 'node:dns';
 
 const digits = s => String(s || '').replace(/\D/g, '');
 const clamp = (v, a, b) => Math.max(a, Math.min(b, v));
@@ -23,9 +24,8 @@ export const SOURCE_DEFS = [
   { key: 'yandex', name: 'Яндекс Карты', kind: 'reviews', needs: ['YANDEX_API_KEY'], about: 'Карточка организации, адрес, телефоны' },
 ];
 
-export function createCompetitors(ctx) {
-  const { db, json, readBody, log, broadcast, getSetting, setSetting, user: noop } = ctx;
-
+// схема модуля «Конкуренты»: создаётся и при запуске сервера, и при явном seed
+export function ensureCompetitorsSchema(db) {
   db.exec(`
   CREATE TABLE IF NOT EXISTS competitors(id INTEGER PRIMARY KEY,name TEXT NOT NULL,inn TEXT,ogrn TEXT,city TEXT,website TEXT,phone TEXT,notes TEXT DEFAULT '',price_url TEXT DEFAULT '',created_at TEXT DEFAULT (datetime('now')));
   CREATE TABLE IF NOT EXISTS competitor_checks(id INTEGER PRIMARY KEY,competitor_id INTEGER REFERENCES competitors(id) ON DELETE CASCADE,source TEXT,status TEXT,summary TEXT,payload TEXT,checked_at TEXT DEFAULT (datetime('now')));
@@ -33,12 +33,18 @@ export function createCompetitors(ctx) {
   CREATE TABLE IF NOT EXISTS reviews(id INTEGER PRIMARY KEY,competitor_id INTEGER REFERENCES competitors(id) ON DELETE CASCADE,source TEXT DEFAULT 'вручную',rating REAL,text TEXT,author TEXT,url TEXT,created_at TEXT DEFAULT (datetime('now')));
   CREATE TABLE IF NOT EXISTS price_rows(id INTEGER PRIMARY KEY,competitor_id INTEGER,scope TEXT DEFAULT 'competitor',item TEXT,price REAL,unit TEXT,sku TEXT,note TEXT,source_name TEXT,updated_at TEXT DEFAULT (datetime('now')));
   CREATE INDEX IF NOT EXISTS idx_checks_comp ON competitor_checks(competitor_id,source);
-  `);
-  for (const [t, c, d] of [['competitors', 'demo', 'INTEGER DEFAULT 0'], ['price_rows', 'demo', 'INTEGER DEFAULT 0']]) { const cols = db.prepare(`PRAGMA table_info(${t})`).all().map(r => r.name); if (!cols.includes(c)) db.exec(`ALTER TABLE ${t} ADD COLUMN ${c} ${d}`) }
-  db.exec(`
   CREATE INDEX IF NOT EXISTS idx_reviews_comp ON reviews(competitor_id);
   CREATE INDEX IF NOT EXISTS idx_prices_comp ON price_rows(competitor_id,scope);
   `);
+  for (const [t, c, d] of [['competitors', 'demo', 'INTEGER DEFAULT 0'], ['price_rows', 'demo', 'INTEGER DEFAULT 0']]) {
+    const cols = db.prepare(`PRAGMA table_info(${t})`).all().map(r => r.name);
+    if (!cols.includes(c)) db.exec(`ALTER TABLE ${t} ADD COLUMN ${c} ${d}`);
+  }
+}
+
+export function createCompetitors(ctx) {
+  const { db, json, readBody, log, broadcast, getSetting, setSetting } = ctx;
+  ensureCompetitorsSchema(db);
 
   const SOURCE_URL_DEFAULTS = {
     RUSPROFILE_URL: 'https://www.rusprofile.ru',
@@ -53,13 +59,54 @@ export function createCompetitors(ctx) {
   const srcUrl = k => getSetting(k, SOURCE_URL_DEFAULTS[k]).replace(/\/$/, '');
 
   // ─────────────────────────── helpers ───────────────────────────
+  // SSRF-защита: пользовательские ссылки (прайс конкурента, « наша таблица по URL»)
+  // не должны тянуть данные из внутренней сети. Только http/https, только
+  // публичные IP, редиректы проверяются заново, размер ответа ограничен.
+  const isPrivateIp = ip => {
+    if (!ip) return true;
+    if (ip.includes('::ffff:')) ip = ip.split('::ffff:').pop(); // IPv4-mapped IPv6
+    const v6 = ip.includes(':');
+    if (v6) return ip === '::1' || ip.startsWith('fc') || ip.startsWith('fd') || ip.startsWith('fe80') || ip.startsWith('fe00');
+    const o = ip.split('.').map(Number);
+    if (o.length !== 4 || o.some(x => !Number.isFinite(x) || x < 0 || x > 255)) return true;
+    if (o[0] === 127 || o[0] === 10 || o[0] === 0) return true;
+    if (o[0] === 169 && o[1] === 254) return true;
+    if (o[0] === 192 && o[1] === 168) return true;
+    if (o[0] === 172 && o[1] >= 16 && o[1] <= 31) return true;
+    return false;
+  };
+  // ALLOW_PRIVATE_FETCH=1 — только для тестов и самохостинговых шлюзов в локальной сети
+  const ALLOW_PRIVATE = process.env.ALLOW_PRIVATE_FETCH === '1';
+  async function safeFetch(url, opt = {}, ms = 12000, hops = 0) {
+    let u;
+    try { u = new URL(url); } catch { throw new Error('Некорректная ссылка'); }
+    if (!['http:', 'https:'].includes(u.protocol)) throw new Error('Только ссылки http/https');
+    let infos = [];
+    try { infos = await dns.promises.lookup(u.hostname, { all: true }); } catch { throw new Error('Не удалось узнать адрес сервера'); }
+    if (!ALLOW_PRIVATE && (!infos.length || infos.some(i => isPrivateIp(i.address)))) throw new Error('Ссылка ведёт на внутренний адрес — это запрещено политикой безопасности');
+    const res = await fetch(url, { ...opt, redirect: 'manual', signal: AbortSignal.timeout(ms), headers: { 'User-Agent': 'Mozilla/5.0 (compatible; KarkasCRM)', Accept: '*/*', ...(opt.headers || {}) } });
+    if ([301, 302, 303, 307, 308].includes(res.status)) {
+      const loc = res.headers.get('location');
+      if (!loc) throw new Error('Пустое перенаправление');
+      if (hops >= 5) throw new Error('Слишком много перенаправлений');
+      return safeFetch(new URL(loc, url).toString(), opt, ms, hops + 1);
+    }
+    // ограничиваем размер ответа: читаем поток с потолком 8 МБ
+    const MAX = 8 * 1024 * 1024;
+    const chunks = []; let total = 0;
+    for await (const chunk of res.body ?? []) {
+      total += chunk.length;
+      if (total > MAX) { res.body?.cancel?.(); throw new Error('Ответ слишком большой (более 8 МБ)'); }
+      chunks.push(chunk);
+    }
+    return { ok: res.ok, status: res.status, text: Buffer.concat(chunks).toString('utf8') };
+  }
   async function http(url, opt = {}, ms = Number(getSetting('COMPETITOR_TIMEOUT_MS', '12000'))) {
     try {
-      const res = await fetch(url, { ...opt, signal: AbortSignal.timeout(ms), headers: { 'User-Agent': 'Mozilla/5.0 (compatible; KarkasCRM)', Accept: '*/*', ...(opt.headers || {}) } });
-      const text = await res.text();
-      let data = null; try { data = JSON.parse(text); } catch {}
-      return { ok: res.ok, status: res.status, text, data };
-    } catch (e) { return { ok: false, status: 0, text: '', data: null, error: e.name === 'TimeoutError' ? 'таймаут запроса' : e.message }; }
+      const res = await safeFetch(url, opt, ms);
+      let data = null; try { data = JSON.parse(res.text); } catch {}
+      return { ok: res.ok, status: res.status, text: res.text, data };
+    } catch (e) { return { ok: false, status: 0, text: '', data: null, error: e.message }; }
   }
   const blockedHint = 'сайт не отдал данные автоматически — проверьте по ссылке ниже';
   // нет соединения / блокировка антиботом / превышен лимит — во всех случаях данные берём по ссылке
@@ -379,6 +426,7 @@ export function createCompetitors(ctx) {
   async function fetchTable(url) {
     const res = await http(url, {}, 20000);
     if (!res.ok) throw new Error(`Не удалось скачать таблицу: HTTP ${res.status || res.error}`);
+    if (res.error) throw new Error(res.error);
     const isSheet = /docs\.google\.com\/spreadsheets/.test(url) && !/output=csv|format=csv/.test(url);
     const body = isSheet ? (await http(url.replace(/\/edit.*$/, '/export?format=csv'), {}, 20000)).text : res.text;
     return body;
@@ -439,13 +487,18 @@ export function createCompetitors(ctx) {
     const scope = b.scope === 'ours' ? 'ours' : 'competitor';
     let rows = [];
     if (b.base64) rows = importBuffer(Buffer.from(String(b.base64).split(',').pop(), 'base64'), b.filename || 'загруженный файл');
-    else if (b.csv) rows = rowsToPrices(parseTable(b.csv), b.filename || 'вставленная таблица');
+    else if (b.csv || b.text) rows = rowsToPrices(parseTable(b.csv || b.text), b.filename || 'вставленная таблица');
     if (!rows.length) return { error: 'Не удалось распознать ни одной строки. Нужны колонки «наименование» и «цена».' };
     const compId = scope === 'ours' ? null : (defaultCompId ?? (b.competitor_id ? Number(b.competitor_id) : null));
     if (scope === 'competitor' && !compId) return { error: 'Не указан конкурент' };
-    db.prepare('DELETE FROM price_rows WHERE scope=? AND IFNULL(competitor_id,0)=IFNULL(?,0)').run(scope, compId);
-    const ins = db.prepare('INSERT INTO price_rows(competitor_id,scope,item,price,unit,sku,note,source_name) VALUES(?,?,?,?,?,?,?,?)');
-    rows.forEach(r => ins.run(compId, scope, r.item, r.price, r.unit || 'шт', r.sku || '', r.note || '', r.source_name || b.filename || 'файл'));
+    // замена таблицы — в транзакции: упало на середине, старый прайс цел
+    db.exec('BEGIN IMMEDIATE');
+    try {
+      db.prepare('DELETE FROM price_rows WHERE scope=? AND IFNULL(competitor_id,0)=IFNULL(?,0)').run(scope, compId);
+      const ins = db.prepare('INSERT INTO price_rows(competitor_id,scope,item,price,unit,sku,note,source_name) VALUES(?,?,?,?,?,?,?,?)');
+      rows.forEach(r => ins.run(compId, scope, r.item, r.price, r.unit || 'шт', r.sku || '', r.note || '', r.source_name || b.filename || 'файл'));
+      db.exec('COMMIT');
+    } catch (e) { db.exec('ROLLBACK'); throw e }
     return { imported: rows.length, scope, rows: db.prepare('SELECT * FROM price_rows WHERE scope=? AND IFNULL(competitor_id,0)=IFNULL(?,0)').all(scope, compId) };
   }
 
@@ -473,7 +526,14 @@ export function createCompetitors(ctx) {
         ourPriceUrl: getSetting('OUR_PRICE_URL'), timeout: getSetting('COMPETITOR_TIMEOUT_MS', '12000'),
         urls: Object.fromEntries(Object.keys(SOURCE_URL_DEFAULTS).map(k => [k, srcUrl(k)])),
       });
-      if (req.method === 'PUT') { if (!await admin()) return; const b = await readBody(req); for (const [k, v] of Object.entries(b)) if (v !== undefined && !String(v).includes('•')) setSetting(k, v); return json(res, 200, { saved: true }); }
+      if (req.method === 'PUT') {
+      if (!await admin()) return;
+      const b = await readBody(req);
+      // только известные ключи: адреса источников, ключи и таймаут
+      const allowed = [...Object.keys(SOURCE_URL_DEFAULTS), 'FNS_API_KEY', 'FSSP_TOKEN', 'GOOGLE_PLACES_KEY', 'TWOGIS_KEY', 'YANDEX_API_KEY', 'OUR_PRICE_URL', 'COMPETITOR_TIMEOUT_MS'];
+      for (const k of allowed) if (b[k] !== undefined && !String(b[k]).includes('•')) setSetting(k, String(b[k]).slice(0, 512));
+      return json(res, 200, { saved: true });
+    }
     }
     if (p === '/api/competitor-links') { const q = { name: u.searchParams.get('name') || '', inn: u.searchParams.get('inn') || '', ogrn: u.searchParams.get('ogrn') || '' }; return json(res, 200, { links: linksFor(q) }); }
     if (p === '/api/competitors') {
@@ -500,7 +560,14 @@ export function createCompetitors(ctx) {
       if (action === 'check' && req.method === 'POST') { const b = await readBody(req).catch(() => ({})); if (b.inn && !comp.inn) { db.prepare('UPDATE competitors SET inn=? WHERE id=?').run(digits(b.inn), id); comp.inn = digits(b.inn) } const out = await runCheck(comp, { sources: b.sources, pullTable: b.pullTable !== false }); return json(res, 200, { ...out, competitor: competitorFull(id) }); }
       if (action === 'reviews' && req.method === 'POST') { const b = await readBody(req); const r = db.prepare('INSERT INTO reviews(competitor_id,source,rating,text,author,url) VALUES(?,?,?,?,?,?)').run(id, b.source || 'вручную', b.rating ?? null, b.text || '', b.author || user.name, b.url || ''); return json(res, 201, { id: r.lastInsertRowid }); }
       if (action === 'prices' && req.method === 'POST') {
-        const out = importPriceRows(await readBody(req), id);
+        const b = await readBody(req);
+        // «наша таблица цен» — общий справочник: менять его может только администратор
+        if (b.scope === 'ours' && user.role !== 'admin') return json(res, 403, { error: 'Нашу таблицу цен может менять только администратор' });
+        // «Текст / ссылки»: подтягиваем таблицу по URL или разбираем вставленный текст
+        if (b.url && !b.base64 && !b.csv && !b.text) {
+          try { b.csv = await fetchTable(String(b.url)); } catch (e) { return json(res, 400, { error: e.message }) }
+        }
+        const out = importPriceRows(b, id);
         if (out.error) return json(res, 400, { error: out.error });
         log(`Импорт прайса (${out.scope}): ${out.imported} позиций`, 'competitors', out.scope === 'ours' ? null : id, user.name); broadcast('change', { table: 'price_rows' });
         return json(res, 201, out);
@@ -510,7 +577,12 @@ export function createCompetitors(ctx) {
     const mRev = p.match(/^\/api\/reviews\/(\d+)$/);
     if (mRev && req.method === 'DELETE') { db.prepare('DELETE FROM reviews WHERE id=?').run(mRev[1]); return json(res, 200, { deleted: true }); }
     if (p === '/api/prices' && req.method === 'POST') {
-      const out = importPriceRows(await readBody(req), null);
+      const b = await readBody(req);
+      if (b.scope === 'ours' && user.role !== 'admin') return json(res, 403, { error: 'Нашу таблицу цен может менять только администратор' });
+      if (b.url && !b.base64 && !b.csv && !b.text) {
+        try { b.csv = await fetchTable(String(b.url)); } catch (e) { return json(res, 400, { error: e.message }) }
+      }
+      const out = importPriceRows(b, null);
       if (out.error) return json(res, 400, { error: out.error });
       log(`Импорт прайса (${out.scope}): ${out.imported} позиций`, 'competitors', null, user.name); broadcast('change', { table: 'price_rows' });
       return json(res, 201, out);
@@ -523,6 +595,7 @@ export function createCompetitors(ctx) {
       return json(res, 200, { scope, rows, competitor_id: compId ? Number(compId) : null });
     }
     if ((p === '/api/prices/load' || p === '/api/competitors/prices-url') && req.method === 'POST') {
+      if (!await admin()) return;
       const b = await readBody(req);
       if (b.url) { try { const text = await fetchTable(b.url); const rows = importBuffer(Buffer.from(text), 'URL-таблица'); if (!rows.length) return json(res, 400, { error: 'В таблице не найдено позиций с ценами' }); db.prepare("DELETE FROM price_rows WHERE scope='ours'").run(); const ins = db.prepare('INSERT INTO price_rows(competitor_id,scope,item,price,unit,sku,note,source_name) VALUES(NULL,?,?,?,?,?,?,?)'); rows.forEach(r => ins.run('ours', r.item, r.price, r.unit, r.sku, r.note, 'URL-таблица')); setSetting('OUR_PRICE_URL', b.url); return json(res, 200, { imported: rows.length, rows: db.prepare("SELECT * FROM price_rows WHERE scope='ours'").all() }); } catch (e) { return json(res, 400, { error: e.message }) } }
       return json(res, 400, { error: 'Не передан URL таблицы' });

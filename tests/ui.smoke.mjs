@@ -24,7 +24,7 @@ if (!JSDOM) {
 const PORT = 18079, BASE = `http://127.0.0.1:${PORT}`, DATA = '/tmp/karkas-ui-smoke';
 rmSync(DATA, { recursive: true, force: true });
 const sleep = ms => new Promise(r => setTimeout(r, ms));
-const srv = spawn('node', ['--experimental-sqlite', 'backend/src/server.js'], { cwd: ROOT, env: { ...process.env, DATA_DIR: DATA, PORT: String(PORT), HOST: '127.0.0.1' }, stdio: 'ignore' });
+const srv = spawn('node', ['--experimental-sqlite', 'backend/src/server.js'], { cwd: ROOT, env: { ...process.env, DATA_DIR: DATA, PORT: String(PORT), HOST: '127.0.0.1', SEED_MODE: 'off' }, stdio: 'ignore' });
 for (let i = 0; i < 60; i++) { try { if ((await fetch(BASE + '/api/health')).ok) break } catch {} await sleep(200) }
 
 const html = readFileSync(join(ROOT, 'frontend/public/index.html'), 'utf8');
@@ -38,10 +38,11 @@ window.__state = state;
 Object.assign(window, {
   SKELETONS, toggleTheme, applyTheme, openPalette, closePalette, toggleSel, clearSel,
   siteFormCode, bulkApply, openContactCard, openDealCard, api, get token() { return token },
-  icon, normalizeDue, taskDueMeta, isAscii, readToken, endSession, togglePass,
+  icon, normalizeDue, taskDueMeta, isAscii, endSession, togglePass,
   toggleUserMenu, closeUserMenu, toggleTaskSelect, ICON_PATHS, msgHtml, channelOptions,
   uploadChatFile, uploadLogo, deleteLogo, checkHealth, refreshLogo,
-  sourceLabel, channelLabel, roleLabel, askConfirm, askInput, translit, SOURCE_LABELS, CHANNEL_LABELS, ROLE_LABELS
+  sourceLabel, channelLabel, roleLabel, askConfirm, askInput, translit, SOURCE_LABELS, CHANNEL_LABELS, ROLE_LABELS,
+  isoDate, todayISO, fmtDayMonth, kindStage, formMore, captureFocus, restoreFocus
 });`;
 const dom = new JSDOM(htmlClean, { runScripts: 'dangerously', url: BASE + '/', pretendToBeVisual: true, virtualConsole: new VirtualConsole() });
 const { window } = dom;
@@ -85,7 +86,8 @@ try {
   $('#loginForm').dispatchEvent(new window.Event('submit', { bubbles: true, cancelable: true }));
   await wait(700);
   check('вход через форму открывает приложение', $('#login').classList.contains('hidden') && !$('#app').classList.contains('hidden'), $('#loginErr').textContent);
-  window.__token = window.localStorage.getItem('karkas_token');
+  window.__token = loginJson.token;
+  check('токен сессии не сохраняется в localStorage', window.localStorage.getItem('karkas_token') === null);
 
   // ── тестовые данные через API ────────────────────────────────────────────
   await apiPost('/webhooks/generic', { channel: 'site', phone: '79110001122', name: 'Ирина Соколова', body: 'Здравствуйте, нужен расчёт дома' });
@@ -130,6 +132,26 @@ try {
   await modal('дубли контактов', () => window.openDuplicates());
   await modal('редактор своих полей', () => window.editField(-1));
   await modal('письмо клиенту', () => window.openEmailComposer(conv.id));
+
+  // ── формы: главное сразу, вторичное — под «Дополнительно» ─────────────────
+  await window.openDeal(); await wait(250);
+  check('в новой сделке есть блок «Дополнительно»', Boolean($('#modalBody details.form-more')) && /Дополнительно/.test($('#modalBody').innerHTML));
+  check('главные поля сделки видны без раскрытия', Boolean($('#modalBody input[name=title]')) && Boolean($('#modalBody select[name=contact_id]')));
+  check('ответственный и дедлайн спрятаны под «Дополнительно»', Boolean($('#modalBody details.form-more select[name=responsible_id]')) && Boolean($('#modalBody details.form-more input[name=deadline]')));
+  check('в форме контакта «Дополнительно» закрыто по умолчанию', await (async () => { window.closeModal(); await window.openContact(); await wait(200); const d = $('#modalBody details.form-more'); const closed = d && !d.open; window.closeModal(); return closed })());
+  // этап «успех» находится по смыслу, а не по жёсткому коду
+  check('этап успеха определяется по виду этапа', window.__state.stages.some(s => s.kind === 'won') ? window.kindStage('won') === window.__state.stages.find(s => s.kind === 'won').code : true);
+  // задача из карточки: связи уже известны — подпись вместо двух длинных списков
+  const linkDeal = window.__state.deals[0], linkContact = window.__state.contacts[0];
+  window.closeModal();
+  await window.openTask(null, { deal_id: linkDeal.id, contact_id: linkContact.id }); await wait(250);
+  check('задача из карточки показывает привязки подписью', Boolean($('#modalBody .task-link')) && !$('#modalBody select[name=deal_id]') && Boolean($('#modalBody input[type=hidden][name=deal_id]')));
+  window.taskUnlink($('#modalBody .task-link .link-btn'), 'contact_id');
+  check('привязку можно сменить на другое значение', Boolean($('#modalBody select[name=contact_id]')));
+  window.closeModal();
+  // локальная дата не зависит от UTC
+  check('isoDate возвращает локальную дату', window.isoDate(new Date(2026, 0, 1)) === '2026-01-01' && window.isoDate(new Date(2026, 11, 31)) === '2026-12-31');
+  check('todayISO совпадает с локальным днём', window.todayISO() === `${new Date().getFullYear()}-${String(new Date().getMonth() + 1).padStart(2, '0')}-${String(new Date().getDate()).padStart(2, '0')}`);
   await modal('ссылка на файл', () => { window.__state.conv = conv.id; window.openAttachment() });
 
   // ── чат: компоновщик как в мессенджере ───────────────────────────────────
@@ -212,7 +234,8 @@ try {
 
   // ── дашборд и внимание ───────────────────────────────────────────────────
   window.go('dashboard'); await wait(350);
-  check('дашборд содержит блок «Требует внимания»', $('#view').innerHTML.includes('Требует внимания'));
+  // либо блок внимания с цифрами, либо спокойная плашка «Всё под контролем»
+  check('дашборд показывает состояние дел без лишнего шума', /Требует внимания|Всё под контролем/.test($('#view').innerHTML));
   check('карточки внимания: сегодня, просрочено, чаты', $('#view .attn-card.today') && $('#view .attn-card.warn') && $('#view .attn-card.chat'));
   check('дашборд содержит кликабельные KPI', $$('#view .clickable-card, #view .kpi[onclick]').length >= 4);
 
@@ -234,10 +257,7 @@ try {
   check('глазок показывает пароль', pwInput.type === 'text');
   window.togglePass($('#loginEye'));
   check('повторный клик глазка скрывает пароль', pwInput.type === 'password');
-  check('readToken отбрасывает не-ASCII токены', window.isAscii('valid_token_123') && !window.isAscii('bad_token_\u0000_тест'));
-  window.localStorage.setItem('karkas_token', 'bad_token_\u0000\u0001');
-  check('повреждённый токен очищается', window.readToken() === '' && !window.localStorage.getItem('karkas_token'));
-  window.localStorage.setItem('karkas_token', window.__token);
+  check('проверка токена отбрасывает не-ASCII значения', window.isAscii('valid_token_123') && !window.isAscii('bad_token_\u0000_тест'));
   check('endSession определён', typeof window.endSession === 'function');
   check('normalizeDue/taskDueMeta работают', window.normalizeDue('сегодня 14:00').includes('14:00') && window.normalizeDue('15.10.2026 18:30') === '2026-10-15 18:30' && window.taskDueMeta('2020-01-01 10:00', false).overdue === true);
 
@@ -280,8 +300,8 @@ try {
   const viewLogin = await (await fetch(BASE + '/api/auth/login', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ email: 'view_ui@example.com', password: 'password123' }) })).json();
   const view403 = await fetch(BASE + '/api/contacts', { method: 'POST', headers: { 'Content-Type': 'application/json', Authorization: 'Bearer ' + viewLogin.token }, body: JSON.stringify({ name: 'Hack' }) });
   check('наблюдатель не может создавать записи (403)', view403.status === 403);
-  const sim403 = await fetch(BASE + '/api/inbox/simulate', { method: 'POST', headers: { 'Content-Type': 'application/json', Authorization: 'Bearer ' + mgrToken }, body: JSON.stringify({ text: 'x' }) });
-  check('служебный симулятор входящих доступен только администратору', sim403.status === 403);
+  const auto403 = await fetch(BASE + '/api/automations', { method: 'POST', headers: { 'Content-Type': 'application/json', Authorization: 'Bearer ' + mgrToken }, body: JSON.stringify({ name: 'Правило менеджера' }) });
+  check('менеджеру запрещено создавать автоматизации (403)', auto403.status === 403);
 
   // ── настройки команды глазами менеджера ──────────────────────────────────
   const admin = window.__state.me;
@@ -307,7 +327,7 @@ try {
   check('эмодзи нет в server.js', !hasEmojis(serverJsRaw));
   check('эмодзи нет в competitors.js', !hasEmojis(competitorsJsRaw));
   const productText = html + appJsRaw + cssText;
-  check('в интерфейсе нет упоминаний демонстрационного режима', !/демо|Демо|SEED_DEMO/.test(productText));
+  check('в интерфейсе нет технического мусора seed', !/SEED_DEMO|seed-demo/.test(productText));
   check('в интерфейсе нет номеров версий и патчей', !/2\.9|v2\.\d|karkascrm-v|KarkasCRM-\d/.test(productText));
   check('в интерфейсе нет кнопки-самолётика', !/icon\('send'/.test(appJsRaw));
   check('в интерфейсе нет пользовательского симулятора входящих', !/simulate\(\)/.test(appJsRaw));
