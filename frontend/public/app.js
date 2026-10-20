@@ -482,8 +482,8 @@ function cfCollect(form) {
 }
 function cfTable(entity, obj = {}) {
   const fields = cfFor(entity); const val = cfValues(obj.custom);
-  const rows = fields.filter(f => String(val[f.key] ?? '') !== '').map(f => `<tr><th>${esc(f.label)}</th><td>${esc(val[f.key])}</td></tr>`).join('');
-  return rows || '';
+  if (!fields.length) return '';
+  return fields.map(f => `<tr><th>${esc(f.label)}</th><td>${String(val[f.key] ?? '') !== '' ? esc(val[f.key]) : '—'}</td></tr>`).join('');
 }
 
 // ── вход, сессия, меню пользователя ────────────────────────────────────────
@@ -1195,7 +1195,7 @@ async function inbox(v) {
      </div>
      <div class="composer-row composer-sub">
        <select id="msgChannel" class="composer-select" title="Канал отправки">${channelOptions(cur)}</select>
-       <select id="msgTmpl" class="composer-select" title="Шаблон ответа" onchange="if(this.value){const t=$('#msgText');t.value=this.value;this.value='';t.focus();t.setSelectionRange(t.value.length,t.value.length)}"><option value="">Шаблоны ответов…</option>${templates.map(t => `<option value="${esc(tmpl(t.name, { body: t.body, name: cur.title }))}">${esc(t.name)}</option>`).join('')}</select>
+       <select id="msgTmpl" class="composer-select" title="Шаблон ответа" onchange="if(this.value){const t=$('#msgText');t.value=this.value;this.value='';t.focus();t.setSelectionRange(t.value.length,t.value.length)}"><option value="">Шаблоны ответов…</option>${templates.map(t => `<option value="${esc(tmpl(t.name, { body: t.body, name: cur.title, sum: cur.deal_amount ? fmt(cur.deal_amount) : '—', date: new Date().toLocaleDateString('ru-RU') }))}">${esc(t.name)}</option>`).join('')}</select>
        <button type="button" class="tmpl-settings" onclick="go('settings','templates')">${icon('settings', 12)} настроить шаблоны</button>
      </div></form>` : '<div class="empty">Выберите диалог</div>'}</div>
    <div class="profile">${cur ? `<h3>Клиент</h3><p><b>${esc(cur.title || '')}</b></p><p>${icon('phone', 13)} ${esc(cur.phone || '—')}<br>${icon('email', 13)} ${esc(cur.email || '—')}</p><p>Каналы: ${chan(cur.channels)}${(cur.channels || '').includes('email') ? ' <span class="tag grey">почта подключена</span>' : ''}</p><p><button class="btn sm" onclick="attachContact(${cur.contact_id})">Открыть карточку клиента</button></p><hr><h3>Быстрые действия</h3><div style="display:flex;flex-direction:column;gap:6px">${cur.phone ? `<a class="btn sm" href="tel:${esc(String(cur.phone).replace(/[^+\d]/g, ''))}">${icon('phone', 13)} Позвонить</a>` : ''}<button class="btn sm" onclick="openTask(null,{contact_id:${cur.contact_id}})">+ Задача</button><button class="btn sm" onclick="quickDeal(${cur.contact_id})">+ Сделка</button><button class="btn sm" onclick="quickNote(${cur.contact_id})">+ Заметка</button></div>` : '<div class="empty">Выберите чат</div>'}</div></div>`;
@@ -1415,7 +1415,7 @@ function bulkAddTag() {
 }
 
 function siteFormCode() {
-  const origin = location.origin;
+  const origin = ((state.cache.settings && state.cache.settings.public_url) || location.origin).replace(/\/+$/, '');
   const secret = (state.cache.settings && state.cache.settings.webhook && state.cache.settings.webhook.secret) || '';
   const hook = origin + '/webhooks/generic' + (secret ? '?secret=' + encodeURIComponent(secret) : '');
   return `<!-- Форма заявки КаркасCRM -->
@@ -1441,6 +1441,24 @@ async function sendToKarkas(e) {
   return false;
 }
 <\/script>`;
+}
+// Одна строка «адрес + копировать»: адрес меняется от установки к установке.
+function hookLine(url) {
+  return `<div class="hook-line"><code>${esc(url)}</code><button type="button" class="btn sm" data-copy="${esc(url)}" onclick="copyFrom(this)">${icon('copy', 13)} Копировать</button></div>`;
+}
+function copyFrom(btn) {
+  const text = btn.getAttribute('data-copy') || '';
+  const done = () => toast('Скопировано');
+  if (navigator.clipboard && navigator.clipboard.writeText) navigator.clipboard.writeText(text).then(done).catch(() => fallback());
+  else fallback();
+  function fallback() {
+    openModal(`<h3>Скопируйте адрес</h3><textarea rows="3" readonly onclick="this.select()">${esc(text)}</textarea><p><small>Выделите текст и нажмите Ctrl+C.</small></p>`);
+  }
+}
+async function savePublicUrl() {
+  const v = ($('#publicUrl') && $('#publicUrl').value || '').trim();
+  try { await api('/api/settings', { method: 'PUT', body: JSON.stringify({ PUBLIC_URL: v }) }); toast(v ? 'Адрес сохранён' : 'Будет использоваться адрес из строки браузера'); state.cache.settings = null; render(); }
+  catch (e) { toast(e.message, true); }
 }
 function copySiteFormCode() {
   navigator.clipboard.writeText(siteFormCode()).then(() => toast('Код формы скопирован в буфер')).catch(() => openModal(`<h3>Код формы для сайта</h3><textarea rows="14" readonly onclick="this.select()">${esc(siteFormCode())}</textarea><p><small>Выделите и скопируйте код, затем вставьте его на страницу сайта.</small></p>`));
@@ -1487,7 +1505,7 @@ async function openContactCard(id) {
      <div>
        <h4>Контактные данные</h4>
        <p>Телефон: <b>${esc(c.phone || '—')}</b><br>E-mail: <b>${esc(c.email || '—')}</b><br>Ответственный: <b>${esc(__team.find(u => u.id === c.responsible_id)?.name || 'Не назначен')}</b></p>
-       <table class="mini">${cfTable('contacts', c)}</table>
+       ${cfTable('contacts', c) ? `<h4>Свои поля</h4><table class="mini">${cfTable('contacts', c)}</table>` : ''}
        <p><small>Создан: ${esc(dt(c.created_at))}</small></p>
      </div>
    </div>`);
@@ -1506,8 +1524,8 @@ async function openContact(id) {
    <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px"><label>Ответственный<select name="responsible_id">${userOptions(c.responsible_id || meId())}</select></label>
    <label>Источник<select name="source">${sourceOptions(c.source)}</select></label></div>
    <label>Теги (через запятую)<input name="tags" value="${esc(c.tags || '')}" placeholder="VIP, каркас, участок"></label>
-   <label>Заметки<textarea name="notes" rows="2">${esc(c.notes || '')}</textarea></label>
-   ${cfInputs('contacts', c)}`, !!id && !!(c.tags || c.notes || c.position || (c.company_id)))}
+   <label>Заметки<textarea name="notes" rows="2">${esc(c.notes || '')}</textarea></label>`, !!id && !!(c.tags || c.notes || c.position || (c.company_id)))}
+   ${cfInputs('contacts', c)}
    <button class="btn primary w">${id ? 'Сохранить' : 'Создать контакт'}</button></form>`);
 }
 
@@ -2024,7 +2042,10 @@ async function importPriceText(e, competitorId, scope) {
 /* ---------- settings ---------- */
 async function settings(v) {
   const isAdmin = (state.me && state.me.role) === 'admin';
-  const s = isAdmin ? await api('/api/settings') : {}; state.cache.settings = s; const origin = location.origin;
+  const s = isAdmin ? await api('/api/settings') : {}; state.cache.settings = s;
+  // Адрес для вебхуков: сохранённый публичный адрес, иначе тот, по которому открыта CRM.
+  const origin = (s.public_url || location.origin).replace(/\/+$/, '');
+  const localOrigin = /^https?:\/\/(localhost|127\.|0\.0\.0\.0|\[::1\]|10\.|192\.168\.)/i.test(origin);
   const allTabs = {
     integrations: 'Интеграции и каналы',
     fields: 'Поля карточек',
@@ -2045,6 +2066,13 @@ async function settings(v) {
     const chans = state.channels.length ? state.channels : await api('/api/channels').catch(() => []); state.channels = chans;
     body = `${!isAdmin ? '<div class="card" style="box-shadow:none;border-color:#fde68a;background:#fffbeb"><b>Режим просмотра</b><br><small>Ключи и настройки интеграций меняет администратор. Вы можете работать с чатами, сделками и задачами — всё остальное доступно.</small></div>' : ''}
     <div class="settings-cols"><div>
+     <div class="card"><h3>Адрес CRM в интернете</h3>
+      <p><small>По этому адресу CRM открывают сотрудники, и сюда же обращаются Wazzup и формы с сайта. Он подставляется во все ссылки ниже.</small></p>
+      <label>Публичный адрес<input id="publicUrl" value="${esc(s.public_url || '')}" placeholder="https://crm.вашдомен.ру"></label>
+      <p><small>Обычно достаточно оставить пустым — тогда берётся адрес из строки браузера. Заполните, если CRM открывают и по локальной сети, а снаружи она живёт на другом домене.</small></p>
+      <button class="btn sm primary" onclick="savePublicUrl()">Сохранить адрес</button>
+      ${localOrigin ? `<div class="notice warn" style="margin-top:12px"><b>Сейчас открыт локальный адрес</b><br><small>${esc(origin)} виден только на этом компьютере. Wazzup и формы с сайта не смогут сюда достучаться — укажите публичный адрес выше (например, https://crm.вашдомен.ру) или откройте CRM по домену.</small></div>` : ''}
+     </div>
      <div class="card"><h3>Мессенджеры через Wazzup</h3>
       <p><small>Один ключ Wazzup объединяет <b>WhatsApp, Telegram, Instagram и Viber</b> в одном разделе «Чаты» — отдельные подключения для каждого мессенджера не нужны. Ключ создаётся в личном кабинете Wazzup: раздел «Интеграция с CRM» → API.</small></p>
       <p>Статус: <b class="${s.wazzup.configured ? 'green' : ''}">${s.wazzup.configured ? 'подключено' : 'не подключено'}</b></p>
@@ -2053,13 +2081,19 @@ async function settings(v) {
       <label>Секрет для уведомлений (необязательно)<input id="wzSecret" value="${esc(s.wazzup.webhook_secret || '')}"></label></div>
       <label>Адрес API Wazzup<input id="wzUrl" value="${esc(s.wazzup.api_url)}"></label>
       <div style="display:flex;gap:8px;flex-wrap:wrap"><button class="btn primary" onclick="saveWazzup()">Сохранить</button><button class="btn" onclick="testWazzup()">${icon('sync', 13)} Проверить и синхронизировать каналы</button></div>
-      <hr><p><b>Адрес для уведомлений Wazzup (webhook)</b></p><p><small>Этот адрес указывается в настройках вебхуков Wazzup или регистрируется автоматически кнопкой ниже.</small></p><code>${origin}/webhooks/wazzup${s.wazzup.webhook_secret ? '?secret=' + esc(s.wazzup.webhook_secret) : ''}</code>
-      <p><button class="btn sm" onclick="registerWazzupWebhook()">Зарегистрировать адрес автоматически</button></p>
+      <hr><p><b>Адрес для уведомлений Wazzup (webhook)</b></p>
+      <p><small>Это «входная дверь» для сообщений: когда клиент пишет в WhatsApp или Telegram, Wazzup отправляет сообщение на этот адрес, и оно появляется в «Чатах». Адрес нужно вставить в личном кабинете Wazzup (раздел вебхуков) или нажать кнопку ниже — тогда CRM зарегистрирует его сама.</small></p>
+      ${hookLine(origin + '/webhooks/wazzup' + (s.wazzup.webhook_secret ? '?secret=' + encodeURIComponent(s.wazzup.webhook_secret) : ''))}
+      <p><small>${s.wazzup.webhook_secret ? 'Секрет в адресе — пароль от этой двери: без него чужие люди не смогут присылать поддельные сообщения.' : 'Секрет не задан: адрес примет сообщение от любого, кто его узнает. Для работы в интернете лучше задать секрет выше.'}</small></p>
+      <div style="display:flex;gap:8px;flex-wrap:wrap"><button class="btn sm" onclick="registerWazzupWebhook()">${icon('sync', 13)} Зарегистрировать адрес автоматически</button></div>
       <hr><h3>Подключённые каналы (${chans.length})</h3>${chans.map(c => `<div class="row"><span>${esc(c.name || c.transport || c.external_id)}<br><small>${esc(channelLabel(c.transport))} ${esc(c.phone || '')} · статус: ${esc(c.state === 'active' ? 'активен' : (c.state || 'неизвестно'))}</small></span><span class="tag ${c.state === 'active' ? '' : 'grey'}">${esc(c.state === 'active' ? 'активен' : (c.state || 'неизвестно'))}</span></div>`).join('') || '<small>Каналы появятся после сохранения ключа и синхронизации.</small>'}</div>
 
      <div class="card"><h3>Форма заявки для сайта и свой вебхук</h3>
-      <p><small>Готовый код формы ставится на любой сайт — заявки сразу попадают в «Чаты» и создают сделку. Сюда же можно направлять сообщения своего Telegram-бота или любой системы: POST JSON на адрес ниже.</small></p>
-      <p>Адрес для формы и вебхуков: <code>${origin}/webhooks/generic${s.webhook?.secret ? '?secret=' + esc(s.webhook.secret) : ''}</code></p>
+      <p><small>Готовая форма для сайта и «входная дверь» для любых заявок: имя, телефон и вопрос попадают в CRM, а она сама создаёт клиента, чат и сделку. Код формы копируется кнопкой ниже и вставляется на страницу сайта. Сюда же можно направить заявки с Авито, лендинга или своего бота — достаточно отправить POST с JSON.</small></p>
+      ${hookLine(origin + '/webhooks/generic' + (s.webhook?.secret ? '?secret=' + encodeURIComponent(s.webhook.secret) : ''))}
+      <details style="margin:4px 0 10px"><summary><small>Пример запроса</small></summary><pre style="white-space:pre-wrap;font-size:12px;background:#f1f5f9;border-radius:8px;padding:10px">curl -X POST '${esc(origin)}/webhooks/generic${s.webhook?.secret ? '?secret=' + esc(s.webhook.secret) : ''}' \
+  -H 'Content-Type: application/json' \
+  -d '{"channel":"site","name":"Иван","phone":"+7 999 123-45-67","body":"Нужен дом 8×10"}'</pre></details>
       <label>Секрет вебхука (защита от чужого спама)
         <div style="display:flex;gap:8px"><input id="whSecret" value="${esc(s.webhook?.secret || '')}" placeholder="пусто — принимать любые заявки"><button type="button" class="btn sm" style="white-space:nowrap" onclick="genWebhookSecret()">Сгенерировать</button></div>
       </label>
@@ -2067,7 +2101,8 @@ async function settings(v) {
       <div style="display:flex;gap:8px;flex-wrap:wrap"><button class="btn primary sm" onclick="saveWebhookSecret()">Сохранить секрет</button><button class="btn sm" onclick="copySiteFormCode()">${icon('copy', 13)} Скопировать код формы для сайта</button></div></div>
 
      <div class="card"><h3>Электронная почта</h3>
-      <p><small>После настройки письма клиентам отправляются прямо из карточки чата, а входящие письма попадают в ту же переписку. Для Яндекс Почты, Mail.ru и Gmail нужен «пароль приложения», а не обычный пароль от ящика.</small></p>
+      <p><small>После настройки письма клиентам отправляются прямо из карточки чата, а входящие письма попадают в ту же переписку.</small></p>
+      <p><small><b>Что такое «пароль приложения».</b> Яндекс Почта, Mail.ru и Gmail не разрешают сторонним программам входить по обычному паролю. В настройках безопасности ящика создаётся отдельный одноразовый пароль для CRM: он выглядит как <code>abcd efgh ijkl mnop</code> и вводится в поле «Пароль приложения» ниже. Обычный пароль от почты останется только у вас.</small></p>
       <p>Статус: <b class="${s.email.configured ? 'green' : ''}">${s.email.configured ? 'почта настроена' : 'не настроена'}</b></p>
       <form onsubmit="return saveEmail(event)">
        <div style="display:grid;grid-template-columns:2fr 1fr;gap:12px"><label>SMTP-сервер<input name="SMTP_HOST" value="${esc(s.email.host || '')}" placeholder="smtp.mail.ru"></label><label>Порт<input name="SMTP_PORT" value="${esc(s.email.port || '587')}" placeholder="465 или 587"></label></div>
@@ -2076,9 +2111,9 @@ async function settings(v) {
        <label>Адрес для проверочного письма<input name="SMTP_TEST_TO" value="${esc(s.email.test_to || '')}" placeholder="admin@company.ru"></label>
        <div style="display:flex;gap:8px"><button class="btn primary">Сохранить почту</button><button class="btn" type="button" onclick="testEmail(this.form)">Отправить проверочное письмо</button></div></form>
       <hr><p><b>Приём входящих писем</b></p>
-      <p><small>Настройте в почтовом ящике пересылку входящих на адрес ниже. Секрет защищает адрес от чужого спама; если он пуст, письма принимаются без проверки.</small></p>
+      <p><small><b>Входящие письма.</b> Письма приходят не сами по себе: в почтовом ящике нужно включить пересылку (фильтр «пересылать все письма на адрес…») на адрес ниже. CRM разберёт отправителя, тему и текст и добавит письмо в чат клиента. Секрет защищает адрес от чужого спама; если он пуст, письма принимаются без проверки.</small></p>
       <div style="display:flex;gap:8px"><input id="emailSecret" value="${esc(s.email.webhook_secret || '')}" placeholder="секрет для входящих писем"><button type="button" class="btn sm" style="white-space:nowrap" onclick="genEmailSecret()">Сгенерировать</button><button type="button" class="btn sm primary" style="white-space:nowrap" onclick="saveEmailSecret()">Сохранить</button></div>
-      <p style="margin-top:8px"><code>${origin}/webhooks/email${s.email.webhook_secret ? '?secret=' + esc(s.email.webhook_secret) : ''}</code></p>
+      ${hookLine(origin + '/webhooks/email' + (s.email.webhook_secret ? '?secret=' + encodeURIComponent(s.email.webhook_secret) : ''))}
      </div>
     </div><div>
      <div class="card"><h3>Проверка связи</h3><button class="btn orange w" onclick="checkHealth()">Проверить работу сервера</button><p style="margin-top:8px"><small>Проверка доступности сервера и базы данных. Диалоги и входящие сообщения появляются автоматически при подключённых каналах связи.</small></p></div>
@@ -2086,10 +2121,13 @@ async function settings(v) {
   } else if (state.settingsTab === 'fields') {
     const cf = await api('/api/custom-fields');
     const rows = cf.fields;
-    body = `<div class="settings-cols"><div class="card"><div class="row" style="border:0"><h3>Свои поля для контактов и сделок</h3><button class="btn sm primary" onclick="editField(-1)">+ Поле</button></div>
-     <table><tr><th>Название</th><th>Где</th><th>Тип</th><th>Обязательное</th><th></th></tr>${rows.map((f, i) => `<tr><td><b>${esc(f.label)}</b></td><td>${({ contacts: 'Контакты', deals: 'Сделки', both: 'Везде' })[f.entity] || esc(f.entity)}</td><td>${({ text: 'Текст', number: 'Число', date: 'Дата', select: 'Список', phone: 'Телефон', email: 'E-mail' })[f.type] || esc(f.type)}${f.options && f.options.length ? '<br><small>' + f.options.map(esc).join(', ') + '</small>' : ''}</td><td>${f.required ? 'Да' : '—'}</td><td><button class="btn sm" onclick="editField(${i})">${icon('edit', 13)}</button> <button class="btn sm danger" onclick="delField(${i})">${icon('close', 13)}</button></td></tr>`).join('') || '<tr><td colspan="5"><div class="empty">Своих полей пока нет</div></td></tr>'}</table>
-     <p><small>Например: «Площадь участка», «Тип фундамента», «Дата замера». Поля сразу появляются в формах и карточках и попадают во все выгрузки.</small></p></div>
-     <div><div class="card"><h3>Как работают свои поля</h3><p><small>Достаточно ввести понятное название — система сама позаботится обо всём остальном. Поля сохраняются в карточке клиента или сделки, участвуют в фильтрах и печатных документах.</small></p></div></div></div>`;
+    body = `<div class="settings-cols"><div class="card"><div class="row" style="border:0"><div><h3>Свои поля для контактов и сделок</h3><small>Дополнительные строки в карточке: площадь участка, тип фундамента, дата замера — что удобно именно вам.</small></div><button class="btn sm primary" onclick="editField(-1)">${icon('plus', 13)} Добавить поле</button></div>
+     <table><tr><th>Название</th><th>Где</th><th>Тип</th><th>Обязательное</th><th></th></tr>${rows.map((f, i) => `<tr><td><b>${esc(f.label)}</b></td><td>${({ contacts: 'Контакты', deals: 'Сделки', both: 'Везде' })[f.entity] || esc(f.entity)}</td><td>${({ text: 'Текст', number: 'Число', date: 'Дата', select: 'Список', phone: 'Телефон', email: 'E-mail' })[f.type] || esc(f.type)}${f.options && f.options.length ? '<br><small>' + f.options.map(esc).join(', ') + '</small>' : ''}</td><td>${f.required ? 'Да' : '—'}</td><td><button class="btn sm" title="Изменить поле" onclick="editField(${i})">${icon('edit', 13)}</button> <button class="btn sm danger" title="Удалить поле" onclick="delField(${i})">${icon('close', 13)}</button></td></tr>`).join('') || '<tr><td colspan="5"><div class="empty">Своих полей пока нет</div></td></tr>'}</table>
+     <p><small>Например: «Площадь участка», «Тип фундамента», «Дата замера». Новое поле сразу появляется в форме создания и в карточке клиента или сделки, а его значения попадают в выгрузку контактов в CSV.</small></p></div>
+     <div><div class="card"><h3>Как работают свои поля</h3>
+      <p><small>Введите понятное название — технический код система сделает сама, видеть его не нужно. Поле появится в форме и в карточке, значения сохранятся вместе с клиентом или сделкой.</small></p>
+      <p><small><b>Где показывать:</b> «Везде» — и в контактах, и в сделках; можно ограничить одним разделом. <b>Обязательное</b> поле нельзя сохранить пустым.</small></p>
+      <p><small><b>Удаление</b> убирает поле из форм и карточек; ранее введённые значения остаются в базе, но больше не показываются. Если поле нужно снова — создайте его с тем же названием.</small></p></div></div></div>`;
   } else if (state.settingsTab === 'competitors') {
     const cs = await api('/api/competitor-sources');
     const ours = await api('/api/prices?scope=ours');
@@ -2114,15 +2152,18 @@ async function settings(v) {
     body = `<div class="card"><div class="row" style="border:0"><h3>Автоматизации</h3><button class="btn sm primary" onclick="openAutomation()">+ Правило</button></div>
     <table><tr><th>Название</th><th>Когда</th><th>Что сделать</th><th>Вкл.</th><th></th></tr>${rows.map(a => `<tr><td><b>${esc(a.name)}</b></td><td>${trg[a.trigger_type] || esc(a.trigger_type)}</td><td>${act[a.action_type] || esc(a.action_type)}: <small>${esc(a.action_value || '')}</small></td>
      <td><input type="checkbox" style="width:auto" ${a.active ? 'checked' : ''} onchange="api('/api/automations/${a.id}',{method:'PATCH',body:JSON.stringify({active:this.checked?1:0})}).then(()=>toast('Обновлено'))"></td>
-     <td><button class="btn sm" onclick="openAutomation(${a.id})">${icon('edit', 13)}</button> <button class="btn sm danger" onclick="del('automations',${a.id})">${icon('close', 13)}</button></td></tr>`).join('') || '<tr><td colspan="5"><div class="empty">Правил нет</div></td></tr>'}</table></div>`;
+     <td><button class="btn sm" title="Изменить правило" onclick="openAutomation(${a.id})">${icon('edit', 13)}</button> <button class="btn sm danger" title="Удалить правило" onclick="del('automations',${a.id})">${icon('close', 13)}</button></td></tr>`).join('') || '<tr><td colspan="5"><div class="empty">Правил нет</div></td></tr>'}</table></div>`;
   } else if (state.settingsTab === 'templates') {
     const rows = await api('/api/templates');
-    const tplRow = t => `<div class=\"card\" style=\"box-shadow:none\"><b>${esc(t.name)}</b> <span class=\"tag grey\">${esc(channelLabel(t.channel))}</span><span style=\"float:right;display:flex;gap:6px\"><button class=\"btn sm\" onclick=\"openTemplate(${t.id})\">${icon('edit', 13)}</button><button class=\"btn sm danger\" onclick=\"delTemplate(${t.id})\">${icon('trash', 13)}</button></span><p>${esc(t.body)}</p></div>`;
-    body = `<div class=\"settings-cols\"><div>
-     <div class=\"card\"><div class=\"row\" style=\"border:0\"><h3>Мои шаблоны (${rows.length})</h3><button class=\"btn sm primary\" onclick=\"openTemplate()\">${icon('plus', 13)} Новый шаблон</button></div>
-     ${rows.map(tplRow).join('') || '<small>Шаблонов пока нет — создайте первый для частых ответов в чате.</small>'}</div>
+    const tplRow = t => `<div class="tpl-row"><div class="tpl-main"><b>${esc(t.name)}</b> <span class="tag grey">${esc(channelLabel(t.channel))}</span>
+      <p>${esc(t.body)}</p></div><div class="tpl-actions"><button class="btn sm" title="Изменить шаблон" onclick="openTemplate(${t.id})">${icon('edit', 13)}</button><button class="btn sm danger" title="Удалить шаблон" onclick="delTemplate(${t.id})">${icon('trash', 13)}</button></div></div>`;
+    body = `<div class="settings-cols"><div>
+     <div class="card"><div class="row" style="border:0"><div><h3>Мои шаблоны (${rows.length})</h3><small>Заготовки частых ответов. В чате выбираются из списка «Шаблоны ответов…» над полем ввода.</small></div><button class="btn sm primary" onclick="openTemplate()">${icon('plus', 13)} Новый шаблон</button></div>
+     ${rows.map(tplRow).join('') || `<div class="empty">Шаблонов пока нет. Создайте первый — например, приветствие или условия доставки.</div>`}</div>
     </div><div>
-     <div class=\"card\"><h3>Как это работает</h3><p><small>Шаблоны личные: видит и правит только вы. В чате выбираются одним кликом из поля ввода и подставляются в текст — останется проверить и отправить. В тексте работают подстановки: {name} — клиент, {sum} — сумма сделки.</small></p></div>
+     <div class="card"><h3>Как это работает</h3><p><small>Шаблоны <b>личные</b>: каждый сотрудник видит и правит только свои. При выборе в чате текст подставляется в поле ввода — его можно поправить перед отправкой.</small></p>
+      <p><small><b>Подстановки:</b> {name} — имя клиента, {sum} — сумма его открытой сделки, {date} — сегодняшняя дата. Если сделки ещё нет, вместо {sum} будет «—».</small></p>
+      <p><small><b>Канал</b> — подсказка, где шаблон уместен (WhatsApp, Telegram, почта…). Подставить шаблон можно в любой чат; «Любой канал» подходит везде.</small></p></div>
     </div></div>`;
   } else if (state.settingsTab === 'team') {
     const rows = await api('/api/users');
@@ -2135,7 +2176,7 @@ async function settings(v) {
       return { open: open.length, sum: open.reduce((a, d) => a + d.amount, 0), won: my.filter(d => d.stage === 'won').length, tasks: tasks.length };
     };
     body = `<div class="card"><div class="row" style="border:0"><h3>Команда</h3><button class="btn sm primary" onclick="openUser()">+ Пользователь</button></div>
-    <table><tr><th>Сотрудник</th><th>E-mail</th><th>Роль</th><th>Сделки в работе</th><th>Задачи</th><th>Вход</th><th></th></tr>${rows.map(x => { const st = stat(x.id); return `<tr><td><b>${esc(x.name)}</b></td><td>${esc(x.email)}</td><td>${esc(roleLabel(x.role))}</td><td>${st.open} на ${fmt(st.sum)}<br><small>успешных: ${st.won}</small></td><td>${st.tasks}</td><td>${x.active ? 'разрешён' : 'отключён'}</td><td><button class="btn sm" onclick="openUser(${x.id})">${icon('edit', 13)}</button></td></tr>`; }).join('')}</table>
+    <table><tr><th>Сотрудник</th><th>E-mail</th><th>Роль</th><th>Сделки в работе</th><th>Задачи</th><th>Вход</th><th></th></tr>${rows.map(x => { const st = stat(x.id); return `<tr><td><b>${esc(x.name)}</b></td><td>${esc(x.email)}</td><td>${esc(roleLabel(x.role))}</td><td>${st.open} на ${fmt(st.sum)}<br><small>успешных: ${st.won}</small></td><td>${st.tasks}</td><td>${x.active ? 'разрешён' : 'отключён'}</td><td><button class="btn sm" title="Изменить сотрудника" onclick="openUser(${x.id})">${icon('edit', 13)}</button></td></tr>`; }).join('')}</table>
     <div style="margin-top:14px"><div class="card" style="box-shadow:none"><h3>Права ролей</h3><p><small><b>Администратор</b> — всё, включая настройки, команду, интеграции и данные.<br><b>Менеджер</b> — контакты, компании, сделки, задачи, заметки и все чаты; настройки и справочники меняет админ.<br><b>Наблюдатель</b> — только чтение и выгрузки.</small></p></div></div></div>`;
   } else if (state.settingsTab === 'data') {
     const demoRows = Object.values(s.demo || {}).reduce((a, b) => a + b, 0);

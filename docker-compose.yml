@@ -26,6 +26,13 @@ services:
       # Необязательно: свой файл логотипа, смонтированный в контейнер (иначе —
       # логотип из комплекта или загруженный в интерфейсе в томе /data/logo).
       LOGO_FILE: ${LOGO_FILE:-}
+      # Публичный адрес для ссылок и вебхуков (можно задать и в интерфейсе:
+      # Настройки → Интеграции → Адрес CRM в интернете). Пусто — из CRM_DOMAIN/браузера.
+      PUBLIC_URL: ${PUBLIC_URL:-}
+      # 1 — разрешить проверке конкурентов локальные адреса (только для тестов/шлюзов)
+      ALLOW_PRIVATE_FETCH: ${ALLOW_PRIVATE_FETCH:-}
+      # 1 — не создавать начальные данные (совсем пустая база)
+      KARKAS_NO_SEED: ${KARKAS_NO_SEED:-}
       ADMIN_EMAIL: ${ADMIN_EMAIL:-admin@example.com}
       ADMIN_PASSWORD: ${ADMIN_PASSWORD:-admin12345}
       # Wazzup — один ключ на WhatsApp, Telegram, Instagram и Viber

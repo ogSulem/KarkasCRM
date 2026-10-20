@@ -180,10 +180,20 @@ test('автоматизации, шаблоны, интеграции, кома
   assert.ok((c.tags || '').includes('новый-лид'), 'автоматизация добавила тег при создании сделки');
   const tpl = (await call('/api/templates', { method: 'POST', body: JSON.stringify({ name: 'Тест', body: 'Здравствуйте, {name}!' }) })).body;
   assert.ok(tpl.id);
+  // текст шаблона и канал не должны меняться местами
+  assert.equal(tpl.body, 'Здравствуйте, {name}!', 'в шаблоне сохраняется текст ответа');
+  assert.equal(tpl.channel, 'any', 'канал по умолчанию — «любой»');
+  assert.equal((await call('/api/templates', { method: 'POST', body: JSON.stringify({ name: 'WA', body: 'Текст для WhatsApp', channel: 'whatsapp' }) })).body.channel, 'whatsapp');
   // Wazzup: маскировка ключа и синхронизация каналов
   await call('/api/settings', { method: 'PUT', body: JSON.stringify({ WAZZUP_API_KEY: 'test-api-key-123456', WAZZUP_CHANNEL_ID: 'e0629e11-0f67-4567-92a9-2237e91ec1b9' }) });
   const set = (await call('/api/settings')).body;
   assert.ok(set.wazzup.api_key.startsWith('••••••'), 'ключ Wazzup маскируется');
+  // публичный адрес CRM для ссылок и вебхуков
+  assert.equal((await call('/api/settings', { method: 'PUT', body: JSON.stringify({ PUBLIC_URL: 'ftp://crm.local' }) })).status, 400, 'кривой публичный адрес не принимается');
+  await call('/api/settings', { method: 'PUT', body: JSON.stringify({ PUBLIC_URL: 'https://crm.example.ru/' }) });
+  assert.equal((await call('/api/settings')).body.public_url, 'https://crm.example.ru', 'адрес сохраняется без хвостового слэша');
+  await call('/api/settings', { method: 'PUT', body: JSON.stringify({ PUBLIC_URL: '' }) });
+  assert.equal((await call('/api/settings')).body.public_url, '', 'пустой адрес возвращает автоопределение');
   assert.equal(set.wazzup.configured, true);
   const test = await call('/api/integrations/wazzup/test', { method: 'POST' });
   assert.equal(test.status, 400, 'без реального ключа Wazzup возвращается понятная ошибка');
