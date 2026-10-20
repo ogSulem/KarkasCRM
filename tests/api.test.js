@@ -279,6 +279,22 @@ test('обязательные свои поля: пустое значение 
   await call('/api/custom-fields', { method: 'PUT', body: JSON.stringify({ fields: [{ key: 'area', label: 'Площадь участка', type: 'number', entity: 'both' }] }) });
 });
 
+test('создание контакта: проверка дублей по телефону и почте', async () => {
+  const first = await call('/api/contacts', { method: 'POST', body: JSON.stringify({ name: 'Проверка Дубля', phone: '+7 901 555-11-22', email: 'dup-check@example.com' }) });
+  assert.equal(first.status, 201);
+  // интерфейс просит проверить дубли: тот же телефон в другом формате должен дать 409 с id карточки
+  const samePhone = await call('/api/contacts?check_duplicates=1', { method: 'POST', body: JSON.stringify({ name: 'Ещё один', phone: '89015551122' }) });
+  assert.equal(samePhone.status, 409, 'дубль по телефону не создаётся');
+  assert.equal(samePhone.body.duplicate.id, first.body.id, 'возвращается существующая карточка');
+  const sameEmail = await call('/api/contacts?check_duplicates=1', { method: 'POST', body: JSON.stringify({ name: 'Ещё один', email: 'DUP-CHECK@example.com' }) });
+  assert.equal(sameEmail.status, 409, 'дубль по почте не создаётся');
+  // без проверки (импорт, осознанное решение менеджера) запись создаётся
+  const forced = await call('/api/contacts', { method: 'POST', body: JSON.stringify({ name: 'Сознательный дубль', phone: '+7 901 555-11-22' }) });
+  assert.equal(forced.status, 201, 'без флага дубли разрешены');
+  await call('/api/contacts/' + forced.body.id, { method: 'DELETE' });
+  await call('/api/contacts/' + first.body.id, { method: 'DELETE' });
+});
+
 test('дубли контактов: поиск и объединение карточек', async () => {
   const a = (await call('/api/contacts', { method: 'POST', body: JSON.stringify({ name: 'Иван Дубль', phone: '+7 999 123-45-67' }) })).body;
   const b = (await call('/api/contacts', { method: 'POST', body: JSON.stringify({ name: 'Иван Дубль (Авито)', phone: '89991234567', email: 'dubl@mail.ru' }) })).body;

@@ -935,6 +935,14 @@ export const server = http.createServer(async (req, res) => {
         const required = { contacts: 'name', companies: 'name', products: 'name', tasks: 'title', automations: 'name', templates: 'name' }[table];
         if (required && !String(b[required] || '').trim()) return json(res, 400, { error: required === 'name' ? 'Укажите название' : 'Укажите название задачи' });
         if (table === 'notes' && !String(b.body || '').trim()) return json(res, 400, { error: 'Заметка не может быть пустой' });
+        // проверка дублей при создании контакта: интерфейс шлёт check_duplicates=1,
+        // чтобы показать «такой клиент уже есть» и не плодить карточки
+        if (table === 'contacts' && u.searchParams.get('check_duplicates') === '1') {
+          const ph = digits(b.phone), em = String(b.email || '').trim().toLowerCase();
+          const dup = (ph && db.prepare('SELECT id,name,phone FROM contacts WHERE phone_norm=?').get(ph))
+            || (em && db.prepare('SELECT id,name,phone FROM contacts WHERE lower(email)=?').get(em));
+          if (dup) return json(res, 409, { error: `Клиент с такими контактами уже есть: ${dup.name}`, duplicate: { id: dup.id, name: dup.name, phone: dup.phone || '' } });
+        }
         // при создании обязательные поля проверяются всегда, при частичном обновлении — только если custom передан
         if (table === 'contacts') { const err = missingRequiredCustom('contacts', b.custom); if (err) return json(res, 400, { error: err }); }
         // связанные записи должны существовать: понятная ошибка вместо сбоя внешнего ключа
@@ -1251,7 +1259,11 @@ export const server = http.createServer(async (req, res) => {
           else { status = 'error'; send = { delivered: false, mode: 'error: ' + e.message }; }
         }
         const body = String(b.body || '').trim() || (file ? '[вложение]' : '');
-        const r = db.prepare('INSERT INTO messages(conversation_id,channel,direction,body,content_uri,content_name,content_type,status,external_id,author) VALUES(?,?,?,?,?,?,?,?,?,?)').run(id, wantChannel, 'out', body, file?.contentUri || null, b.contentName ? safeFileName(b.contentName) : null, b.contentType || null, status, send.id || null, user.name);
+        const insertOut = ext => db.prepare('INSERT INTO messages(conversation_id,channel,direction,body,content_uri,content_name,content_type,status,external_id,author) VALUES(?,?,?,?,?,?,?,?,?,?)').run(id, wantChannel, 'out', body, file?.contentUri || null, b.contentName ? safeFileName(b.contentName) : null, b.contentType || null, status, ext, user.name);
+        // внешний id уникален (защита от повторной доставки входящих), но если провайдер
+        // вернул уже встречавшийся id, сообщение всё равно должно сохраниться в CRM
+        let r; try { r = insertOut(send.id || null); }
+        catch (e) { if (!/UNIQUE/i.test(e.message)) throw e; r = insertOut(null); }
         db.prepare("UPDATE conversations SET last_at=datetime('now') WHERE id=?").run(id); broadcast('message', { conversation_id: Number(id), direction: 'out' }); return json(res, 201, { message: db.prepare('SELECT * FROM messages WHERE id=?').get(r.lastInsertRowid), send }); }
     }
     const mEmail = p.match(/^\/api\/conversations\/(\d+)\/email$/);

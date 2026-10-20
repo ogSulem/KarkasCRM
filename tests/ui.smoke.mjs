@@ -41,7 +41,8 @@ Object.assign(window, {
   icon, normalizeDue, taskDueMeta, isAscii, endSession, togglePass,
   toggleUserMenu, closeUserMenu, toggleTaskSelect, ICON_PATHS, msgHtml, channelOptions,
   uploadChatFile, uploadLogo, deleteLogo, checkHealth, refreshLogo,
-  sourceLabel, channelLabel, roleLabel, askConfirm, askInput, translit, SOURCE_LABELS, CHANNEL_LABELS, ROLE_LABELS
+  sourceLabel, channelLabel, roleLabel, askConfirm, askInput, translit, SOURCE_LABELS, CHANNEL_LABELS, ROLE_LABELS,
+  isoDate, todayISO, fmtDayMonth, kindStage, formMore, captureFocus, restoreFocus
 });`;
 const dom = new JSDOM(htmlClean, { runScripts: 'dangerously', url: BASE + '/', pretendToBeVisual: true, virtualConsole: new VirtualConsole() });
 const { window } = dom;
@@ -131,6 +132,18 @@ try {
   await modal('дубли контактов', () => window.openDuplicates());
   await modal('редактор своих полей', () => window.editField(-1));
   await modal('письмо клиенту', () => window.openEmailComposer(conv.id));
+
+  // ── формы: главное сразу, вторичное — под «Дополнительно» ─────────────────
+  await window.openDeal(); await wait(250);
+  check('в новой сделке есть блок «Дополнительно»', Boolean($('#modalBody details.form-more')) && /Дополнительно/.test($('#modalBody').innerHTML));
+  check('главные поля сделки видны без раскрытия', Boolean($('#modalBody input[name=title]')) && Boolean($('#modalBody select[name=contact_id]')));
+  check('ответственный и дедлайн спрятаны под «Дополнительно»', Boolean($('#modalBody details.form-more select[name=responsible_id]')) && Boolean($('#modalBody details.form-more input[name=deadline]')));
+  check('в форме контакта «Дополнительно» закрыто по умолчанию', await (async () => { window.closeModal(); await window.openContact(); await wait(200); const d = $('#modalBody details.form-more'); const closed = d && !d.open; window.closeModal(); return closed })());
+  // этап «успех» находится по смыслу, а не по жёсткому коду
+  check('этап успеха определяется по виду этапа', window.__state.stages.some(s => s.kind === 'won') ? window.kindStage('won') === window.__state.stages.find(s => s.kind === 'won').code : true);
+  // локальная дата не зависит от UTC
+  check('isoDate возвращает локальную дату', window.isoDate(new Date(2026, 0, 1)) === '2026-01-01' && window.isoDate(new Date(2026, 11, 31)) === '2026-12-31');
+  check('todayISO совпадает с локальным днём', window.todayISO() === `${new Date().getFullYear()}-${String(new Date().getMonth() + 1).padStart(2, '0')}-${String(new Date().getDate()).padStart(2, '0')}`);
   await modal('ссылка на файл', () => { window.__state.conv = conv.id; window.openAttachment() });
 
   // ── чат: компоновщик как в мессенджере ───────────────────────────────────

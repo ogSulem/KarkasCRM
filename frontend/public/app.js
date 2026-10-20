@@ -283,6 +283,19 @@ const dt = s => {
   return raw.replace('T', ' ').slice(0, 16);
 };
 const dueText = s => s ? String(s).replace('T', ' ').slice(0, 16) : '';
+// Локальная дата YYYY-MM-DD. toISOString() здесь нельзя: в Москве он отдаёт
+// вчерашний день до 03:00, из-за чего «сегодня» и неделя съезжали на сутки.
+const isoDate = (d = new Date()) => `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+const todayISO = () => isoDate();
+function fmtDayMonth(iso) {
+  const m = String(iso || '').match(/^(\d{4})-(\d{2})-(\d{2})/);
+  if (!m) return iso || '';
+  const d = new Date(+m[1], +m[2] - 1, +m[3]);
+  const t = new Date(); const tomorrow = new Date(t.getFullYear(), t.getMonth(), t.getDate() + 1);
+  if (isoDate(d) === isoDate(t)) return 'сегодня';
+  if (isoDate(d) === isoDate(tomorrow)) return 'завтра';
+  return `${m[3]}.${m[2]}`;
+}
 // Внешние ссылки: только http(s). «site.ru» превращаем в https://site.ru,
 // а javascript:/data: отбрасываем — иначе получится XSS через поле «Сайт».
 function siteHref(u) {
@@ -320,7 +333,11 @@ async function api(path, opt = {}) {
   }
   if (String(opt.raw ? 0 : 1) && !(r.headers.get('content-type') || '').includes('json')) return r;
   const d = await r.json().catch(() => ({}));
-  if (!r.ok) throw new Error(d.error || (`Не удалось выполнить запрос (код ${r.status}). Обратитесь к администратору, если проблема повторяется.`));
+  if (!r.ok) {
+    const err = new Error(d.error || (`Не удалось выполнить запрос (код ${r.status}). Обратитесь к администратору, если проблема повторяется.`));
+    err.status = r.status; err.data = d;
+    throw err;
+  }
   return d;
 }
 
@@ -353,16 +370,20 @@ function toast(t, kind = 'ok') {
 function openModal(html) {
   $('#modalBody').innerHTML = html;
   $('#modal').classList.remove('hidden');
+  // курсор сразу в первом поле: меньше кликов, форма заполняется с клавиатуры
+  const first = $('#modalBody input:not([type=hidden]):not([type=checkbox]):not([disabled]), #modalBody textarea, #modalBody select');
+  if (first) setTimeout(() => { try { first.focus({ preventScroll: true }); if (first.select && first.type === 'text') first.select(); } catch {} }, 30);
 }
 function closeModal() {
   $('#modal').classList.add('hidden');
   if ($('#createdCredentials')) $('#modalBody').replaceChildren();
 }
 // Единое аккуратное окно подтверждения вместо системного confirm().
-function askConfirm(message, onYes, { okText = 'Подтвердить', danger = true } = {}) {
+function askConfirm(message, onYes, { okText = 'Подтвердить', danger = true, extraText = '', onExtra = null } = {}) {
   openModal(`<h3>Подтверждение действия</h3><p>${esc(message)}</p>
    <div style="display:flex;gap:8px;justify-content:flex-end;margin-top:14px">
      <button class="btn" onclick="closeModal()">Отмена</button>
+     ${extraText ? `<button class="btn" id="askConfirmExtra">${esc(extraText)}</button>` : ''}
      <button class="btn ${danger ? 'danger' : 'primary'}" id="askConfirmYes">${esc(okText)}</button>
    </div>`);
   $('#askConfirmYes').onclick = async () => {
@@ -370,6 +391,8 @@ function askConfirm(message, onYes, { okText = 'Подтвердить', danger 
     // ошибку сервера показываем пользователю, а не теряем в консоли
     try { await onYes(); } catch (e) { toast(e.message, 'err'); }
   };
+  const extra = $('#askConfirmExtra');
+  if (extra && onExtra) extra.onclick = async () => { closeModal(); try { await onExtra(); } catch (e) { toast(e.message, 'err'); } };
 }
 // Единое модальное окно ввода вместо системного prompt().
 function askInput({ title, label, value = '', type = 'text', okText = 'Сохранить' }, onSubmit) {
@@ -407,7 +430,7 @@ function userOptions(selId) {
 
 let __myTasks = [];
 function myTasksBlock() {
-  if (!__myTasks.length) return '<small style="color:var(--muted)">Нет открытых задач на вас</small>';
+  if (!__myTasks.length) return '<small style="color:var(--muted)">Открытых задач на вас нет. Поставьте себе дело, чтобы не потерять клиента из виду.</small>';
   return __myTasks.map(t => {
     const meta = taskDueMeta(t.due, t.done);
     return `<div class="row">
@@ -419,6 +442,10 @@ function myTasksBlock() {
     </div>`;
   }).join('');
 }
+
+// Вторичные поля формы прячем под «Дополнительно»: при создании видно
+// только главное, а всё остальное доступно в один клик.
+const formMore = (html, open = false) => html ? `<details class="form-more"${open ? ' open' : ''}><summary>Дополнительно</summary>${html}</details>` : '';
 
 // ── свои поля (custom fields) ─────────────────────────────────────────────
 function cfFor(entity) {
@@ -643,8 +670,29 @@ async function go(view, subTab) {
   await render();
 }
 
+// Поле поиска перерисовывается вместе с таблицей — возвращаем в него курсор,
+// иначе после каждого символа приходилось кликать в поле заново.
+function captureFocus() {
+  const el = document.activeElement;
+  if (!el || !el.id || !$('#view').contains(el)) return null;
+  return { id: el.id, start: el.selectionStart, end: el.selectionEnd };
+}
+function restoreFocus(f) {
+  if (!f) return;
+  const el = document.getElementById(f.id);
+  if (!el || el === document.activeElement) return;
+  try {
+    el.focus({ preventScroll: true });
+    if (typeof f.start === 'number' && el.setSelectionRange) el.setSelectionRange(f.start, f.end);
+  } catch { }
+}
+// Живой поиск: не дёргаем сервер и перерисовку на каждый символ.
+const __liveTimers = {};
+function liveSearch(key, run, ms = 160) { clearTimeout(__liveTimers[key]); __liveTimers[key] = setTimeout(run, ms); }
+
 async function render() {
   const v = $('#view');
+  const focus = captureFocus();
   try {
     if (state.view === 'dashboard') return await dashboard(v);
     if (state.view === 'pipe') return await pipe(v);
@@ -658,12 +706,14 @@ async function render() {
     if (state.view === 'settings') return await settings(v);
   } catch (e) {
     v.innerHTML = `<div class="card err"><h3>Не удалось загрузить раздел</h3><p>${esc(e.message)}</p><button class="btn primary" onclick="render()">Повторить попытку</button></div>`;
+  } finally {
+    restoreFocus(focus);
   }
 }
 
 async function openNotifications() {
   const rows = await api('/api/tasks');
-  const today = new Date().toISOString().slice(0, 10);
+  const today = todayISO();
   const over = rows.filter(t => !t.done && normalizeDue(t.due).slice(0, 10) < today && normalizeDue(t.due) !== '');
   const now = rows.filter(t => !t.done && normalizeDue(t.due).slice(0, 10) === today);
   openModal(`<h3>${icon('bell', 18)} Уведомления и сегодняшние дела</h3>
@@ -818,7 +868,7 @@ async function pipe(v) {
     <span class="tabs" style="margin:0"><button class="${state.dealScope !== 'mine' && state.dealScope !== 'notask' && state.dealScope !== 'overdue' ? 'active' : ''}" onclick="state.dealScope='all';render()">Все сделки</button><button class="${state.dealScope === 'mine' ? 'active' : ''}" onclick="state.dealScope='mine';render()">Мои (${d.deals.filter(x => x.responsible_id === meId()).length})</button><button class="${state.dealScope === 'notask' ? 'active' : ''}" onclick="state.dealScope='notask';render()">Без задач (${noTaskCount})</button><button class="${state.dealScope === 'overdue' ? 'active' : ''}" onclick="state.dealScope='overdue';render()">Просрочено (${overdueCount})</button></span>
     <span class="tag">В работе: ${shown.length}</span><span class="tag orange">Сумма: ${fmt(shown.filter(x => !['won', 'lost'].includes(x.stage)).reduce((a, x) => a + x.amount, 0))}</span>
     <button class="btn sm" style="margin-left:auto" onclick="download('/api/export/deals','deals.csv')" title="Выгрузить сделки в CSV">${icon('download', 13)} Экспорт</button>
-    <input id="dealSearch" style="max-width:210px" placeholder="Поиск по сделкам и клиентам" value="${esc(state.dealQuery || '')}" oninput="state.dealQuery=this.value;render()">
+    <input id="dealSearch" style="max-width:210px" placeholder="Поиск по сделкам и клиентам" value="${esc(state.dealQuery || '')}" oninput="liveSearch('deals',()=>{state.dealQuery=this.value;render()})">
     ${(state.me && state.me.role) === 'admin' ? `<button class="btn sm" onclick="openPipelineEditor()">${icon('settings', 13)} Настроить воронку</button>` : ''}</div>
   <div class="kanban">${d.stages.map(s => {
     const colDeals = shown.filter(x => x.stage === s.code);
@@ -851,7 +901,14 @@ async function ensureStages() {
   return state.stages || [];
 }
 function stageLabel(code) {
-  return ((state.stages || []).find(s => s.code === code) || {}).name || code || '—';
+  const own = (state.stages || []).find(s => s.code === code);
+  if (own) return own.name;
+  // сделка может быть в другой воронке — ищем название этапа во всех загруженных
+  for (const p of state.pipelines || []) {
+    const hit = (p.stages || []).find(s => s.code === code);
+    if (hit) return hit.name;
+  }
+  return code || '—';
 }
 
 async function moveDeal(id, dir, stage) {
@@ -879,18 +936,38 @@ async function openDeal(contactId, stageCode) {
   const curStage = stageCode || (def[0] ? def[0].code : '');
   openModal(`<h3>Новая сделка</h3><form onsubmit="return saveDeal(event)">
    <label>Название сделки*<input name="title" required placeholder="Каркасный дом 8x10"></label>
-   <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px"><label>Сумма (${CUR()})<input name="amount" type="number" value="0"></label>
-   <label>Этап<select name="stage">${def.map(s => `<option value="${s.code}" ${s.code === curStage ? 'selected' : ''}>${s.name}</option>`).join('')}</select></label></div>
-   <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px"><label>Контакт<select name="contact_id"><option value="">— выбрать —</option>${state.contacts.map(c => `<option value="${c.id}" ${c.id === contactId ? 'selected' : ''}>${esc(c.name)}</option>`).join('')}</select></label>
-   <label>Ответственный<select name="responsible_id">${userOptions(meId())}</select></label></div>
-   <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px"><label>Приоритет<select name="priority"><option value="normal">Обычный</option><option value="high">Высокий</option><option value="low">Низкий</option></select></label>
-   <label>Дедлайн<input name="deadline" type="date"></label></div>
-   ${cfInputs('deals')}
+   <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px"><label>Сумма (${CUR()})<input name="amount" type="number" value="0" placeholder="0"></label>
+   <label>Контакт<select name="contact_id"><option value="">— выбрать —</option>${state.contacts.map(c => `<option value="${c.id}" ${c.id === contactId ? 'selected' : ''}>${esc(c.name)}</option>`).join('')}</select></label></div>
+   <label>Этап<select name="stage">${def.map(s => `<option value="${esc(s.code)}" ${s.code === curStage ? 'selected' : ''}>${esc(s.name)}</option>`).join('')}</select></label>
+   ${formMore(`<div style="display:grid;grid-template-columns:1fr 1fr;gap:12px"><label>Ответственный<select name="responsible_id">${userOptions(meId())}</select></label>
+   <label>Приоритет<select name="priority"><option value="normal">Обычный</option><option value="high">Высокий</option><option value="low">Низкий</option></select></label></div>
+   <label>Дедлайн<input name="deadline" type="date"></label>
+   ${cfInputs('deals')}`)}
    <button class="btn primary w">Создать сделку</button></form>`);
 }
 
-function selStages(cur) {
-  return (state.stages || []).map(s => `<option value="${s.code}" ${s.code === cur ? 'selected' : ''}>${s.name}</option>`).join('');
+function selStages(cur, list) {
+  return (list || state.stages || []).map(s => `<option value="${esc(s.code)}" ${s.code === cur ? 'selected' : ''}>${esc(s.name)}</option>`).join('');
+}
+// Код этапа по его смыслу (успех/отказ): в разных воронках коды могут отличаться.
+function kindStage(kind) {
+  const list = (state.cardStages && state.cardStages.length ? state.cardStages : state.stages) || [];
+  const hit = list.find(s => s.kind === kind);
+  return hit ? hit.code : (kind === 'won' ? 'won' : 'lost');
+}
+// Быстрое решение по сделке прямо из карточки: выиграна / отказ.
+async function quickDealStage(id, stage) {
+  try {
+    await api('/api/deals/' + id, { method: 'PATCH', body: JSON.stringify({ stage }) });
+    closeModal(); render();
+    const st = ((state.cardStages || state.stages || []).find(s => s.code === stage) || {});
+    if (st.kind === 'lost') {
+      toast('Сделка закрыта как нереализованная');
+      askInput({ title: 'Причина отказа', label: 'Почему сделка не реализована? Это видно в аналитике', value: '', okText: 'Сохранить' }, reason => {
+        if (reason) api('/api/deals/' + id, { method: 'PATCH', body: JSON.stringify({ loss_reason: reason }) }).catch(() => {});
+      });
+    } else toast(`Сделка переведена: ${st.name || stage}`);
+  } catch (e) { toast(e.message, 'err'); }
 }
 async function saveDeal(e, id) {
   e.preventDefault();
@@ -908,16 +985,36 @@ async function saveDeal(e, id) {
 
 async function openDealCard(id) {
   const d = await api('/api/deals/' + id);
+  await team();
   const deal = d.deal;
   if (!(state.contacts || []).length) state.contacts = await api('/api/contacts').catch(() => []);
+  // этапы берём из воронки самой сделки: иначе в карточке можно выбрать чужой этап
+  const pipes = state.pipelines && state.pipelines.length ? state.pipelines : await api('/api/pipelines');
+  state.pipelines = pipes;
+  const pipe = pipes.find(p => p.id === deal.pipeline_id) || pipes[0] || {};
+  state.cardStages = pipe.stages || [];
+  state.cardCompanies = state.cardCompanies || await api('/api/companies').catch(() => []);
+  const done = ['won', 'lost'].includes(deal.stage);
+  const openTasks = (d.tasks || []).filter(t => !t.done).length;
+  const nextTask = (d.tasks || []).filter(t => !t.done && t.due).sort((a, b) => String(a.due).localeCompare(String(b.due)))[0];
   openModal(`
-   <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px">
-     <div><h3 style="margin:0">${esc(deal.title)}</h3><small>${esc(deal.contact_name || 'Без контакта')} · ${fmt(deal.amount)}</small></div>
+   <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px;gap:10px;flex-wrap:wrap">
+     <div><h3 style="margin:0">${esc(deal.title)}</h3><small>${esc(deal.contact_name || 'Без контакта')} · ${fmt(deal.amount)} · <span class="tag">${esc(stageLabel(deal.stage) || deal.stage)}</span></small></div>
      <div style="display:flex;gap:6px">
        <button class="btn sm" onclick="printDoc(${deal.id},'quote')" title="Коммерческое предложение">${icon('print', 13)} КП</button>
        <button class="btn sm" onclick="printDoc(${deal.id},'invoice')" title="Счёт на оплату">${icon('fileText', 13)} Счёт</button>
      </div>
    </div>
+   ${!done && !openTasks ? `<div class="card" style="box-shadow:none;border-color:#fdba74;background:#fff7ed;margin:10px 0;padding:10px 12px"><b>${icon('alertCircle', 15)} У сделки нет открытых задач</b> — она может зависнуть. <button class="btn sm" style="margin-left:6px" onclick="openTask(null,{deal_id:${deal.id},contact_id:${deal.contact_id || 'null'}})">${icon('plus', 13)} Поставить задачу</button></div>` : ''}
+   ${!done && openTasks && nextTask ? `<p style="margin:6px 0 0"><small>${icon('clock', 13)} Ближайшая задача: <b>${esc(nextTask.title)}</b> — ${esc(taskDueMeta(nextTask.due).label)}</small></p>` : ''}
+   ${done ? '' : `<div class="card-actions">
+     ${deal.contact_phone ? `<a class="btn sm" href="tel:${esc(String(deal.contact_phone).replace(/[^+\d]/g, ''))}">${icon('phone', 13)} Позвонить</a>` : ''}
+     ${deal.contact_phone ? `<a class="btn sm" href="https://wa.me/${esc(String(deal.contact_phone).replace(/[^\d]/g, ''))}" target="_blank" rel="noopener">${icon('whatsapp', 13)} WhatsApp</a>` : ''}
+     <button class="btn sm" onclick="openTask(null,{deal_id:${deal.id},contact_id:${deal.contact_id || 'null'}})">${icon('plus', 13)} Задача</button>
+     <button class="btn sm primary" onclick="state.dealTab='products';openDealCard(${deal.id})">${icon('products', 13)} Добавить товар</button>
+     <button class="btn sm" style="margin-left:auto" onclick="quickDealStage(${deal.id},'${esc(kindStage('won'))}')">${icon('checkCircle', 13)} Выиграна</button>
+     <button class="btn sm danger" onclick="quickDealStage(${deal.id},'${esc(kindStage('lost'))}')">${icon('xCircle', 13)} Отказ</button>
+   </div>`}
    <div class="tabs" style="margin-bottom:12px">
      <button class="${state.dealTab === 'details' ? 'active' : ''}" onclick="state.dealTab='details';openDealCard(${id})">Детали</button>
      <button class="${state.dealTab === 'chat' ? 'active' : ''}" onclick="state.dealTab='chat';openDealCard(${id})">Переписка</button>
@@ -934,14 +1031,14 @@ function dealTab(deal, d) {
     return `<form onsubmit="return saveDeal(event,${deal.id})">
      <label>Название<input name="title" value="${esc(deal.title)}"></label>
      <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px"><label>Сумма (${CUR()})<input name="amount" type="number" value="${deal.amount}"></label>
-     <label>Этап<select name="stage">${selStages(deal.stage)}</select></label></div>
+     <label>Этап<select name="stage">${selStages(deal.stage, state.cardStages)}</select></label></div>
      <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px"><label>Клиент<select name="contact_id"><option value="">— без контакта —</option>${(state.contacts || []).map(c => `<option value="${c.id}" ${c.id === deal.contact_id ? 'selected' : ''}>${esc(c.name)}</option>`).join('')}</select></label>
-     <label>Дедлайн<input name="deadline" type="date" value="${esc((deal.deadline || '').slice(0, 10))}"></label></div>
-     <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px"><label>Ответственный<select name="responsible_id">${userOptions(deal.responsible_id)}</select></label>
-     <label>Приоритет<select name="priority"><option value="normal" ${deal.priority === 'normal' ? 'selected' : ''}>Обычный</option><option value="high" ${deal.priority === 'high' ? 'selected' : ''}>Высокий</option><option value="low" ${deal.priority === 'low' ? 'selected' : ''}>Низкий</option></select></label></div>
-     <label>Причина отказа (если сделка проиграна)<input name="loss_reason" value="${esc(deal.loss_reason || '')}"></label>
-     ${cfInputs('deals', deal)}
-     <table class="mini" style="margin-top:10px">${cfTable('deals', deal)}</table>
+     <label>Компания<select name="company_id"><option value="">— без компании —</option>${(state.cardCompanies || []).map(c => `<option value="${c.id}" ${c.id === deal.company_id ? 'selected' : ''}>${esc(c.name)}</option>`).join('')}</select></label></div>
+     ${formMore(`<div style="display:grid;grid-template-columns:1fr 1fr;gap:12px"><label>Дедлайн<input name="deadline" type="date" value="${esc((deal.deadline || '').slice(0, 10))}"></label>
+     <label>Ответственный<select name="responsible_id">${userOptions(deal.responsible_id)}</select></label></div>
+     <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px"><label>Приоритет<select name="priority"><option value="normal" ${deal.priority === 'normal' ? 'selected' : ''}>Обычный</option><option value="high" ${deal.priority === 'high' ? 'selected' : ''}>Высокий</option><option value="low" ${deal.priority === 'low' ? 'selected' : ''}>Низкий</option></select></label>
+     <label>Причина отказа (если сделка проиграна)<input name="loss_reason" value="${esc(deal.loss_reason || '')}"></label></div>
+     ${cfInputs('deals', deal)}`, true)}
      <div style="display:flex;gap:8px;margin-top:12px"><button class="btn primary">Сохранить изменения</button><button class="btn danger" type="button" onclick="del('deals',${deal.id})">Удалить</button></div></form>`;
   }
   if (state.dealTab === 'chat') {
@@ -950,7 +1047,8 @@ function dealTab(deal, d) {
     <div class="msgs" style="max-height:360px">${d.messages.map(msgHtml).join('') || '<small>Сообщений пока нет</small>'}</div>`;
   }
   if (state.dealTab === 'products') {
-    return `<table><tr><th>Товар / проект</th><th>Цена</th><th>Кол-во</th><th>Сумма</th><th></th></tr>${d.products.map(p => `<tr><td>${esc(p.name)}</td><td>${fmt(p.price)}</td><td>${p.qty}</td><td><b>${fmt(p.price * p.qty)}</b></td><td><button class="btn sm danger" onclick="delRow('deal_products',${p.id},${deal.id})">${icon('close', 13)}</button></td></tr>`).join('') || '<tr><td colspan="5"><small>Позиций нет — добавьте проект дома или доп. опцию</small></td></tr>'}</table>
+    const total = d.products.reduce((a, p) => a + p.price * p.qty, 0);
+    return `<table><tr><th>Товар / проект</th><th>Цена</th><th>Кол-во</th><th>Сумма</th><th></th></tr>${d.products.map(p => `<tr><td>${esc(p.name)}</td><td>${fmt(p.price)}</td><td>${p.qty}</td><td><b>${fmt(p.price * p.qty)}</b></td><td><button class="btn sm danger" onclick="delRow('deal_products',${p.id},${deal.id})">${icon('close', 13)}</button></td></tr>`).join('') || '<tr><td colspan="5"><small>Позиций нет — добавьте проект дома или доп. опцию</small></td></tr>'}${d.products.length ? `<tr><td colspan="3" style="text-align:right"><b>Итого по позициям:</b></td><td><b>${fmt(total)}</b></td><td></td></tr>${Math.abs(total - deal.amount) >= 1 ? `<tr><td colspan="5"><small>Сумма сделки — ${fmt(deal.amount)}. <button class="btn sm" onclick="syncDealAmount(${deal.id},${total})">Подставить ${fmt(total)} в сделку</button></small></td></tr>` : ''}` : ''}</table>
      <hr><button class="btn sm primary" onclick="addDealProduct(${deal.id})">+ Добавить товар / услугу</button>`;
   }
   if (state.dealTab === 'tasks') {
@@ -983,12 +1081,23 @@ async function addNote(e, entity_type, entity_id) {
 }
 async function addDealProduct(dealId) {
   const prods = await api('/api/products');
+  state.catalogMap = Object.fromEntries(prods.map(p => [p.id, { name: p.name, price: p.price, unit: p.unit || 'шт' }]));
   openModal(`<h3>Добавить товар к сделке</h3><form onsubmit="return saveDealProduct(event,${dealId})">
-   <label>Товар из каталога<select name="product_id" onchange="const p=${JSON.stringify(prods)}.find(x=>x.id==this.value);if(p){this.form.name.value=p.name;this.form.price.value=p.price}"><option value="">— свободная позиция —</option>${prods.map(p => `<option value="${p.id}">${esc(p.name)} (${fmt(p.price)})</option>`).join('')}</select></label>
+   <label>Товар из каталога<select name="product_id" onchange="pickCatalogProduct(this)"><option value="">— свободная позиция —</option>${prods.map(p => `<option value="${p.id}">${esc(p.name)} (${fmt(p.price)})</option>`).join('')}</select></label>
    <label>Название позиции*<input name="name" required placeholder="Каркасный дом «Север»"></label>
    <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px"><label>Цена (${CUR()})<input name="price" type="number" required value="0"></label>
    <label>Количество<input name="qty" type="number" step="0.1" value="1"></label></div>
    <button class="btn primary w">Добавить</button></form>`);
+}
+function pickCatalogProduct(sel) {
+  const p = (state.catalogMap || {})[sel.value];
+  if (!p) return;
+  sel.form.name.value = p.name;
+  sel.form.price.value = p.price;
+}
+async function syncDealAmount(dealId, amount) {
+  await api('/api/deals/' + dealId, { method: 'PATCH', body: JSON.stringify({ amount }) });
+  toast('Сумма сделки обновлена'); openDealCard(dealId);
 }
 async function saveDealProduct(e, deal_id) {
   e.preventDefault();
@@ -1006,6 +1115,7 @@ async function delNote(id, contactId, dealId) {
 async function delRow(table, id, parentId) {
   await api(`/api/${table}/${id}`, { method: 'DELETE' });
   toast('Удалено');
+  if (table === 'deals') { closeModal(); render(); return; }
   if (parentId) openDealCard(parentId); else render();
 }
 
@@ -1116,7 +1226,11 @@ async function sendMsg(e, cid) {
     // обновляем список диалогов: последний текст и счётчик непрочитанных
     state.cache.convs = await api('/api/conversations');
     filterConvs($('#convSearch')?.value || '');
-  } catch (err) { toast(err.message, 'err'); }
+  } catch (err) {
+    // текст не теряем: возвращаем его в поле и ставим курсор в конец
+    if (input.isConnected && !input.value) { input.value = body; input.focus(); }
+    toast(err.message, 'err');
+  }
   return false;
 }
 // Загрузка файла/фото из кнопки-скрепки: файл сразу уходит в диалог как вложение-ссылка.
@@ -1131,7 +1245,7 @@ async function uploadChatFile(input, cid) {
       const dataBase64 = String(reader.result).split(',').pop();
       const up = await api(`/api/conversations/${cid}/upload`, { method: 'POST', body: JSON.stringify({ filename: file.name, contentType: file.type || 'application/octet-stream', dataBase64 }) });
       await api(`/api/conversations/${cid}/messages`, { method: 'POST', body: JSON.stringify({ body: (file.type || '').startsWith('image/') ? '' : (file.name || 'Файл'), contentUri: up.url, contentName: up.name, contentType: up.contentType, channel: $('#msgChannel')?.value || 'whatsapp' }) });
-      toast('Файл отправлен'); render();
+      toast('Файл отправлен'); refreshInbox();
     } catch (err) { toast(err.message, 'err'); }
   };
   reader.readAsDataURL(file);
@@ -1198,10 +1312,10 @@ function bulkStage() {
 /* ---------- week calendar ---------- */
 function weekCalendar(tasksList) {
   const now = new Date(); const dayIdx = (now.getDay() + 6) % 7;
-  const monday = new Date(now.getTime() - dayIdx * 864e5);
-  const days = Array.from({ length: 7 }, (_, i) => { const d = new Date(monday.getTime() + i * 864e5); return d.toISOString().slice(0, 10); });
+  const monday = new Date(now.getFullYear(), now.getMonth(), now.getDate() - dayIdx);
+  const days = Array.from({ length: 7 }, (_, i) => isoDate(new Date(monday.getFullYear(), monday.getMonth(), monday.getDate() + i)));
   const names = ['Пн', 'Вт', 'Ср', 'Чт', 'Пт', 'Сб', 'Вс'];
-  const today = now.toISOString().slice(0, 10);
+  const today = isoDate(now);
   return `<div class="calendar">${days.map((d, i) => {
     const list = tasksList.filter(t => normalizeDue(t.due).startsWith(d));
     return `<div class="cal-day ${d === today ? 'today' : ''}"><h4><span>${names[i]}</span><small>${d.slice(5)}</small></h4>
@@ -1229,22 +1343,23 @@ async function contacts(v) {
 
   v.innerHTML = `${bulkBar('contacts', `${bulkOwner('contacts')}<button class="btn sm" onclick="bulkAddTag()">${icon('tag', 13)} Добавить тег</button><button class="btn sm danger" onclick="bulkApply('contacts','delete')">${icon('trash', 13)} Удалить</button>`)}
   <div class="card" style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
-   <input style="max-width:220px" placeholder="Поиск по имени, тел, почте" value="${esc(f.q)}" oninput="state.contactFilter.q=this.value;render()">
+   <input id="contactSearch" style="max-width:220px" placeholder="Поиск по имени, тел, почте" value="${esc(f.q)}" oninput="liveSearch('contacts',()=>{state.contactFilter.q=this.value;state.contactLimit=50;render()})">
    <select style="width:auto" onchange="state.contactFilter.owner=this.value;render()"><option value="">Все ответственные</option>${__team.map(u => `<option value="${u.id}" ${f.owner == u.id ? 'selected' : ''}>${esc(u.name)}</option>`).join('')}</select>
    <select style="width:auto" onchange="state.contactFilter.source=this.value;render()"><option value="">Все источники</option>${['manual', 'wazzup-whatsapp', 'wazzup-telegram', 'wazzup-instagram', 'wazzup-viber', 'site', 'avito', 'email', 'import'].map(s => `<option value="${s}" ${f.source === s ? 'selected' : ''}>${sourceLabel(s)}</option>`).join('')}</select>
-   ${tagsAll.length ? `<select style="width:auto" onchange="state.contactFilter.tag=this.value;render()"><option value="">Все теги</option>${tagsAll.map(t => `<option value="${t}" ${f.tag === t ? 'selected' : ''}>${esc(t)}</option>`).join('')}</select>` : ''}
+   ${tagsAll.length ? `<select style="width:auto" onchange="state.contactFilter.tag=this.value;render()"><option value="">Все теги</option>${tagsAll.map(t => `<option value="${esc(t)}" ${f.tag === t ? 'selected' : ''}>${esc(t)}</option>`).join('')}</select>` : ''}
    ${(f.q || f.owner || f.source || f.tag) ? `<button class="btn sm ghost" onclick="resetContactFilter()">Сбросить</button>` : ''}
-   <span class="tag grey" style="margin-left:auto">показано ${filtered.length} из ${list.length}</span>
+   <span class="tag grey" style="margin-left:auto">показано ${Math.min(filtered.length, state.contactLimit || 50)} из ${filtered.length}${filtered.length !== list.length ? ` (всего в базе ${list.length})` : ''}</span>
    <button class="btn sm" onclick="openDuplicates()">${icon('search', 13)} Дубли</button>
    <button class="btn sm" onclick="download('/api/export/contacts','contacts.csv')" title="Выгрузить всех клиентов в CSV">${icon('download', 13)} Экспорт</button>
    <button class="btn sm" onclick="importContacts()">${icon('upload', 13)} Импорт CSV</button>
    <button class="btn sm primary" onclick="openContact()">${icon('plus', 13)} Новый контакт</button></div>
   <div class="card"><table><tr><th class="sel"></th><th>Клиент</th><th>Телефон / E-mail</th><th>Компания</th><th>Источник</th><th>Теги</th><th>Ответственный</th><th></th></tr>
-   ${filtered.map(c => `<tr class="${selSet('contacts').has(c.id) ? 'selected' : ''}"><td class="sel"><input type="checkbox" ${selSet('contacts').has(c.id) ? 'checked' : ''} onchange="toggleSel('contacts',${c.id})"></td>
+   ${filtered.slice(0, state.contactLimit || 50).map(c => `<tr class="${selSet('contacts').has(c.id) ? 'selected' : ''}"><td class="sel"><input type="checkbox" ${selSet('contacts').has(c.id) ? 'checked' : ''} onchange="toggleSel('contacts',${c.id})"></td>
     <td><a href="#" onclick="openContactCard(${c.id});return false"><b>${esc(c.name)}</b></a></td><td>${esc(c.phone || '—')}<br><small>${esc(c.email || '')}</small></td><td>${esc(c.company || '—')}</td><td><span class="tag grey">${esc(sourceLabel(c.source))}</span></td>
     <td>${(c.tags || '').split(',').filter(Boolean).map(t => `<span class="tag">${esc(t.trim())}</span>`).join('')}</td>
     <td><small>${esc(__team.find(u => u.id === c.responsible_id)?.name || '—')}</small></td>
-    <td style="white-space:nowrap"><button class="btn sm" onclick="openContactCard(${c.id})">Карточка</button> <button class="btn sm" onclick="openDeal(${c.id})">+ Сделка</button> <button class="btn sm danger" onclick="del('contacts',${c.id})">${icon('close', 13)}</button></td></tr>`).join('') || '<tr><td colspan="8"><div class="empty">Контактов не найдено</div></td></tr>'}</table></div>`;
+    <td style="white-space:nowrap"><button class="btn sm" onclick="openContactCard(${c.id})">Карточка</button> <button class="btn sm" onclick="openDeal(${c.id})">+ Сделка</button> <button class="btn sm danger" onclick="del('contacts',${c.id})">${icon('close', 13)}</button></td></tr>`).join('') || '<tr><td colspan="8"><div class="empty">Контактов не найдено</div></td></tr>'}</table>
+   ${filtered.length > (state.contactLimit || 50) ? `<div style="text-align:center;margin-top:10px"><button class="btn" onclick="state.contactLimit=(state.contactLimit||50)+50;render()">Показать ещё 50</button></div>` : ''}</div>`;
 }
 
 function resetContactFilter() { state.contactFilter = { q: '', owner: '', source: '', tag: '' }; render(); }
@@ -1303,6 +1418,7 @@ async function openContactCard(id) {
   const deals = (await api('/api/deals')).deals.filter(d => d.contact_id === id);
   const conv = (await api('/api/conversations')).find(x => x.contact_id === id);
   const notes = await api(`/api/notes?type=contacts&entity=${id}`);
+  const contactTasks = (await api('/api/tasks').catch(() => [])).filter(t => t.contact_id === id && !t.done).slice(0, 6);
   await team();
   const rawPhone = (c.phone || '').replace(/[^\d]/g, '');
 
@@ -1323,6 +1439,13 @@ async function openContactCard(id) {
      <div>
        <h4>Сделки клиента (${deals.length})</h4>
        <table><tr><th>Сделка</th><th>Сумма</th><th>Этап</th></tr>${deals.map(d => `<tr><td><a href="#" onclick="closeModal();openDealCard(${d.id});return false"><b>${esc(d.title)}</b></a></td><td>${fmt(d.amount)}</td><td><span class="tag">${esc(stageLabel(d.stage))}</span></td></tr>`).join('') || '<tr><td colspan="3"><small>Сделок нет — создайте первую</small></td></tr>'}</table>
+       <h4 style="margin-top:16px">Открытые задачи (${contactTasks.length})</h4>
+       <div class="list">${contactTasks.map(t => {
+         const meta = taskDueMeta(t.due, t.done);
+         return `<div class="row"><span><b>${esc(t.title)}</b><br><small class="${meta.overdue ? 'task-due-overdue' : ''}">${esc(meta.label)}</small></span>
+           <span style="display:flex;gap:6px"><button class="btn sm mark" onclick="toggleTask(${t.id},1);openContactCard(${c.id})">${icon('check', 13)} Выполнить</button><button class="btn sm" onclick="openTask(${t.id})">${icon('edit', 13)}</button></span></div>`;
+       }).join('') || '<small>Открытых задач нет — поставьте звонок или встречу, чтобы не потерять клиента.</small>'}</div>
+       <button class="btn sm" style="margin-top:8px" onclick="openTask(null,{contact_id:${c.id}})">+ Задача клиенту</button>
        <h4 style="margin-top:16px">Заметки</h4>
        <form onsubmit="return addNote(event,'contacts',${c.id})"><textarea name="body" rows="2" required placeholder="Заметка о клиенте…"></textarea><button class="btn sm primary" style="margin-top:6px">Добавить заметку</button></form>
        <div class="list" style="margin-top:10px">${notes.map(n => `<div class="row"><span>${esc(n.body)}<br><small>${esc(n.author || '—')} · ${esc(dt(n.created_at))}</small></span><button class="btn sm danger" onclick="delNote(${n.id},${c.id})">${icon('close', 13)}</button></div>`).join('') || '<small>Заметок нет</small>'}</div>
@@ -1344,23 +1467,35 @@ async function openContact(id) {
    <label>Имя клиента*<input name="name" required value="${esc(c.name || '')}" placeholder="Иван Петров"></label>
    <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px"><label>Телефон<input name="phone" value="${esc(c.phone || '')}" placeholder="+7 999 123-45-67"></label>
    <label>E-mail<input name="email" type="email" value="${esc(c.email || '')}" placeholder="ivan@mail.ru"></label></div>
-   <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px"><label>Компания<select name="company_id"><option value="">— частное лицо —</option>${comps.map(x => `<option value="${x.id}" ${x.id === c.company_id ? 'selected' : ''}>${esc(x.name)}</option>`).join('')}</select></label>
+   ${formMore(`<div style="display:grid;grid-template-columns:1fr 1fr;gap:12px"><label>Компания<select name="company_id"><option value="">— частное лицо —</option>${comps.map(x => `<option value="${x.id}" ${x.id === c.company_id ? 'selected' : ''}>${esc(x.name)}</option>`).join('')}</select></label>
    <label>Должность<input name="position" value="${esc(c.position || '')}" placeholder="Собственник / застройщик"></label></div>
    <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px"><label>Ответственный<select name="responsible_id">${userOptions(c.responsible_id || meId())}</select></label>
    <label>Источник<select name="source">${sourceOptions(c.source)}</select></label></div>
    <label>Теги (через запятую)<input name="tags" value="${esc(c.tags || '')}" placeholder="VIP, каркас, участок"></label>
    <label>Заметки<textarea name="notes" rows="2">${esc(c.notes || '')}</textarea></label>
-   ${cfInputs('contacts', c)}
-   <button class="btn primary w">Сохранить</button></form>`);
+   ${cfInputs('contacts', c)}`, !!id && !!(c.tags || c.notes || c.position || (c.company_id)))}
+   <button class="btn primary w">${id ? 'Сохранить' : 'Создать контакт'}</button></form>`);
 }
 
-async function saveContact(e, id) {
+async function saveContact(e, id, allowDuplicate = false) {
   e.preventDefault();
   const b = cfCollect(e.target);
   b.company_id = b.company_id ? +b.company_id : null;
   b.responsible_id = b.responsible_id ? +b.responsible_id : null;
-  await api(id ? '/api/contacts/' + id : '/api/contacts', { method: id ? 'PATCH' : 'POST', body: JSON.stringify(b) });
-  closeModal(); toast('Контакт сохранён'); render(); return false;
+  const url = id ? '/api/contacts/' + id : '/api/contacts' + (allowDuplicate ? '' : '?check_duplicates=1');
+  try {
+    await api(url, { method: id ? 'PATCH' : 'POST', body: JSON.stringify(b) });
+  } catch (err) {
+    const dup = err.data && err.data.duplicate;
+    if (dup) {
+      askConfirm(`Похоже, этот клиент уже есть в базе: ${dup.name}${dup.phone ? ' · ' + dup.phone : ''}. Открыть существующую карточку, чтобы не создавать дубль?`,
+        () => openContactCard(dup.id),
+        { okText: 'Открыть карточку', danger: false, extraText: 'Всё равно создать', onExtra: () => saveContact(e, id, true) });
+      return false;
+    }
+    throw err;
+  }
+  closeModal(); toast(id ? 'Контакт сохранён' : 'Контакт создан'); render(); return false;
 }
 
 async function openDuplicates() {
@@ -1386,9 +1521,14 @@ function mergeGroup(gi) {
 /* ---------- companies ---------- */
 async function companies(v) {
   const rows = await api('/api/companies');
-  v.innerHTML = `<div class="card"><div class="row" style="border:0"><h3>Компании (${rows.length})</h3><button class="btn sm primary" onclick="openCompany()">+ Компания</button></div>
+  const q = (state.companyQuery || '').trim().toLowerCase();
+  const shown = q ? rows.filter(c => `${c.name} ${c.inn || ''} ${c.phone || ''} ${c.email || ''}`.toLowerCase().includes(q)) : rows;
+  v.innerHTML = `<div class="card"><div class="row" style="border:0;flex-wrap:wrap;gap:8px"><h3>Компании (${shown.length}${shown.length !== rows.length ? ` из ${rows.length}` : ''})</h3>
+   <input id="companySearch" style="max-width:240px" placeholder="Название, ИНН, телефон" value="${esc(state.companyQuery || '')}" oninput="liveSearch('companies',()=>{state.companyQuery=this.value;render()})">
+   <button class="btn sm primary" style="margin-left:auto" onclick="openCompany()">+ Компания</button></div>
   <table><tr><th>Компания</th><th>ИНН</th><th>Телефон</th><th>E-mail</th><th>Сайт</th><th></th></tr>
-   ${rows.map(c => `<tr><td><b>${esc(c.name)}</b></td><td>${esc(c.inn || '—')}</td><td>${esc(c.phone || '—')}</td><td>${esc(c.email || '—')}</td><td>${siteHref(c.site) ? `<a href="${esc(siteHref(c.site))}" target="_blank" rel="noopener">${esc(c.site)}</a>` : '—'}</td><td><button class="btn sm" onclick="openCompany(${c.id})">${icon('edit', 13)}</button> <button class="btn sm danger" onclick="del('companies',${c.id})">${icon('close', 13)}</button></td></tr>`).join('') || '<tr><td colspan="6"><div class="empty">Компаний пока нет</div></td></tr>'}</table></div>`;
+   ${shown.slice(0, state.companyLimit || 100).map(c => `<tr><td><b>${esc(c.name)}</b></td><td>${esc(c.inn || '—')}</td><td>${esc(c.phone || '—')}</td><td>${esc(c.email || '—')}</td><td>${siteHref(c.site) ? `<a href="${esc(siteHref(c.site))}" target="_blank" rel="noopener">${esc(c.site)}</a>` : '—'}</td><td><button class="btn sm" onclick="openCompany(${c.id})">${icon('edit', 13)}</button> <button class="btn sm danger" onclick="del('companies',${c.id})">${icon('close', 13)}</button></td></tr>`).join('') || '<tr><td colspan="6"><div class="empty">Компаний не найдено</div></td></tr>'}</table>
+   ${shown.length > (state.companyLimit || 100) ? `<div style="text-align:center;margin-top:10px"><button class="btn" onclick="state.companyLimit=(state.companyLimit||100)+100;render()">Показать ещё</button></div>` : ''}</div>`;
 }
 async function openCompany(id) {
   const c = id ? await api('/api/companies/' + id) : {};
@@ -1406,10 +1546,10 @@ async function openCompany(id) {
   }
   openModal(`<h3>${id ? 'Компания' : 'Новая компания'}</h3><form onsubmit="return saveCompany(event,${id || 'null'})">
    <label>Название организации*<input name="name" required value="${esc(c.name || '')}" placeholder="ООО «СтройКаркас»"></label>
-   <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px"><label>ИНН<input name="inn" value="${esc(c.inn || '')}"></label><label>Телефон<input name="phone" value="${esc(c.phone || '')}"></label></div>
-   <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px"><label>E-mail<input name="email" type="email" value="${esc(c.email || '')}"></label><label>Сайт<input name="site" value="${esc(c.site || '')}"></label></div>
-   <label>Заметки<textarea name="notes" rows="2">${esc(c.notes || '')}</textarea></label>
-   <button class="btn primary w">Сохранить</button></form>${related}`);
+   <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px"><label>ИНН<input name="inn" value="${esc(c.inn || '')}" placeholder="10 или 12 цифр"></label><label>Телефон<input name="phone" value="${esc(c.phone || '')}" placeholder="+7 495 000-00-00"></label></div>
+   ${formMore(`<div style="display:grid;grid-template-columns:1fr 1fr;gap:12px"><label>E-mail<input name="email" type="email" value="${esc(c.email || '')}"></label><label>Сайт<input name="site" value="${esc(c.site || '')}"></label></div>
+   <label>Заметки<textarea name="notes" rows="2">${esc(c.notes || '')}</textarea></label>`, !!id)}
+   <button class="btn primary w">${id ? 'Сохранить' : 'Создать компанию'}</button></form>${related}`);
 }
 async function saveCompany(e, id) { e.preventDefault(); await api(id ? '/api/companies/' + id : '/api/companies', { method: id ? 'PATCH' : 'POST', body: JSON.stringify(Object.fromEntries(new FormData(e.target))) }); closeModal(); toast('Компания сохранена'); render(); return false; }
 
@@ -1417,7 +1557,7 @@ async function saveCompany(e, id) { e.preventDefault(); await api(id ? '/api/com
 async function tasks(v) {
   const all = await api('/api/tasks');
   await team();
-  const today = new Date().toISOString().slice(0, 10);
+  const today = todayISO();
   let rows = state.taskScope === 'mine' ? all.filter(t => t.responsible_id === meId() || !t.responsible_id) : all;
   if (state.taskFilter === 'today') rows = rows.filter(t => !t.done && normalizeDue(t.due).slice(0, 10) === today);
   if (state.taskFilter === 'overdue') rows = rows.filter(t => !t.done && normalizeDue(t.due) !== '' && normalizeDue(t.due).slice(0, 10) < today);
@@ -1436,10 +1576,10 @@ async function tasks(v) {
    <span class="tabs" style="margin:0"><button class="${state.taskView === 'list' ? 'active' : ''}" onclick="state.taskView='list';render()">${icon('list', 14)} Список</button><button class="${state.taskView === 'week' ? 'active' : ''}" onclick="state.taskView='week';render()">${icon('calendar', 14)} Неделя</button></span>
    <button class="btn sm ${state.taskSelectMode ? 'active' : ''}" onclick="toggleTaskSelect()">${state.taskSelectMode ? 'Отменить выбор' : 'Выбрать несколько'}</button>
    <button class="btn sm primary" style="margin-left:auto" onclick="openTask()">${icon('plus', 14)} Задача</button></div>
-   <p><small>«Мои» — задачи, назначенные на вас (${esc((state.me && state.me.name) || '')})${state.taskScope === 'mine' ? '; неназначенные задачи тоже попадают в список' : ''}.</small></p>
+   ${state.taskScope === 'mine' ? `<p><small>Здесь задачи, назначенные на вас (${esc((state.me && state.me.name) || '')}), и неназначенные — их удобно разобрать первыми.</small></p>` : ''}
    ${state.taskView === 'week' ? weekCalendar(rows) : ''}
    ${state.taskView !== 'week' && state.taskSelectMode ? bulkBar('tasks', `<button class="btn sm" onclick="bulkApply('tasks','update',{done:1})">${icon('check', 14)} Выполнить выбранные</button> <button class="btn sm" onclick="bulkRescheduleTasks()">Перенести</button> <button class="btn sm danger" onclick="bulkApply('tasks','delete')">${icon('trash', 14)} Удалить</button>`) : ''}
-   ${state.taskView === 'week' ? '' : groups.map(([t, list]) => list.length ? `<h3 style="margin-top:12px">${t} <small>${list.length}</small></h3>${list.map(x => {
+   ${state.taskView === 'week' ? '' : groups.map(([t, list]) => list.length ? `<h3 style="margin-top:12px">${t} <small>${list.length}</small></h3>${list.slice(0, state.taskLimit || 50).map(x => {
      const meta = taskDueMeta(x.due, x.done);
      return `<div class="row taskrow ${selSet('tasks').has(x.id) ? 'selected' : ''}">
        <div style="display:flex;gap:10px;align-items:center;min-width:0;flex:1">
@@ -1454,7 +1594,7 @@ async function tasks(v) {
          <button class="btn sm danger" onclick="del('tasks',${x.id})">${icon('close', 13)}</button>
        </span>
      </div>`;
-   }).join('')}` : '').join('') || '<div class="empty-state"><span class="ico">' + icon('target', 36) + '</span><b>Задач нет</b>Поставьте первое дело — звонок, встречу или письмо.<br><button class="btn primary" onclick="openTask()">' + icon('plus', 14) + ' Задача</button></div>'}</div>`;
+   }).join('')}${list.length > (state.taskLimit || 50) ? `<div style="margin:6px 0 10px"><small>Показано ${state.taskLimit || 50} из ${list.length}. <button class="btn sm" onclick="state.taskLimit=(state.taskLimit||50)+50;render()">Показать ещё</button></small></div>` : ''}` : '').join('') || '<div class="empty-state"><span class="ico">' + icon('target', 36) + '</span><b>Задач нет</b>Поставьте первое дело — звонок, встречу или письмо.<br><button class="btn primary" onclick="openTask()">' + icon('plus', 14) + ' Задача</button></div>'}</div>`;
 }
 
 function toggleTaskSelect() {
@@ -1495,11 +1635,13 @@ async function reschedule(id, days) {
     const t = await api('/api/tasks/' + id);
     const curDue = normalizeDue(t.due);
     const time = /\d{2}:\d{2}/.test(curDue) ? curDue.slice(-5) : '10:00';
-    const baseDate = /^\d{4}-\d{2}-\d{2}/.test(curDue) ? new Date(curDue.slice(0, 10)) : new Date();
-    const nextDate = new Date(baseDate.getTime() + days * 864e5);
-    const iso = `${nextDate.toISOString().slice(0, 10)} ${time}`;
+    // дату разбираем по частям: new Date('2026-01-01') — это UTC, а не местное время
+    const m = curDue.match(/^(\d{4})-(\d{2})-(\d{2})/);
+    const baseDate = m ? new Date(+m[1], +m[2] - 1, +m[3]) : new Date();
+    const nextDate = new Date(baseDate.getFullYear(), baseDate.getMonth(), baseDate.getDate() + days);
+    const iso = `${isoDate(nextDate)} ${time}`;
     await api('/api/tasks/' + id, { method: 'PATCH', body: JSON.stringify({ due: iso }) });
-    toast(`Задача перенесена на ${iso.slice(0, 10)}`);
+    toast(`Задача перенесена на ${fmtDayMonth(iso.slice(0, 10))}`);
     render();
   } catch (e) { toast(e.message, 'err'); }
 }
@@ -1509,19 +1651,23 @@ async function openTask(id, p = {}) {
   if (!state.contacts.length) state.contacts = await api('/api/contacts');
   await team();
   const deals = state.deals.length ? state.deals : (await api('/api/deals')).deals;
-  const dueVal = t.due ? normalizeDue(t.due).replace(' ', 'T').slice(0, 16) : '';
+  // срок по умолчанию: сегодня 18:00, а если уже вечер — завтра 12:00
+  const nowT = new Date();
+  const defDay = new Date(nowT); let defTime = '18:00';
+  if (nowT.getHours() >= 18) { defDay.setDate(defDay.getDate() + 1); defTime = '12:00'; }
+  const dueVal = t.due ? normalizeDue(t.due).replace(' ', 'T').slice(0, 16) : `${isoDate(defDay)}T${defTime}`;
 
   openModal(`<h3>${id ? 'Задача' : 'Новая задача'}</h3><form onsubmit="return saveTask(event,${id || 'null'})">
-   <label>Что сделать*<input name="title" required value="${esc(t.title || '')}"></label>
-   <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px"><label>Тип<select name="type">${Object.entries({ call: 'Звонок', meeting: 'Встреча', message: 'Сообщение', email: 'Письмо', other: 'Другое' }).map(([k, n]) => `<option value="${k}" ${k === (t.type || 'call') ? 'selected' : ''}>${n}</option>`).join('')}</select></label>
-   <label>Срок<input name="due" type="datetime-local" value="${esc(dueVal)}"></label></div>
+   <label>Что сделать*<input name="title" required value="${esc(t.title || '')}" placeholder="Позвонить, уточнить детали"></label>
+   <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px"><label>Срок<input name="due" type="datetime-local" value="${esc(dueVal)}"></label>
+   <label>Тип<select name="type">${Object.entries({ call: 'Звонок', meeting: 'Встреча', message: 'Сообщение', email: 'Письмо', other: 'Другое' }).map(([k, n]) => `<option value="${k}" ${k === (t.type || 'call') ? 'selected' : ''}>${n}</option>`).join('')}</select></label></div>
    <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px"><label>Контакт<select name="contact_id"><option value="">— нет —</option>${state.contacts.map(c => `<option value="${c.id}" ${c.id === t.contact_id ? 'selected' : ''}>${esc(c.name)}</option>`).join('')}</select></label>
    <label>Сделка<select name="deal_id"><option value="">— нет —</option>${deals.map(d => `<option value="${d.id}" ${d.id === t.deal_id ? 'selected' : ''}>${esc(d.title)}</option>`).join('')}</select></label></div>
-   <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px"><label>Ответственный<select name="responsible_id">${userOptions(t.responsible_id || meId())}</select></label>
-   <label>Повтор задачи<select name="repeat">${[['none', 'Не повторять'], ['daily', 'Каждый день'], ['weekly', 'Каждую неделю'], ['monthly', 'Каждый месяц']].map(([k, n]) => `<option value="${k}" ${k === (t.repeat || 'none') ? 'selected' : ''}>${n}</option>`).join('')}</select></label></div>
-   <label>Приоритет<select name="priority"><option value="normal" ${t.priority === 'normal' ? 'selected' : ''}>Обычный</option><option value="high" ${t.priority === 'high' ? 'selected' : ''}>Высокий</option><option value="low" ${t.priority === 'low' ? 'selected' : ''}>Низкий</option></select></label>
-   <label>Результат (после выполнения)<textarea name="result" rows="2" placeholder="Договорились на 15:00 — пришлём смету сегодня">${esc(t.result || '')}</textarea></label>
-   <button class="btn primary w">Сохранить</button></form>`);
+   ${formMore(`<div style="display:grid;grid-template-columns:1fr 1fr;gap:12px"><label>Ответственный<select name="responsible_id">${userOptions(t.responsible_id || meId())}</select></label>
+   <label>Приоритет<select name="priority"><option value="normal" ${t.priority === 'normal' ? 'selected' : ''}>Обычный</option><option value="high" ${t.priority === 'high' ? 'selected' : ''}>Высокий</option><option value="low" ${t.priority === 'low' ? 'selected' : ''}>Низкий</option></select></label></div>
+   <label>Повтор задачи<select name="repeat">${[['none', 'Не повторять'], ['daily', 'Каждый день'], ['weekly', 'Каждую неделю'], ['monthly', 'Каждый месяц']].map(([k, n]) => `<option value="${k}" ${k === (t.repeat || 'none') ? 'selected' : ''}>${n}</option>`).join('')}</select></label>
+   <label>Результат (после выполнения)<textarea name="result" rows="2" placeholder="Договорились на 15:00 — пришлём смету сегодня">${esc(t.result || '')}</textarea></label>`, !!id)} 
+   <button class="btn primary w">${id ? 'Сохранить' : 'Поставить задачу'}</button></form>`);
 }
 
 async function saveTask(e, id) {
@@ -1538,19 +1684,26 @@ async function saveTask(e, id) {
 /* ---------- products ---------- */
 async function products(v) {
   const rows = await api('/api/products');
-  v.innerHTML = `<div class="card"><div class="row" style="border:0"><h3>Каталог товаров и услуг (${rows.length})</h3><button class="btn sm primary" onclick="openProduct()">+ Товар / проект</button></div>
+  const q = (state.productQuery || '').trim().toLowerCase();
+  const onlyActive = state.productScope !== 'all';
+  const shown = rows.filter(p => (!onlyActive || p.active) && (!q || `${p.name} ${p.sku || ''} ${p.unit || ''}`.toLowerCase().includes(q)));
+  const archived = rows.filter(p => !p.active).length;
+  v.innerHTML = `<div class="card"><div class="row" style="border:0;flex-wrap:wrap;gap:8px"><h3>Каталог (${shown.length})</h3>
+   <span class="tabs" style="margin:0"><button class="${onlyActive ? 'active' : ''}" onclick="state.productScope='active';render()">В продаже</button><button class="${!onlyActive ? 'active' : ''}" onclick="state.productScope='all';render()">Все${archived ? ` (+${archived} в архиве)` : ''}</button></span>
+   <input id="productSearch" style="max-width:240px" placeholder="Название или артикул" value="${esc(state.productQuery || '')}" oninput="liveSearch('products',()=>{state.productQuery=this.value;render()})">
+   <button class="btn sm primary" style="margin-left:auto" onclick="openProduct()">+ Товар / проект</button></div>
   <table><tr><th>Артикул</th><th>Название</th><th>Цена</th><th>Ед.</th><th>В продаже</th><th></th></tr>
-   ${rows.map(p => `<tr><td><code>${esc(p.sku || '—')}</code></td><td><b>${esc(p.name)}</b></td><td>${fmt(p.price)}</td><td>${esc(p.unit || 'шт')}</td><td>${p.active ? 'Да' : 'Архив'}</td><td><button class="btn sm" onclick="openProduct(${p.id})">${icon('edit', 13)}</button> <button class="btn sm danger" onclick="del('products',${p.id})">${icon('close', 13)}</button></td></tr>`).join('') || '<tr><td colspan="6"><div class="empty">Товаров пока нет</div></td></tr>'}</table></div>`;
+   ${shown.map(p => `<tr><td><code>${esc(p.sku || '—')}</code></td><td><b>${esc(p.name)}</b></td><td>${fmt(p.price)}</td><td>${esc(p.unit || 'шт')}</td><td>${p.active ? 'Да' : '<span class="tag grey">Архив</span>'}</td><td><button class="btn sm" onclick="openProduct(${p.id})">${icon('edit', 13)}</button> <button class="btn sm danger" onclick="del('products',${p.id})">${icon('close', 13)}</button></td></tr>`).join('') || '<tr><td colspan="6"><div class="empty">Ничего не найдено — измените фильтр или добавьте позицию</div></td></tr>'}</table></div>`;
 }
 async function openProduct(id) {
   const p = id ? await api('/api/products/' + id) : {};
   openModal(`<h3>${id ? 'Товар / проект' : 'Новая позиция каталога'}</h3><form onsubmit="return saveProduct(event,${id || 'null'})">
    <label>Название*<input name="name" required value="${esc(p.name || '')}" placeholder="Каркасный дом «Скандинавия 8×10»"></label>
-   <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px"><label>Артикул / код<input name="sku" value="${esc(p.sku || '')}" placeholder="DOM-SKAN-810"></label>
-   <label>Цена (${CUR()})<input name="price" type="number" required value="${p.price || 0}"></label></div>
-   <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px"><label>Единица измерения<input name="unit" value="${esc(p.unit || 'шт')}"></label>
-   <label style="display:flex;align-items:center;gap:8px;margin-top:22px"><input type="checkbox" name="active" style="width:auto" ${p.active === 0 ? '' : 'checked'}> В продаже</label></div>
-   <button class="btn primary w">Сохранить</button></form>`);
+   <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px"><label>Цена (${CUR()})<input name="price" type="number" required value="${p.price || 0}" placeholder="0"></label>
+   <label>Единица измерения<input name="unit" value="${esc(p.unit || 'шт')}" placeholder="шт, м², услуга"></label></div>
+   ${formMore(`<div style="display:grid;grid-template-columns:1fr 1fr;gap:12px"><label>Артикул / код<input name="sku" value="${esc(p.sku || '')}" placeholder="DOM-SKAN-810"></label>
+   <label style="display:flex;align-items:center;gap:8px;margin-top:22px"><input type="checkbox" name="active" style="width:auto" ${p.active === 0 ? '' : 'checked'}> В продаже</label></div>`, !!id)}
+   <button class="btn primary w">${id ? 'Сохранить' : 'Добавить в каталог'}</button></form>`);
 }
 async function saveProduct(e, id) {
   e.preventDefault(); const b = Object.fromEntries(new FormData(e.target));
@@ -1566,7 +1719,7 @@ async function analytics(v) {
   const plan = a.plan || {};
   v.innerHTML = `
   <div class="grid">
-   <div class="kpi"><i>${icon('money', 20)}</i><span>План продаж (${plan.month || 'тек. месяц'})</span><b>${plan.target ? fmt(plan.target) : 'Не задан'}</b>${plan.percent !== null ? `<small class="${plan.percent >= 100 ? 'green' : ''}">Факт: ${fmt(plan.fact)} (${plan.percent}%)</small>` : '<small>Задайте цель внизу</small>'}</div>
+   <div class="kpi"><i>${icon('money', 20)}</i><span>План продаж (${esc(plan.month || 'текущий месяц')})</span><b>${plan.target ? fmt(plan.target) : 'Не задан'}</b>${plan.percent !== null ? `<small class="${plan.percent >= 100 ? 'green' : ''}">Факт: ${fmt(plan.fact)} (${plan.percent}%)</small>` : '<small>Задайте цель внизу</small>'}</div>
    <div class="kpi"><i>${icon('analytics', 20)}</i><span>Конверсия воронки</span><b class="green">${a.conversion}%</b><small>успешных к закрытым</small></div>
    <div class="kpi"><i>${icon('money', 20)}</i><span>Средний чек сделки</span><b>${fmt(a.avgCheck)}</b></div>
    <div class="kpi"><i>${icon('pipe', 20)}</i><span>Прогноз (сделки в работе)</span><b class="accent">${fmt(a.forecast)}</b></div>
@@ -2119,7 +2272,6 @@ async function openAutomation(id) {
 async function saveAutomation(e, id) { e.preventDefault(); const b = Object.fromEntries(new FormData(e.target)); await api(id ? '/api/automations/' + id : '/api/automations', { method: id ? 'PATCH' : 'POST', body: JSON.stringify(b) }); closeModal(); toast('Правило сохранено'); render(); return false; }
 async function openTemplate(id = null) {
   const rows = await api('/api/templates'); const t = id ? (rows.find(x => x.id === id) || {}) : {};
-  const isAdmin = (state.me && state.me.role) === 'admin';
   openModal(`<h3>${id ? 'Шаблон' : 'Новый шаблон'}</h3><form onsubmit="return saveTemplate(event,${id || 'null'})"><label>Название<input name="name" required value="${esc(t.name || '')}" placeholder="Приветствие"></label>
    <label>Текст сообщения<textarea name="body" rows="4" required>${esc(t.body || '')}</textarea></label><label>Канал<select name="channel">${['any', 'whatsapp', 'telegram', 'instagram', 'viber', 'email'].map(c => `<option value="${c}" ${c === (t.channel || 'any') ? 'selected' : ''}>${channelLabel(c)}</option>`).join('')}</select></label>
    <p><small>Подстановки: {name} — имя клиента, {sum} — сумма сделки. Текст можно изменить после подстановки в чате.</small></p>
@@ -2192,9 +2344,20 @@ async function loadBackups() {
   const host = $('#backupList'); if (!host) return;
   try { const d = await api('/api/backups');
     const isAdmin = ((state.me || {}).role) === 'admin';
-    host.innerHTML = `<table class="mini"><tr><th>Файл</th><th>Размер</th><th>Создан</th><th></th></tr>${(d.files || []).slice(0, 8).map(f => `<tr><td>${esc(f.name)}</td><td>${(f.sizeBytes / 1024 | 0)} КБ</td><td><small>${esc(dt(f.created_at))}</small></td><td style="white-space:nowrap">${isAdmin ? `<button class="btn sm" onclick="download(${JSON.stringify('/api/backups/download?file=' + f.name)},${JSON.stringify(f.name)})" title="Скачать копию">${icon('download', 13)}</button> <button class="btn sm" onclick="restoreBackup(${JSON.stringify(f.name)})" title="Восстановить">${icon('refresh', 13)}</button>` : ''}</td></tr>`).join('') || '<tr><td colspan="4"><small>Копий пока нет — создайте первую</small></td></tr>'}</table>
+    const files = (d.files || []).slice(0, 8);
+    window.__backups = files.map(f => f.name);
+    host.innerHTML = `<table class="mini"><tr><th>Файл</th><th>Размер</th><th>Создан</th><th></th></tr>${files.map((f, i) => `<tr><td>${esc(f.name)}</td><td>${(f.sizeBytes / 1024 | 0)} КБ</td><td><small>${esc(dt(f.created_at))}</small></td><td style="white-space:nowrap">${isAdmin ? `<button class="btn sm" onclick="downloadBackup(${i})" title="Скачать копию">${icon('download', 13)}</button> <button class="btn sm" onclick="restoreBackupAt(${i})" title="Восстановить">${icon('refresh', 13)}</button>` : ''}</td></tr>`).join('') || '<tr><td colspan="4"><small>Копий пока нет — создайте первую</small></td></tr>'}</table>
      ${isAdmin ? `<p><small>Копии создаются автоматически каждую ночь и хранятся ${esc(String((state.cache.settings && state.cache.settings.maintenance && state.cache.settings.maintenance.backup_keep_days) || 7))} дней. Перед каждым обновлением система дополнительно сохраняет страховочную копию.</small></p>` : ''}`;
   } catch (e) { host.innerHTML = `<small>${esc(e.message)}</small>`; }
+}
+function downloadBackup(i) {
+  const name = (window.__backups || [])[i];
+  if (!name) return toast('Копия не найдена — обновите список', 'err');
+  download('/api/backups/download?file=' + encodeURIComponent(name), name);
+}
+function restoreBackupAt(i) {
+  const name = (window.__backups || [])[i];
+  if (name) restoreBackup(name);
 }
 async function makeBackup() { const r = await api('/api/backups', { method: 'POST' }); toast('Копия создана: ' + r.created); loadBackups(); }
 function cleanDemo() {
@@ -2251,9 +2414,12 @@ function refreshLogo(url) {
 async function importContacts() { openModal(`<h3>Импорт контактов из CSV</h3><p><small>Первая строка — заголовки: <code>Имя;Телефон;E-mail;Компания</code>. Разделитель — <code>;</code> или <code>,</code>.</small></p><form onsubmit="return doImport(event)"><label>Вставьте CSV<textarea name="csv" rows="8" placeholder="Имя;Телефон;E-mail;Компания&#10;Иван Петров;+7 900 111-22-33;ivan@mail.ru;ООО Иван"></textarea></label><label>…или выберите файл<input type="file" accept=".csv,text/csv" onchange="csvFromFile(this)"></label><button class="btn primary w">Импортировать</button></form>`); }
 function csvFromFile(input) { const f = input.files[0]; if (!f) return; const r = new FileReader(); r.onload = () => { $('#modalBody textarea').value = r.result; }; r.readAsText(f); }
 async function doImport(e) { e.preventDefault(); const d = await api('/api/import/contacts', { method: 'POST', body: JSON.stringify({ csv: new FormData(e.target).get('csv') }) }); closeModal(); toast(d.message || ('Импортировано контактов: ' + d.imported)); render(); return false; }
-function del(table, id) {
-  askConfirm('Удалить запись? Действие необратимо.', async () => {
-    await api(`/api/${table}/${id}`, { method: 'DELETE' }); toast('Удалено'); render();
+const DEL_LABELS = { contacts: 'контакт', companies: 'компанию', deals: 'сделку', tasks: 'задачу', products: 'позицию каталога', automations: 'правило', pipelines: 'воронку' };
+function del(table, id, name = '') {
+  const what = DEL_LABELS[table] || 'запись';
+  askConfirm(`Удалить ${what}${name ? ' «' + name + '»' : ''}? Действие необратимо.`, async () => {
+    await api(`/api/${table}/${id}`, { method: 'DELETE' });
+    closeModal(); toast('Удалено'); render();
   }, { okText: 'Удалить' });
 }
 
@@ -2423,6 +2589,13 @@ function runPaletteRow(idx) {
   try { it.run(); } catch (e) { toast(e.message, 'err'); }
 }
 
+// Esc закрывает модальное окно — привычное поведение, не нужно искать крестик.
+window.addEventListener('keydown', e => {
+  if (e.key === 'Escape') {
+    const m = $('#modal');
+    if (m && !m.classList.contains('hidden')) { e.preventDefault(); closeModal(); }
+  }
+});
 window.addEventListener('keydown', e => {
   if ((e.metaKey || e.ctrlKey) && (e.key === 'k' || e.key === 'K')) {
     e.preventDefault();
@@ -2431,7 +2604,7 @@ window.addEventListener('keydown', e => {
   }
 });
 
-let realtime = null, navTimer = null;
+let realtime = null, navTimer = null, __changeTimer = null;
 // Один канал realtime на вкладку: повторный вход не должен плодить SSE и таймеры.
 function totalStop() {
   if (realtime) { try { realtime.close() } catch {} realtime = null; }
@@ -2442,7 +2615,8 @@ function connectSSE() {
   es.addEventListener('notify', e => {
     const d = JSON.parse(e.data);
     if (d.type === 'overdue_tasks') toast(`Внимание: просроченных задач — ${d.count}`);
-    if (state.view === 'inbox' || state.view === 'dashboard') render();
+    if (state.view === 'inbox') { refreshInbox(); api('/api/dashboard').then(navCounts).catch(() => {}); }
+    else if (state.view === 'dashboard') render();
   });
   es.addEventListener('message', e => {
     const d = JSON.parse(e.data);
@@ -2452,9 +2626,13 @@ function connectSSE() {
     api('/api/dashboard').then(navCounts).catch(() => {});
   });
   es.addEventListener('change', () => {
-    // совместная работа: списки обновляются у всех, но открытую карточку не сбиваем
-    const modalOpen = !$('#modal').classList.contains('hidden');
-    if (!modalOpen && ['pipe', 'dashboard', 'contacts', 'companies', 'tasks', 'products', 'analytics'].includes(state.view)) render();
+    // совместная работа: списки обновляются у всех, но открытую карточку не сбиваем.
+    // Перерисовку склеиваем: при массовом импорте событий приходит много, а запрос нужен один.
+    clearTimeout(__changeTimer);
+    __changeTimer = setTimeout(() => {
+      const modalOpen = !$('#modal').classList.contains('hidden');
+      if (!modalOpen && ['pipe', 'dashboard', 'contacts', 'companies', 'tasks', 'products', 'analytics'].includes(state.view)) render();
+    }, 400);
   });
   return es;
 }
