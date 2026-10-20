@@ -516,8 +516,7 @@ function myTasksBlock() {
 const fld = (label, inner, required = false) =>
   `<label class="${required ? 'req' : 'opt'}">${label}${required ? '<span class="star" aria-hidden="true">*</span>' : ''}${inner}</label>`;
 const grid2 = html => `<div class="form-grid2">${html}</div>`;
-const formSep = (text = 'Необязательные поля') => `<div class="form-sep"><span>${text}</span></div>`;
-const formLegend = () => `<p class="form-hint"><span class="star">*</span> — обязательные поля. Без них карточка не сохранится; остальные можно заполнить позже.</p>`;
+const formLegend = () => `<p class="form-hint"><span class="star">*</span> — обязательные поля: они идут первыми, без них карточка не сохранится. Остальные можно заполнить позже.</p>`;
 
 // ── свои поля (custom fields) ─────────────────────────────────────────────
 function cfFor(entity) {
@@ -1052,7 +1051,6 @@ async function openDeal(contactId, stageCode) {
    ${formLegend()}
    ${fld('Название сделки', `<input name="title" required placeholder="Каркасный дом 8×10">`, true)}
    ${cfInputs('deals', {}, 2, 'required')}
-   ${formSep()}
    ${grid2(`${fld('Сумма (' + CUR() + ')', `<input name="amount" type="number" value="0" placeholder="0">`)}
      ${fld('Клиент', `<select name="contact_id"><option value="">— выбрать —</option>${state.contacts.map(c => `<option value="${c.id}" ${c.id === contactId ? 'selected' : ''}>${esc(c.name)}</option>`).join('')}</select>`)}`)}
    ${grid2(`${fld('Этап', `<select name="stage">${def.map(st => `<option value="${esc(st.code)}" ${st.code === curStage ? 'selected' : ''}>${esc(st.name)}</option>`).join('')}</select>`)}
@@ -1150,7 +1148,6 @@ function dealTab(deal, d) {
      ${formLegend()}
      ${fld('Название', `<input name="title" required value="${esc(deal.title)}">`, true)}
      ${cfInputs('deals', deal, 2, 'required')}
-     ${formSep()}
      ${grid2(`${fld('Сумма (' + CUR() + ')', `<input name="amount" type="number" value="${deal.amount}">`)}
        ${fld('Этап', `<select name="stage">${selStages(deal.stage, state.cardStages)}</select>`)}`)}
      ${grid2(`${fld('Клиент', `<select name="contact_id"><option value="">— без контакта —</option>${(state.contacts || []).map(c => `<option value="${c.id}" ${c.id === deal.contact_id ? 'selected' : ''}>${esc(c.name)}</option>`).join('')}</select>`)}
@@ -1608,7 +1605,6 @@ async function openContact(id) {
    ${formLegend()}
    ${fld('Имя клиента', `<input name="name" required value="${esc(c.name || '')}" placeholder="Иван Петров">`, true)}
    ${cfInputs('contacts', c, 2, 'required')}
-   ${formSep()}
    ${grid2(`${fld('Телефон', `<input name="phone" value="${esc(c.phone || '')}" placeholder="+7 999 123-45-67">`)}
      ${fld('E-mail', `<input name="email" type="email" value="${esc(c.email || '')}" placeholder="ivan@mail.ru">`)}`)}
    ${grid2(`${fld('Компания', `<select name="company_id"><option value="">— частное лицо —</option>${comps.map(x => `<option value="${x.id}" ${x.id === c.company_id ? 'selected' : ''}>${esc(x.name)}</option>`).join('')}</select>`)}
@@ -1693,7 +1689,6 @@ async function openCompany(id) {
   openModal(`<h3>${id ? 'Компания' : 'Новая компания'}</h3><form onsubmit="return saveCompany(event,${id || 'null'})">
    ${formLegend()}
    ${fld('Название организации', `<input name="name" required value="${esc(c.name || '')}" placeholder="ООО «СтройКаркас»">`, true)}
-   ${formSep()}
    ${grid2(`${fld('ИНН', `<input name="inn" value="${esc(c.inn || '')}" placeholder="10 или 12 цифр">`)}
      ${fld('Телефон', `<input name="phone" value="${esc(c.phone || '')}" placeholder="+7 495 000-00-00">`)}`)}
    ${grid2(`${fld('E-mail', `<input name="email" type="email" value="${esc(c.email || '')}" placeholder="info@stroykarkas.ru">`)}
@@ -1827,7 +1822,6 @@ async function openTask(id, p = {}) {
   openModal(`<h3>${id ? 'Задача' : 'Новая задача'}</h3><form onsubmit="return saveTask(event,${id || 'null'})">
    ${formLegend()}
    ${fld('Что сделать', `<input name="title" required value="${esc(t.title || '')}" placeholder="Позвонить, уточнить детали">`, true)}
-   ${formSep()}
    ${grid2(`${fld('Срок', `<input name="due" type="datetime-local" value="${esc(dueVal)}"><small id="dueHint">${esc(t.due ? '' : (defTime === '18:00' ? 'по умолчанию — сегодня вечером' : 'по умолчанию — завтра в 12:00'))}</small>`)}
      ${fld('Тип', `<select name="type">${Object.entries({ call: 'Звонок', meeting: 'Встреча', message: 'Сообщение', email: 'Письмо', other: 'Другое' }).map(([k, n]) => `<option value="${k}" ${k === (t.type || 'call') ? 'selected' : ''}>${n}</option>`).join('')}</select>`)}`)}
    <div class="due-chips" title="Быстрый выбор срока — поле «Срок» заполнится автоматически">
@@ -1895,7 +1889,6 @@ async function openProduct(id) {
    ${formLegend()}
    ${fld('Название', `<input name="name" required value="${esc(p.name || '')}" placeholder="Каркасный дом «Скандинавия 8×10»">`, true)}
    ${fld('Цена (' + CUR() + ')', `<input name="price" type="number" required value="${p.price || 0}" placeholder="0">`, true)}
-   ${formSep()}
    ${grid2(`${fld('Единица измерения', `<input name="unit" value="${esc(p.unit || 'шт')}" placeholder="шт, м², услуга">`)}
      ${fld('Артикул / код', `<input name="sku" value="${esc(p.sku || '')}" placeholder="DOM-SKAN-810">`)}`)}
    <label class="check-line"><input type="checkbox" name="active" style="width:auto" ${p.active === 0 ? '' : 'checked'}><span>Показывать в продаже <small>(снимите галочку, чтобы убрать в архив)</small></span></label>
@@ -2228,13 +2221,14 @@ async function settings(v) {
   } else if (state.settingsTab === 'fields') {
     const cf = await api('/api/custom-fields');
     const rows = cf.fields;
-    body = `<div class="settings-cols"><div class="card"><div class="row" style="border:0"><div><h3>Свои поля для контактов и сделок</h3><small>Дополнительные строки в карточке: площадь участка, тип фундамента, дата замера — что удобно именно вам.</small></div><button class="btn sm primary" onclick="editField(-1)">${icon('plus', 13)} Добавить поле</button></div>
-     <table><tr><th>Название</th><th>Где</th><th>Тип</th><th>В форме</th><th></th></tr>${rows.map((f, i) => `<tr><td><b>${esc(f.label)}</b></td><td>${({ contacts: 'Контакты', deals: 'Сделки', both: 'Везде' })[f.entity] || esc(f.entity)}</td><td>${({ text: 'Текст', number: 'Число', date: 'Дата', select: 'Список', phone: 'Телефон', email: 'E-mail' })[f.type] || esc(f.type)}${f.options && f.options.length ? '<br><small>' + f.options.map(esc).join(', ') + '</small>' : ''}</td><td>${f.required ? '<b>Сверху</b><br><small>со звёздочкой</small>' : 'Ниже, <small>без звёздочки</small>'}</td><td><button class="btn sm" title="Изменить поле" onclick="editField(${i})">${icon('edit', 13)}</button> <button class="btn sm danger" title="Удалить поле" onclick="delField(${i})">${icon('close', 13)}</button></td></tr>`).join('') || '<tr><td colspan="5"><div class="empty">Своих полей пока нет</div></td></tr>'}</table>
+    body = `<div class="settings-cols"><div class="card"><div class="row" style="border:0"><div><h3>Свои поля для контактов и сделок</h3><small>Дополнительные строки в карточке: площадь участка, тип фундамента, дата замера — что удобно именно вам. Название, обязательность и варианты списка меняются кнопкой «Изменить».</small></div><button class="btn sm primary" onclick="editField(-1)">${icon('plus', 13)} Добавить поле</button></div>
+     <table><tr><th>Название</th><th>Раздел</th><th>Тип</th><th>Обязательное</th><th style="width:210px"></th></tr>${rows.map((f, i) => `<tr><td><b>${esc(f.label)}</b></td><td>${({ contacts: 'Контакты', deals: 'Сделки', both: 'Контакты и сделки' })[f.entity] || esc(f.entity)}</td><td>${({ text: 'Текст', number: 'Число', date: 'Дата', select: 'Список', phone: 'Телефон', email: 'E-mail' })[f.type] || esc(f.type)}${f.options && f.options.length ? '<br><small>' + f.options.map(esc).join(', ') + '</small>' : ''}</td><td>${f.required ? '<b>Да</b><br><small>сначала, со звёздочкой</small>' : 'Нет<br><small>ниже, можно позже</small>'}</td><td style="white-space:nowrap"><button class="btn sm" onclick="editField(${i})">${icon('edit', 13)} Изменить</button> <button class="btn sm danger" onclick="delField(${i})">${icon('trash', 13)} Удалить</button></td></tr>`).join('') || '<tr><td colspan="5"><div class="empty">Своих полей пока нет</div></td></tr>'}</table>
      <p><small>Например: «Площадь участка», «Тип фундамента», «Дата замера». Новое поле сразу появляется в форме создания и в карточке клиента или сделки, а его значения попадают в выгрузку контактов в CSV.</small></p></div>
      <div><div class="card"><h3>Как работают свои поля</h3>
       <p><small>Введите понятное название — технический код система сделает сама, видеть его не нужно. Поле появится в форме и в карточке, значения сохранятся вместе с клиентом или сделкой.</small></p>
-      <p><small><b>Обязательное</b> поле нельзя сохранить пустым: оно стоит первым, подписано жирным и звёздочкой. Необязательные идут ниже, после разделителя, — заполнить их можно сразу или позже, они не мешают сохранить карточку.</small></p>
-      <p><small><b>Где показывать:</b> «Везде» — и в контактах, и в сделках; можно ограничить одним разделом.</small></p>
+      <p><small><b>Обязательное</b> поле нельзя сохранить пустым: оно стоит первым, подписано жирным и звёздочкой. Необязательные идут ниже спокойным шрифтом — их можно заполнить сразу или позже, они не мешают сохранить карточку.</small></p>
+      <p><small><b>Изменить</b> можно любое своё поле: переименовать, сменить тип, раздел или сделать обязательным. Новые настройки сразу видны в формах и карточках.</small></p>
+      <p><small><b>Раздел:</b> «Контакты и сделки» — поле видно везде; можно ограничить одним разделом.</small></p>
       <p><small><b>Удаление</b> убирает поле из форм и карточек; ранее введённые значения остаются в базе, но больше не показываются. Если поле нужно снова — создайте его с тем же названием.</small></p></div></div></div>`;
   } else if (state.settingsTab === 'competitors') {
     const cs = await api('/api/competitor-sources');
@@ -2314,7 +2308,7 @@ async function settings(v) {
        <div style="display:flex;gap:8px;flex-wrap:wrap"><button class="btn primary sm" onclick="makeBackup()">${icon('plus', 13)} Создать копию сейчас</button>
        <button class="btn sm" onclick="download('/api/export/json','karkas-backup.json')" title="Текстовый файл со всеми данными — для переноса в другую программу">${icon('download', 13)} Скачать все данные</button></div>
        <div id="backupList" style="margin-top:10px">Загрузка…</div>
-       <details class="form-more"><summary>Копии на другом сервере</summary>
+       <details class="settings-more"><summary>Копии на другом сервере</summary>
         <p><small>Копии из списка лежат на этом же сервере: они спасают от случайного удаления, но не от поломки диска. Чтобы была вторая копия в другом месте, включите выгрузку в облачное хранилище S3 — файлы уходят туда автоматически по расписанию. Настройка — в <b>DEPLOY.md, раздел 7.1</b>: адрес хранилища, ведро и ключи доступа вписываются в <code>.env</code> на сервере, дальше одна строка в cron. Стоимость — примерно 100–200 ₽ в месяц.</small></p>
         <p><small>Проверять восстановление стоит раз в квартал: скачайте копию и поднимите её на тестовом сервере. Копия, которую ни разу не восстанавливали, копией не считается.</small></p>
        </details>
@@ -2395,13 +2389,13 @@ function translit(s) {
 }
 async function editField(i) {
   const list = await loadFields(); const f = i >= 0 ? list[i] : { key: '', label: '', type: 'text', entity: 'both', options: [], required: false };
-  openModal(`<h3>${i >= 0 ? 'Поле' : 'Новое поле карточки'}</h3><form onsubmit="return saveField(event,${i})">
+  openModal(`<h3>${i >= 0 ? 'Своё поле' : 'Новое поле карточки'}</h3><p><small>${i >= 0 ? 'Изменения сразу появятся в формах и карточках; уже введённые значения сохранятся.' : 'Поле появится в форме создания и в карточке выбранного раздела.'}</small></p><form onsubmit="return saveField(event,${i})">
    <input type="hidden" name="key" value="${esc(f.key)}">
-   <label>Название поля*<input name="label" required value="${esc(f.label)}" placeholder="Площадь участка"></label>
+   <label class="req">Название поля<span class="star">*</span><input name="label" required value="${esc(f.label)}" placeholder="Площадь участка"></label>
    <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px"><label>Тип<select name="type">${[['text', 'Текст'], ['number', 'Число'], ['date', 'Дата'], ['email', 'E-mail'], ['phone', 'Телефон'], ['select', 'Список вариантов']].map(([k, n]) => `<option value="${k}" ${k === f.type ? 'selected' : ''}>${n}</option>`).join('')}</select></label>
    <label>Где показывать<select name="entity">${[['both', 'Везде'], ['contacts', 'Только контакты'], ['deals', 'Только сделки']].map(([k, n]) => `<option value="${k}" ${k === f.entity ? 'selected' : ''}>${n}</option>`).join('')}</select></label></div>
-   <label>Варианты (только для типа «Список вариантов», через запятую)<input name="options" value="${esc((f.options || []).join(', '))}" placeholder="каркас, брус, газобетон"></label>
-   <label style="display:flex;gap:8px;align-items:center"><input type="checkbox" name="required" style="width:auto" ${f.required ? 'checked' : ''}> Обязательное для заполнения</label>
+   <label>Варианты списка (только для типа «Список», через запятую)<input name="options" value="${esc((f.options || []).join(', '))}" placeholder="каркас, брус, газобетон"></label>
+   <label class="check-line"><input type="checkbox" name="required" style="width:auto" ${f.required ? 'checked' : ''}><span>Обязательное поле <small>— стоит первым, без него карточка не сохранится</small></span></label>
    <button class="btn primary w">Сохранить</button></form>`);
 }
 async function saveField(e, i) {
@@ -2723,15 +2717,15 @@ if (si) {
 /* ── палитра команд (Ctrl+K) ────────────────────────────────────────── */
 const PALETTE_ACTIONS = [
   { group: 'Разделы', items: [
-    { ico: 'dashboard', title: 'Дашборд', hint: 'обзор продаж', run: () => go('dashboard') },
+    { ico: 'dashboard', title: 'Рабочий стол', hint: 'обзор продаж', run: () => go('dashboard') },
     { ico: 'pipe', title: 'Сделки', hint: 'канбан-воронка', run: () => go('pipe') },
+    { ico: 'tasks', title: 'Задачи', hint: 'дела и календарь', run: () => go('tasks') },
     { ico: 'inbox', title: 'Чаты', hint: 'единый инбокс мессенджеров', run: () => go('inbox') },
     { ico: 'contacts', title: 'Контакты', hint: 'база клиентов', run: () => go('contacts') },
     { ico: 'companies', title: 'Компании', hint: 'юридические лица', run: () => go('companies') },
-    { ico: 'tasks', title: 'Задачи', hint: 'дела и календарь', run: () => go('tasks') },
-    { ico: 'products', title: 'Товары', hint: 'каталог домов и опций', run: () => go('products') },
-    { ico: 'competitors', title: 'Конкуренты', hint: 'разведка и проверка', run: () => go('competitors') },
+    { ico: 'products', title: 'Каталог', hint: 'дома, проекты и опции', run: () => go('products') },
     { ico: 'analytics', title: 'Аналитика', hint: 'воронка и план продаж', run: () => go('analytics') },
+    { ico: 'competitors', title: 'Конкуренты', hint: 'разведка и проверка', run: () => go('competitors') },
     { ico: 'settings', title: 'Настройки', hint: 'интеграции и права', run: () => go('settings') }
   ]},
   { group: 'Быстрое создание', items: [
@@ -2907,6 +2901,15 @@ function connectSSE() {
         text: `${d.title}${d.due ? ' · ' + dueText(d.due) : ''}`,
         actionLabel: 'Открыть задачу',
         onAction: () => openTask(d.id),
+      });
+      api('/api/dashboard').then(navCounts).catch(() => {});
+    }
+    if (d.type === 'bulk_assigned') {
+      // при массовой передаче — один тост со сводкой, а не сотня одинаковых
+      const where = { deals: ['deals', 'сделок'], contacts: ['contacts', 'клиентов'], tasks: ['tasks', 'задач'] }[d.table] || ['dashboard', 'записей'];
+      notify({
+        title: 'Вам передали записи', kind: 'task', text: `${d.count} ${where[1]}`,
+        actionLabel: 'Посмотреть', onAction: () => go(where[0]),
       });
       api('/api/dashboard').then(navCounts).catch(() => {});
     }

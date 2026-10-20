@@ -11,6 +11,7 @@ import { extname, join, normalize, basename } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { createCompetitors } from './competitors.js';
 import { sendMail } from './smtp.js';
+import { cleanupOrphans, syncDealResponsibleNames, cleanupUploads, dailyMaintenance } from './maintenance.js';
 import { seedBase, seedDemo, demoCounts, cleanDemo } from './seed.js';
 
 const PORT = process.env.PORT || 8080, HOST = process.env.HOST || '0.0.0.0';
@@ -309,7 +310,17 @@ if (!db.prepare('SELECT id FROM users LIMIT 1').get()) {
   log('Система инициализирована: создана чистая база и учётная запись администратора');
 }
 export function getStages(pipeline_id = 1) { return db.prepare('SELECT * FROM stages WHERE pipeline_id=? ORDER BY sort,id').all(pipeline_id); }
-export function getCustomFields() { try { const v = JSON.parse(getSetting('CUSTOM_FIELDS', '[]')); return Array.isArray(v) ? v.filter(f => f && f.key && f.label) : [] } catch { return [] } }
+export function getCustomFields() {
+  try {
+    const v = JSON.parse(getSetting('CUSTOM_FIELDS', '[]'));
+    if (!Array.isArray(v)) return [];
+    const seen = new Set();
+    return v.filter(f => {
+      if (!f || !f.key || !f.label || seen.has(f.key)) return false;
+      seen.add(f.key); return true;
+    });
+  } catch { return [] }
+}
 // Обязательные свои поля проверяются на сервере, а не только звёздочкой в форме.
 function missingRequiredCustom(table, customRaw) {
   const req = getCustomFields().filter(f => f.required && (f.entity === 'both' || f.entity === table));
@@ -319,14 +330,24 @@ function missingRequiredCustom(table, customRaw) {
   const miss = req.filter(f => !String(obj[f.key] ?? '').trim());
   return miss.length ? `Заполните обязательные поля: ${miss.map(f => f.label).join(', ')}` : null;
 }
-const sanitizeFields = list => (Array.isArray(list) ? list : []).slice(0, 40).map(f => ({
-  key: String(f.key || '').replace(/[^a-zA-Z0-9_]/g, '').slice(0, 40),
-  label: String(f.label || '').slice(0, 80),
-  type: ['text', 'number', 'date', 'select', 'phone', 'email'].includes(f.type) ? f.type : 'text',
-  entity: ['contacts', 'deals', 'both'].includes(f.entity) ? f.entity : 'both',
-  options: Array.isArray(f.options) ? f.options.map(String).slice(0, 40) : [],
-  required: !!f.required,
-})).filter(f => f.key && f.label);
+const sanitizeFields = list => {
+  const out = [], seen = new Set();
+  for (const f of (Array.isArray(list) ? list : []).slice(0, 40)) {
+    const key = String(f?.key || '').replace(/[^a-zA-Z0-9_]/g, '').slice(0, 40);
+    const label = String(f?.label || '').trim().slice(0, 80);
+    // ключ — техническое имя поля: дубликаты ломают формы и сохранение значений
+    if (!key || !label || seen.has(key)) continue;
+    seen.add(key);
+    out.push({
+      key, label,
+      type: ['text', 'number', 'date', 'select', 'phone', 'email'].includes(f.type) ? f.type : 'text',
+      entity: ['contacts', 'deals', 'both'].includes(f.entity) ? f.entity : 'both',
+      options: Array.isArray(f.options) ? f.options.map(String).slice(0, 40) : [],
+      required: !!f.required,
+    });
+  }
+  return out;
+};
 
 // ---------- realtime ----------
 const clients = new Set();
@@ -514,8 +535,13 @@ function startScheduler() {
       if (lastBackupDay !== day && now.getHours() >= Number(hourly)) {
         lastBackupDay = day;
         try { makeBackup() } catch (e) { console.error('backup', e) }
-        // лента активности не растёт бесконечно: храним последние 20 000 событий
-        try { db.prepare('DELETE FROM activities WHERE id NOT IN (SELECT id FROM activities ORDER BY id DESC LIMIT 20000)').run() } catch (e) { console.error('activities cleanup', e) }
+        // ежедневная уборка: лента активности (20 000 событий), осиротевшие
+        // строки и старые файлы чатов, на которые больше нет ссылок
+        try {
+          const m = dailyMaintenance(db, { uploadDir: UPLOAD_DIR });
+          const n = Object.values(m.orphans).reduce((a, b) => a + b, 0);
+          if (n || m.activitiesTrimmed || m.reportsTrimmed || m.uploads.removed) console.log(`Обслуживание базы: строк убрано ${n}, событий ленты ${m.activitiesTrimmed}, отчётов конкурентов ${m.reportsTrimmed}, файлов ${m.uploads.removed}.`);
+        } catch (e) { console.error('maintenance', e) }
       }
       await overdueTick();
     } catch (e) { console.error('scheduler', e) }
@@ -637,7 +663,11 @@ function rateLimit(key, limit, windowMs) {
   rec.count++;
   return { ok: rec.count <= limit, left: Math.max(0, limit - rec.count), retryAfter: Math.ceil((rec.resetAt - now) / 1000) };
 }
-const readBody = async (req, maxBytes = 5e6) => { let s = ''; for await (const ch of req) { s += ch; if (s.length > maxBytes) throw new Error('Слишком большой запрос'); } try { return s ? JSON.parse(s) : {}; } catch { return {}; } };
+const readBody = async (req, maxBytes = 5e6) => {
+  let s = ''; for await (const ch of req) { s += ch; if (s.length > maxBytes) throw new Error('Слишком большой запрос'); }
+  try { return s ? JSON.parse(s) : {}; }
+  catch { const e = new Error('Некорректный JSON в запросе — проверьте данные формы'); e.statusCode = 400; throw e; }
+};
 const MIME = { '.html': 'text/html', '.js': 'text/javascript', '.css': 'text/css', '.svg': 'image/svg+xml', '.png': 'image/png', '.jpg': 'image/jpeg', '.jpeg': 'image/jpeg', '.gif': 'image/gif', '.webp': 'image/webp', '.ico': 'image/x-icon', '.pdf': 'application/pdf', '.zip': 'application/zip', '.txt': 'text/plain', '.csv': 'text/csv', '.doc': 'application/msword', '.docx': 'application/vnd.openxmlformats-officedocument.wordprocessingml.document', '.xls': 'application/vnd.ms-excel', '.xlsx': 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet', '.patch': 'text/plain', '.diff': 'text/plain' };
 // Определение типа изображения по сигнатуре файла: расширению доверять нельзя
 // (логотип могут загрузить в .jpg, .png или любом другом формате).
@@ -674,7 +704,14 @@ const asciiFileName = name => String(name || 'file').normalize('NFKD').toLowerCa
   if (ch === ' ') return '_';
   return TRANSLIT[ch] || TRANSLIT[ch.toLowerCase()] || '_';
 }).join('').replace(/_+/g, '_').replace(/^[._-]+|[._-]+$/g, '').slice(0, 120) || 'file';
-const csv = rows => { if (!rows.length) return ''; const ks = Object.keys(rows[0]); const q = v => `"${String(v ?? '').replace(/"/g, '""')}"`; return [ks.join(';'), ...rows.map(r => ks.map(k => q(r[k])).join(';'))].join('\n'); };
+const csv = rows => {
+  if (!rows.length) return '';
+  const ks = Object.keys(rows[0]);
+  // Excel выполняет ячейки, начинающиеся с = + - @, как формулы. Данные клиентов
+  // не должны запускать вычисления при открытии выгрузки — экранируем апострофом.
+  const q = v => { let s = String(v ?? ''); if (typeof v === 'string' && /^[=+\-@\t\r]/.test(s)) s = "'" + s; return `"${s.replace(/"/g, '""')}"`; };
+  return [ks.join(';'), ...rows.map(r => ks.map(k => q(r[k])).join(';'))].join('\n');
+};
 const ADMIN_ONLY = [
   /^\/api\/settings(\/.*)?$/, /^\/api\/users(\/.*)?$/, /^\/api\/pipelines(\/.*)?$/, /^\/api\/automations(\/.*)?$/,
   /^\/api\/custom-fields(\/.*)?$/, /^\/api\/competitor-sources(\/.*)?$/,
@@ -735,6 +772,16 @@ try {
     } catch (e) { db.exec('ROLLBACK'); throw e }
   }
 } catch (e) { console.error('Не удалось проверить шаблоны:', e.message) }
+
+// Разовая уборка при старте: если старая версия оставила заметки удалённых
+// сделок или ссылки задач на несуществующие записи, они не должны копиться.
+try {
+  const cleaned = cleanupOrphans(db);
+  const synced = syncDealResponsibleNames(db);
+  const n = Object.values(cleaned).reduce((a, b) => a + b, 0);
+  if (n) console.log(`База: убрано ${n} строк, потерявших родителя (заметки, позиции, ссылки задач).`);
+  if (synced) console.log(`База: имя ответственного обновлено у ${synced} сделок.`);
+} catch (e) { console.error('Уборка базы при старте:', e.message) }
 
 export const server = http.createServer(async (req, res) => {
   const u = new URL(req.url, `http://${req.headers.host}`), p = u.pathname;
@@ -926,7 +973,7 @@ export const server = http.createServer(async (req, res) => {
         avgCheck: wonCount ? Math.round(wonSum / wonCount) : 0,
         forecast,
         bySource: by('SELECT c.source name, COUNT(*) n, COALESCE(SUM(d.amount),0) s FROM deals d LEFT JOIN contacts c ON c.id=d.contact_id GROUP BY c.source'),
-        byManager: by('SELECT COALESCE(d.responsible,\'—\') name, COUNT(*) n, COALESCE(SUM(d.amount),0) s FROM deals d GROUP BY d.responsible'),
+        byManager: by('SELECT COALESCE(u.name, NULLIF(d.responsible,\'\'), \'—\') name, COUNT(*) n, COALESCE(SUM(d.amount),0) s FROM deals d LEFT JOIN users u ON u.id=d.responsible_id GROUP BY 1'),
         byLoss: by("SELECT COALESCE(loss_reason,'—') name, COUNT(*) n, COALESCE(SUM(amount),0) s FROM deals WHERE stage='lost' GROUP BY loss_reason"),
         stages: getStages().map(s => { const r = db.prepare('SELECT COUNT(*) n, COALESCE(SUM(amount),0) s FROM deals WHERE stage=?').get(s.code); return { name: s.name, code: s.code, count: r.n, sum: r.s } }),
       });
@@ -1001,7 +1048,7 @@ export const server = http.createServer(async (req, res) => {
       const tables = ['users', 'companies', 'contacts', 'pipelines', 'stages', 'deals', 'tasks', 'notes', 'products', 'templates', 'automations', 'conversations', 'messages', 'channels', 'competitors', 'competitor_checks', 'competitor_reports', 'reviews', 'price_rows']; const out = {}; tables.forEach(t => out[t] = db.prepare(`SELECT * FROM ${t}`).all()); res.writeHead(200, { 'Content-Type': 'application/json', 'Content-Disposition': 'attachment; filename=karkas-backup.json' }); return res.end(JSON.stringify(out, null, 2)); }
 
     // ===== generic CRUD =====
-    const CRUD = { contacts: ['name', 'phone', 'email', 'company', 'company_id', 'position', 'source', 'tags', 'notes', 'responsible_id', 'custom'], companies: ['name', 'inn', 'phone', 'email', 'site', 'notes'], tasks: ['title', 'type', 'due', 'priority', 'done', 'deal_id', 'contact_id', 'responsible_id', 'result', 'repeat'], products: ['name', 'sku', 'price', 'unit', 'active'], templates: ['name', 'body'], automations: ['name', 'trigger_type', 'trigger_value', 'action_type', 'action_value', 'active'], notes: ['entity_type', 'entity_id', 'body', 'author'] };
+    const CRUD = { contacts: ['name', 'phone', 'email', 'company', 'company_id', 'position', 'source', 'tags', 'notes', 'responsible_id', 'custom'], companies: ['name', 'inn', 'phone', 'email', 'site', 'notes'], tasks: ['title', 'type', 'due', 'priority', 'done', 'deal_id', 'contact_id', 'responsible_id', 'result', 'repeat'], deals: ['title', 'amount', 'stage', 'pipeline_id', 'contact_id', 'company_id', 'responsible', 'responsible_id', 'priority', 'loss_reason', 'deadline', 'custom'], products: ['name', 'sku', 'price', 'unit', 'active'], templates: ['name', 'body'], automations: ['name', 'trigger_type', 'trigger_value', 'action_type', 'action_value', 'active'], notes: ['entity_type', 'entity_id', 'body', 'author'] };
     const mCrud = p.match(/^\/api\/(contacts|companies|tasks|products|templates|automations|notes)(?:\/(\d+))?$/);
     if (mCrud) { const [, table, id] = mCrud; const fields = CRUD[table];
       if (table === 'templates') {
@@ -1051,6 +1098,11 @@ export const server = http.createServer(async (req, res) => {
         const required = { contacts: 'name', companies: 'name', products: 'name', tasks: 'title', automations: 'name', templates: 'name' }[table];
         if (required && !String(b[required] || '').trim()) return json(res, 400, { error: required === 'name' ? 'Укажите название' : 'Укажите название задачи' });
         if (table === 'notes' && !String(b.body || '').trim()) return json(res, 400, { error: 'Заметка не может быть пустой' });
+        if (table === 'notes') {
+          const et = String(b.entity_type || '');
+          if (!['contacts', 'deals', 'companies'].includes(et)) return json(res, 400, { error: 'Заметку можно привязать только к клиенту, сделке или компании' });
+          if (!db.prepare(`SELECT 1 x FROM ${et} WHERE id=?`).get(Number(b.entity_id))) return json(res, 400, { error: 'Карточка для заметки не найдена — обновите страницу' });
+        }
         // проверка дублей при создании контакта: интерфейс шлёт check_duplicates=1,
         // чтобы показать «такой клиент уже есть» и не плодить карточки
         if (table === 'contacts' && u.searchParams.get('check_duplicates') === '1') {
@@ -1088,6 +1140,12 @@ export const server = http.createServer(async (req, res) => {
         }
         const ks = Object.keys(b).filter(k => fields.includes(k));
         if (table === 'contacts' && b.custom !== undefined) { const err = missingRequiredCustom('contacts', b.custom); if (err) return json(res, 400, { error: err }); }
+        if (table === 'contacts' && b.name !== undefined && !String(b.name || '').trim()) return json(res, 400, { error: 'Имя клиента не может быть пустым' });
+        // при частичном обновлении проверяем ссылки так же, как при создании
+        const patchFk = { tasks: [['deal_id', 'deals'], ['contact_id', 'contacts'], ['responsible_id', 'users']], contacts: [['company_id', 'companies'], ['responsible_id', 'users']] }[table] || [];
+        for (const [field, target] of patchFk) {
+          if (b[field] && !db.prepare(`SELECT 1 x FROM ${target} WHERE id=?`).get(b[field])) return json(res, 400, { error: 'Связанная запись не найдена — обновите страницу и выберите из списка' });
+        }
         if (table === 'contacts' && b.phone !== undefined && !ks.includes('phone_norm')) { ks.push('phone_norm'); b.phone_norm = digits(b.phone) || null; }
         const prevTask = table === 'tasks' ? db.prepare('SELECT title,responsible_id,due FROM tasks WHERE id=?').get(id) : null;
         const prevContact = table === 'contacts' ? db.prepare('SELECT name,responsible_id FROM contacts WHERE id=?').get(id) : null;
@@ -1211,7 +1269,17 @@ export const server = http.createServer(async (req, res) => {
         if (b.contact_id && !db.prepare('SELECT 1 x FROM contacts WHERE id=?').get(b.contact_id)) return json(res, 400, { error: 'Клиент не найден — выберите контакт из списка' });
         if (b.company_id && !db.prepare('SELECT 1 x FROM companies WHERE id=?').get(b.company_id)) return json(res, 400, { error: 'Компания не найдена — обновите страницу и выберите из списка' });
         if (b.responsible_id !== undefined && b.responsible_id !== null && b.responsible_id !== '' && !db.prepare('SELECT 1 x FROM users WHERE id=?').get(b.responsible_id)) return json(res, 400, { error: 'Ответственный не найден — обновите страницу и выберите сотрудника' });
-        { const err = missingRequiredCustom('deals', b.custom); if (err) return json(res, 400, { error: err }); } const fields = ['title', 'amount', 'stage', 'pipeline_id', 'contact_id', 'company_id', 'responsible', 'responsible_id', 'priority', 'loss_reason', 'deadline', 'custom']; const ks = fields.filter(f => b[f] !== undefined); const r = db.prepare(`INSERT INTO deals(${ks}) VALUES(${ks.map(() => '?')})`).run(...ks.map(k => b[k])); log(`Сделка создана: ${b.title}`, 'deals', Number(r.lastInsertRowid), user.name); runAutomations('deal_created', { deal_id: Number(r.lastInsertRowid), contact_id: b.contact_id }); broadcast('change', { table: 'deals' }); return json(res, 201, db.prepare('SELECT * FROM deals WHERE id=?').get(r.lastInsertRowid)); }
+        // имя ответственного дублируется в старом поле responsible: аналитика и поиск
+        // читают его, поэтому не позволяем ему разойтись с responsible_id
+        if (b.responsible_id !== undefined) {
+          b.responsible_id = b.responsible_id ? Number(b.responsible_id) : null;
+          b.responsible = b.responsible_id ? (db.prepare('SELECT name FROM users WHERE id=?').get(b.responsible_id)?.name || null) : null;
+        }
+        { const err = missingRequiredCustom('deals', b.custom); if (err) return json(res, 400, { error: err }); }
+        // сделку можно завести сразу закрытой («продали давно»). Дата закрытия нужна
+        // аналитике: без неё выручка привязалась бы к дате создания, а не к продаже
+        if (['won', 'lost'].includes(stage)) b.closed_at = new Date().toISOString().slice(0, 19).replace('T', ' ');
+        const fields = ['title', 'amount', 'stage', 'pipeline_id', 'contact_id', 'company_id', 'responsible', 'responsible_id', 'priority', 'loss_reason', 'deadline', 'closed_at', 'custom']; const ks = fields.filter(f => b[f] !== undefined); const r = db.prepare(`INSERT INTO deals(${ks}) VALUES(${ks.map(() => '?')})`).run(...ks.map(k => b[k])); log(`Сделка создана: ${b.title}`, 'deals', Number(r.lastInsertRowid), user.name); runAutomations('deal_created', { deal_id: Number(r.lastInsertRowid), contact_id: b.contact_id }); broadcast('change', { table: 'deals' }); return json(res, 201, db.prepare('SELECT * FROM deals WHERE id=?').get(r.lastInsertRowid)); }
     }
     // ===== печать документов по сделке: коммерческое предложение или счёт =====
     if (/^\/api\/deals\/\d+\/print$/.test(p) && req.method === 'GET') {
@@ -1263,8 +1331,16 @@ export const server = http.createServer(async (req, res) => {
         if (b.contact_id !== undefined) { b.contact_id = b.contact_id ? Number(b.contact_id) : null; if (b.contact_id !== null && (!Number.isInteger(b.contact_id) || b.contact_id <= 0)) return json(res, 400, { error: 'Некорректный клиент — выберите контакт из списка' }); if (b.contact_id && !db.prepare('SELECT 1 x FROM contacts WHERE id=?').get(b.contact_id)) return json(res, 400, { error: 'Клиент не найден — выберите контакт из списка' }); }
         if (b.company_id !== undefined) { b.company_id = b.company_id ? Number(b.company_id) : null; if (b.company_id !== null && (!Number.isInteger(b.company_id) || b.company_id <= 0)) return json(res, 400, { error: 'Некорректная компания — выберите из списка' }); if (b.company_id && !db.prepare('SELECT 1 x FROM companies WHERE id=?').get(b.company_id)) return json(res, 400, { error: 'Компания не найдена — обновите страницу и выберите из списка' }); }
         if (b.responsible_id !== undefined && b.responsible_id !== null && b.responsible_id !== '' && !db.prepare('SELECT 1 x FROM users WHERE id=?').get(b.responsible_id)) return json(res, 400, { error: 'Ответственный не найден — обновите страницу и выберите сотрудника' });
+        if (b.responsible_id !== undefined) {
+          b.responsible_id = b.responsible_id ? Number(b.responsible_id) : null;
+          b.responsible = b.responsible_id ? (db.prepare('SELECT name FROM users WHERE id=?').get(b.responsible_id)?.name || null) : null;
+        }
         if (b.custom !== undefined) { const err = missingRequiredCustom('deals', b.custom); if (err) return json(res, 400, { error: err }); }
-        const fields = ['title', 'amount', 'stage', 'pipeline_id', 'contact_id', 'company_id', 'responsible', 'responsible_id', 'priority', 'loss_reason', 'deadline', 'custom']; const ks = Object.keys(b).filter(k => fields.includes(k)); if (ks.length) db.prepare(`UPDATE deals SET ${ks.map(k => k + '=?')},updated_at=datetime('now')${b.stage && ['won', 'lost'].includes(b.stage) ? ",closed_at=datetime('now')" : ''} WHERE id=?`).run(...ks.map(k => b[k]), id);
+        const fields = ['title', 'amount', 'stage', 'pipeline_id', 'contact_id', 'company_id', 'responsible', 'responsible_id', 'priority', 'loss_reason', 'deadline', 'custom']; const ks = Object.keys(b).filter(k => fields.includes(k));
+        // закрытая сделка, которую вернули в работу, не должна хранить дату закрытия:
+        // иначе аналитика по месяцам считает её повторно закрытой
+        const closedSetter = b.stage !== undefined ? (['won', 'lost'].includes(b.stage) ? ",closed_at=datetime('now')" : ',closed_at=NULL') : '';
+        if (ks.length) db.prepare(`UPDATE deals SET ${ks.map(k => k + '=?')},updated_at=datetime('now')${closedSetter} WHERE id=?`).run(...ks.map(k => b[k]), id);
         // сделку передали коллеге — он сразу увидит уведомление, а не узнает случайно
         const newResp = b.responsible_id !== undefined ? (b.responsible_id ? Number(b.responsible_id) : null) : old.responsible_id;
         if (newResp && newResp !== Number(old.responsible_id) && newResp !== Number(user.id)) {
@@ -1279,6 +1355,7 @@ export const server = http.createServer(async (req, res) => {
           // задачи не удаляем: они остаются в списке дел и у клиента, просто без привязки к сделке
           db.prepare('UPDATE tasks SET deal_id=NULL WHERE deal_id=?').run(id);
           db.prepare('DELETE FROM deal_products WHERE deal_id=?').run(id);
+          db.prepare("DELETE FROM notes WHERE entity_type='deals' AND entity_id=?").run(id);
           db.prepare('DELETE FROM deals WHERE id=?').run(id);
           db.exec('COMMIT');
         } catch (e) { db.exec('ROLLBACK'); throw e }
@@ -1294,7 +1371,11 @@ export const server = http.createServer(async (req, res) => {
       const sum = db.prepare('SELECT COALESCE(SUM(price*qty),0) s FROM deal_products WHERE deal_id=?').get(row.deal_id).s; db.prepare('UPDATE deals SET amount=? WHERE id=?').run(sum, row.deal_id); return json(res, 200, { saved: true, amount: sum }); }
     // ===== users / team =====
     if (p === '/api/users') {
-      if (req.method === 'GET') return json(res, 200, db.prepare('SELECT id,name,email,role,active FROM users ORDER BY id').all());
+      // Список нужен всем для выбора ответственного, но e-mail сотрудников —
+      // только администратору: остальным достаточно имени и роли.
+      if (req.method === 'GET') return json(res, 200, user.role === 'admin'
+        ? db.prepare('SELECT id,name,email,role,active FROM users ORDER BY id').all()
+        : db.prepare('SELECT id,name,role,active FROM users ORDER BY id').all());
       if (req.method === 'POST') {
         if (!requireAdmin(user, res)) return;
         const b = await readBody(req);
@@ -1592,6 +1673,8 @@ export const server = http.createServer(async (req, res) => {
     if (p === '/api/demo/cleanup' && req.method === 'POST') {
       if (!requireAdmin(user, res)) return;
       const removed = cleanDemo(db);
+      // после демо-сделок могли остаться заметки и ссылки задач без родителя
+      try { cleanupOrphans(db) } catch (e) { console.error('cleanup after demo', e) }
       setSetting('SEED_DONE', '1'); // после очистки примеры не вернутся при перезапуске
       log('Демонстрационные данные удалены (' + removed + ' записей)', null, null, user.name);
       broadcast('change', { table: 'all' });
@@ -1600,7 +1683,7 @@ export const server = http.createServer(async (req, res) => {
     // ===== массовые действия: выделили записи и применили к ним одно изменение =====
     if (p === '/api/bulk' && req.method === 'POST') {
       const b = await readBody(req);
-      const table = String(b.table || ''), ids = (b.ids || []).map(Number).filter(Boolean);
+      const table = String(b.table || ''), ids = [...new Set((b.ids || []).map(Number).filter(Boolean))];
       const fields = CRUD[table];
       if (!fields || !ids.length) return json(res, 400, { error: 'Нечего обрабатывать: укажите таблицу и хотя бы одну запись' });
       if (ids.length > 500) return json(res, 400, { error: 'За один раз можно изменить не больше 500 записей' });
@@ -1608,39 +1691,117 @@ export const server = http.createServer(async (req, res) => {
       if (b.action === 'delete' && table === 'templates') {
         // шаблоны личные: массово удаляем только свои, чужие не трогаем
         const st = db.prepare('DELETE FROM templates WHERE id=? AND user_id=?');
-        for (const id of ids) st.run(id, user.id);
+        let done = 0; for (const id of ids) done += st.run(id, user.id).changes;
         broadcast('change', { table });
-        return json(res, 200, { done: ids.length });
+        return json(res, 200, { done, count: done });
       }
+      let applied = 0;
       if (b.action === 'delete') {
         const st = db.prepare(`DELETE FROM ${table} WHERE id=?`);
-        for (const id of ids) {
-          // связи рвём так же, как при одиночном удалении: иначе остаются «висячие» задачи и заметки
-          if (table === 'contacts') {
-            db.prepare('UPDATE tasks SET contact_id=NULL WHERE contact_id=?').run(id);
-            db.prepare('UPDATE deals SET contact_id=NULL WHERE contact_id=?').run(id);
-            db.prepare("DELETE FROM notes WHERE entity_type='contacts' AND entity_id=?").run(id);
+        db.exec('BEGIN IMMEDIATE');
+        try {
+          for (const id of ids) {
+            // связи рвём так же, как при одиночном удалении: иначе остаются «висячие» задачи и заметки
+            if (table === 'contacts') {
+              db.prepare('UPDATE tasks SET contact_id=NULL WHERE contact_id=?').run(id);
+              db.prepare('UPDATE deals SET contact_id=NULL WHERE contact_id=?').run(id);
+              db.prepare("DELETE FROM notes WHERE entity_type='contacts' AND entity_id=?").run(id);
+            }
+            if (table === 'companies') {
+              db.prepare('UPDATE deals SET company_id=NULL WHERE company_id=?').run(id);
+              db.prepare('UPDATE contacts SET company_id=NULL WHERE company_id=?').run(id);
+              db.prepare("DELETE FROM notes WHERE entity_type='companies' AND entity_id=?").run(id);
+            }
+            if (table === 'deals') {
+              db.prepare('UPDATE tasks SET deal_id=NULL WHERE deal_id=?').run(id);
+              db.prepare('DELETE FROM deal_products WHERE deal_id=?').run(id);
+              db.prepare("DELETE FROM notes WHERE entity_type='deals' AND entity_id=?").run(id);
+            }
+            applied += st.run(id).changes;
           }
-          if (table === 'companies') {
-            db.prepare('UPDATE deals SET company_id=NULL WHERE company_id=?').run(id);
-            db.prepare('UPDATE contacts SET company_id=NULL WHERE company_id=?').run(id);
-            db.prepare("DELETE FROM notes WHERE entity_type='companies' AND entity_id=?").run(id);
-          }
-          st.run(id);
-        }
+          db.exec('COMMIT');
+        } catch (e) { db.exec('ROLLBACK'); throw e }
       }
       else {
         const patch = {}; for (const k of Object.keys(b.patch || {})) if (fields.includes(k) && b.patch[k] !== undefined) patch[k] = b.patch[k];
         const ks = Object.keys(patch);
         if (!ks.length) return json(res, 400, { error: 'Не передано ни одного допустимого поля' });
-        if (table === 'contacts' && patch.phone !== undefined) { ks.push('phone_norm'); patch.phone_norm = digits(patch.phone) || null; }
-        if (table === 'tasks' && patch.due !== undefined) patch.due = patch.due ? normalizeDue(String(patch.due)) : '';
-        const st = db.prepare(`UPDATE ${table} SET ${ks.map(k => k + '=?').join(',')} WHERE id=?`);
-        for (const id of ids) st.run(...ks.map(k => patch[k]), id);
+        // проверяем ссылки и значения до записи: массовая операция не должна
+        // падать на середине и оставлять часть записей изменёнными
+        if (patch.responsible_id) {
+          patch.responsible_id = Number(patch.responsible_id);
+          if (!Number.isInteger(patch.responsible_id) || !db.prepare('SELECT 1 x FROM users WHERE id=?').get(patch.responsible_id)) return json(res, 400, { error: 'Ответственный не найден — обновите страницу' });
+        }
+        if (table === 'contacts') {
+          if (patch.name !== undefined && !String(patch.name || '').trim()) return json(res, 400, { error: 'Имя клиента не может быть пустым' });
+          if (patch.company_id && !db.prepare('SELECT 1 x FROM companies WHERE id=?').get(patch.company_id)) return json(res, 400, { error: 'Компания не найдена — обновите страницу' });
+          if (patch.phone !== undefined) { ks.push('phone_norm'); patch.phone_norm = digits(patch.phone) || null; }
+        }
+        if (table === 'tasks') {
+          for (const [field, target] of [['deal_id', 'deals'], ['contact_id', 'contacts']]) {
+            if (patch[field] && !db.prepare(`SELECT 1 x FROM ${target} WHERE id=?`).get(patch[field])) return json(res, 400, { error: 'Связанная запись не найдена — обновите страницу' });
+          }
+          if (patch.due !== undefined) patch.due = patch.due ? normalizeDue(String(patch.due)) : '';
+        }
+        let assignedTo = null, assignedCount = 0;
+        if (patch.responsible_id && ['deals', 'contacts', 'tasks'].includes(table)) {
+          assignedTo = patch.responsible_id;
+          for (const id of ids) {
+            const prev = db.prepare(`SELECT responsible_id FROM ${table} WHERE id=?`).get(id);
+            if (prev && Number(prev.responsible_id) !== assignedTo) assignedCount++;
+          }
+          if (table === 'deals') patch.responsible = db.prepare('SELECT name FROM users WHERE id=?').get(assignedTo)?.name || null;
+        }
+        if (table === 'deals') {
+          // у сделок проверяем этап вместе с воронкой и пересчитываем дату закрытия
+          const rows = ids.map(id => db.prepare('SELECT * FROM deals WHERE id=?').get(id)).filter(Boolean);
+          const next = [];
+          for (const d of rows) {
+            const n = { ...d };
+            if (patch.title !== undefined) { const t = String(patch.title || '').trim(); if (!t) return json(res, 400, { error: 'Название сделки не может быть пустым' }); n.title = t.slice(0, 200); }
+            if (patch.amount !== undefined) { const a = patch.amount === null || patch.amount === '' ? 0 : Number(patch.amount); if (!Number.isFinite(a) || a < 0) return json(res, 400, { error: 'Сумма сделки должна быть неотрицательным числом' }); n.amount = Math.round(a); }
+            if (patch.pipeline_id !== undefined) { const pid = Number(patch.pipeline_id); if (!db.prepare('SELECT 1 x FROM pipelines WHERE id=?').get(pid)) return json(res, 400, { error: 'Воронка не найдена — обновите страницу' }); n.pipeline_id = pid; }
+            if (patch.stage !== undefined) n.stage = String(patch.stage);
+            for (const [field, target] of [['contact_id', 'contacts'], ['company_id', 'companies']]) {
+              if (patch[field] !== undefined) {
+                const val = patch[field] ? Number(patch[field]) : null;
+                if (val !== null && !db.prepare(`SELECT 1 x FROM ${target} WHERE id=?`).get(val)) return json(res, 400, { error: 'Связанная запись не найдена — обновите страницу' });
+                n[field] = val;
+              }
+            }
+            if (patch.responsible_id !== undefined) n.responsible_id = patch.responsible_id;
+            if (patch.priority !== undefined) { if (!['low', 'normal', 'high'].includes(patch.priority)) return json(res, 400, { error: 'Неизвестный приоритет' }); n.priority = patch.priority; }
+            if (patch.loss_reason !== undefined) n.loss_reason = String(patch.loss_reason || '').slice(0, 500);
+            if (patch.deadline !== undefined) n.deadline = String(patch.deadline || '').slice(0, 40);
+            if (patch.custom !== undefined) { const err = missingRequiredCustom('deals', patch.custom); if (err) return json(res, 400, { error: err }); n.custom = patch.custom; }
+            const stageList = getStages(Number(n.pipeline_id) || 1);
+            if (patch.stage === undefined && patch.pipeline_id !== undefined && !stageList.some(st => st.code === n.stage)) {
+              // воронку сменили, а этап остался от старой — ставим первый этап новой
+              n.stage = stageList[0]?.code || n.stage;
+            }
+            if (!stageList.some(st => st.code === n.stage)) return json(res, 400, { error: 'Этап не найден в выбранной воронке — обновите страницу' });
+            n.responsible = n.responsible_id ? (db.prepare('SELECT name FROM users WHERE id=?').get(n.responsible_id)?.name || null) : null;
+            const wasClosed = ['won', 'lost'].includes(d.stage);
+            n.closed_at = !['won', 'lost'].includes(n.stage) ? null
+              : (wasClosed && d.closed_at ? d.closed_at : new Date().toISOString().slice(0, 19).replace('T', ' '));
+            next.push(n);
+          }
+          const st = db.prepare(`UPDATE deals SET title=?,amount=?,stage=?,pipeline_id=?,contact_id=?,company_id=?,responsible=?,responsible_id=?,priority=?,loss_reason=?,deadline=?,custom=?,closed_at=?,updated_at=datetime('now') WHERE id=?`);
+          db.exec('BEGIN IMMEDIATE');
+          try { for (const n of next) applied += st.run(n.title, n.amount, n.stage, n.pipeline_id, n.contact_id, n.company_id, n.responsible, n.responsible_id, n.priority, n.loss_reason, n.deadline, n.custom, n.closed_at, n.id).changes; db.exec('COMMIT'); }
+          catch (e) { db.exec('ROLLBACK'); throw e }
+        } else {
+          const st = db.prepare(`UPDATE ${table} SET ${ks.map(k => k + '=?').join(',')} WHERE id=?`);
+          for (const id of ids) applied += st.run(...ks.map(k => patch[k]), id).changes;
+        }
+        if (assignedTo && assignedCount && assignedTo !== Number(user.id)) {
+          // одна сводка вместо сотни одинаковых тостов при массовой передаче
+          broadcastTo(assignedTo, 'notify', { type: 'bulk_assigned', table, count: assignedCount });
+        }
         log(`Массовое изменение (${table}): ${ids.length} записей — ${ks.join(', ')}`, table, null, user.name);
       }
       broadcast('change', { table });
-      return json(res, 200, { table, action: b.action === 'delete' ? 'delete' : 'update', count: ids.length });
+      return json(res, 200, { table, action: b.action === 'delete' ? 'delete' : 'update', count: applied });
     }
 
     // ===== конкуренты: разведка (долги, суды, банкротство, отзывы, прайс-таблицы) =====
@@ -1710,11 +1871,14 @@ export const server = http.createServer(async (req, res) => {
     res.writeHead(200, { ...headers, 'Content-Length': st.size });
     res.end(readFileSync(file));
   } catch (e) {
-    console.error(e);
+    // ошибки клиента (битый JSON, большое тело) не засоряют журнал сервера
+    if (!e.statusCode || e.statusCode >= 500) console.error(e);
     // если ответ уже начали отдавать (файл/поток), повторно заголовки не пишем
     if (res.headersSent) { try { res.end() } catch {} return; }
     // слишком большое тело — это ошибка клиента, а не сбой сервера
     if (/Слишком большой запрос/.test(e.message)) return json(res, 413, { error: 'Слишком большой запрос: уменьшите файл или разбейте данные на части' });
+    // разбор тела уже дал понятную причину (например, битый JSON)
+    if (e.statusCode >= 400 && e.statusCode < 500) return json(res, e.statusCode, { error: e.message });
     json(res, 500, { error: 'Внутренняя ошибка сервера. Попробуйте ещё раз; если повторяется — посмотрите логи.' });
   }
 });
