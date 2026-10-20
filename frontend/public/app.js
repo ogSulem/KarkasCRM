@@ -396,14 +396,31 @@ const download = async (path, name) => {
   return false;
 };
 
+// Всплывающие уведомления. Простой toast — короткая новость «сохранено/ошибка».
+// notify — важное событие с заголовком и действием («Открыть чат», «Открыть задачу»):
+// так сотрудник не пропустит сообщение клиента и сможет перейти в один клик.
 function toast(t, kind = 'ok') {
-  const e = $('#toast');
-  if (!e) return;
-  e.textContent = t;
-  e.classList.toggle('error', kind === 'err');
-  e.classList.add('show');
-  clearTimeout(toast._t);
-  toast._t = setTimeout(() => e.classList.remove('show'), kind === 'err' ? 5200 : 2600);
+  pushToast({ text: String(t || ''), kind: kind === 'err' ? 'error' : 'ok', timeout: kind === 'err' ? 5200 : 2600 });
+}
+function notify({ title, text = '', kind = 'message', actionLabel = '', onAction = null, timeout = 7000 }) {
+  pushToast({ title, text, kind, actionLabel, onAction, timeout });
+}
+function pushToast({ title = '', text = '', kind = 'ok', actionLabel = '', onAction = null, timeout = 4000 }) {
+  const box = $('#toast');
+  if (!box) return;
+  const icons = { ok: 'checkCircle', error: 'alertCircle', message: 'inbox', task: 'tasks', info: 'bell' };
+  const el = document.createElement('div');
+  el.className = `toast-item ${kind}${onAction ? ' clickable' : ''}`;
+  el.innerHTML = `<span class="toast-ico">${icon(icons[kind] || 'bell', 16)}</span>
+    <div class="toast-text">${title ? `<b>${esc(title)}</b>` : ''}<span>${esc(text)}</span>${actionLabel ? `<span style="opacity:.75;margin-top:2px">${esc(actionLabel)} →</span>` : ''}</div>
+    <button type="button" class="toast-x" aria-label="Закрыть уведомление">×</button>`;
+  const close = () => { clearTimeout(el._t); el.remove(); };
+  el.querySelector('.toast-x').onclick = e => { e.stopPropagation(); close(); };
+  if (onAction) el.onclick = () => { close(); try { onAction(); } catch (err) { console.error(err); } };
+  box.appendChild(el);
+  // больше трёх карточек не держим: экран не должен «зарастать» старыми новостями
+  while (box.children.length > 3) box.firstElementChild.remove();
+  el._t = setTimeout(close, timeout);
 }
 function openModal(html) {
   $('#modalBody').innerHTML = html;
@@ -467,6 +484,16 @@ function userOptions(selId) {
   return `<option value="">— не назначен —</option>` + __team.map(u => `<option value="${u.id}" ${u.id === selId ? 'selected' : ''}>${esc(u.name)} (${esc(roleLabel(u.role))})</option>`).join('');
 }
 
+// Честное объяснение, кому достанется новый контакт: людям важно понимать,
+// почему карточка оказалась у них, а не у коллеги.
+function responsibleHint() {
+  const active = (__team || []).filter(u => u.active !== 0);
+  const count = active.length || (state.meta && state.meta.activeUsers) || 1;
+  if (count <= 1) return 'Пока в команде только вы — новые контакты закрепляются за вами. Добавить коллег: Настройки → Команда.';
+  if (state.meta && state.meta.autoAssign) return 'Обращения из чатов и форм CRM распределяет сама — отдаёт менеджеру с меньшим числом сделок в работе. Здесь ответственного можно выбрать вручную.';
+  return 'По умолчанию ответственный — вы, но можно выбрать коллегу. Автоматическое распределение обращений включается в «Настройки → Данные и компания».';
+}
+
 let __myTasks = [];
 function myTasksBlock() {
   if (!__myTasks.length) return '<small style="color:var(--muted)">Открытых задач на вас нет. Поставьте себе дело, чтобы не потерять клиента из виду.</small>';
@@ -482,9 +509,15 @@ function myTasksBlock() {
   }).join('');
 }
 
-// Вторичные поля формы прячем под «Дополнительно»: при создании видно
-// только главное, а всё остальное доступно в один клик.
-const formMore = (html, open = false) => html ? `<details class="form-more"${open ? ' open' : ''}><summary>Дополнительно</summary>${html}</details>` : '';
+// ── поля форм ───────────────────────────────────────────────────────────────
+// Обязательные поля всегда идут первыми: жирная подпись и звёздочка. Ниже —
+// необязательные, спокойным шрифтом. Ничего не спрятано за «Дополнительно»:
+// лишнего клика нет, а форма остаётся читаемой за счёт разделителя.
+const fld = (label, inner, required = false) =>
+  `<label class="${required ? 'req' : 'opt'}">${label}${required ? '<span class="star" aria-hidden="true">*</span>' : ''}${inner}</label>`;
+const grid2 = html => `<div class="form-grid2">${html}</div>`;
+const formSep = (text = 'Необязательные поля') => `<div class="form-sep"><span>${text}</span></div>`;
+const formLegend = () => `<p class="form-hint"><span class="star">*</span> — обязательные поля. Без них карточка не сохранится; остальные можно заполнить позже.</p>`;
 
 // ── свои поля (custom fields) ─────────────────────────────────────────────
 function cfFor(entity) {
@@ -494,17 +527,19 @@ function cfFor(entity) {
 function cfValues(custom) {
   try { return typeof custom === 'string' ? JSON.parse(custom || '{}') : (custom || {}); } catch { return {}; }
 }
-// Обязательные свои поля показываем сразу в форме, необязательные — под «Дополнительно».
+// Свои поля: обязательные — вместе с обязательными полями карточки (сверху),
+// необязательные — ниже разделителя, вместе с остальными необязательными.
 function cfInputs(entity, obj = {}, grid = 2, only = 'all') {
   const fields = cfFor(entity).filter(f => only === 'all' ? true : only === 'required' ? f.required : !f.required);
   if (!fields.length) return '';
   const val = cfValues(obj.custom);
-  return `<div style="display:grid;grid-template-columns:repeat(${grid},1fr);gap:12px">${fields.map(f => {
+  return `<div class="form-grid2" style="grid-template-columns:repeat(${grid},1fr)">${fields.map(f => {
     const v = esc(val[f.key] ?? '');
-    const label = `${esc(f.label)}${f.required ? ' *' : ''}`;
-    if (f.type === 'select') return `<label>${label}<select name="cf_${esc(f.key)}" ${f.required ? 'required' : ''}>${['', ...(f.options || [])].map(o => `<option value="${esc(o)}" ${String(val[f.key] ?? '') === o ? 'selected' : ''}>${esc(o || '—')}</option>`).join('')}</select></label>`;
+    const star = f.required ? '<span class="star" aria-hidden="true">*</span>' : '';
+    const cls = f.required ? 'req' : 'opt';
+    if (f.type === 'select') return `<label class="${cls}">${esc(f.label)}${star}<select name="cf_${esc(f.key)}" ${f.required ? 'required' : ''}>${['', ...(f.options || [])].map(o => `<option value="${esc(o)}" ${String(val[f.key] ?? '') === o ? 'selected' : ''}>${esc(o || '—')}</option>`).join('')}</select></label>`;
     const t = f.type === 'number' ? 'number' : f.type === 'date' ? 'date' : f.type === 'email' ? 'email' : 'text';
-    return `<label>${label}<input name="cf_${esc(f.key)}" type="${t}" value="${v}" ${f.required ? 'required' : ''}></label>`;
+    return `<label class="${cls}">${esc(f.label)}${star}<input name="cf_${esc(f.key)}" type="${t}" value="${v}" ${f.required ? 'required' : ''}></label>`;
   }).join('')}</div>`;
 }
 function cfCollect(form) {
@@ -675,17 +710,19 @@ function hydrateNavIcons() {
 }
 
 /* ---------- navigation + skeletons ---------- */
+// Порядок и названия разделов — как в amoCRM: сначала рабочие инструменты
+// (стол, сделки, задачи, чаты), затем клиентская база, каталог, отчёты.
 const TITLES = {
-  dashboard: ['Дашборд', 'Продажи, воронка и активность команды'],
+  dashboard: ['Рабочий стол', 'Главное за сегодня: продажи, задачи и новые сообщения'],
   pipe: ['Сделки', 'Воронка продаж — перетаскивайте карточки между этапами'],
-  inbox: ['Чаты', 'Единый диалог клиента: WhatsApp, Telegram, Instagram, Viber и почта'],
-  contacts: ['Контакты', 'База клиентов с историей, сделками и перепиской'],
-  companies: ['Компании', 'Юридические лица, реквизиты и связанные клиенты'],
-  tasks: ['Задачи', 'Календарь звонков, встреч и напоминаний по сделкам'],
-  products: ['Товары и проекты', 'Каталог домов, бань, комплектаций и услуг'],
-  competitors: ['Разведка конкурентов', 'Проверка по 8 источникам: долги, суды, отзывы, сравнение цен'],
-  analytics: ['Аналитика', 'Конверсия воронки, план продаж, средний чек и отчёты'],
-  settings: ['Настройки', 'Интеграции, воронки, свои поля, правила, команда и бэкапы']
+  tasks: ['Задачи', 'Что и когда сделать: звонки, встречи и напоминания'],
+  inbox: ['Чаты', 'Одна переписка на клиента: WhatsApp, Telegram, Instagram, Viber и почта'],
+  contacts: ['Контакты', 'Клиенты с историей, сделками и перепиской'],
+  companies: ['Компании', 'Юридические лица и связанные с ними клиенты'],
+  products: ['Каталог', 'Дома, бани, комплектации и услуги — то, что вы продаёте'],
+  analytics: ['Аналитика', 'Сколько продали, конверсия, план и результаты менеджеров'],
+  competitors: ['Конкуренты', 'Проверка по открытым источникам и сравнение цен'],
+  settings: ['Настройки', 'Компания, интеграции, поля, команда и резервные копии']
 };
 
 const SKELETONS = {
@@ -765,26 +802,46 @@ async function openNotifications() {
   const today = todayISO();
   const over = rows.filter(t => !t.done && normalizeDue(t.due).slice(0, 10) < today && normalizeDue(t.due) !== '');
   const now = rows.filter(t => !t.done && normalizeDue(t.due).slice(0, 10) === today);
-  openModal(`<h3>${icon('bell', 18)} Уведомления и сегодняшние дела</h3>
-   <h4 style="margin:12px 0 4px;color:#dc2626">Просрочено: ${over.length}</h4>${over.map(t => {
-     const meta = taskDueMeta(t.due, t.done);
-     return `<div class="row"><span><b>${esc(t.title)}</b><br><small>${esc(meta.label)} · ${esc(t.contact_name || '')}</small></span><button class="btn sm mark" onclick="toggleTask(${t.id},1);closeModal()">${icon('check', 13)} Выполнить</button></div>`;
-   }).join('') || '<small>Нет просроченных задач</small>'}
-   <h4 style="margin:16px 0 4px;color:var(--green)">На сегодня: ${now.length}</h4>${now.map(t => {
-     const meta = taskDueMeta(t.due, t.done);
-     return `<div class="row"><span><b>${esc(t.title)}</b><br><small>${esc(meta.label)} · ${esc(t.contact_name || '')}</small></span><button class="btn sm mark" onclick="toggleTask(${t.id},1);closeModal()">${icon('check', 13)} Выполнить</button></div>`;
-   }).join('') || '<small>Планов на сегодня нет</small>'}
-   <h3 style="margin-top:16px">${icon('inbox', 16)} Непрочитанные чаты</h3><div id="notifConvs">…</div>`);
   const convs = (await api('/api/conversations')).filter(c => c.unread);
-  $('#notifConvs').innerHTML = convs.map(c => `<div class="row"><span><b>${esc(c.title)}</b><br><small>${esc(c.last_body || '')}</small></span><button class="btn sm" onclick="closeModal();state.conv=${c.id};go('inbox')">Открыть</button></div>`).join('') || '<small>Все сообщения прочитаны</small>';
+  const rowHtml = t => {
+    const meta = taskDueMeta(t.due, t.done);
+    return `<div class="row"><span><b>${esc(t.title)}</b><br><small>${esc(meta.label)}${t.contact_name ? ' · ' + esc(t.contact_name) : ''}</small></span><button class="btn sm mark" onclick="toggleTask(${t.id},1);closeModal()">${icon('check', 13)} Выполнить</button></div>`;
+  };
+  const empty = 'Ничего не ждёт — можно спокойно работать с клиентами.';
+  openModal(`<h3>${icon('bell', 18)} Уведомления</h3>
+   <p class="form-hint">Здесь всё, что требует вашего внимания сейчас. Колокольчик показывает общее число, а сообщения клиентов всплывают внизу экрана с кнопкой «Открыть чат».</p>
+   <h4 style="margin:12px 0 4px;color:#dc2626">Просрочено: ${over.length}</h4>
+   <p class="form-hint" style="margin:0 0 4px">Срок уже прошёл — лучше заняться этим первым.</p>
+   ${over.map(rowHtml).join('') || `<small>${empty}</small>`}
+   <h4 style="margin:16px 0 4px;color:var(--green)">Сегодня: ${now.length}</h4>
+   <p class="form-hint" style="margin:0 0 4px">Планы на сегодня — звонки, встречи и письма.</p>
+   ${now.map(rowHtml).join('') || '<small>На сегодня задач нет.</small>'}
+   <h4 style="margin:16px 0 4px">${icon('inbox', 15)} Непрочитанные чаты: ${convs.length}</h4>
+   <p class="form-hint" style="margin:0 0 4px">Клиент написал и ждёт ответа.</p>
+   ${convs.map(c => `<div class="row"><span><b>${esc(c.title)}</b><br><small>${esc(c.last_body || '')}</small></span><button class="btn sm" onclick="closeModal();state.conv=${c.id};go('inbox')">Открыть чат</button></div>`).join('') || '<small>Все сообщения прочитаны.</small>'}
+   <div style="display:flex;gap:8px;flex-wrap:wrap;margin-top:16px">
+     <button class="btn sm" onclick="closeModal();state.taskScope='all';state.taskFilter='overdue';go('tasks')">Все задачи</button>
+     <button class="btn sm" onclick="closeModal();go('inbox')">Все чаты</button>
+     <button class="btn sm" onclick="closeModal()">Закрыть</button>
+   </div>`);
 }
 
+const BASE_TITLE = 'КаркасCRM — сделки, клиенты и задачи в единой CRM-системе';
 async function navCounts(d) {
   $('#navUnread').textContent = d.unread || '';
   $('#navTasks').textContent = d.tasksOpen || '';
   $('#navDeals').textContent = d.dealsTotal || '';
+  // Колокольчик показывает всё, что требует внимания: просроченные задачи и
+  // непрочитанные чаты. В заголовке вкладки — только новые сообщения: их видно,
+  // даже когда CRM свёрнута.
+  const attention = (d.tasksOverdue || 0) + (d.unread || 0);
   const b = $('#bellCount');
-  if (b) b.textContent = d.tasksOverdue || '';
+  if (b) b.textContent = attention || '';
+  const bell = $('#bellBtn');
+  if (bell) bell.title = attention
+    ? `Требуют внимания: ${attention} (просроченные задачи и новые сообщения)`
+    : 'Уведомления: всё под контролем';
+  document.title = d.unread ? `(${d.unread}) Новые сообщения — КаркасCRM` : BASE_TITLE;
 }
 
 /* ---------- dashboard ---------- */
@@ -992,15 +1049,17 @@ async function openDeal(contactId, stageCode) {
   const def = ((state.pipelines || []).find(p => p.id === state.pipeline) || state.pipelines?.[0] || {}).stages || [];
   const curStage = stageCode || (def[0] ? def[0].code : '');
   openModal(`<h3>Новая сделка</h3><form onsubmit="return saveDeal(event)">
-   <label>Название сделки*<input name="title" required placeholder="Каркасный дом 8x10"></label>
-   <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px"><label>Сумма (${CUR()})<input name="amount" type="number" value="0" placeholder="0"></label>
-   <label>Контакт<select name="contact_id"><option value="">— выбрать —</option>${state.contacts.map(c => `<option value="${c.id}" ${c.id === contactId ? 'selected' : ''}>${esc(c.name)}</option>`).join('')}</select></label></div>
-   <label>Этап<select name="stage">${def.map(s => `<option value="${esc(s.code)}" ${s.code === curStage ? 'selected' : ''}>${esc(s.name)}</option>`).join('')}</select></label>
+   ${formLegend()}
+   ${fld('Название сделки', `<input name="title" required placeholder="Каркасный дом 8×10">`, true)}
    ${cfInputs('deals', {}, 2, 'required')}
-   ${formMore(`<div style="display:grid;grid-template-columns:1fr 1fr;gap:12px"><label>Ответственный<select name="responsible_id">${userOptions(meId())}</select></label>
-   <label>Приоритет<select name="priority"><option value="normal">Обычный</option><option value="high">Высокий</option><option value="low">Низкий</option></select></label></div>
-   <label>Дедлайн<input name="deadline" type="date"></label>
-   ${cfInputs('deals', {}, 2, 'optional')}`)}
+   ${formSep()}
+   ${grid2(`${fld('Сумма (' + CUR() + ')', `<input name="amount" type="number" value="0" placeholder="0">`)}
+     ${fld('Клиент', `<select name="contact_id"><option value="">— выбрать —</option>${state.contacts.map(c => `<option value="${c.id}" ${c.id === contactId ? 'selected' : ''}>${esc(c.name)}</option>`).join('')}</select>`)}`)}
+   ${grid2(`${fld('Этап', `<select name="stage">${def.map(st => `<option value="${esc(st.code)}" ${st.code === curStage ? 'selected' : ''}>${esc(st.name)}</option>`).join('')}</select>`)}
+     ${fld('Ответственный', `<select name="responsible_id">${userOptions(meId())}</select>`)}`)}
+   ${grid2(`${fld('Дедлайн', '<input name="deadline" type="date">')}
+     ${fld('Приоритет', `<select name="priority"><option value="normal">Обычный</option><option value="high">Высокий</option><option value="low">Низкий</option></select>`)}`)}
+   ${cfInputs('deals', {}, 2, 'optional')}
    <button class="btn primary w">Создать сделку</button></form>`);
 }
 
@@ -1088,17 +1147,19 @@ async function openDealCard(id) {
 function dealTab(deal, d) {
   if (state.dealTab === 'details') {
     return `<form onsubmit="return saveDeal(event,${deal.id})">
-     <label>Название<input name="title" value="${esc(deal.title)}"></label>
-     <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px"><label>Сумма (${CUR()})<input name="amount" type="number" value="${deal.amount}"></label>
-     <label>Этап<select name="stage">${selStages(deal.stage, state.cardStages)}</select></label></div>
-     <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px"><label>Клиент<select name="contact_id"><option value="">— без контакта —</option>${(state.contacts || []).map(c => `<option value="${c.id}" ${c.id === deal.contact_id ? 'selected' : ''}>${esc(c.name)}</option>`).join('')}</select></label>
-     <label>Компания<select name="company_id"><option value="">— без компании —</option>${(state.cardCompanies || []).map(c => `<option value="${c.id}" ${c.id === deal.company_id ? 'selected' : ''}>${esc(c.name)}</option>`).join('')}</select></label></div>
+     ${formLegend()}
+     ${fld('Название', `<input name="title" required value="${esc(deal.title)}">`, true)}
      ${cfInputs('deals', deal, 2, 'required')}
-     ${formMore(`<div style="display:grid;grid-template-columns:1fr 1fr;gap:12px"><label>Дедлайн<input name="deadline" type="date" value="${esc((deal.deadline || '').slice(0, 10))}"></label>
-     <label>Ответственный<select name="responsible_id">${userOptions(deal.responsible_id)}</select></label></div>
-     <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px"><label>Приоритет<select name="priority"><option value="normal" ${deal.priority === 'normal' ? 'selected' : ''}>Обычный</option><option value="high" ${deal.priority === 'high' ? 'selected' : ''}>Высокий</option><option value="low" ${deal.priority === 'low' ? 'selected' : ''}>Низкий</option></select></label>
-     <label>Причина отказа (если сделка проиграна)<input name="loss_reason" value="${esc(deal.loss_reason || '')}"></label></div>
-     ${cfInputs('deals', deal, 2, 'optional')}`, true)}
+     ${formSep()}
+     ${grid2(`${fld('Сумма (' + CUR() + ')', `<input name="amount" type="number" value="${deal.amount}">`)}
+       ${fld('Этап', `<select name="stage">${selStages(deal.stage, state.cardStages)}</select>`)}`)}
+     ${grid2(`${fld('Клиент', `<select name="contact_id"><option value="">— без контакта —</option>${(state.contacts || []).map(c => `<option value="${c.id}" ${c.id === deal.contact_id ? 'selected' : ''}>${esc(c.name)}</option>`).join('')}</select>`)}
+       ${fld('Компания', `<select name="company_id"><option value="">— без компании —</option>${(state.cardCompanies || []).map(c => `<option value="${c.id}" ${c.id === deal.company_id ? 'selected' : ''}>${esc(c.name)}</option>`).join('')}</select>`)}`)}
+     ${grid2(`${fld('Дедлайн', `<input name="deadline" type="date" value="${esc((deal.deadline || '').slice(0, 10))}">`)}
+       ${fld('Ответственный', `<select name="responsible_id">${userOptions(deal.responsible_id)}</select>`)}`)}
+     ${grid2(`${fld('Приоритет', `<select name="priority"><option value="normal" ${deal.priority === 'normal' ? 'selected' : ''}>Обычный</option><option value="high" ${deal.priority === 'high' ? 'selected' : ''}>Высокий</option><option value="low" ${deal.priority === 'low' ? 'selected' : ''}>Низкий</option></select>`)}
+       ${fld('Причина отказа (если сделка проиграна)', `<input name="loss_reason" value="${esc(deal.loss_reason || '')}" placeholder="Дорого, выбрали другого подрядчика…">`)}`)}
+     ${cfInputs('deals', deal, 2, 'optional')}
      <div style="display:flex;gap:8px;margin-top:12px"><button class="btn primary">Сохранить изменения</button><button class="btn danger" type="button" onclick="del('deals',${deal.id})">Удалить</button></div></form>`;
   }
   if (state.dealTab === 'chat') {
@@ -1541,20 +1602,23 @@ async function openContactCard(id) {
 
 async function openContact(id) {
   await team();
-  const comps = (await api('/api/companies')).concat();
+  const comps = await api('/api/companies');
   const c = id ? await api('/api/contacts/' + id) : { tags: '', custom: '{}' };
   openModal(`<h3>${id ? 'Контакт' : 'Новый контакт'}</h3><form onsubmit="return saveContact(event,${id || 'null'})">
-   <label>Имя клиента*<input name="name" required value="${esc(c.name || '')}" placeholder="Иван Петров"></label>
-   <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px"><label>Телефон<input name="phone" value="${esc(c.phone || '')}" placeholder="+7 999 123-45-67"></label>
-   <label>E-mail<input name="email" type="email" value="${esc(c.email || '')}" placeholder="ivan@mail.ru"></label></div>
+   ${formLegend()}
+   ${fld('Имя клиента', `<input name="name" required value="${esc(c.name || '')}" placeholder="Иван Петров">`, true)}
    ${cfInputs('contacts', c, 2, 'required')}
-   ${formMore(`<div style="display:grid;grid-template-columns:1fr 1fr;gap:12px"><label>Компания<select name="company_id"><option value="">— частное лицо —</option>${comps.map(x => `<option value="${x.id}" ${x.id === c.company_id ? 'selected' : ''}>${esc(x.name)}</option>`).join('')}</select></label>
-   <label>Должность<input name="position" value="${esc(c.position || '')}" placeholder="Собственник / застройщик"></label></div>
-   <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px"><label>Ответственный<select name="responsible_id">${userOptions(c.responsible_id || meId())}</select></label>
-   <label>Источник<select name="source">${sourceOptions(c.source)}</select></label></div>
-   <label>Теги (через запятую)<input name="tags" value="${esc(c.tags || '')}" placeholder="VIP, каркас, участок"></label>
-   <label>Заметки<textarea name="notes" rows="2">${esc(c.notes || '')}</textarea></label>
-   ${cfInputs('contacts', c, 2, 'optional')}`, !!id && !!(c.tags || c.notes || c.position || (c.company_id)))}
+   ${formSep()}
+   ${grid2(`${fld('Телефон', `<input name="phone" value="${esc(c.phone || '')}" placeholder="+7 999 123-45-67">`)}
+     ${fld('E-mail', `<input name="email" type="email" value="${esc(c.email || '')}" placeholder="ivan@mail.ru">`)}`)}
+   ${grid2(`${fld('Компания', `<select name="company_id"><option value="">— частное лицо —</option>${comps.map(x => `<option value="${x.id}" ${x.id === c.company_id ? 'selected' : ''}>${esc(x.name)}</option>`).join('')}</select>`)}
+     ${fld('Должность', `<input name="position" value="${esc(c.position || '')}" placeholder="Собственник / застройщик">`)}`)}
+   ${grid2(`${fld('Ответственный', `<select name="responsible_id">${userOptions(c.responsible_id || meId())}</select>`)}
+     ${fld('Источник', `<select name="source">${sourceOptions(c.source)}</select>`)}`)}
+   <p class="form-hint">${esc(responsibleHint())}</p>
+   ${fld('Теги', `<input name="tags" value="${esc(c.tags || '')}" placeholder="VIP, каркас, участок">`)}
+   ${fld('Заметки', `<textarea name="notes" rows="2" placeholder="Что важно помнить об этом клиенте">${esc(c.notes || '')}</textarea>`)}
+   ${cfInputs('contacts', c, 2, 'optional')}
    <button class="btn primary w">${id ? 'Сохранить' : 'Создать контакт'}</button></form>`);
 }
 
@@ -1627,12 +1691,17 @@ async function openCompany(id) {
       <div><h4>Сделки (${ds.length})</h4><div class="list">${ds.map(d => `<div class="row"><span><a href="#" onclick="closeModal();openDealCard(${d.id});return false"><b>${esc(d.title)}</b></a><br><small>${esc(stageLabel(d.stage))} · ${fmt(d.amount)}</small></span></div>`).join('') || '<small>Сделок пока нет</small>'}</div></div></div>`;
   }
   openModal(`<h3>${id ? 'Компания' : 'Новая компания'}</h3><form onsubmit="return saveCompany(event,${id || 'null'})">
-   <label>Название организации*<input name="name" required value="${esc(c.name || '')}" placeholder="ООО «СтройКаркас»"></label>
-   <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px"><label>ИНН<input name="inn" value="${esc(c.inn || '')}" placeholder="10 или 12 цифр"></label><label>Телефон<input name="phone" value="${esc(c.phone || '')}" placeholder="+7 495 000-00-00"></label></div>
-   ${formMore(`<div style="display:grid;grid-template-columns:1fr 1fr;gap:12px"><label>E-mail<input name="email" type="email" value="${esc(c.email || '')}"></label><label>Сайт<input name="site" value="${esc(c.site || '')}"></label></div>
-   <label>Заметки<textarea name="notes" rows="2">${esc(c.notes || '')}</textarea></label>`, !!id)}
+   ${formLegend()}
+   ${fld('Название организации', `<input name="name" required value="${esc(c.name || '')}" placeholder="ООО «СтройКаркас»">`, true)}
+   ${formSep()}
+   ${grid2(`${fld('ИНН', `<input name="inn" value="${esc(c.inn || '')}" placeholder="10 или 12 цифр">`)}
+     ${fld('Телефон', `<input name="phone" value="${esc(c.phone || '')}" placeholder="+7 495 000-00-00">`)}`)}
+   ${grid2(`${fld('E-mail', `<input name="email" type="email" value="${esc(c.email || '')}" placeholder="info@stroykarkas.ru">`)}
+     ${fld('Сайт', `<input name="site" value="${esc(c.site || '')}" placeholder="stroykarkas.ru">`)}`)}
+   ${fld('Заметки', `<textarea name="notes" rows="2" placeholder="Договорённости, особенности работы">${esc(c.notes || '')}</textarea>`)}
    <button class="btn primary w">${id ? 'Сохранить' : 'Создать компанию'}</button></form>${related}`);
 }
+
 async function saveCompany(e, id) {
   e.preventDefault();
   await api(id ? '/api/companies/' + id : '/api/companies', { method: id ? 'PATCH' : 'POST', body: JSON.stringify(Object.fromEntries(new FormData(e.target))) });
@@ -1756,9 +1825,11 @@ async function openTask(id, p = {}) {
     : `<div class="task-link-slot" data-kind="${kind}">${kind === 'contact_id' ? contactPick : dealPick}</div>`;
 
   openModal(`<h3>${id ? 'Задача' : 'Новая задача'}</h3><form onsubmit="return saveTask(event,${id || 'null'})">
-   <label>Что сделать*<input name="title" required value="${esc(t.title || '')}" placeholder="Позвонить, уточнить детали"></label>
-   <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px"><label>Срок<input name="due" type="datetime-local" value="${esc(dueVal)}"><small id="dueHint">${esc(t.due ? '' : (defTime === '18:00' ? 'по умолчанию — сегодня вечером' : 'по умолчанию — завтра в 12:00'))}</small></label>
-   <label>Тип<select name="type">${Object.entries({ call: 'Звонок', meeting: 'Встреча', message: 'Сообщение', email: 'Письмо', other: 'Другое' }).map(([k, n]) => `<option value="${k}" ${k === (t.type || 'call') ? 'selected' : ''}>${n}</option>`).join('')}</select></label></div>
+   ${formLegend()}
+   ${fld('Что сделать', `<input name="title" required value="${esc(t.title || '')}" placeholder="Позвонить, уточнить детали">`, true)}
+   ${formSep()}
+   ${grid2(`${fld('Срок', `<input name="due" type="datetime-local" value="${esc(dueVal)}"><small id="dueHint">${esc(t.due ? '' : (defTime === '18:00' ? 'по умолчанию — сегодня вечером' : 'по умолчанию — завтра в 12:00'))}</small>`)}
+     ${fld('Тип', `<select name="type">${Object.entries({ call: 'Звонок', meeting: 'Встреча', message: 'Сообщение', email: 'Письмо', other: 'Другое' }).map(([k, n]) => `<option value="${k}" ${k === (t.type || 'call') ? 'selected' : ''}>${n}</option>`).join('')}</select>`)}`)}
    <div class="due-chips" title="Быстрый выбор срока — поле «Срок» заполнится автоматически">
      <span class="due-chips-label">Быстро:</span>
      <button type="button" class="btn sm chip" onclick="setTaskDue(this,'today')">сегодня 18:00</button>
@@ -1767,10 +1838,10 @@ async function openTask(id, p = {}) {
      <button type="button" class="btn sm chip ghost" onclick="setTaskDue(this,'clear')">без срока</button>
    </div>
    <div class="task-links"><div class="task-link-col"><span class="task-link-cap">Клиент</span>${linkSlot('contact_id', preContact, 'contact')}</div><div class="task-link-col"><span class="task-link-cap">Сделка</span>${linkSlot('deal_id', preDeal, 'pipe')}</div></div>
-   ${formMore(`<div style="display:grid;grid-template-columns:1fr 1fr;gap:12px"><label>Ответственный<select name="responsible_id">${userOptions(t.responsible_id || meId())}</select></label>
-   <label>Приоритет<select name="priority"><option value="normal" ${t.priority === 'normal' ? 'selected' : ''}>Обычный</option><option value="high" ${t.priority === 'high' ? 'selected' : ''}>Высокий</option><option value="low" ${t.priority === 'low' ? 'selected' : ''}>Низкий</option></select></label></div>
-   <label>Повтор задачи<select name="repeat">${[['none', 'Не повторять'], ['daily', 'Каждый день'], ['weekly', 'Каждую неделю'], ['monthly', 'Каждый месяц']].map(([k, n]) => `<option value="${k}" ${k === (t.repeat || 'none') ? 'selected' : ''}>${n}</option>`).join('')}</select></label>
-   <label>Результат (после выполнения)<textarea name="result" rows="2" placeholder="Договорились на 15:00 — пришлём смету сегодня">${esc(t.result || '')}</textarea></label>`, !!id)} 
+   ${grid2(`${fld('Ответственный', `<select name="responsible_id">${userOptions(t.responsible_id || meId())}</select>`)}
+     ${fld('Приоритет', `<select name="priority"><option value="normal" ${t.priority === 'normal' ? 'selected' : ''}>Обычный</option><option value="high" ${t.priority === 'high' ? 'selected' : ''}>Высокий</option><option value="low" ${t.priority === 'low' ? 'selected' : ''}>Низкий</option></select>`)}`)}
+   ${fld('Повтор задачи', `<select name="repeat">${[['none', 'Не повторять'], ['daily', 'Каждый день'], ['weekly', 'Каждую неделю'], ['monthly', 'Каждый месяц']].map(([k, n]) => `<option value="${k}" ${k === (t.repeat || 'none') ? 'selected' : ''}>${n}</option>`).join('')}</select>`)}
+   ${fld('Результат (после выполнения)', `<textarea name="result" rows="2" placeholder="Договорились на 15:00 — пришлём смету сегодня">${esc(t.result || '')}</textarea>`)}
    <button class="btn primary w">${id ? 'Сохранить' : 'Поставить задачу'}</button></form>`);
 }
 
@@ -1821,11 +1892,13 @@ async function products(v) {
 async function openProduct(id) {
   const p = id ? await api('/api/products/' + id) : {};
   openModal(`<h3>${id ? 'Товар / проект' : 'Новая позиция каталога'}</h3><form onsubmit="return saveProduct(event,${id || 'null'})">
-   <label>Название*<input name="name" required value="${esc(p.name || '')}" placeholder="Каркасный дом «Скандинавия 8×10»"></label>
-   <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px"><label>Цена (${CUR()})<input name="price" type="number" required value="${p.price || 0}" placeholder="0"></label>
-   <label>Единица измерения<input name="unit" value="${esc(p.unit || 'шт')}" placeholder="шт, м², услуга"></label></div>
-   ${formMore(`<div style="display:grid;grid-template-columns:1fr 1fr;gap:12px"><label>Артикул / код<input name="sku" value="${esc(p.sku || '')}" placeholder="DOM-SKAN-810"></label>
-   <label style="display:flex;align-items:center;gap:8px;margin-top:22px"><input type="checkbox" name="active" style="width:auto" ${p.active === 0 ? '' : 'checked'}> В продаже</label></div>`, !!id)}
+   ${formLegend()}
+   ${fld('Название', `<input name="name" required value="${esc(p.name || '')}" placeholder="Каркасный дом «Скандинавия 8×10»">`, true)}
+   ${fld('Цена (' + CUR() + ')', `<input name="price" type="number" required value="${p.price || 0}" placeholder="0">`, true)}
+   ${formSep()}
+   ${grid2(`${fld('Единица измерения', `<input name="unit" value="${esc(p.unit || 'шт')}" placeholder="шт, м², услуга">`)}
+     ${fld('Артикул / код', `<input name="sku" value="${esc(p.sku || '')}" placeholder="DOM-SKAN-810">`)}`)}
+   <label class="check-line"><input type="checkbox" name="active" style="width:auto" ${p.active === 0 ? '' : 'checked'}><span>Показывать в продаже <small>(снимите галочку, чтобы убрать в архив)</small></span></label>
    <button class="btn primary w">${id ? 'Сохранить' : 'Добавить в каталог'}</button></form>`);
 }
 async function saveProduct(e, id) {
@@ -2029,7 +2102,7 @@ async function delReview(rid, cid) { await api('/api/reviews/' + rid, { method: 
 function openPriceImport(competitorId, scope) {
   openModal(`<h3>Загрузка прайс-таблицы (Excel / CSV)</h3>
    <p><small>${scope === 'ours' ? 'Наша таблица цен — используется для сравнения во всех отчётах.' : 'Прайс конкурента — для сравнения позиций.'}</small></p>
-   <p><small>Первая строка — заголовки: <code>Наименование;Цена;Ед</code>. Например: <code>Дом 8×10;3850000;шт</code>. CSV в UTF-8 или первый лист XLSX, цены числами. <a href="/examples/prices.csv" download>Скачать пример CSV</a>.</small></p>
+   <p><small>Первая строка — заголовки: <code>Наименование;Цена;Ед</code>. Например: <code>Дом 8×10;3850000;шт</code>. Подойдёт файл CSV (обычная таблица) или первый лист Excel; цены — числами. <a href="/examples/prices.csv" download>Скачать пример</a>.</small></p>
    <div class="tabs"><button class="active" onclick="this.parentElement.nextElementSibling.classList.remove('hidden');this.nextElementSibling.classList.remove('active');this.classList.add('active');">Файл .xlsx / .csv</button><button onclick="openPriceTextForm(${competitorId},'${scope}')">Текст / ссылки</button></div>
    <div><form onsubmit="return importPriceFile(event,${competitorId || 'null'},'${scope}')">
      <label>Выберите файл таблицы (.xlsx или .csv)<input type="file" accept=".xlsx,.csv,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet,text/csv" required></label>
@@ -2105,30 +2178,32 @@ async function settings(v) {
       ${localOrigin ? `<div class="notice warn" style="margin-top:12px"><b>Сейчас открыт локальный адрес</b><br><small>${esc(origin)} виден только на этом компьютере. Wazzup и формы с сайта не смогут сюда достучаться — укажите публичный адрес выше (например, https://crm.вашдомен.ру) или откройте CRM по домену.</small></div>` : ''}
      </div>
      <div class="card"><h3>Мессенджеры через Wazzup</h3>
-      <p><small>Один ключ Wazzup объединяет <b>WhatsApp, Telegram, Instagram и Viber</b> в одном разделе «Чаты» — отдельные подключения для каждого мессенджера не нужны. Ключ создаётся в личном кабинете Wazzup: раздел «Интеграция с CRM» → API.</small></p>
+      <p><small>Один ключ Wazzup объединяет <b>WhatsApp, Telegram, Instagram и Viber</b> в одном разделе «Чаты» — отдельно подключать каждый мессенджер не нужно. Ключ берётся в личном кабинете Wazzup: раздел «Интеграция с CRM» → API. Это длинная строка, которая работает как пароль к вашему аккаунту Wazzup, — храните её в секрете.</small></p>
       <p>Статус: <b class="${s.wazzup.configured ? 'green' : ''}">${s.wazzup.configured ? 'подключено' : 'не подключено'}</b></p>
-      <label>API-ключ Wazzup<input id="wzKey" placeholder="${esc(s.wazzup.api_key || 'вставьте ключ из личного кабинета Wazzup')}"></label>
-      <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px"><label>Канал по умолчанию<select id="wzChannel"><option value="">— выберите канал —</option>${chans.map(c => `<option value="${esc(c.external_id)}" ${c.external_id === s.wazzup.channel_id ? 'selected' : ''}>${esc(c.name || c.phone || c.transport || c.external_id)}</option>`).join('')}</select></label>
-      <label>Секрет для уведомлений (необязательно)<input id="wzSecret" value="${esc(s.wazzup.webhook_secret || '')}"></label></div>
-      <label>Адрес API Wazzup<input id="wzUrl" value="${esc(s.wazzup.api_url)}"></label>
+      <label>Ключ доступа Wazzup<input id="wzKey" placeholder="${esc(s.wazzup.api_key || 'вставьте ключ из личного кабинета Wazzup')}"></label>
+      <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px"><label>Куда отправлять ответы по умолчанию<select id="wzChannel"><option value="">— выберите канал —</option>${chans.map(c => `<option value="${esc(c.external_id)}" ${c.external_id === s.wazzup.channel_id ? 'selected' : ''}>${esc(c.name || c.phone || c.transport || c.external_id)}</option>`).join('')}</select></label>
+      <label>Код защиты адреса (необязательно)<input id="wzSecret" value="${esc(s.wazzup.webhook_secret || '')}" placeholder="придумайте длинный код"></label></div>
+      <p class="form-hint">Код защиты подставляется в адрес ниже. С ним никто посторонний не сможет присылать в CRM поддельные сообщения.</p>
+      <label>Адрес сервера Wazzup<input id="wzUrl" value="${esc(s.wazzup.api_url)}"></label>
+      <p class="form-hint">Обычно менять не нужно — это адрес, по которому CRM общается с Wazzup.</p>
       <div style="display:flex;gap:8px;flex-wrap:wrap"><button class="btn primary" onclick="saveWazzup()">Сохранить</button><button class="btn" onclick="testWazzup()">${icon('sync', 13)} Проверить и синхронизировать каналы</button></div>
-      <hr><p><b>Адрес для уведомлений Wazzup (webhook)</b></p>
-      <p><small>Это «входная дверь» для сообщений: когда клиент пишет в WhatsApp или Telegram, Wazzup отправляет сообщение на этот адрес, и оно появляется в «Чатах». Адрес нужно вставить в личном кабинете Wazzup (раздел вебхуков) или нажать кнопку ниже — тогда CRM зарегистрирует его сама.</small></p>
+      <hr><p><b>Адрес, по которому Wazzup присылает сообщения</b></p>
+      <p><small>Это «входная дверь» для сообщений: когда клиент пишет в WhatsApp или Telegram, Wazzup передаёт сообщение на этот адрес, и оно появляется в «Чатах». Вставьте адрес в личном кабинете Wazzup (раздел с адресами уведомлений) или нажмите кнопку ниже — CRM зарегистрирует его сама.</small></p>
       ${hookLine(origin + '/webhooks/wazzup' + (s.wazzup.webhook_secret ? '?secret=' + encodeURIComponent(s.wazzup.webhook_secret) : ''))}
       <p><small>${s.wazzup.webhook_secret ? 'Секрет в адресе — пароль от этой двери: без него чужие люди не смогут присылать поддельные сообщения.' : 'Секрет не задан: адрес примет сообщение от любого, кто его узнает. Для работы в интернете лучше задать секрет выше.'}</small></p>
       <div style="display:flex;gap:8px;flex-wrap:wrap"><button class="btn sm" onclick="registerWazzupWebhook()">${icon('sync', 13)} Зарегистрировать адрес автоматически</button></div>
       <hr><h3>Подключённые каналы (${chans.length})</h3>${chans.map(c => `<div class="row"><span>${esc(c.name || c.transport || c.external_id)}<br><small>${esc(channelLabel(c.transport))} ${esc(c.phone || '')} · статус: ${esc(c.state === 'active' ? 'активен' : (c.state || 'неизвестно'))}</small></span><span class="tag ${c.state === 'active' ? '' : 'grey'}">${esc(c.state === 'active' ? 'активен' : (c.state || 'неизвестно'))}</span></div>`).join('') || '<small>Каналы появятся после сохранения ключа и синхронизации.</small>'}</div>
 
-     <div class="card"><h3>Форма заявки для сайта и свой вебхук</h3>
-      <p><small>Готовая форма для сайта и «входная дверь» для любых заявок: имя, телефон и вопрос попадают в CRM, а она сама создаёт клиента, чат и сделку. Код формы копируется кнопкой ниже и вставляется на страницу сайта. Сюда же можно направить заявки с Авито, лендинга или своего бота — достаточно отправить POST с JSON.</small></p>
+     <div class="card"><h3>Заявки с сайта и из других сервисов</h3>
+      <p><small>Готовая форма для сайта и «входная дверь» для любых заявок: имя, телефон и вопрос попадают в CRM, а она сама создаёт клиента, чат и сделку. Код формы копируется кнопкой ниже и вставляется на страницу сайта. Сюда же можно направить заявки с Авито, лендинга или своего бота — если сервис умеет отправлять данные на адрес (это называется вебхук).</small></p>
       ${hookLine(origin + '/webhooks/generic' + (s.webhook?.secret ? '?secret=' + encodeURIComponent(s.webhook.secret) : ''))}
       <details style="margin:4px 0 10px"><summary><small>Пример запроса</small></summary><pre style="white-space:pre-wrap;font-size:12px;background:#f1f5f9;border-radius:8px;padding:10px">curl -X POST '${esc(origin)}/webhooks/generic${s.webhook?.secret ? '?secret=' + esc(s.webhook.secret) : ''}' \
   -H 'Content-Type: application/json' \
   -d '{"channel":"site","name":"Иван","phone":"+7 999 123-45-67","body":"Нужен дом 8×10"}'</pre></details>
-      <label>Секрет вебхука (защита от чужого спама)
+      <label>Код защиты (чтобы чужие не присылали заявки)
         <div style="display:flex;gap:8px"><input id="whSecret" value="${esc(s.webhook?.secret || '')}" placeholder="пусто — принимать любые заявки"><button type="button" class="btn sm" style="white-space:nowrap" onclick="genWebhookSecret()">Сгенерировать</button></div>
       </label>
-      <p><small>Если секрет задан, заявка без него отклоняется. Код формы ниже уже содержит секрет. Присылайте заявки на адрес с параметром <code>?secret=…</code> или с заголовком <code>x-webhook-secret</code>.</small></p>
+      <p><small>Если код задан, заявка без него отклоняется. Готовая форма для сайта уже содержит код — её можно вставлять как есть. Другим сервисам добавьте код в адрес: <code>?secret=…</code> (подробность для программиста: можно и заголовком <code>x-webhook-secret</code>).</small></p>
       <div style="display:flex;gap:8px;flex-wrap:wrap"><button class="btn primary sm" onclick="saveWebhookSecret()">Сохранить секрет</button><button class="btn sm" onclick="copySiteFormCode()">${icon('copy', 13)} Скопировать код формы для сайта</button></div></div>
 
      <div class="card"><h3>Электронная почта</h3>
@@ -2136,13 +2211,14 @@ async function settings(v) {
       <p><small><b>Что такое «пароль приложения».</b> Яндекс Почта, Mail.ru и Gmail не разрешают сторонним программам входить по обычному паролю. В настройках безопасности ящика создаётся отдельный одноразовый пароль для CRM: он выглядит как <code>abcd efgh ijkl mnop</code> и вводится в поле «Пароль приложения» ниже. Обычный пароль от почты останется только у вас.</small></p>
       <p>Статус: <b class="${s.email.configured ? 'green' : ''}">${s.email.configured ? 'почта настроена' : 'не настроена'}</b></p>
       <form onsubmit="return saveEmail(event)">
-       <div style="display:grid;grid-template-columns:2fr 1fr;gap:12px"><label>SMTP-сервер<input name="SMTP_HOST" value="${esc(s.email.host || '')}" placeholder="smtp.mail.ru"></label><label>Порт<input name="SMTP_PORT" value="${esc(s.email.port || '587')}" placeholder="465 или 587"></label></div>
+       <div style="display:grid;grid-template-columns:2fr 1fr;gap:12px"><label>Почтовый сервер<input name="SMTP_HOST" value="${esc(s.email.host || '')}" placeholder="smtp.mail.ru"></label><label>Порт<input name="SMTP_PORT" value="${esc(s.email.port || '587')}" placeholder="465 или 587"></label></div>
+       <p class="form-hint">Адрес почтового сервера спрашивается в справке вашей почты (Яндекс, Mail.ru, Gmail): обычно <code>smtp.название.ru</code>. Порт и шифрование ниже обычно определяются сами.</p>
        <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px"><label>Логин (адрес ящика)<input name="SMTP_USER" value="${esc(s.email.user || '')}" placeholder="crm@company.ru"></label><label>Пароль приложения<input name="SMTP_PASS" type="password" placeholder="${s.email.pass ? '•••••• (сохранён)' : 'пароль приложения'}"></label></div>
-       <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px"><label>Шифрование<select name="SMTP_SECURE"><option value="" ${!s.email.secure ? 'selected' : ''}>Авто: STARTTLS</option><option value="1" ${s.email.secure === '1' ? 'selected' : ''}>SSL/TLS сразу (обычно 465)</option><option value="0" ${s.email.secure === '0' ? 'selected' : ''}>Без шифрования (внутренний сервер)</option></select></label><label>Адрес отправителя<input name="MAIL_FROM" value="${esc(s.email.from || '')}" placeholder="crm@company.ru"></label></div>
+       <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px"><label>Защита соединения<select name="SMTP_SECURE"><option value="" ${!s.email.secure ? 'selected' : ''}>Авто: STARTTLS</option><option value="1" ${s.email.secure === '1' ? 'selected' : ''}>SSL/TLS сразу (обычно 465)</option><option value="0" ${s.email.secure === '0' ? 'selected' : ''}>Без шифрования (внутренний сервер)</option></select></label><label>Адрес отправителя<input name="MAIL_FROM" value="${esc(s.email.from || '')}" placeholder="crm@company.ru"></label></div>
        <label>Адрес для проверочного письма<input name="SMTP_TEST_TO" value="${esc(s.email.test_to || '')}" placeholder="admin@company.ru"></label>
        <div style="display:flex;gap:8px"><button class="btn primary">Сохранить почту</button><button class="btn" type="button" onclick="testEmail(this.form)">Отправить проверочное письмо</button></div></form>
       <hr><p><b>Приём входящих писем</b></p>
-      <p><small><b>Входящие письма.</b> Письма приходят не сами по себе: в почтовом ящике нужно включить пересылку (фильтр «пересылать все письма на адрес…») на адрес ниже. CRM разберёт отправителя, тему и текст и добавит письмо в чат клиента. Секрет защищает адрес от чужого спама; если он пуст, письма принимаются без проверки.</small></p>
+      <p><small><b>Входящие письма.</b> Письма приходят не сами по себе: в почтовом ящике нужно включить пересылку (фильтр «пересылать все письма на адрес…») на адрес ниже. CRM разберёт отправителя, тему и текст и добавит письмо в чат клиента. Код защиты спасает адрес от чужого спама; если он пуст, письма принимаются без проверки.</small></p>
       <div style="display:flex;gap:8px"><input id="emailSecret" value="${esc(s.email.webhook_secret || '')}" placeholder="секрет для входящих писем"><button type="button" class="btn sm" style="white-space:nowrap" onclick="genEmailSecret()">Сгенерировать</button><button type="button" class="btn sm primary" style="white-space:nowrap" onclick="saveEmailSecret()">Сохранить</button></div>
       ${hookLine(origin + '/webhooks/email' + (s.email.webhook_secret ? '?secret=' + encodeURIComponent(s.email.webhook_secret) : ''))}
      </div>
@@ -2153,11 +2229,11 @@ async function settings(v) {
     const cf = await api('/api/custom-fields');
     const rows = cf.fields;
     body = `<div class="settings-cols"><div class="card"><div class="row" style="border:0"><div><h3>Свои поля для контактов и сделок</h3><small>Дополнительные строки в карточке: площадь участка, тип фундамента, дата замера — что удобно именно вам.</small></div><button class="btn sm primary" onclick="editField(-1)">${icon('plus', 13)} Добавить поле</button></div>
-     <table><tr><th>Название</th><th>Где</th><th>Тип</th><th>В форме</th><th></th></tr>${rows.map((f, i) => `<tr><td><b>${esc(f.label)}</b></td><td>${({ contacts: 'Контакты', deals: 'Сделки', both: 'Везде' })[f.entity] || esc(f.entity)}</td><td>${({ text: 'Текст', number: 'Число', date: 'Дата', select: 'Список', phone: 'Телефон', email: 'E-mail' })[f.type] || esc(f.type)}${f.options && f.options.length ? '<br><small>' + f.options.map(esc).join(', ') + '</small>' : ''}</td><td>${f.required ? '<b>Сразу</b><br><small>обязательное</small>' : 'Под «Дополнительно»'}</td><td><button class="btn sm" title="Изменить поле" onclick="editField(${i})">${icon('edit', 13)}</button> <button class="btn sm danger" title="Удалить поле" onclick="delField(${i})">${icon('close', 13)}</button></td></tr>`).join('') || '<tr><td colspan="5"><div class="empty">Своих полей пока нет</div></td></tr>'}</table>
+     <table><tr><th>Название</th><th>Где</th><th>Тип</th><th>В форме</th><th></th></tr>${rows.map((f, i) => `<tr><td><b>${esc(f.label)}</b></td><td>${({ contacts: 'Контакты', deals: 'Сделки', both: 'Везде' })[f.entity] || esc(f.entity)}</td><td>${({ text: 'Текст', number: 'Число', date: 'Дата', select: 'Список', phone: 'Телефон', email: 'E-mail' })[f.type] || esc(f.type)}${f.options && f.options.length ? '<br><small>' + f.options.map(esc).join(', ') + '</small>' : ''}</td><td>${f.required ? '<b>Сверху</b><br><small>со звёздочкой</small>' : 'Ниже, <small>без звёздочки</small>'}</td><td><button class="btn sm" title="Изменить поле" onclick="editField(${i})">${icon('edit', 13)}</button> <button class="btn sm danger" title="Удалить поле" onclick="delField(${i})">${icon('close', 13)}</button></td></tr>`).join('') || '<tr><td colspan="5"><div class="empty">Своих полей пока нет</div></td></tr>'}</table>
      <p><small>Например: «Площадь участка», «Тип фундамента», «Дата замера». Новое поле сразу появляется в форме создания и в карточке клиента или сделки, а его значения попадают в выгрузку контактов в CSV.</small></p></div>
      <div><div class="card"><h3>Как работают свои поля</h3>
       <p><small>Введите понятное название — технический код система сделает сама, видеть его не нужно. Поле появится в форме и в карточке, значения сохранятся вместе с клиентом или сделкой.</small></p>
-      <p><small><b>Обязательное</b> поле нельзя сохранить пустым, и оно показывается сразу в основной части формы. Необязательные поля не мешают: они убраны под «Дополнительно» и всегда доступны в карточке.</small></p>
+      <p><small><b>Обязательное</b> поле нельзя сохранить пустым: оно стоит первым, подписано жирным и звёздочкой. Необязательные идут ниже, после разделителя, — заполнить их можно сразу или позже, они не мешают сохранить карточку.</small></p>
       <p><small><b>Где показывать:</b> «Везде» — и в контактах, и в сделках; можно ограничить одним разделом.</small></p>
       <p><small><b>Удаление</b> убирает поле из форм и карточек; ранее введённые значения остаются в базе, но больше не показываются. Если поле нужно снова — создайте его с тем же названием.</small></p></div></div></div>`;
   } else if (state.settingsTab === 'competitors') {
@@ -2169,8 +2245,8 @@ async function settings(v) {
      ${isAdmin ? `<div class="card"><h3>Ключи источников (хранятся на сервере)</h3><form onsubmit="return saveCompetitorKeys(event)">${KEY_FIELDS.map(([k, label, hint]) => `<label>${esc(label)}<input name="${k}" placeholder="${cs.keys[k] ? '•••••• (сохранён)' : esc(hint)}"></label>`).join('')}<button class="btn primary">Сохранить ключи</button></form></div>` : `<div class="card"><h3>Ключи источников</h3><p><small>Ключи источников задаёт администратор: Настройки → Конкуренты и источники. Отчёты и ссылки доступны всем — можно проверять конкурентов прямо сейчас.</small></p></div>`}
      <div class="card"><h3>Наша таблица цен</h3>${ours.rows.length ? `<p><b>Загружено позиций: ${ours.rows.length}</b></p>` : '<p><small>Пока не загружена.</small></p>'}<button class="btn primary w" onclick="openPriceImport(null,'ours')">Загрузить нашу таблицу цен</button></div>
     </div><div>
-     <div class="card"><h3>Принцип работы разведки</h3><p><small>CRM собирает информацию по открытым реестрам, судам, долгам и картам, рассчитывает риск-скор и даёт подсказки менеджеру.</small></p></div>
-     ${isAdmin ? `<div class="card"><h3>Адреса API источников</h3><form onsubmit="return saveCompetitorUrls(event)">${[['FNS_API_URL', 'ФНС API'], ['FSSP_API_URL', 'ФССП API'], ['FEDRESURS_API_URL', 'Федресурс'], ['KAD_API_URL', 'Арбитр'], ['RUSPROFILE_URL', 'Rusprofile'], ['GOOGLE_API_URL', 'Google Places'], ['TWOGIS_API_URL', '2ГИС'], ['YANDEX_API_URL', 'Яндекс Геопоиск']].map(([k, n]) => `<label>${n}<input name="${k}" value="${esc((cs.urls || {})[k] || '')}"></label>`).join('')}<button class="btn">Сохранить адреса</button></form></div>` : ''}
+     <div class="card"><h3>Принцип работы разведки</h3><p><small>CRM собирает информацию по открытым реестрам, судам, долгам и картам, оценивает риск работы с клиентом и подсказывает менеджеру, на что обратить внимание.</small></p></div>
+     ${isAdmin ? `<div class="card"><h3>Адреса сервисов проверки</h3><p><small>Нужны только техническому специалисту — обычно здесь ничего менять не надо. Если сервис сменил адрес, его можно поправить.</small></p><form onsubmit="return saveCompetitorUrls(event)">${[['FNS_API_URL', 'ФНС API'], ['FSSP_API_URL', 'ФССП API'], ['FEDRESURS_API_URL', 'Федресурс'], ['KAD_API_URL', 'Арбитр'], ['RUSPROFILE_URL', 'Rusprofile'], ['GOOGLE_API_URL', 'Google Places'], ['TWOGIS_API_URL', '2ГИС'], ['YANDEX_API_URL', 'Яндекс Геопоиск']].map(([k, n]) => `<label>${n}<input name="${k}" value="${esc((cs.urls || {})[k] || '')}"></label>`).join('')}<button class="btn">Сохранить адреса</button></form></div>` : ''}
     </div></div>`;
   } else if (state.settingsTab === 'pipelines') {
     const pl = await api('/api/pipelines');
@@ -2215,7 +2291,9 @@ async function settings(v) {
     body = `${demoRows ? `<div class="card" style="box-shadow:none;border-color:#fde68a;background:#fffbeb"><h3>${icon('sparkles', 16)} Демонстрационные данные</h3><p><small>Сейчас в базе примеры: клиентов ${s.demo?.contacts || 0}, сделок ${s.demo?.deals || 0}, задач ${s.demo?.tasks || 0}, чатов ${s.demo?.conversations || 0}, конкурентов ${s.demo?.competitors || 0}, товаров каталога ${s.demo?.products || 0}, шаблонов ${s.demo?.templates || 0}, правил ${s.demo?.automations || 0}. Их можно редактировать как обычные данные или удалить одной кнопкой — тогда CRM будет полностью чистой.</small></p><button class="btn danger sm" onclick="cleanDemo()">${icon('trash', 13)} Удалить демонстрационные данные</button></div>` : ''}
     <div class="settings-cols"><div><div class="card"><h3>Название компании</h3><form onsubmit="return saveCompanySettings(event)"><div style="display:grid;grid-template-columns:2fr 1fr;gap:12px"><label>Название<input name="COMPANY_NAME" value="${esc(s.company.name)}"></label><label>Валюта<input name="CURRENCY" value="${esc(s.company.currency)}"></label></div>
      <label>Автосоздание сделки при обращении<select name="AUTO_DEAL"><option value="1" ${s.auto_deal === '1' ? 'selected' : ''}>Да — создавать сделку «Неразобранное»</option><option value="0" ${s.auto_deal !== '1' ? 'selected' : ''}>Нет</option></select></label>
+     <p class="form-hint">Когда клиент впервые пишет в чат или оставляет заявку на сайте, CRM сразу создаёт сделку. Так обращение не потеряется, даже если менеджер ещё не открыл чат.</p>
      <label>Распределять новые обращения между менеджерами<select name="AUTO_ASSIGN"><option value="0" ${s.auto_assign !== '1' ? 'selected' : ''}>Нет — оставлять без ответственного</option><option value="1" ${s.auto_assign === '1' ? 'selected' : ''}>Да — отдавать наименее загруженному менеджеру</option></select></label>
+     <p class="form-hint">Касается обращений из чатов, сайта и форм. CRM выбирает сотрудника с меньшим числом сделок в работе — нагрузка распределяется поровну. Контакты, созданные вручную, остаются за тем, кто их создал: в форме можно сразу выбрать другого ответственного.</p>
      <button class="btn primary">Сохранить</button></form></div>
      <div class="card"><h3>Реквизиты для КП и счёта</h3><p><small>Попадают в печатные документы сделки (кнопки «КП» и «Счёт»). Префикс номера — начало нумерации, например «КП», «СЧ».</small></p>
       <form onsubmit="return saveCompanySettings(event)">
@@ -2229,12 +2307,12 @@ async function settings(v) {
        <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px"><label>Банк<input name="COMPANY_BANK" value="${esc((s.requisites || {}).bank || '')}" placeholder="ООО «Банк», БИК 044525225"></label>
        <label>Расчётный счёт<input name="COMPANY_ACCOUNT" value="${esc((s.requisites || {}).account || '')}" placeholder="40702810…"></label></div>
        <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px"><label>Корр. счёт<input name="COMPANY_CORR" value="${esc((s.requisites || {}).corr || '')}"></label>
-       <label>Префикс номеров документов<input name="DOC_PREFIX" value="${esc((s.requisites || {}).doc_prefix || '')}" placeholder="К-"></label></div>
+       <label>Начало номера документов<input name="DOC_PREFIX" value="${esc((s.requisites || {}).doc_prefix || '')}" placeholder="К-"></label></div>
        <button class="btn primary">Сохранить реквизиты</button></form></div>
     </div><div>
      <div class="card"><h3>Резервные копии базы</h3>
        <div style="display:flex;gap:8px;flex-wrap:wrap"><button class="btn primary sm" onclick="makeBackup()">${icon('plus', 13)} Создать копию сейчас</button>
-       <button class="btn sm" onclick="download('/api/export/json','karkas-backup.json')" title="Полная выгрузка всех данных в JSON">${icon('download', 13)} Выгрузить данные (JSON)</button></div>
+       <button class="btn sm" onclick="download('/api/export/json','karkas-backup.json')" title="Текстовый файл со всеми данными — для переноса в другую программу">${icon('download', 13)} Скачать все данные</button></div>
        <div id="backupList" style="margin-top:10px">Загрузка…</div>
        <details class="form-more"><summary>Копии на другом сервере</summary>
         <p><small>Копии из списка лежат на этом же сервере: они спасают от случайного удаления, но не от поломки диска. Чтобы была вторая копия в другом месте, включите выгрузку в облачное хранилище S3 — файлы уходят туда автоматически по расписанию. Настройка — в <b>DEPLOY.md, раздел 7.1</b>: адрес хранилища, ведро и ключи доступа вписываются в <code>.env</code> на сервере, дальше одна строка в cron. Стоимость — примерно 100–200 ₽ в месяц.</small></p>
@@ -2251,10 +2329,10 @@ async function settings(v) {
           <button type="button" class="btn danger sm" id="logoDeleteBtn" ${s.logo && s.logo.custom ? '' : 'disabled'} onclick="deleteLogo()">Удалить логотип</button>
         </div>
       </div>
-      ${s.logo && s.logo.env ? '<p><small>Задан LOGO_FILE на сервере: он имеет приоритет над загрузкой.</small></p>' : ''}
+      ${s.logo && s.logo.env ? '<p><small>Логотип задан на сервере при установке — он важнее загруженного здесь.</small></p>' : ''}
     </div>
      <div class="card"><h3>Обслуживание и уведомления</h3>
-      <p><small>Резервные копии создаются автоматически и хранятся указанное число дней. Просроченные задачи можно отправлять во внешний сервис (Slack, бот, свой обработчик).</small></p>
+      <p><small>Резервные копии создаются автоматически и хранятся указанное число дней. Просроченные задачи можно отправлять и во внешний сервис — например, в Slack или Telegram-бот (если он у вас есть).</small></p>
       <form onsubmit="return saveMaintenance(event)">
        <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px"><label>Хранить копии, дней<input name="BACKUP_KEEP_DAYS" type="number" min="0" max="3650" value="${esc(String(s.maintenance?.backup_keep_days ?? 7))}"></label>
        <label>Час создания копии (0–23)<input name="BACKUP_HOUR" type="number" min="0" max="23" value="${esc(String(s.maintenance?.backup_hour ?? 3))}"></label></div>
@@ -2263,15 +2341,15 @@ async function settings(v) {
       </form>
      </div>
      <div class="card"><h3>Дополнительные параметры</h3>
-      <p><small>Сохраняются в базе и перекрывают значения из .env — после смены здесь править .env не нужно.</small></p>
+      <p><small>Эти настройки хранятся в самой CRM и важнее параметров сервера — править файлы на сервере не нужно.</small></p>
       <form onsubmit="return saveAdvanced(event)">
-       <label>Встраивание в iframe (FRAME_ANCESTORS)<input name="FRAME_ANCESTORS" value="${esc(s.advanced?.frame_ancestors || '')}" placeholder="пусто = запрещено · например https://портал.ru или *"></label>
-       <p style="margin:-4px 0 10px"><small>Кому можно показывать CRM внутри своего сайта через iframe. Пустое поле — запрещено всем (безопасно по умолчанию); адрес вида <code>https://портал.ru</code> — только этому сайту; <code>*</code> — любому сайту (не рекомендуется). На обычную работу CRM не влияет.</small></p>
-       <label>Попыток входа с одного IP за 5 минут<input name="LOGIN_RATE_LIMIT" type="number" min="1" max="10000" value="${esc(String(s.advanced?.login_rate_limit ?? 12))}"></label>
+       <label>Показывать CRM внутри другого сайта<input name="FRAME_ANCESTORS" value="${esc(s.advanced?.frame_ancestors || '')}" placeholder="пусто = запрещено · например https://портал.ru или *"></label>
+       <p style="margin:-4px 0 10px"><small>Кому можно показывать CRM внутри своего сайта — например, встроить в портал компании. Пустое поле — никому (безопасно); адрес вида <code>https://портал.ru</code> — только этому сайту; <code>*</code> — любому сайту (не рекомендуется). На обычную работу CRM не влияет.</small></p>
+       <label>Сколько неудачных попыток входа разрешать за 5 минут<input name="LOGIN_RATE_LIMIT" type="number" min="1" max="10000" value="${esc(String(s.advanced?.login_rate_limit ?? 12))}"></label>
        <p style="margin:-4px 0 10px"><small>Защита от подбора пароля: после указанного числа неудачных попыток вход с этого IP временно блокируется на 5 минут. Для офиса за одним IP ставьте значение повыше, для открытого интернета хватает 10–20.</small></p>
        <button class="btn primary">Сохранить параметры</button>
       </form>
-      <p><small>Режим начальных данных (SEED_MODE): <b>${esc(s.seed_mode || 'demo')}</b> — применяется только при первом запуске на пустой базе.</small></p>
+      <p><small>Начальные данные: <b>${esc(s.seed_mode === 'demo' ? 'демонстрационные примеры' : s.seed_mode === 'base' ? 'базовые (каталог и шаблоны)' : s.seed_mode || 'демо')}</b>. Это влияет только на самую первую установку на пустой базе — потом данные не добавляются и не удаляются.</small></p>
      </div>
     </div></div>`;
   } else if (state.settingsTab === 'profile') {
@@ -2487,12 +2565,14 @@ async function saveUser(e, id) {
 }
 async function copyCreatedCredentials() {
   const field = $('#createdCredentials'), status = $('#copyCredentialsStatus');
+  if (!field) return; // окно с паролем уже закрыто — копировать нечего
   try {
+    if (!navigator.clipboard) throw new Error('clipboard unavailable');
     await navigator.clipboard.writeText(field.value);
-    status.textContent = 'Данные скопированы. Передайте их сотруднику лично.';
+    if (status) status.textContent = 'Данные скопированы. Передайте их сотруднику лично.';
   } catch {
     field.focus(); field.select();
-    status.textContent = 'Автоматическое копирование недоступно. Нажмите Ctrl+C или скопируйте выделенный текст вручную.';
+    if (status) status.textContent = 'Автоматическое копирование недоступно. Нажмите Ctrl+C или скопируйте выделенный текст вручную.';
   }
 }
 
@@ -2800,14 +2880,52 @@ function connectSSE() {
   const es = new EventSource('/api/events');
   es.addEventListener('notify', e => {
     const d = JSON.parse(e.data);
-    if (d.type === 'overdue_tasks') toast(`Внимание: просроченных задач — ${d.count}`);
+    if (d.type === 'overdue_tasks') {
+      notify({
+        title: 'Есть просроченные задачи', kind: 'task',
+        text: `${d.count} ${plural(d.count, 'задача ждёт', 'задачи ждут', 'задач ждут')} выполнения`,
+        actionLabel: 'Открыть задачи',
+        onAction: () => { state.taskScope = 'all'; state.taskFilter = 'overdue'; go('tasks'); },
+      });
+    }
+    if (d.type === 'deal_assigned') {
+      notify({
+        title: 'Вам передали сделку', kind: 'task', text: d.title,
+        actionLabel: 'Открыть сделку', onAction: () => openDealCard(d.id),
+      });
+      api('/api/dashboard').then(navCounts).catch(() => {});
+    }
+    if (d.type === 'contact_assigned') {
+      notify({
+        title: 'Вам передали клиента', kind: 'task', text: d.title,
+        actionLabel: 'Открыть карточку', onAction: () => openContactCard(d.id),
+      });
+    }
+    if (d.type === 'task_assigned') {
+      notify({
+        title: 'Вам поставили задачу', kind: 'task',
+        text: `${d.title}${d.due ? ' · ' + dueText(d.due) : ''}`,
+        actionLabel: 'Открыть задачу',
+        onAction: () => openTask(d.id),
+      });
+      api('/api/dashboard').then(navCounts).catch(() => {});
+    }
     if (state.view === 'inbox') { refreshInbox(); api('/api/dashboard').then(navCounts).catch(() => {}); }
     else if (state.view === 'dashboard') render();
   });
   es.addEventListener('message', e => {
     const d = JSON.parse(e.data);
-    // исходящие из другого окна не анонсируем, входящие — показываем с именем клиента
-    if (d.direction !== 'out') toast(`Новое сообщение: ${d.title || 'клиент'}${d.preview ? ' — ' + d.preview : ''}`);
+    // исходящие из другого окна не анонсируем; входящее показываем только если
+    // сотрудник не смотрит прямо сейчас этот чат — иначе уведомление мешает
+    const sameChat = state.view === 'inbox' && Number(state.conv) === Number(d.conversation_id) && document.hasFocus();
+    if (d.direction !== 'out' && !sameChat) {
+      notify({
+        title: 'Новое сообщение', kind: 'message',
+        text: `${d.title || 'Клиент'}${d.preview ? ': ' + d.preview : ''}`,
+        actionLabel: 'Открыть чат',
+        onAction: () => { state.conv = d.conversation_id; go('inbox'); },
+      });
+    }
     if (state.view === 'inbox') refreshInbox();
     api('/api/dashboard').then(navCounts).catch(() => {});
   });

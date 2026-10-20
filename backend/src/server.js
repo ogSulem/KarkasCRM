@@ -333,6 +333,13 @@ const clients = new Set();
 function closeUserStreams(id) { for (const res of clients) if (res.userId === id) { clients.delete(res); res.end(); } }
 const staticGzip = new Map(); // кэш сжатых ассетов: gzip считается один раз на версию файла
 export function broadcast(ev, data) { const s = `event: ${ev}\ndata: ${JSON.stringify(data)}\n\n`; clients.forEach(r => { try { r.write(s); } catch {} }); }
+// Личное уведомление: «вам поставили задачу» должен увидеть только исполнитель,
+// а не вся команда. Соединения знают своего пользователя (res.userId).
+export function broadcastTo(userId, ev, data) {
+  if (!userId) return;
+  const s = `event: ${ev}\ndata: ${JSON.stringify(data)}\n\n`;
+  clients.forEach(r => { if (r.userId === Number(userId)) { try { r.write(s); } catch {} } });
+}
 
 // ---------- automations ----------
 function runAutomations(trigger, ctx = {}) {
@@ -857,6 +864,11 @@ export const server = http.createServer(async (req, res) => {
       customFields: getCustomFields(),
       features: { email: !!getSetting('SMTP_HOST'), wazzup: !!getSetting('WAZZUP_API_KEY') },
       salesTarget: Number(getSetting('SALES_TARGET', '0')) || 0,
+      // интерфейсу нужно знать правила распределения, чтобы честно объяснить,
+      // кому достанется новый контакт (см. подсказку в форме)
+      autoAssign: getSetting('AUTO_ASSIGN', '0') === '1',
+      autoDeal: getSetting('AUTO_DEAL', '1') === '1',
+      activeUsers: db.prepare('SELECT COUNT(*) n FROM users WHERE active=1').get().n,
     });
     if (user && p.startsWith('/api/') && user.role === 'viewer' && req.method !== 'GET' && p !== '/api/me/password') return json(res, 403, { error: 'Роль «Наблюдатель» — только просмотр' });
     // настройки, команда, воронки, шаблоны, автоматизации, ключи и обслуживание — только администратор
@@ -1059,6 +1071,10 @@ export const server = http.createServer(async (req, res) => {
         if (table === 'contacts' && b.phone !== undefined) { ks.push('phone_norm'); vals.push(digits(b.phone) || null); }
         const r = db.prepare(`INSERT INTO ${table}(${ks}) VALUES(${ks.map(() => '?')})`).run(...vals);
         log(`Создано (${table} #${r.lastInsertRowid})`, table, Number(r.lastInsertRowid), user.name);
+        // задачу поставили коллеге — он сразу увидит всплывающее уведомление
+        if (table === 'tasks' && b.responsible_id && Number(b.responsible_id) !== Number(user.id)) {
+          broadcastTo(b.responsible_id, 'notify', { type: 'task_assigned', id: Number(r.lastInsertRowid), title: String(b.title || 'Задача'), due: b.due || '' });
+        }
         broadcast('change', { table });
         return json(res, 201, db.prepare(`SELECT * FROM ${table} WHERE id=?`).get(r.lastInsertRowid));
       }
@@ -1073,7 +1089,19 @@ export const server = http.createServer(async (req, res) => {
         const ks = Object.keys(b).filter(k => fields.includes(k));
         if (table === 'contacts' && b.custom !== undefined) { const err = missingRequiredCustom('contacts', b.custom); if (err) return json(res, 400, { error: err }); }
         if (table === 'contacts' && b.phone !== undefined && !ks.includes('phone_norm')) { ks.push('phone_norm'); b.phone_norm = digits(b.phone) || null; }
+        const prevTask = table === 'tasks' ? db.prepare('SELECT title,responsible_id,due FROM tasks WHERE id=?').get(id) : null;
+        const prevContact = table === 'contacts' ? db.prepare('SELECT name,responsible_id FROM contacts WHERE id=?').get(id) : null;
         if (ks.length) db.prepare(`UPDATE ${table} SET ${ks.map(k => k + '=?')} WHERE id=?`).run(...ks.map(k => b[k]), id);
+        // задачу переназначили — новый исполнитель получает уведомление сразу
+        if (prevTask && b.responsible_id !== undefined && b.responsible_id
+          && Number(b.responsible_id) !== Number(user.id) && Number(b.responsible_id) !== Number(prevTask.responsible_id)) {
+          broadcastTo(b.responsible_id, 'notify', { type: 'task_assigned', id: Number(id), title: String(prevTask.title || 'Задача'), due: b.due ?? prevTask.due ?? '' });
+        }
+        // контакт передали коллеге — он тоже узнаёт сразу
+        if (prevContact && b.responsible_id !== undefined && b.responsible_id
+          && Number(b.responsible_id) !== Number(user.id) && Number(b.responsible_id) !== Number(prevContact.responsible_id)) {
+          broadcastTo(b.responsible_id, 'notify', { type: 'contact_assigned', id: Number(id), title: String(prevContact.name || 'Клиент') });
+        }
         // закрыли повторяющуюся задачу — сразу создаём следующую по расписанию
         let nextTaskId = null;
         if (table === 'tasks' && Number(b.done) === 1) {
@@ -1236,7 +1264,13 @@ export const server = http.createServer(async (req, res) => {
         if (b.company_id !== undefined) { b.company_id = b.company_id ? Number(b.company_id) : null; if (b.company_id !== null && (!Number.isInteger(b.company_id) || b.company_id <= 0)) return json(res, 400, { error: 'Некорректная компания — выберите из списка' }); if (b.company_id && !db.prepare('SELECT 1 x FROM companies WHERE id=?').get(b.company_id)) return json(res, 400, { error: 'Компания не найдена — обновите страницу и выберите из списка' }); }
         if (b.responsible_id !== undefined && b.responsible_id !== null && b.responsible_id !== '' && !db.prepare('SELECT 1 x FROM users WHERE id=?').get(b.responsible_id)) return json(res, 400, { error: 'Ответственный не найден — обновите страницу и выберите сотрудника' });
         if (b.custom !== undefined) { const err = missingRequiredCustom('deals', b.custom); if (err) return json(res, 400, { error: err }); }
-        const fields = ['title', 'amount', 'stage', 'pipeline_id', 'contact_id', 'company_id', 'responsible', 'responsible_id', 'priority', 'loss_reason', 'deadline', 'custom']; const ks = Object.keys(b).filter(k => fields.includes(k)); if (ks.length) db.prepare(`UPDATE deals SET ${ks.map(k => k + '=?')},updated_at=datetime('now')${b.stage && ['won', 'lost'].includes(b.stage) ? ",closed_at=datetime('now')" : ''} WHERE id=?`).run(...ks.map(k => b[k]), id); if (b.stage && old && b.stage !== old.stage) { const s = db.prepare('SELECT name FROM stages WHERE code=?').get(b.stage); log(`Сделка «${old.title}» → этап «${s?.name || b.stage}»`, 'deals', Number(id), user.name); runAutomations('stage_changed', { deal_id: Number(id), contact_id: old.contact_id, stage: b.stage }); } broadcast('change', { table: 'deals' }); return json(res, 200, db.prepare('SELECT * FROM deals WHERE id=?').get(id)); }
+        const fields = ['title', 'amount', 'stage', 'pipeline_id', 'contact_id', 'company_id', 'responsible', 'responsible_id', 'priority', 'loss_reason', 'deadline', 'custom']; const ks = Object.keys(b).filter(k => fields.includes(k)); if (ks.length) db.prepare(`UPDATE deals SET ${ks.map(k => k + '=?')},updated_at=datetime('now')${b.stage && ['won', 'lost'].includes(b.stage) ? ",closed_at=datetime('now')" : ''} WHERE id=?`).run(...ks.map(k => b[k]), id);
+        // сделку передали коллеге — он сразу увидит уведомление, а не узнает случайно
+        const newResp = b.responsible_id !== undefined ? (b.responsible_id ? Number(b.responsible_id) : null) : old.responsible_id;
+        if (newResp && newResp !== Number(old.responsible_id) && newResp !== Number(user.id)) {
+          broadcastTo(newResp, 'notify', { type: 'deal_assigned', id: Number(id), title: String(b.title || old.title || 'Сделка') });
+        }
+        if (b.stage && old && b.stage !== old.stage) { const s = db.prepare('SELECT name FROM stages WHERE code=?').get(b.stage); log(`Сделка «${old.title}» → этап «${s?.name || b.stage}»`, 'deals', Number(id), user.name); runAutomations('stage_changed', { deal_id: Number(id), contact_id: old.contact_id, stage: b.stage }); } broadcast('change', { table: 'deals' }); return json(res, 200, db.prepare('SELECT * FROM deals WHERE id=?').get(id)); }
       if (req.method === 'DELETE') {
         const d = db.prepare('SELECT * FROM deals WHERE id=?').get(id);
         if (!d) return json(res, 404, { error: 'Сделка не найдена' });

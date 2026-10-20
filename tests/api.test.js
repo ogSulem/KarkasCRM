@@ -681,6 +681,73 @@ test('контакт находится по телефону в любом фо
   assert.equal(conv.channels, 'whatsapp');
 });
 
+test('передача ответственного: коллега получает персональное уведомление', async () => {
+  // Коллега с собственным паролем (временный пароль обязательно меняется при первом входе).
+  const email = 'assignee-' + Date.now() + '@example.com';
+  const temp = 'TemporaryPass-2026!x', own = 'OwnPersonalPass-2026!x';
+  const created = (await call('/api/users', { method: 'POST', body: JSON.stringify({ name: 'Коллега', email, role: 'manager', active: 1, password: temp }) })).body;
+  assert.ok(created.id, 'сотрудник создан');
+  const first = (await call('/api/auth/login', { method: 'POST', body: JSON.stringify({ email, password: temp }) })).body;
+  const changed = (await call('/api/me/password', { method: 'POST', headers: { Authorization: 'Bearer ' + first.token }, body: JSON.stringify({ old_password: temp, new_password: own }) })).body;
+  const colleague = { Authorization: 'Bearer ' + changed.token };
+
+  // Подключаемся к живым событиям так же, как это делает браузер коллеги.
+  const ctrl = new AbortController();
+  const stream = await fetch(base + '/api/events', { headers: colleague, signal: ctrl.signal });
+  assert.equal(stream.status, 200);
+  const reader = stream.body.getReader(), decoder = new TextDecoder();
+  const events = []; let buf = '';
+  const pump = (async () => {
+    try {
+      for (;;) { const { value, done } = await reader.read(); if (done) break;
+        buf += decoder.decode(value, { stream: true });
+        let i; while ((i = buf.indexOf('\n\n')) >= 0) {
+          const chunk = buf.slice(0, i); buf = buf.slice(i + 2);
+          const ev = /event: ([^\n]+)/.exec(chunk), data = /data: (.*)/.exec(chunk);
+          if (ev) events.push({ ev: ev[1], data: data ? JSON.parse(data[1]) : null });
+        } }
+    } catch {}
+  })();
+  const waitEvent = async (type) => {
+    for (let i = 0; i < 100; i++) {
+      const found = events.find(e => e.ev === 'notify' && e.data?.type === type);
+      if (found) return found.data;
+      await new Promise(r => setTimeout(r, 30));
+    }
+    return null;
+  };
+  try {
+    await waitEvent('ready'); // подписка зарегистрирована на сервере
+    assert.ok(events.some(e => e.ev === 'ready'), 'поток событий открыт');
+
+    const c = (await call('/api/contacts', { method: 'POST', body: JSON.stringify({ name: 'Клиент для передачи' }) })).body;
+    const dc = await call('/api/contacts/' + c.id, { method: 'PATCH', body: JSON.stringify({ responsible_id: created.id }) });
+    assert.equal(dc.status, 200);
+    const contactNote = await waitEvent('contact_assigned');
+    assert.ok(contactNote, 'контакт передан — коллега получил contact_assigned');
+    assert.equal(contactNote.id, c.id);
+
+    const deal = (await call('/api/deals', { method: 'POST', body: JSON.stringify({ title: 'Сделка для передачи', contact_id: c.id }) })).body;
+    assert.equal((await call('/api/deals/' + deal.id, { method: 'PATCH', body: JSON.stringify({ responsible_id: created.id }) })).status, 200);
+    const dealNote = await waitEvent('deal_assigned');
+    assert.ok(dealNote, 'сделка передана — коллега получил deal_assigned');
+    assert.equal(dealNote.id, deal.id);
+
+    // Повторная передача тому же человеку уведомление не дублирует.
+    const before = events.filter(e => e.ev === 'notify' && e.data?.type === 'deal_assigned').length;
+    await call('/api/deals/' + deal.id, { method: 'PATCH', body: JSON.stringify({ responsible_id: created.id }) });
+    await new Promise(r => setTimeout(r, 250));
+    assert.equal(events.filter(e => e.ev === 'notify' && e.data?.type === 'deal_assigned').length, before, 'без фактической смены уведомления нет');
+
+    // Задача, поставленная коллеге сразу при создании, тоже даёт уведомление.
+    const task = (await call('/api/tasks', { method: 'POST', body: JSON.stringify({ title: 'Задача для передачи', due: '2026-12-31', responsible_id: created.id }) })).body;
+    assert.ok(task.id);
+    const taskNote = await waitEvent('task_assigned');
+    assert.ok(taskNote, 'задача назначена — коллега получил task_assigned');
+    assert.equal(taskNote.id, task.id);
+  } finally { ctrl.abort(); await pump.catch(() => {}); }
+});
+
 test('защита входа: ограничение попыток подбора пароля', async () => {
   const codes = [];
   for (let i = 0; i < 16; i++) codes.push((await readyLogin('/api/auth/login', { method: 'POST', body: JSON.stringify({ email: 'admin@example.com', password: 'wrong-' + i }) })).status);

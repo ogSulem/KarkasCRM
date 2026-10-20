@@ -4,7 +4,7 @@
 //   JSDOM_PATH=/tmp/jsdomtest/node_modules/jsdom/lib/api.js node --experimental-sqlite tests/ui.smoke.mjs
 // Если jsdom не установлен — тест сообщает об этом и завершается успешно.
 import { spawn } from 'node:child_process';
-import { readFileSync, rmSync, accessSync, constants } from 'node:fs';
+import { readFileSync, readdirSync, rmSync, accessSync, constants } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
 
@@ -22,10 +22,22 @@ if (!JSDOM) {
 }
 
 const PORT = 18079, BASE = `http://127.0.0.1:${PORT}`, DATA = '/tmp/karkas-ui-smoke';
-rmSync(DATA, { recursive: true, force: true });
 const sleep = ms => new Promise(r => setTimeout(r, ms));
-const srv = spawn('node', ['--experimental-sqlite', 'backend/src/server.js'], { cwd: ROOT, env: { ...process.env, DATA_DIR: DATA, PORT: String(PORT), HOST: '127.0.0.1', SEED_MODE: 'off' }, stdio: 'ignore' });
-for (let i = 0; i < 60; i++) { try { if ((await fetch(BASE + '/api/health')).ok) break } catch {} await sleep(200) }
+// Убираем сервер, оставшийся от прерванного прошлого прогона: иначе порт занят,
+// отвечает старый процесс со старыми данными и проверки падают на 409/«пользователь уже есть».
+for (const pid of readdirSync('/proc').filter(d => /^\d+$/.test(d))) {
+  if (+pid === process.pid) continue;
+  try {
+    const env = readFileSync(`/proc/${pid}/environ`, 'utf8').split('\0');
+    if (env.includes('KARKAS_SMOKE_OWNER=ui')) process.kill(+pid, 'SIGKILL');
+  } catch {}
+}
+await sleep(300);
+rmSync(DATA, { recursive: true, force: true });
+const srv = spawn('node', ['--experimental-sqlite', 'backend/src/server.js'], { cwd: ROOT, env: { ...process.env, DATA_DIR: DATA, PORT: String(PORT), HOST: '127.0.0.1', SEED_MODE: 'off', KARKAS_SMOKE_OWNER: 'ui' }, stdio: 'ignore' });
+let ready = false;
+for (let i = 0; i < 60; i++) { try { if ((await fetch(BASE + '/api/health')).ok) { ready = true; break } } catch {} await sleep(200) }
+if (!ready) { console.error('Smoke-тест: сервер не запустился — порт ' + PORT + ' занят другим процессом.'); process.exit(1); }
 
 const html = readFileSync(join(ROOT, 'frontend/public/index.html'), 'utf8');
 const htmlClean = html.replace(/<script[^>]*><\/script>/g, '');
@@ -42,7 +54,7 @@ Object.assign(window, {
   toggleUserMenu, closeUserMenu, toggleTaskSelect, ICON_PATHS, msgHtml, channelOptions,
   uploadChatFile, uploadLogo, deleteLogo, checkHealth, refreshLogo,
   sourceLabel, channelLabel, roleLabel, askConfirm, askInput, translit, SOURCE_LABELS, CHANNEL_LABELS, ROLE_LABELS,
-  isoDate, todayISO, fmtDayMonth, kindStage, formMore, captureFocus, restoreFocus
+  isoDate, todayISO, fmtDayMonth, kindStage, fld, grid2, formSep, formLegend, pushToast, notify, captureFocus, restoreFocus
 });`;
 const dom = new JSDOM(htmlClean, { runScripts: 'dangerously', url: BASE + '/', pretendToBeVisual: true, virtualConsole: new VirtualConsole() });
 const { window } = dom;
@@ -148,11 +160,12 @@ try {
     check('вебхуки: адреса собраны с хостом', links.length === 3 && links.every(u => /^https?:\/\//.test(u)) && links.some(u => /\/webhooks\/wazzup$/.test(u)) && links.some(u => /\/webhooks\/email$/.test(u)));
     check('вебхуки: у каждого адреса есть кнопка копирования', $$('#view .hook-line button[data-copy]').length === links.length);
     const txt = $('#view').textContent;
-    check('вебхуки: объяснено простыми словами', /входная дверь/.test(txt) && /пароль приложения/.test(txt) && /пересылк/i.test(txt));
+    check('вебхуки: объяснено простыми словами', /входная дверь/.test(txt) && /пароль приложения/.test(txt) && /пересылк/i.test(txt),
+      [/входная дверь/.test(txt), /пароль приложения/.test(txt), /пересылк/i.test(txt)].join('/'));
     check('вебхуки: поле публичного адреса доступно в интерфейсе', Boolean($('#publicUrl')));
   }
 
-  // ── свои поля: обязательные сразу в форме, необязательные под «Дополнительно» ──
+  // ── свои поля: обязательные сверху, остальные — ниже, без «Дополнительно» ──
   {
     const saved = await (await fetch(BASE + '/api/custom-fields', { headers: authH() })).json();
     await fetch(BASE + '/api/custom-fields', { method: 'PUT', headers: authH(), body: JSON.stringify({ fields: [
@@ -165,20 +178,26 @@ try {
       const rows = $$('#view table tr').slice(1).map(r => [...r.children].map(td => td.textContent.trim()));
       const reqRow = rows.find(r => /Площадь участка/.test(r[0]));
       const optRow = rows.find(r => /Тип фундамента/.test(r[0]));
-      check('в таблице полей видно, что показывается сразу', Boolean(reqRow) && /Сразу/.test(reqRow[3]) && /обязательн/i.test(reqRow[3]), reqRow && reqRow[3]);
-      check('в таблице полей видно, что убрано под «Дополнительно»', Boolean(optRow) && /Дополнительно/i.test(optRow[3]), optRow && optRow[3]);
-      check('объяснение для неспециалиста есть', /показывается сразу в основной части формы/i.test($('#view').textContent));
+      check('в таблице полей видно, что обязательное идёт сверху', Boolean(reqRow) && /Сверху/.test(reqRow[3]) && /звёздочк/i.test(reqRow[3]), reqRow && reqRow[3]);
+      check('в таблице полей видно, что необязательное идёт ниже', Boolean(optRow) && /Ниже/i.test(optRow[3]), optRow && optRow[3]);
+      check('объяснение для неспециалиста есть', /подписано жирным и звёздочкой/i.test($('#view').textContent));
     }
     await window.openContact(conv.contact_id); await wait(350);
     const req = $('#modalBody [name=cf_plot_area]');
     const opt = $('#modalBody [name=cf_foundation]');
-    check('обязательное своё поле — сразу в основной форме', Boolean(req) && !req.closest('details'));
-    check('необязательное своё поле — под «Дополнительно»', Boolean(opt) && !!opt.closest('details'));
+    check('обязательное своё поле есть в форме', Boolean(req));
+    check('необязательное своё поле тоже видно без раскрытия', Boolean(opt) && !opt.closest('details'));
+    check('в форме нет сворачиваемого блока «Дополнительно»', !$('#modalBody details.form-more'));
+    check('обязательное своё поле идёт раньше необязательного',
+      Boolean(req) && Boolean(opt) && (req.compareDocumentPosition(opt) & window.Node.DOCUMENT_POSITION_FOLLOWING) !== 0);
+    check('подпись обязательного поля жирная и со звёздочкой', Boolean(req.closest('label.req')) && req.closest('label').querySelector('.star'));
     check('своё поле подписано понятным названием', /Площадь участка/.test($('#modalBody').textContent));
+    check('в форме контакта объяснено, кому достанется клиент', /Пока в команде только вы|Обращения из чатов|По умолчанию ответственный/.test($('#modalBody').textContent));
     window.closeModal();
     await window.openDeal(); await wait(350);
-    check('в сделке тоже: обязательное сверху, необязательное в «Дополнительно»',
-      Boolean($('#modalBody [name=cf_plot_area]')) && !$('#modalBody [name=cf_plot_area]').closest('details') && !!$('#modalBody [name=cf_foundation]').closest('details'));
+    check('в сделке то же порядок: обязательное раньше необязательного',
+      Boolean($('#modalBody [name=cf_plot_area]')) && Boolean($('#modalBody [name=cf_foundation]')) && !$('#modalBody [name=cf_foundation]').closest('details')
+      && ($('#modalBody [name=cf_plot_area]').compareDocumentPosition($('#modalBody [name=cf_foundation]')) & window.Node.DOCUMENT_POSITION_FOLLOWING) !== 0);
     window.closeModal();
     await window.openContactCard(conv.contact_id); await wait(350);
     check('свои поля видны в карточке клиента', /Площадь участка/.test($('#modalBody').textContent) && /Тип фундамента/.test($('#modalBody').textContent));
@@ -213,12 +232,24 @@ try {
   await modal('редактор своих полей', () => window.editField(-1));
   await modal('письмо клиенту', () => window.openEmailComposer(conv.id));
 
-  // ── формы: главное сразу, вторичное — под «Дополнительно» ─────────────────
+  // ── формы: без «Дополнительно», обязательные поля первыми ──────────────────
   await window.openDeal(); await wait(250);
-  check('в новой сделке есть блок «Дополнительно»', Boolean($('#modalBody details.form-more')) && /Дополнительно/.test($('#modalBody').innerHTML));
-  check('главные поля сделки видны без раскрытия', Boolean($('#modalBody input[name=title]')) && Boolean($('#modalBody select[name=contact_id]')));
-  check('ответственный и дедлайн спрятаны под «Дополнительно»', Boolean($('#modalBody details.form-more select[name=responsible_id]')) && Boolean($('#modalBody details.form-more input[name=deadline]')));
-  check('в форме контакта «Дополнительно» закрыто по умолчанию', await (async () => { window.closeModal(); await window.openContact(); await wait(200); const d = $('#modalBody details.form-more'); const closed = d && !d.open; window.closeModal(); return closed })());
+  check('в форме сделки нет сворачиваемого «Дополнительно»', !$('#modalBody details.form-more'));
+  check('главные и второстепенные поля сделки видны сразу',
+    Boolean($('#modalBody input[name=title]')) && Boolean($('#modalBody select[name=contact_id]'))
+    && Boolean($('#modalBody select[name=responsible_id]')) && Boolean($('#modalBody input[name=deadline]')));
+  check('название сделки подписано как обязательное', Boolean($('#modalBody label.req input[name=title]')));
+  check('обязательное поле идёт раньше необязательных',
+    ($('#modalBody input[name=title]').compareDocumentPosition($('#modalBody input[name=amount]')) & window.Node.DOCUMENT_POSITION_FOLLOWING) !== 0);
+  check('необязательные поля отделены подписью', /Необязательные поля/.test($('#modalBody').textContent));
+  await window.openCompany(); await wait(250);
+  check('в компании название обязательно и первое', Boolean($('#modalBody label.req input[name=name]')) && !$('#modalBody details.form-more'));
+  check('в компании видны ИНН, телефон, почта, сайт и заметки', ['inn', 'phone', 'email', 'site', 'notes'].every(n => Boolean($('#modalBody [name=' + n + ']'))));
+  await window.openTask(); await wait(250);
+  check('в задаче нет «Дополнительно», исполнитель и повтор видны сразу', !$('#modalBody details.form-more') && Boolean($('#modalBody select[name=responsible_id]')) && Boolean($('#modalBody select[name=repeat]')));
+  await window.openProduct(); await wait(250);
+  check('в каталоге цена обязательна и стоит рядом с названием', Boolean($('#modalBody label.req input[name=price]')) && !$('#modalBody details.form-more'));
+  window.closeModal();
   // этап «успех» находится по смыслу, а не по жёсткому коду
   check('этап успеха определяется по виду этапа', window.__state.stages.some(s => s.kind === 'won') ? window.kindStage('won') === window.__state.stages.find(s => s.kind === 'won').code : true);
   // задача из карточки: связи уже известны — подпись вместо двух длинных списков
@@ -474,10 +505,10 @@ try {
 
   // ── вкладка интеграций: человеческие формулировки ────────────────────────
   window.go('settings', 'integrations');
-  for (let i = 0; i < 40 && !$('#view .settings-cols'); i++) await wait(100);
+  for (let i = 0; i < 60 && !$('#view').textContent.includes('это называется вебхук'); i++) await wait(100);
   const integText = $('#view').textContent;
   check('интеграции: вместо «Локальный режим» — «не подключено»', !integText.includes('Локальный режим') && integText.includes('не подключено'));
-  check('интеграции: термин webhook объяснён по-русски', integText.includes('Адрес для уведомлений'));
+  check('интеграции: термин webhook объяснён по-русски', integText.includes('(это называется вебхук)') && integText.includes('Адрес, по которому Wazzup присылает сообщения'), integText.slice(0, 120));
 
   // ── навигация работает на inline-обработчиках, не завися от boot() ───────
   check('все пункты меню несут inline-обработчик go()', $$('#nav button').length >= 9 && $$('#nav button').every(b => /^go\('/.test(b.getAttribute('onclick') || '')));
@@ -515,6 +546,7 @@ try {
 
 srv.kill('SIGKILL');
 process.on('exit', () => { try { srv.kill('SIGKILL') } catch {} });
+for (const sig of ['SIGINT', 'SIGTERM']) process.on(sig, () => { try { srv.kill('SIGKILL') } catch {}; process.exit(1) });
 process.on('uncaughtException', e => { console.error('Smoke-тест упал:', e.message); try { srv.kill('SIGKILL') } catch {}; process.exit(1) });
 const failed = checks.filter(c => !c.ok);
 console.log('\n=== Smoke-тест интерфейса КаркасCRM ===');
