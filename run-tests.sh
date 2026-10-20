@@ -50,6 +50,20 @@ if missing:
 print('  ✅ Caddyfile: домен из .env, прокси на crm:8080, https://домен/.well-known/health → ok, HSTS')
 CADDYCHECK
 
+echo "  • nginx-пример для сервера с уже занятыми 80/443"
+NGINX=deploy/nginx.conf
+for frag in 'X-Forwarded-For' 'proxy_buffering off' 'client_max_body_size' 'proxy_read_timeout'; do
+  grep -q "$frag" "$NGINX" || { echo "  ❌ nginx.conf: нет $frag"; exit 1; }
+done
+grep -q 'proxy_set_header Host $host' "$NGINX" || { echo "  ❌ nginx.conf: не передаётся Host"; exit 1; }
+echo "  ✅ nginx.conf: реальный IP клиента, Host, размер тела и таймауты для чатов"
+
+echo "  • .env.example описывает необязательные параметры"
+for key in PUBLIC_URL LOGO_FILE ALLOW_PRIVATE_FETCH KARKAS_NO_SEED; do
+  grep -q "^$key=" .env.example || { echo "  ❌ .env.example: нет $key"; exit 1; }
+done
+echo "  ✅ .env.example: PUBLIC_URL, LOGO_FILE, ALLOW_PRIVATE_FETCH, KARKAS_NO_SEED"
+
 echo "▶ 4/4 Smoke-тест интерфейса (нужен jsdom, иначе шаг пропускается)"
 if node -e "import('jsdom').then(()=>process.exit(0)).catch(()=>process.exit(1))" 2>/dev/null; then
   node --experimental-sqlite tests/ui.smoke.mjs
