@@ -101,6 +101,7 @@ const ICON_PATHS = {
   chartPie: '<path d="M21.21 15.89A10 10 0 1 1 8 2.83"/><path d="M22 12A10 10 0 0 0 12 2v10z"/>',
   history: '<polyline points="1 4 1 10 7 10"/><path d="M3.51 15a9 9 0 1 0 2.13-9.36L1 10"/>',
   command: '<path d="M18 3a3 3 0 0 0-3 3v12a3 3 0 0 0 3 3 3 3 0 0 0 3-3 3 3 0 0 0-3-3H6a3 3 0 0 0-3 3 3 3 0 0 0 3 3 3 3 0 0 0 3-3V6a3 3 0 0 0-3-3 3 3 0 0 0-3 3 3 3 0 0 0 3 3h12a3 3 0 0 0 3-3 3 3 0 0 0-3-3z"/>',
+  more: '<circle cx="5" cy="12" r="1"/><circle cx="12" cy="12" r="1"/><circle cx="19" cy="12" r="1"/>',
   list: '<line x1="8" y1="6" x2="21" y2="6"/><line x1="8" y1="12" x2="21" y2="12"/><line x1="8" y1="18" x2="21" y2="18"/><line x1="3" y1="6" x2="3.01" y2="6"/><line x1="3" y1="12" x2="3.01" y2="12"/><line x1="3" y1="18" x2="3.01" y2="18"/>',
   grid: '<rect x="3" y="3" width="7" height="7"/><rect x="14" y="3" width="7" height="7"/><rect x="14" y="14" width="7" height="7"/><rect x="3" y="14" width="7" height="7"/>',
   excel: '<path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><path d="M8 13l3 4m0-4l-3 4"/>',
@@ -232,6 +233,9 @@ function resolvedTheme(mode) {
   if (mode === 'dark' || mode === 'light') return mode;
   return (window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches) ? 'dark' : 'light';
 }
+// Без поддержки backdrop-filter шапка иначе просвечивала бы контентом.
+try { if (!(window.CSS && CSS.supports && CSS.supports('backdrop-filter', 'blur(4px)'))) document.documentElement.classList.add('no-backdrop'); } catch {}
+
 function applyTheme(mode = currentThemeMode()) {
   const res = resolvedTheme(mode);
   document.documentElement.dataset.theme = res;
@@ -320,7 +324,7 @@ async function api(path, opt = {}) {
       }
     });
   } catch (e) {
-    if (e.name === 'TimeoutError') throw new Error('Сервер не ответил за 30 секунд. Повторите попытку чуть позже.');
+    if (e.name === 'TimeoutError' || e.name === 'AbortError') throw new Error('Сервер не ответил вовремя — возможно, внешние источники работают медленно. Повторите попытку чуть позже.');
     throw new Error('Нет связи с сервером. Проверьте подключение к интернету и обновите страницу.');
   }
   if (r.status === 401) {
@@ -342,7 +346,9 @@ async function api(path, opt = {}) {
 }
 
 const download = async (path, name) => {
-  const r = await fetch(path, { headers: { ...(token ? { Authorization: 'Bearer ' + token } : {}) } });
+  let r;
+  try { r = await fetch(path, { headers: { ...(token ? { Authorization: 'Bearer ' + token } : {}) } }); }
+  catch { toast('Нет связи с сервером — файл не скачался. Проверьте интернет и попробуйте снова.', 'err'); return false; }
   if (!r.ok) {
     let msg = 'Не удалось скачать файл (код ' + r.status + ')';
     try { msg = (await r.json()).error || msg; } catch { }
@@ -370,9 +376,10 @@ function toast(t, kind = 'ok') {
 function openModal(html) {
   $('#modalBody').innerHTML = html;
   $('#modal').classList.remove('hidden');
-  // курсор сразу в первом поле: меньше кликов, форма заполняется с клавиатуры
+  // курсор сразу в первом пустом поле: форма заполняется с клавиатуры, но
+  // открытая на просмотр карточка не перехватывает ввод и не портит текст
   const first = $('#modalBody input:not([type=hidden]):not([type=checkbox]):not([disabled]), #modalBody textarea, #modalBody select');
-  if (first) setTimeout(() => { try { first.focus({ preventScroll: true }); if (first.select && first.type === 'text') first.select(); } catch {} }, 30);
+  if (first && !String(first.value || '').length) setTimeout(() => { try { first.focus({ preventScroll: true }); } catch {} }, 30);
 }
 function closeModal() {
   $('#modal').classList.add('hidden');
@@ -502,6 +509,8 @@ function closeUserMenu() {
 window.addEventListener('click', e => {
   const wrap = $('.user-wrap');
   if (wrap && !wrap.contains(e.target)) closeUserMenu();
+  // любое открытое выпадающее меню закрывается кликом вне его
+  $$('details.dropdown[open]').forEach(d => { if (!d.contains(e.target)) d.open = false; });
 });
 window.addEventListener('keydown', e => {
   if (e.key === 'Escape') {
@@ -690,7 +699,14 @@ function restoreFocus(f) {
 const __liveTimers = {};
 function liveSearch(key, run, ms = 160) { clearTimeout(__liveTimers[key]); __liveTimers[key] = setTimeout(run, ms); }
 
-async function render() {
+// Очередь отрисовки: если пользователь быстро переключает разделы, ответ старого
+// запроса не должен перетереть новый экран. Каждый вызов видит актуальный state.view.
+let renderQueue = Promise.resolve();
+function render() {
+  renderQueue = renderQueue.then(renderNow, renderNow);
+  return renderQueue;
+}
+async function renderNow() {
   const v = $('#view');
   const focus = captureFocus();
   try {
@@ -750,8 +766,10 @@ async function dashboard(v) {
 
   v.innerHTML = `
    <div class="card" style="margin-bottom:12px;padding:12px 16px">
-     <h3 style="margin-bottom:8px">${icon('alertCircle', 16)} Требует внимания</h3>
-     <div class="attn-grid">
+     ${!todayTasks && !overdueTasks && !unreadChats
+      ? `<div class="all-clear">${icon('checkCircle', 16)} <b>Всё под контролем</b> — просроченных задач и непрочитанных чатов нет</div>`
+      : `<h3 style="margin-bottom:8px">${icon('alertCircle', 16)} Требует внимания</h3>`}
+     <div class="attn-grid" ${!todayTasks && !overdueTasks && !unreadChats ? 'style="display:none"' : ''}>
        <div class="attn-card today clickable-card" onclick="state.taskScope='all';state.taskFilter='today';go('tasks')" title="Открыть задачи на сегодня">
          <span style="font-size:12.5px">${icon('calendar', 14)} На сегодня</span>
          <b>${todayTasks} задач</b>
@@ -841,10 +859,12 @@ function dealTaskBadge(x) {
 
 function dragDealStart(e, id) {
   e.dataTransfer.setData('text/plain', id);
+  document.body.classList.add('dragging');
   const bar = $('#dropCloseBar');
   if (bar) bar.classList.remove('hidden');
 }
 function dragDealEnd() {
+  document.body.classList.remove('dragging');
   const bar = $('#dropCloseBar');
   if (bar) bar.classList.add('hidden');
 }
@@ -866,7 +886,7 @@ async function pipe(v) {
   v.innerHTML = `${bulkBar('deals', `${bulkStage()}${bulkOwner('deals')}`)}<div class="card" style="display:flex;gap:10px;align-items:center;flex-wrap:wrap">
     <b>Воронка:</b><select style="width:auto" onchange="state.pipeline=+this.value;render()">${d.pipelines.map(p => `<option value="${p.id}" ${p.id === state.pipeline ? 'selected' : ''}>${esc(p.name)}</option>`).join('')}</select>
     <span class="tabs" style="margin:0"><button class="${state.dealScope !== 'mine' && state.dealScope !== 'notask' && state.dealScope !== 'overdue' ? 'active' : ''}" onclick="state.dealScope='all';render()">Все сделки</button><button class="${state.dealScope === 'mine' ? 'active' : ''}" onclick="state.dealScope='mine';render()">Мои (${d.deals.filter(x => x.responsible_id === meId()).length})</button><button class="${state.dealScope === 'notask' ? 'active' : ''}" onclick="state.dealScope='notask';render()">Без задач (${noTaskCount})</button><button class="${state.dealScope === 'overdue' ? 'active' : ''}" onclick="state.dealScope='overdue';render()">Просрочено (${overdueCount})</button></span>
-    <span class="tag">В работе: ${shown.length}</span><span class="tag orange">Сумма: ${fmt(shown.filter(x => !['won', 'lost'].includes(x.stage)).reduce((a, x) => a + x.amount, 0))}</span>
+    <span class="tag" title="Сделок в текущем фильтре">Показано: ${shown.length}${shown.length !== shown.filter(x => !['won', 'lost'].includes(x.stage)).length ? ` · в работе: ${shown.filter(x => !['won', 'lost'].includes(x.stage)).length}` : ''}</span><span class="tag orange" title="Сумма активных сделок в фильтре">В работе на ${fmt(shown.filter(x => !['won', 'lost'].includes(x.stage)).reduce((a, x) => a + x.amount, 0))}</span>
     <button class="btn sm" style="margin-left:auto" onclick="download('/api/export/deals','deals.csv')" title="Выгрузить сделки в CSV">${icon('download', 13)} Экспорт</button>
     <input id="dealSearch" style="max-width:210px" placeholder="Поиск по сделкам и клиентам" value="${esc(state.dealQuery || '')}" oninput="liveSearch('deals',()=>{state.dealQuery=this.value;render()})">
     ${(state.me && state.me.role) === 'admin' ? `<button class="btn sm" onclick="openPipelineEditor()">${icon('settings', 13)} Настроить воронку</button>` : ''}</div>
@@ -888,7 +908,7 @@ async function pipe(v) {
 }
 
 function dragOver(e, el) { e.preventDefault(); el.classList.add('drag-over'); }
-async function dropDeal(e, stage, el) { e.preventDefault(); el.classList.remove('drag-over'); await moveDeal(e.dataTransfer.getData('text/plain'), 0, stage); }
+async function dropDeal(e, stage, el) { e.preventDefault(); el.classList.remove('drag-over'); document.body.classList.remove('dragging'); await moveDeal(e.dataTransfer.getData('text/plain'), 0, stage); }
 // Название этапа для карточек: пользователь видит «Переговоры», а не код offer.
 async function ensureStages() {
   if ((state.stages || []).length) return state.stages;
@@ -980,7 +1000,8 @@ async function saveDeal(e, id) {
   const user = __team.find(u => u.id === b.responsible_id);
   if (user) b.responsible = user.name;
   await api(id ? '/api/deals/' + id : '/api/deals', { method: id ? 'PATCH' : 'POST', body: JSON.stringify(b) });
-  closeModal(); toast('Сделка сохранена'); render(); return false;
+  if (!id) state.deals = [];
+  closeModal(); toast(id ? 'Сделка сохранена' : 'Сделка создана'); render(); return false;
 }
 
 async function openDealCard(id) {
@@ -1133,7 +1154,10 @@ const MSG_STATUS = { sent: 'отправлено', delivered: 'доставле�
 const statusLabel = s => MSG_STATUS[s] || s || '';
 function msgHtml(m) {
   const body = m.body && m.body !== '[вложение]' ? esc(m.body) : '';
-  return `<div class="msg ${m.direction === 'out' ? 'out' : ''}"><div>${attachmentHtml(m)}${body}</div><small>${esc(channelLabel(m.channel) || m.channel)} · ${esc(dt(m.created_at))}${m.status ? ' · ' + esc(statusLabel(m.status)) : ''}</small></div>`;
+  const own = m.direction === 'out';
+  const failed = m.status === 'failed';
+  const badge = failed ? ' <span class="msg-fail" title="Не доставлено — проверьте подключение канала">не доставлено</span>' : '';
+  return `<div class="msg ${own ? 'out' : ''}"><div>${attachmentHtml(m)}${body}</div><small>${esc(channelLabel(m.channel) || m.channel)} · ${esc(dt(m.created_at))}${!failed && m.status ? ' · ' + esc(statusLabel(m.status)) : ''}${badge}</small></div>`;
 }
 // Каналы отправки: сначала подключённые у этого клиента, затем все доступные.
 function channelOptions(conv) {
@@ -1255,11 +1279,19 @@ function openAttachment() {
 }
 async function sendAttachment(e) {
   e.preventDefault(); const { url, text } = Object.fromEntries(new FormData(e.target));
-  await api(`/api/conversations/${state.conv}/messages`, { method: 'POST', body: JSON.stringify({ body: text || 'Файл по ссылке', contentUri: url, contentName: text || 'ссылка на файл', channel: $('#msgChannel')?.value || 'whatsapp' }) });
-  closeModal(); toast('Файл отправлен'); render(); return false;
+  try {
+    await api(`/api/conversations/${state.conv}/messages`, { method: 'POST', body: JSON.stringify({ body: text || 'Файл по ссылке', contentUri: url, contentName: text || 'ссылка на файл', channel: $('#msgChannel')?.value || 'whatsapp' }) });
+    closeModal(); toast('Файл отправлен'); refreshInbox();
+  } catch (err) { toast(err.message, 'err'); }
+  return false;
 }
 function openEmailComposer(cid) {
-  openModal(`<h3>Письмо клиенту</h3><form onsubmit="return sendEmail(event,${cid})"><label>Тема письма*<input name="subject" required value="Информация по проекту дома"></label><label>Текст письма*<textarea name="body" rows="6" required>Здравствуйте!\n\nВысылаю информацию по каркасному дому.</textarea></label><button class="btn primary w">Отправить письмо</button></form>`);
+  // обращение по имени: письмо не должно начинаться с обезличенного «Здравствуйте!»
+  const conv = (state.cache.convs || []).find(c => Number(c.id) === Number(cid)) || {};
+  const name = String(conv.title || '').trim().split(' ')[0] || '';
+  const hello = name ? `Здравствуйте, ${name}!` : 'Здравствуйте!';
+  const email = conv.email ? ` (${conv.email})` : '';
+  openModal(`<h3>Письмо клиенту${email}</h3><form onsubmit="return sendEmail(event,${cid})"><label>Тема письма*<input name="subject" required value="Информация по проекту дома"></label><label>Текст письма*<textarea name="body" rows="6" required>${esc(hello)}\n\nВысылаю информацию по каркасному дому.</textarea></label><button class="btn primary w">Отправить письмо</button></form>`);
 }
 async function sendEmail(e, cid) {
   e.preventDefault(); const b = Object.fromEntries(new FormData(e.target));
@@ -1268,7 +1300,7 @@ async function sendEmail(e, cid) {
     const r = await api(`/api/conversations/${cid}/email`, { method: 'POST', body: JSON.stringify(b) });
     closeModal();
     toast(r.send && r.send.delivered ? 'Письмо отправлено' : 'Письмо сохранено в переписке, но не отправлено — проверьте настройки почты', r.send && r.send.delivered ? 'ok' : 'err');
-    render();
+    if (state.view === 'inbox') refreshInbox(); else render();
   } catch (err) { toast(err.message, 'err'); }
   return false;
 }
@@ -1349,9 +1381,11 @@ async function contacts(v) {
    ${tagsAll.length ? `<select style="width:auto" onchange="state.contactFilter.tag=this.value;render()"><option value="">Все теги</option>${tagsAll.map(t => `<option value="${esc(t)}" ${f.tag === t ? 'selected' : ''}>${esc(t)}</option>`).join('')}</select>` : ''}
    ${(f.q || f.owner || f.source || f.tag) ? `<button class="btn sm ghost" onclick="resetContactFilter()">Сбросить</button>` : ''}
    <span class="tag grey" style="margin-left:auto">показано ${Math.min(filtered.length, state.contactLimit || 50)} из ${filtered.length}${filtered.length !== list.length ? ` (всего в базе ${list.length})` : ''}</span>
-   <button class="btn sm" onclick="openDuplicates()">${icon('search', 13)} Дубли</button>
-   <button class="btn sm" onclick="download('/api/export/contacts','contacts.csv')" title="Выгрузить всех клиентов в CSV">${icon('download', 13)} Экспорт</button>
-   <button class="btn sm" onclick="importContacts()">${icon('upload', 13)} Импорт CSV</button>
+   <details class="dropdown"><summary class="btn sm">${icon('more', 13)} Ещё</summary><div class="dropdown-pop">
+     <button type="button" onclick="closeDropdown(this);openDuplicates()">${icon('search', 13)} Поиск дублей</button>
+     <button type="button" onclick="closeDropdown(this);download('/api/export/contacts','contacts.csv')">${icon('download', 13)} Экспорт в CSV</button>
+     <button type="button" onclick="closeDropdown(this);importContacts()">${icon('upload', 13)} Импорт из CSV</button>
+   </div></details>
    <button class="btn sm primary" onclick="openContact()">${icon('plus', 13)} Новый контакт</button></div>
   <div class="card"><table><tr><th class="sel"></th><th>Клиент</th><th>Телефон / E-mail</th><th>Компания</th><th>Источник</th><th>Теги</th><th>Ответственный</th><th></th></tr>
    ${filtered.slice(0, state.contactLimit || 50).map(c => `<tr class="${selSet('contacts').has(c.id) ? 'selected' : ''}"><td class="sel"><input type="checkbox" ${selSet('contacts').has(c.id) ? 'checked' : ''} onchange="toggleSel('contacts',${c.id})"></td>
@@ -1495,6 +1529,7 @@ async function saveContact(e, id, allowDuplicate = false) {
     }
     throw err;
   }
+  if (!id) { state.contacts = []; state.cardCompanies = null; }
   closeModal(); toast(id ? 'Контакт сохранён' : 'Контакт создан'); render(); return false;
 }
 
@@ -1551,7 +1586,12 @@ async function openCompany(id) {
    <label>Заметки<textarea name="notes" rows="2">${esc(c.notes || '')}</textarea></label>`, !!id)}
    <button class="btn primary w">${id ? 'Сохранить' : 'Создать компанию'}</button></form>${related}`);
 }
-async function saveCompany(e, id) { e.preventDefault(); await api(id ? '/api/companies/' + id : '/api/companies', { method: id ? 'PATCH' : 'POST', body: JSON.stringify(Object.fromEntries(new FormData(e.target))) }); closeModal(); toast('Компания сохранена'); render(); return false; }
+async function saveCompany(e, id) {
+  e.preventDefault();
+  await api(id ? '/api/companies/' + id : '/api/companies', { method: id ? 'PATCH' : 'POST', body: JSON.stringify(Object.fromEntries(new FormData(e.target))) });
+  state.cardCompanies = null;
+  closeModal(); toast('Компания сохранена'); render(); return false;
+}
 
 /* ---------- tasks ---------- */
 async function tasks(v) {
@@ -1657,12 +1697,29 @@ async function openTask(id, p = {}) {
   if (nowT.getHours() >= 18) { defDay.setDate(defDay.getDate() + 1); defTime = '12:00'; }
   const dueVal = t.due ? normalizeDue(t.due).replace(' ', 'T').slice(0, 16) : `${isoDate(defDay)}T${defTime}`;
 
+  // Если задачу ставят из карточки, клиент и сделка уже известны: показываем их
+  // подписью, а не длинным списком. Понадобится другое — «изменить».
+  const contactPick = `<select name="contact_id"><option value="">— нет —</option>${state.contacts.map(c => `<option value="${c.id}" ${c.id === t.contact_id ? 'selected' : ''}>${esc(c.name)}</option>`).join('')}</select>`;
+  const dealPick = `<select name="deal_id"><option value="">— нет —</option>${deals.map(d => `<option value="${d.id}" ${d.id === t.deal_id ? 'selected' : ''}>${esc(d.title)}</option>`).join('')}</select>`;
+  window.__taskLinkSel = { contact_id: contactPick, deal_id: dealPick };
+  const preContact = t.contact_id ? state.contacts.find(c => c.id === +t.contact_id) : null;
+  const preDeal = t.deal_id ? deals.find(d => d.id === +t.deal_id) : null;
+  const linkSlot = (kind, obj, ico) => obj
+    ? `<div class="task-link-slot" data-kind="${kind}"><span class="task-link">${icon(ico, 13)} <b>${esc(obj.name || obj.title)}</b> <button type="button" class="link-btn" onclick="taskUnlink(this,'${kind}')">изменить</button></span><input type="hidden" name="${kind}" value="${obj.id}"></div>`
+    : `<div class="task-link-slot" data-kind="${kind}">${kind === 'contact_id' ? contactPick : dealPick}</div>`;
+
   openModal(`<h3>${id ? 'Задача' : 'Новая задача'}</h3><form onsubmit="return saveTask(event,${id || 'null'})">
    <label>Что сделать*<input name="title" required value="${esc(t.title || '')}" placeholder="Позвонить, уточнить детали"></label>
-   <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px"><label>Срок<input name="due" type="datetime-local" value="${esc(dueVal)}"></label>
+   <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px"><label>Срок<input name="due" type="datetime-local" value="${esc(dueVal)}"><small id="dueHint">${esc(t.due ? '' : (defTime === '18:00' ? 'по умолчанию — сегодня вечером' : 'по умолчанию — завтра в 12:00'))}</small></label>
    <label>Тип<select name="type">${Object.entries({ call: 'Звонок', meeting: 'Встреча', message: 'Сообщение', email: 'Письмо', other: 'Другое' }).map(([k, n]) => `<option value="${k}" ${k === (t.type || 'call') ? 'selected' : ''}>${n}</option>`).join('')}</select></label></div>
-   <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px"><label>Контакт<select name="contact_id"><option value="">— нет —</option>${state.contacts.map(c => `<option value="${c.id}" ${c.id === t.contact_id ? 'selected' : ''}>${esc(c.name)}</option>`).join('')}</select></label>
-   <label>Сделка<select name="deal_id"><option value="">— нет —</option>${deals.map(d => `<option value="${d.id}" ${d.id === t.deal_id ? 'selected' : ''}>${esc(d.title)}</option>`).join('')}</select></label></div>
+   <div class="due-chips" title="Быстрый выбор срока — поле «Срок» заполнится автоматически">
+     <span class="due-chips-label">Быстро:</span>
+     <button type="button" class="btn sm chip" onclick="setTaskDue(this,'today')">сегодня 18:00</button>
+     <button type="button" class="btn sm chip" onclick="setTaskDue(this,'tomorrow')">завтра 10:00</button>
+     <button type="button" class="btn sm chip" onclick="setTaskDue(this,'week')">через неделю</button>
+     <button type="button" class="btn sm chip ghost" onclick="setTaskDue(this,'clear')">без срока</button>
+   </div>
+   <div class="task-links"><div class="task-link-col"><span class="task-link-cap">Клиент</span>${linkSlot('contact_id', preContact, 'contact')}</div><div class="task-link-col"><span class="task-link-cap">Сделка</span>${linkSlot('deal_id', preDeal, 'pipe')}</div></div>
    ${formMore(`<div style="display:grid;grid-template-columns:1fr 1fr;gap:12px"><label>Ответственный<select name="responsible_id">${userOptions(t.responsible_id || meId())}</select></label>
    <label>Приоритет<select name="priority"><option value="normal" ${t.priority === 'normal' ? 'selected' : ''}>Обычный</option><option value="high" ${t.priority === 'high' ? 'selected' : ''}>Высокий</option><option value="low" ${t.priority === 'low' ? 'selected' : ''}>Низкий</option></select></label></div>
    <label>Повтор задачи<select name="repeat">${[['none', 'Не повторять'], ['daily', 'Каждый день'], ['weekly', 'Каждую неделю'], ['monthly', 'Каждый месяц']].map(([k, n]) => `<option value="${k}" ${k === (t.repeat || 'none') ? 'selected' : ''}>${n}</option>`).join('')}</select></label>
@@ -1670,6 +1727,25 @@ async function openTask(id, p = {}) {
    <button class="btn primary w">${id ? 'Сохранить' : 'Поставить задачу'}</button></form>`);
 }
 
+// Вернуть список выбора, если привязанный клиент или сделка не подходят
+function taskUnlink(btn, kind) {
+  const slot = btn.closest('.task-link-slot');
+  const html = window.__taskLinkSel && window.__taskLinkSel[kind];
+  if (slot && html) slot.innerHTML = html;
+}
+// Быстрые сроки: один клик вместо прокрутки календаря. Точное время — в поле «Срок».
+function setTaskDue(btn, mode) {
+  const input = btn.closest('form')?.querySelector('input[name=due]');
+  if (!input) return;
+  const hint = $('#dueHint');
+  if (mode === 'clear') { input.value = ''; if (hint) hint.textContent = 'без срока — задача не попадёт в календарь'; return; }
+  const d = new Date();
+  let hh = 18, mm = 0;
+  if (mode === 'tomorrow') { d.setDate(d.getDate() + 1); hh = 10; }
+  if (mode === 'week') { d.setDate(d.getDate() + 7); hh = 10; }
+  input.value = `${isoDate(d)}T${String(hh).padStart(2, '0')}:${String(mm).padStart(2, '0')}`;
+  if (hint) hint.textContent = '';
+}
 async function saveTask(e, id) {
   e.preventDefault();
   const b = Object.fromEntries(new FormData(e.target));
@@ -1775,7 +1851,8 @@ async function findCompetitor(query) {
   if (!query || !query.trim()) return toast('Введите название или ИНН');
   toast('Поиск и сбор сведений о конкуренте…');
   try {
-    const res = await api('/api/competitors/find', { method: 'POST', body: JSON.stringify({ query }) });
+    // проверка по открытым источникам может занять больше стандартных 30 секунд
+    const res = await api('/api/competitors/find', { method: 'POST', body: JSON.stringify({ query }), signal: AbortSignal.timeout(120000) });
     toast('Конкурент добавлен и проверен');
     render();
     if (res.id) openCompetitorCard(res.id);
@@ -2112,7 +2189,9 @@ async function settings(v) {
       <p><small>Сохраняются в базе и перекрывают значения из .env — после смены здесь править .env не нужно.</small></p>
       <form onsubmit="return saveAdvanced(event)">
        <label>Встраивание в iframe (FRAME_ANCESTORS)<input name="FRAME_ANCESTORS" value="${esc(s.advanced?.frame_ancestors || '')}" placeholder="пусто = запрещено · например https://портал.ru или *"></label>
+       <p style="margin:-4px 0 10px"><small>Кому можно показывать CRM внутри своего сайта через iframe. Пустое поле — запрещено всем (безопасно по умолчанию); адрес вида <code>https://портал.ru</code> — только этому сайту; <code>*</code> — любому сайту (не рекомендуется). На обычную работу CRM не влияет.</small></p>
        <label>Попыток входа с одного IP за 5 минут<input name="LOGIN_RATE_LIMIT" type="number" min="1" max="10000" value="${esc(String(s.advanced?.login_rate_limit ?? 12))}"></label>
+       <p style="margin:-4px 0 10px"><small>Защита от подбора пароля: после указанного числа неудачных попыток вход с этого IP временно блокируется на 5 минут. Для офиса за одним IP ставьте значение повыше, для открытого интернета хватает 10–20.</small></p>
        <button class="btn primary">Сохранить параметры</button>
       </form>
       <p><small>Режим начальных данных (SEED_MODE): <b>${esc(s.seed_mode || 'demo')}</b> — применяется только при первом запуске на пустой базе.</small></p>
@@ -2166,7 +2245,7 @@ async function editField(i) {
    <label>Название поля*<input name="label" required value="${esc(f.label)}" placeholder="Площадь участка"></label>
    <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px"><label>Тип<select name="type">${[['text', 'Текст'], ['number', 'Число'], ['date', 'Дата'], ['email', 'E-mail'], ['phone', 'Телефон'], ['select', 'Список вариантов']].map(([k, n]) => `<option value="${k}" ${k === f.type ? 'selected' : ''}>${n}</option>`).join('')}</select></label>
    <label>Где показывать<select name="entity">${[['both', 'Везде'], ['contacts', 'Только контакты'], ['deals', 'Только сделки']].map(([k, n]) => `<option value="${k}" ${k === f.entity ? 'selected' : ''}>${n}</option>`).join('')}</select></label></div>
-   <label>Варианты для списка (через запятую)<input name="options" value="${esc((f.options || []).join(', '))}" placeholder="каркас, брус, газобетон"></label>
+   <label>Варианты (только для типа «Список вариантов», через запятую)<input name="options" value="${esc((f.options || []).join(', '))}" placeholder="каркас, брус, газобетон"></label>
    <label style="display:flex;gap:8px;align-items:center"><input type="checkbox" name="required" style="width:auto" ${f.required ? 'checked' : ''}> Обязательное для заполнения</label>
    <button class="btn primary w">Сохранить</button></form>`);
 }
@@ -2233,7 +2312,7 @@ async function saveWebhookSecret() {
 }
 async function saveMaintenance(e) { e.preventDefault(); await api('/api/settings', { method: 'PUT', body: JSON.stringify(Object.fromEntries(new FormData(e.target))) }); toast('Настройки обслуживания сохранены'); state.cache.settings = null; render(); return false; }
 async function saveAdvanced(e) { e.preventDefault(); await api('/api/settings', { method: 'PUT', body: JSON.stringify(Object.fromEntries(new FormData(e.target))) }); toast('Параметры сохранены'); render(); return false; }
-async function savePassword(e) { e.preventDefault(); try { const result = await api('/api/me/password', { method: 'POST', body: JSON.stringify(Object.fromEntries(new FormData(e.target))) }); storeSessionToken(result.token); e.target.reset(); toast('Пароль изменён, другие сеансы завершены'); closeModal(); } catch (err) { toast(err.message, 'err'); } return false; }
+async function savePassword(e) { e.preventDefault(); try { const result = await api('/api/me/password', { method: 'POST', body: JSON.stringify(Object.fromEntries(new FormData(e.target))) }); storeSessionToken(result.token); e.target.reset(); toast('Пароль изменён, другие сеансы завершены'); } catch (err) { toast(err.message, 'err'); } return false; }
 function addPipeline() { askInput({ title: 'Новая воронка', label: 'Название воронки', value: 'Новая воронка', okText: 'Создать' }, name => { if (!name) return; (async () => { await api('/api/pipelines', { method: 'POST', body: JSON.stringify({ name }) }); toast('Воронка создана'); render(); })(); }); }
 async function openPipelineEditor() { return editPipeline(state.pipeline || 1); }
 async function editPipeline(id) {
@@ -2426,7 +2505,23 @@ function del(table, id, name = '') {
 /* ---------- global search + realtime ---------- */
 let searchT;
 const si = $('#globalSearch');
+function closeDropdown(el) {
+  const d = el && el.closest && el.closest('details');
+  if (d) d.open = false;
+}
+function closeSearchResults(clear = false) {
+  const box = $('#searchResults');
+  if (box) { box.classList.add('hidden'); box.innerHTML = ''; }
+  if (clear) { const i = $('#globalSearch'); if (i) i.value = ''; }
+}
 if (si) {
+  si.addEventListener('keydown', e => {
+    if (e.key === 'Escape') { closeSearchResults(); si.blur(); }
+    if (e.key === 'Enter') {
+      const first = $('#searchResults div[onclick]');
+      if (first) { e.preventDefault(); first.click(); }
+    }
+  });
   si.oninput = e => {
     clearTimeout(searchT);
     const q = e.target.value.trim();
@@ -2436,10 +2531,10 @@ if (si) {
       const box = $('#searchResults');
       const empty = '<small style="padding:8px 12px;color:var(--muted)">Ничего не найдено</small>';
       const sections = [];
-      if (d.contacts.length) sections.push(`<h4>Клиенты</h4>${d.contacts.map(c => `<div onclick="openContactCard(${c.id})">${esc(c.name)} · <small>${esc(c.phone || c.email || '')}</small></div>`).join('')}`);
-      if (d.deals.length) sections.push(`<h4>Сделки</h4>${d.deals.map(x => `<div onclick="openDealCard(${x.id})">${esc(x.title)} · <b>${fmt(x.amount)}</b></div>`).join('')}`);
-      if (d.companies.length) sections.push(`<h4>Компании</h4>${d.companies.map(c => `<div onclick="openCompany(${c.id})">${esc(c.name)} · <small>${esc(c.inn || '')}</small></div>`).join('')}`);
-      if (d.tasks && d.tasks.length) sections.push(`<h4>Задачи</h4>${d.tasks.map(t => `<div onclick="openTask(${t.id})">${esc(t.title)} · <small>${esc(t.due ? dueText(t.due) : 'без срока')}</small></div>`).join('')}`);
+      if (d.contacts.length) sections.push(`<h4>Клиенты</h4>${d.contacts.map(c => `<div onclick="closeSearchResults(true);openContactCard(${c.id})">${esc(c.name)} · <small>${esc(c.phone || c.email || '')}</small></div>`).join('')}`);
+      if (d.deals.length) sections.push(`<h4>Сделки</h4>${d.deals.map(x => `<div onclick="closeSearchResults(true);openDealCard(${x.id})">${esc(x.title)} · <b>${fmt(x.amount)}</b></div>`).join('')}`);
+      if (d.companies.length) sections.push(`<h4>Компании</h4>${d.companies.map(c => `<div onclick="closeSearchResults(true);openCompany(${c.id})">${esc(c.name)} · <small>${esc(c.inn || '')}</small></div>`).join('')}`);
+      if (d.tasks && d.tasks.length) sections.push(`<h4>Задачи</h4>${d.tasks.map(t => `<div onclick="closeSearchResults(true);openTask(${t.id})">${esc(t.title)} · <small>${esc(t.due ? dueText(t.due) : 'без срока')}</small></div>`).join('')}`);
       box.innerHTML = sections.join('') || empty;
       box.classList.remove('hidden');
     }, 200);
@@ -2589,13 +2684,6 @@ function runPaletteRow(idx) {
   try { it.run(); } catch (e) { toast(e.message, 'err'); }
 }
 
-// Esc закрывает модальное окно — привычное поведение, не нужно искать крестик.
-window.addEventListener('keydown', e => {
-  if (e.key === 'Escape') {
-    const m = $('#modal');
-    if (m && !m.classList.contains('hidden')) { e.preventDefault(); closeModal(); }
-  }
-});
 window.addEventListener('keydown', e => {
   if ((e.metaKey || e.ctrlKey) && (e.key === 'k' || e.key === 'K')) {
     e.preventDefault();

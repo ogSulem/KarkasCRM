@@ -60,6 +60,29 @@ test('сделки, товары и пересчёт суммы', async () => {
   assert.equal((await call('/api/deals/' + c.id)).body.deal.amount, 0, 'после удаления позиции сумма = 0');
 });
 
+test('строгая проверка данных: цена, срок и удалённые записи', async () => {
+  const badPrice = await call('/api/products', { method: 'POST', body: JSON.stringify({ name: 'Отрицательная цена', price: -10 }) });
+  assert.equal(badPrice.status, 400, 'отрицательная цена не сохраняется');
+  assert.match(String(badPrice.body.error), /неотрицательн/i);
+  const okPrice = await call('/api/products', { method: 'POST', body: JSON.stringify({ name: '  С ценой  ', price: '1234', unit: '  ' }) });
+  assert.equal(okPrice.status, 201);
+  assert.equal(okPrice.body.price, 1234, 'цена приводится к числу');
+  assert.equal(okPrice.body.name, 'С ценой', 'название без лишних пробелов');
+  assert.equal(okPrice.body.unit, 'шт', 'пустая единица заменяется на «шт»');
+  assert.equal((await call('/api/products/' + okPrice.body.id, { method: 'PATCH', body: JSON.stringify({ price: -1 }) })).status, 400, 'отрицательная цена не проходит и при правке');
+  await call('/api/products/' + okPrice.body.id, { method: 'DELETE' });
+
+  const badDue = await call('/api/tasks', { method: 'POST', body: JSON.stringify({ title: 'Задача с мусорным сроком', due: 'когда-нибудь' }) });
+  assert.equal(badDue.status, 400, 'непонятный срок не сохраняется');
+  assert.match(String(badDue.body.error), /срок/i);
+  const goodDue = await call('/api/tasks', { method: 'POST', body: JSON.stringify({ title: 'Задача с понятным сроком', due: 'завтра 10:00' }) });
+  assert.equal(goodDue.status, 201);
+  assert.match(goodDue.body.due, /^\d{4}-\d{2}-\d{2} 10:00$/, 'срок приведён к единому формату');
+
+  assert.equal((await call('/api/contacts/999999')).status, 404, 'удалённый контакт отдаёт 404, а не пустую карточку');
+  assert.equal((await call('/api/tasks/999999')).status, 404, 'удалённая задача отдаёт 404');
+});
+
 test('защита данных: этапы с делами, удаление сделки, позиции и секрет вебхука', async () => {
   const made = await call('/api/deals', { method: 'POST', body: JSON.stringify({ title: 'Сделка на этапе', amount: 0, stage: 'new' }) });
   assert.equal(made.status, 201);

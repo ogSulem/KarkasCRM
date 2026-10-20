@@ -193,7 +193,8 @@ function normalizeDue(raw) {
   if (mIso) {
     return `${mIso[1]} ${mIso[2] || '10:00'}`;
   }
-  return s;
+  // Непонятный формат не сохраняем: иначе задача не сортируется и выглядит сломанной.
+  return '';
 }
 
 function fixTaskDues() {
@@ -928,9 +929,23 @@ export const server = http.createServer(async (req, res) => {
       if (req.method !== 'GET' && table === 'automations' && !requireAdmin(user, res)) return;
       if (req.method === 'DELETE' && table === 'products' && !requireAdmin(user, res)) return;
       if (req.method === 'GET' && !id) { if (table === 'tasks') return json(res, 200, db.prepare('SELECT t.*,c.name contact_name,d.title deal_title,u.name responsible_name FROM tasks t LEFT JOIN contacts c ON c.id=t.contact_id LEFT JOIN deals d ON d.id=t.deal_id LEFT JOIN users u ON u.id=t.responsible_id ORDER BY done,due,id DESC').all()); if (table === 'notes') return json(res, 200, db.prepare('SELECT * FROM notes WHERE entity_type=? AND entity_id=? ORDER BY id DESC').all(u.searchParams.get('type'), u.searchParams.get('entity'))); return json(res, 200, db.prepare(`SELECT * FROM ${table} ORDER BY id DESC`).all()); }
-      if (req.method === 'GET') return json(res, 200, db.prepare(`SELECT * FROM ${table} WHERE id=?`).get(id) || {});
+      if (req.method === 'GET') {
+        const row = db.prepare(`SELECT * FROM ${table} WHERE id=?`).get(id);
+        return row ? json(res, 200, row) : json(res, 404, { error: 'Запись не найдена — возможно, её уже удалили. Обновите страницу.' });
+      }
+      // товар: цена только неотрицательная, поля обрезаем по длине
+      const normalizeProduct = b => {
+        if (b.price !== undefined) { const pr = Number(b.price); if (!Number.isFinite(pr) || pr < 0) return 'Цена должна быть неотрицательным числом'; b.price = Math.round(pr); }
+        if (b.active !== undefined) b.active = b.active ? 1 : 0;
+        if (b.sku !== undefined) b.sku = String(b.sku).trim().slice(0, 80);
+        if (b.unit !== undefined) b.unit = String(b.unit).trim().slice(0, 20) || 'шт';
+        if (b.name !== undefined) b.name = String(b.name).trim().slice(0, 200);
+        return null;
+      };
       if (req.method === 'POST') {
         const b = await readBody(req); if (table === 'notes') b.author = user.name;
+        if (table === 'products') { const err = normalizeProduct(b); if (err) return json(res, 400, { error: err }); }
+        if (table === 'tasks' && b.due && !normalizeDue(String(b.due))) return json(res, 400, { error: 'Не поняли срок. Укажите дату как 25.10.2026 14:00 или «завтра 10:00».' });
         // обязательные поля проверяем до SQL: иначе пользователь увидит 500 вместо подсказки
         const required = { contacts: 'name', companies: 'name', products: 'name', tasks: 'title', automations: 'name', templates: 'name' }[table];
         if (required && !String(b[required] || '').trim()) return json(res, 400, { error: required === 'name' ? 'Укажите название' : 'Укажите название задачи' });
@@ -960,7 +975,12 @@ export const server = http.createServer(async (req, res) => {
       }
       if (req.method === 'PATCH' && id) {
         const b = await readBody(req);
-        if (table === 'tasks' && b.due !== undefined) b.due = b.due ? normalizeDue(String(b.due)) : '';
+        if (table === 'products') { const err = normalizeProduct(b); if (err) return json(res, 400, { error: err }); }
+        if (table === 'tasks' && b.due !== undefined) {
+          const norm = b.due ? normalizeDue(String(b.due)) : '';
+          if (b.due && !norm) return json(res, 400, { error: 'Не поняли срок. Укажите дату как 25.10.2026 14:00 или «завтра 10:00».' });
+          b.due = norm;
+        }
         const ks = Object.keys(b).filter(k => fields.includes(k));
         if (table === 'contacts' && b.custom !== undefined) { const err = missingRequiredCustom('contacts', b.custom); if (err) return json(res, 400, { error: err }); }
         if (table === 'contacts' && b.phone !== undefined && !ks.includes('phone_norm')) { ks.push('phone_norm'); b.phone_norm = digits(b.phone) || null; }
@@ -1325,10 +1345,6 @@ export const server = http.createServer(async (req, res) => {
       if (existsSync(CUSTOM_LOGO_DIR)) for (const f of readdirSync(CUSTOM_LOGO_DIR)) if (/^logo\.(png|jpe?g|gif|webp|ico)$/i.test(f)) { try { unlinkSync(join(CUSTOM_LOGO_DIR, f)); } catch { } }
       log('Логотип сброшен на стандартный', null, null, user.name);
       return json(res, 200, { saved: false, url: '/logo.png' });
-    }
-    if ((p === '/api/inbox/simulate' || p === '/api/simulate/incoming') && req.method === 'POST') {
-      if (!requireAdmin(user, res)) return;
-      const b = await readBody(req); const conv = upsertIncoming({ channel: b.channel || 'whatsapp', chatType: b.channel || 'whatsapp', phone: b.phone || '+7 900 000-00-00', name: b.name || 'Тестовый клиент', body: b.body || 'Здравствуйте! Хочу расчёт дома.' }); return json(res, 201, { conversation_id: conv?.id });
     }
     // CSV export/import
     if (p === '/api/export/contacts') { res.writeHead(200, { 'Content-Type': 'text/csv; charset=utf-8', 'Content-Disposition': 'attachment; filename=contacts.csv' }); return res.end('﻿' + csv(db.prepare('SELECT name,phone,email,company,source,tags FROM contacts').all())); }

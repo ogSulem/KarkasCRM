@@ -141,6 +141,14 @@ try {
   check('в форме контакта «Дополнительно» закрыто по умолчанию', await (async () => { window.closeModal(); await window.openContact(); await wait(200); const d = $('#modalBody details.form-more'); const closed = d && !d.open; window.closeModal(); return closed })());
   // этап «успех» находится по смыслу, а не по жёсткому коду
   check('этап успеха определяется по виду этапа', window.__state.stages.some(s => s.kind === 'won') ? window.kindStage('won') === window.__state.stages.find(s => s.kind === 'won').code : true);
+  // задача из карточки: связи уже известны — подпись вместо двух длинных списков
+  const linkDeal = window.__state.deals[0], linkContact = window.__state.contacts[0];
+  window.closeModal();
+  await window.openTask(null, { deal_id: linkDeal.id, contact_id: linkContact.id }); await wait(250);
+  check('задача из карточки показывает привязки подписью', Boolean($('#modalBody .task-link')) && !$('#modalBody select[name=deal_id]') && Boolean($('#modalBody input[type=hidden][name=deal_id]')));
+  window.taskUnlink($('#modalBody .task-link .link-btn'), 'contact_id');
+  check('привязку можно сменить на другое значение', Boolean($('#modalBody select[name=contact_id]')));
+  window.closeModal();
   // локальная дата не зависит от UTC
   check('isoDate возвращает локальную дату', window.isoDate(new Date(2026, 0, 1)) === '2026-01-01' && window.isoDate(new Date(2026, 11, 31)) === '2026-12-31');
   check('todayISO совпадает с локальным днём', window.todayISO() === `${new Date().getFullYear()}-${String(new Date().getMonth() + 1).padStart(2, '0')}-${String(new Date().getDate()).padStart(2, '0')}`);
@@ -226,7 +234,8 @@ try {
 
   // ── дашборд и внимание ───────────────────────────────────────────────────
   window.go('dashboard'); await wait(350);
-  check('дашборд содержит блок «Требует внимания»', $('#view').innerHTML.includes('Требует внимания'));
+  // либо блок внимания с цифрами, либо спокойная плашка «Всё под контролем»
+  check('дашборд показывает состояние дел без лишнего шума', /Требует внимания|Всё под контролем/.test($('#view').innerHTML));
   check('карточки внимания: сегодня, просрочено, чаты', $('#view .attn-card.today') && $('#view .attn-card.warn') && $('#view .attn-card.chat'));
   check('дашборд содержит кликабельные KPI', $$('#view .clickable-card, #view .kpi[onclick]').length >= 4);
 
@@ -291,8 +300,8 @@ try {
   const viewLogin = await (await fetch(BASE + '/api/auth/login', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ email: 'view_ui@example.com', password: 'password123' }) })).json();
   const view403 = await fetch(BASE + '/api/contacts', { method: 'POST', headers: { 'Content-Type': 'application/json', Authorization: 'Bearer ' + viewLogin.token }, body: JSON.stringify({ name: 'Hack' }) });
   check('наблюдатель не может создавать записи (403)', view403.status === 403);
-  const sim403 = await fetch(BASE + '/api/inbox/simulate', { method: 'POST', headers: { 'Content-Type': 'application/json', Authorization: 'Bearer ' + mgrToken }, body: JSON.stringify({ text: 'x' }) });
-  check('служебный симулятор входящих доступен только администратору', sim403.status === 403);
+  const auto403 = await fetch(BASE + '/api/automations', { method: 'POST', headers: { 'Content-Type': 'application/json', Authorization: 'Bearer ' + mgrToken }, body: JSON.stringify({ name: 'Правило менеджера' }) });
+  check('менеджеру запрещено создавать автоматизации (403)', auto403.status === 403);
 
   // ── настройки команды глазами менеджера ──────────────────────────────────
   const admin = window.__state.me;
