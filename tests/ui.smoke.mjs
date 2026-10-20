@@ -24,7 +24,7 @@ if (!JSDOM) {
 const PORT = 18079, BASE = `http://127.0.0.1:${PORT}`, DATA = '/tmp/karkas-ui-smoke';
 rmSync(DATA, { recursive: true, force: true });
 const sleep = ms => new Promise(r => setTimeout(r, ms));
-const srv = spawn('node', ['--experimental-sqlite', 'backend/src/server.js'], { cwd: ROOT, env: { ...process.env, DATA_DIR: DATA, PORT: String(PORT), HOST: '127.0.0.1' }, stdio: 'ignore' });
+const srv = spawn('node', ['--experimental-sqlite', 'backend/src/server.js'], { cwd: ROOT, env: { ...process.env, DATA_DIR: DATA, PORT: String(PORT), HOST: '127.0.0.1', SEED_MODE: 'off' }, stdio: 'ignore' });
 for (let i = 0; i < 60; i++) { try { if ((await fetch(BASE + '/api/health')).ok) break } catch {} await sleep(200) }
 
 const html = readFileSync(join(ROOT, 'frontend/public/index.html'), 'utf8');
@@ -38,7 +38,7 @@ window.__state = state;
 Object.assign(window, {
   SKELETONS, toggleTheme, applyTheme, openPalette, closePalette, toggleSel, clearSel,
   siteFormCode, bulkApply, openContactCard, openDealCard, api, get token() { return token },
-  icon, normalizeDue, taskDueMeta, isAscii, readToken, endSession, togglePass,
+  icon, normalizeDue, taskDueMeta, isAscii, endSession, togglePass,
   toggleUserMenu, closeUserMenu, toggleTaskSelect, ICON_PATHS, msgHtml, channelOptions,
   uploadChatFile, uploadLogo, deleteLogo, checkHealth, refreshLogo,
   sourceLabel, channelLabel, roleLabel, askConfirm, askInput, translit, SOURCE_LABELS, CHANNEL_LABELS, ROLE_LABELS
@@ -85,7 +85,8 @@ try {
   $('#loginForm').dispatchEvent(new window.Event('submit', { bubbles: true, cancelable: true }));
   await wait(700);
   check('вход через форму открывает приложение', $('#login').classList.contains('hidden') && !$('#app').classList.contains('hidden'), $('#loginErr').textContent);
-  window.__token = window.localStorage.getItem('karkas_token');
+  window.__token = loginJson.token;
+  check('токен сессии не сохраняется в localStorage', window.localStorage.getItem('karkas_token') === null);
 
   // ── тестовые данные через API ────────────────────────────────────────────
   await apiPost('/webhooks/generic', { channel: 'site', phone: '79110001122', name: 'Ирина Соколова', body: 'Здравствуйте, нужен расчёт дома' });
@@ -234,10 +235,7 @@ try {
   check('глазок показывает пароль', pwInput.type === 'text');
   window.togglePass($('#loginEye'));
   check('повторный клик глазка скрывает пароль', pwInput.type === 'password');
-  check('readToken отбрасывает не-ASCII токены', window.isAscii('valid_token_123') && !window.isAscii('bad_token_\u0000_тест'));
-  window.localStorage.setItem('karkas_token', 'bad_token_\u0000\u0001');
-  check('повреждённый токен очищается', window.readToken() === '' && !window.localStorage.getItem('karkas_token'));
-  window.localStorage.setItem('karkas_token', window.__token);
+  check('проверка токена отбрасывает не-ASCII значения', window.isAscii('valid_token_123') && !window.isAscii('bad_token_\u0000_тест'));
   check('endSession определён', typeof window.endSession === 'function');
   check('normalizeDue/taskDueMeta работают', window.normalizeDue('сегодня 14:00').includes('14:00') && window.normalizeDue('15.10.2026 18:30') === '2026-10-15 18:30' && window.taskDueMeta('2020-01-01 10:00', false).overdue === true);
 
@@ -307,7 +305,7 @@ try {
   check('эмодзи нет в server.js', !hasEmojis(serverJsRaw));
   check('эмодзи нет в competitors.js', !hasEmojis(competitorsJsRaw));
   const productText = html + appJsRaw + cssText;
-  check('в интерфейсе нет упоминаний демонстрационного режима', !/демо|Демо|SEED_DEMO/.test(productText));
+  check('в интерфейсе нет технического мусора seed', !/SEED_DEMO|seed-demo/.test(productText));
   check('в интерфейсе нет номеров версий и патчей', !/2\.9|v2\.\d|karkascrm-v|KarkasCRM-\d/.test(productText));
   check('в интерфейсе нет кнопки-самолётика', !/icon\('send'/.test(appJsRaw));
   check('в интерфейсе нет пользовательского симулятора входящих', !/simulate\(\)/.test(appJsRaw));

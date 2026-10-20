@@ -6,7 +6,9 @@ import { randomBytes } from 'node:crypto';
 
 const b64 = s => Buffer.from(String(s), 'utf8').toString('base64');
 const isIp = h => /^\d{1,3}(\.\d{1,3}){3}$/.test(String(h));
-const tlsOpts = (host, extra = {}) => ({ host, ...(isIp(host) ? {} : { servername: host }), rejectUnauthorized: false, ...extra });
+// Сертификат проверяется по умолчанию. Для внутреннего релея с самоподписанным
+// сертификатом можно осознанно отключить проверку: SMTP_TLS_INSECURE=1.
+const tlsOpts = (host, extra = {}) => ({ host, ...(isIp(host) ? {} : { servername: host }), rejectUnauthorized: process.env.SMTP_TLS_INSECURE !== '1', ...extra });
 const chunk76 = s => (s.match(/.{1,76}/g) || []).join('\r\n');
 
 function reader(socket, onLine) {
@@ -47,11 +49,18 @@ export async function sendMail({ host, port = 587, secure, starttls, user, pass,
   let waiters = [];
   const onLineInit = line => {
     log.push('< ' + line);
-    if (waiters.length) waiters.shift()(line);
+    const w = waiters.shift();
+    if (w) w.res(line);
     else pending.push(line);
   };
+  // если сервер оборвал соединение или молчит — не зависаем, а сразу отдаём понятную ошибку
+  const failAll = e => { while (waiters.length) waiters.shift().rej(e) };
+  const watchSocket = () => {
+    socket.on('error', failAll);
+    socket.on('close', () => failAll(new Error('SMTP-сервер закрыл соединение')));
+  };
   const startReading = () => reader(socket, onLineInit);
-  const readLine = () => new Promise(res => { if (pending.length) return res(pending.shift()); waiters.push(res) });
+  const readLine = () => new Promise((res, rej) => { if (pending.length) return res(pending.shift()); waiters.push({ res, rej }) });
   const readCode = async (expected) => {
     let line = await readLine();
     const lines = [line];
@@ -68,6 +77,7 @@ export async function sendMail({ host, port = 587, secure, starttls, user, pass,
 
   try {
     await connect();
+    watchSocket();
     startReading();
     GREETING.push((await readCode(['220'])).line);
     let caps = (await send('EHLO karkascrm', ['250'])).lines.join(' ');
@@ -78,6 +88,7 @@ export async function sendMail({ host, port = 587, secure, starttls, user, pass,
         socket = tls.connect(tlsOpts(host, { socket }));
         await new Promise((res, rej) => { socket.once('secureConnect', res); socket.once('error', rej) });
         secureNow = true;
+        watchSocket();
         startReading();
         caps = (await send('EHLO karkascrm', ['250'])).lines.join(' '); // возможности могли измениться после шифрования
       } else if (!allowInsecure) {

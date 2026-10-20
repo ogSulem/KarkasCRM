@@ -2,6 +2,8 @@
 <title>КаркасCRM — сделки, клиенты и задачи в единой CRM-системе</title>
 <meta name="description" content="CRM: воронки и сделки, клиенты, задачи, единый инбокс мессенджеров, почта, разведка конкурентов.">
 <meta name="theme-color" content="#16a34a"><meta name="color-scheme" content="light dark">
+<!-- тема применяется до отрисовки: нет вспышки белым в тёмном режиме -->
+<script>try{var t=localStorage.getItem('karkas_theme');document.documentElement.dataset.theme=(t==='dark'||t==='light')?t:(matchMedia('(prefers-color-scheme: dark)').matches?'dark':'light')}catch(e){}</script>
 <link rel="icon" href="/logo.png">
 <link rel="stylesheet" href="/style.css"></head><body>
 
@@ -54,7 +56,7 @@
     <button type="button" data-view="analytics" onclick="go('analytics')"><span class="nav-ico" data-icon="analytics"></span> Аналитика</button>
     <button type="button" data-view="settings" onclick="go('settings')"><span class="nav-ico" data-icon="settings"></span> Настройки</button>
   </nav>
-  <div class="side-card"><b>Интеграции и каналы</b><p>Мессенджеры, почта, ключи источников, воронки, свои поля и права — в разделе «Настройки».</p><button class="btn orange w" onclick="go('settings','integrations')">Интеграции</button></div>
+  <div class="side-card" id="sideIntegrations"><b>Интеграции и каналы</b><p>Мессенджеры, почта, ключи источников, воронки, свои поля и права — в разделе «Настройки».</p><button class="btn orange w" onclick="go('settings','integrations')">Интеграции</button></div>
   <div class="user-wrap">
     <button class="user-btn" id="userBtn" type="button" aria-haspopup="true" onclick="toggleUserMenu(event)">
       <div class="avatar" id="uAva">А</div>

@@ -10,8 +10,12 @@ import { extname, join, normalize, basename } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { createCompetitors } from './competitors.js';
 import { sendMail } from './smtp.js';
+import { seedBase, seedDemo, demoCounts, cleanDemo } from './seed.js';
 
 const PORT = process.env.PORT || 8080, HOST = process.env.HOST || '0.0.0.0';
+// Режим начальных данных: demo (локально, примеры) / base (прод, правовая основа) / off (чистая база).
+// По умолчанию: если задан домен — base, иначе demo. Переопределяется в SEED_MODE.
+const SEED_MODE = (process.env.SEED_MODE || (process.env.CRM_DOMAIN ? 'base' : 'demo')).toLowerCase();
 const ROOT = fileURLToPath(new URL('.', import.meta.url));
 const DATA_DIR = process.env.DATA_DIR || join(ROOT, '../../data');
 const PUBLIC_DIR = process.env.PUBLIC_DIR || join(ROOT, '../../frontend/public');
@@ -79,7 +83,7 @@ const SCHEMA_COLUMNS = [...SCHEMA,
   ['contacts', 'company_id', 'INTEGER'], ['contacts', 'position', 'TEXT'], ['contacts', 'responsible_id', 'INTEGER'],
   ['contacts', 'tags', "TEXT DEFAULT ''"], ['contacts', 'notes', "TEXT DEFAULT ''"], ['contacts', 'source', "TEXT DEFAULT 'manual'"],
   ['deals', 'pipeline_id', 'INTEGER DEFAULT 1'], ['deals', 'priority', "TEXT DEFAULT 'normal'"], ['deals', 'loss_reason', 'TEXT'],
-  ['deals', 'company_id', 'INTEGER'], ['deals', 'responsible', "TEXT DEFAULT 'Администратор'"], ['deals', 'updated_at', 'TEXT'],
+  ['deals', 'company_id', 'INTEGER'], ['deals', 'responsible', "TEXT DEFAULT 'Администратор'"], ['deals', 'responsible_id', 'INTEGER'], ['deals', 'updated_at', 'TEXT'],
   ['tasks', 'type', "TEXT DEFAULT 'call'"], ['tasks', 'priority', "TEXT DEFAULT 'normal'"], ['tasks', 'responsible_id', 'INTEGER'],
   ['tasks', 'done', 'INTEGER DEFAULT 0'], ['tasks', 'repeat', "TEXT DEFAULT 'none'"],
   ['messages', 'content_uri', 'TEXT'], ['messages', 'status', 'TEXT'], ['messages', 'external_id', 'TEXT'],
@@ -87,6 +91,9 @@ const SCHEMA_COLUMNS = [...SCHEMA,
   ['messages', 'content_name', 'TEXT'], ['messages', 'content_type', 'TEXT'],
   ['conversations', 'channel_id', 'TEXT'], ['conversations', 'external_chat_id', 'TEXT'], ['conversations', 'chat_type', 'TEXT'],
   ['conversations', 'last_at', 'TEXT'], ['conversations', 'assigned_id', 'INTEGER'], ['conversations', 'title', 'TEXT'], ['conversations', 'channels', "TEXT DEFAULT ''"],
+  ['contacts', 'phone_norm', 'TEXT'], ['templates', 'user_id', 'INTEGER'],
+  ['products', 'demo', 'INTEGER DEFAULT 0'], ['templates', 'demo', 'INTEGER DEFAULT 0'], ['automations', 'demo', 'INTEGER DEFAULT 0'],
+  ['companies', 'demo', 'INTEGER DEFAULT 0'], ['notes', 'demo', 'INTEGER DEFAULT 0'],
 ];
 
 // чего не хватает в этой базе: если она из старой версии — сначала копия, потом изменения
@@ -95,10 +102,20 @@ for (const [t, c] of SCHEMA_COLUMNS) {
   const cols = db.prepare(`PRAGMA table_info(${t})`).all().map(r => r.name);
   if (!cols.includes(c)) missingColumns.push([t, c]);
 }
-if (missingColumns.length) {
+// совсем новый файл базы: копировать нечего, страховочная копия не нужна
+const freshDb = (() => {
+  try {
+    return ['users', 'contacts', 'deals', 'messages', 'conversations'].every(t => {
+      try { return db.prepare(`SELECT COUNT(*) n FROM ${t}`).get().n === 0 } catch { return true }
+    });
+  } catch { return true }
+})();
+if (missingColumns.length && !freshDb) {
   try {
     mkdir(join(DATA_DIR, 'backups'), { recursive: true });
     const pre = join(DATA_DIR, 'backups', `pre-upgrade-${new Date().toISOString().slice(0, 19).replace(/[:T]/g, '-')}.db`);
+    // сбрасываем WAL на диск: копия одного файла должна быть согласованной
+    try { db.exec('PRAGMA wal_checkpoint(TRUNCATE)') } catch {}
     copyFileSync(join(DATA_DIR, 'crm.db'), pre);
     console.log(`Обновление схемы базы — страховочная копия: ${pre}`);
   } catch (e) { console.error('Не удалось сделать копию перед обновлением схемы:', e.message) }
@@ -106,19 +123,41 @@ if (missingColumns.length) {
 for (const [t, c, d] of SCHEMA_COLUMNS) {
   const cols = db.prepare(`PRAGMA table_info(${t})`).all().map(r => r.name); if (!cols.includes(c)) db.exec(`ALTER TABLE ${t} ADD COLUMN ${c} ${d}`);
 }
-if (missingColumns.length) console.log(`Схема базы обновлена: заполнено полей — ${missingColumns.length}`);
+if (missingColumns.length && !freshDb) console.log(`Схема базы обновлена: заполнено полей — ${missingColumns.length}`);
 // индексы создаём ПОСЛЕ миграций: иначе база прошлой версии упадёт на отсутствующей колонке
 db.exec(`
 CREATE INDEX IF NOT EXISTS idx_msg_conv ON messages(conversation_id,id);
 CREATE INDEX IF NOT EXISTS idx_deals_stage ON deals(stage);
 CREATE INDEX IF NOT EXISTS idx_contacts_phone ON contacts(phone);
+CREATE INDEX IF NOT EXISTS idx_contacts_phone_norm ON contacts(phone_norm);
 CREATE INDEX IF NOT EXISTS idx_tasks_done ON tasks(done,due);
 CREATE INDEX IF NOT EXISTS idx_conv_contact ON conversations(contact_id);
+CREATE INDEX IF NOT EXISTS idx_templates_owner ON templates(user_id);
+CREATE INDEX IF NOT EXISTS idx_deals_pipeline ON deals(pipeline_id, stage);
+CREATE INDEX IF NOT EXISTS idx_deals_contact ON deals(contact_id);
+CREATE INDEX IF NOT EXISTS idx_deals_responsible ON deals(responsible_id);
+CREATE INDEX IF NOT EXISTS idx_tasks_deal ON tasks(deal_id);
+CREATE INDEX IF NOT EXISTS idx_tasks_contact ON tasks(contact_id);
+CREATE INDEX IF NOT EXISTS idx_tasks_responsible ON tasks(responsible_id, done);
+CREATE INDEX IF NOT EXISTS idx_conv_last ON conversations(last_at);
+CREATE INDEX IF NOT EXISTS idx_deal_products_deal ON deal_products(deal_id);
+CREATE INDEX IF NOT EXISTS idx_notes_entity ON notes(entity_type, entity_id);
+CREATE INDEX IF NOT EXISTS idx_activities_entity ON activities(entity_type, entity_id);
 `);
 try { db.exec('CREATE UNIQUE INDEX IF NOT EXISTS idx_msg_ext ON messages(external_id) WHERE external_id IS NOT NULL'); }
 catch (e) { console.error('Не удалось создать уникальный индекс по external_id (в базе есть дубли внешних id):', e.message); }
-const SCHEMA_VERSION = 4;
+const SCHEMA_VERSION = 5;
 
+// Дата в местном часовом поясе (в базе время хранится в UTC, а сроки задач —
+// в местном настенном времени; сравнивать их с UTC-«сегодня» нельзя).
+function localDate(d = new Date()) {
+  const p = n => String(n).padStart(2, '0');
+  return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}`;
+}
+function localNow(d = new Date()) {
+  const p = n => String(n).padStart(2, '0');
+  return `${localDate(d)} ${p(d.getHours())}:${p(d.getMinutes())}:${p(d.getSeconds())}`;
+}
 function nowDue(offsetHours = 2) {
   const d = new Date(Date.now() + offsetHours * 3600 * 1000);
   const pad = n => String(n).padStart(2, '0');
@@ -170,6 +209,20 @@ function fixTaskDues() {
 fixTaskDues();
 
 const getSetting = (k, d = '') => db.prepare('SELECT value FROM settings WHERE key=?').get(k)?.value ?? process.env[k] ?? d;
+// IP клиента для лимитов. X-Forwarded-For доверяем только когда запрос пришёл
+// от локального/контейнерного прокси, и берём ПОСЛЕДНИЙ адрес: его дописал наш
+// прокси. Первый адрес клиент может подделать и обойти ограничение попыток входа.
+const isPrivateIp = ip => {
+  const s = String(ip || '');
+  if (s === '::1' || /^(fe80|fc|fd)/i.test(s)) return true;
+  return /^(::ffff:)?(127\.|10\.|192\.168\.|172\.(1[6-9]|2\d|3[01])\.)/.test(s);
+};
+function clientIp(req) {
+  const remote = req.socket.remoteAddress || 'local';
+  if (!isPrivateIp(remote)) return remote;
+  const list = String(req.headers['x-forwarded-for'] || '').split(',').map(x => x.trim()).filter(Boolean);
+  return list.length ? list[list.length - 1] : remote;
+}
 const setSetting = (k, v) => db.prepare('INSERT INTO settings(key,value) VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value').run(k, String(v ?? ''));
 const log = (text, et = null, eid = null, user = '') => db.prepare('INSERT INTO activities(text,entity_type,entity_id,user_name) VALUES(?,?,?,?)').run(text, et, eid, user);
 const hashPass = (p, salt = randomBytes(16).toString('hex')) => `${salt}:${scryptSync(p, salt, 64).toString('hex')}`;
@@ -195,6 +248,15 @@ function sessionCookie(req, token) {
 const clearSessionCookie = req => `karkas_token=; HttpOnly; SameSite=Lax; Path=/; Max-Age=0${isHttps(req) ? '; Secure' : ''}`;
 const cookieOf = req => Object.fromEntries((req.headers.cookie || '').split(';').map(x => x.trim().split('=').map(decodeURIComponent)).filter(([k]) => k));
 const digits = s => String(s || '').replace(/\D/g, '').replace(/^8(?=\d{10}$)/, '7');
+// нормализованные телефоны для быстрой связи входящих с карточками (миграция)
+{
+  const cols = db.prepare('PRAGMA table_info(contacts)').all().map(r => r.name);
+  if (cols.includes('phone_norm')) {
+    const rows = db.prepare('SELECT id,phone FROM contacts WHERE phone_norm IS NULL OR phone_norm=\'\'').all();
+    const up = db.prepare('UPDATE contacts SET phone_norm=? WHERE id=?');
+    for (const r of rows) up.run(digits(r.phone) || null, r.id);
+  }
+}
 
 // ---------- seed ----------
 if (!db.prepare('SELECT id FROM pipelines LIMIT 1').get()) {
@@ -211,6 +273,15 @@ if (!db.prepare('SELECT id FROM users LIMIT 1').get()) {
 }
 export function getStages(pipeline_id = 1) { return db.prepare('SELECT * FROM stages WHERE pipeline_id=? ORDER BY sort,id').all(pipeline_id); }
 export function getCustomFields() { try { const v = JSON.parse(getSetting('CUSTOM_FIELDS', '[]')); return Array.isArray(v) ? v.filter(f => f && f.key && f.label) : [] } catch { return [] } }
+// Обязательные свои поля проверяются на сервере, а не только звёздочкой в форме.
+function missingRequiredCustom(table, customRaw) {
+  const req = getCustomFields().filter(f => f.required && (f.entity === 'both' || f.entity === table));
+  if (!req.length) return null;
+  let obj = {};
+  try { obj = typeof customRaw === 'string' ? JSON.parse(customRaw || '{}') : (customRaw || {}) } catch { obj = {} }
+  const miss = req.filter(f => !String(obj[f.key] ?? '').trim());
+  return miss.length ? `Заполните обязательные поля: ${miss.map(f => f.label).join(', ')}` : null;
+}
 const sanitizeFields = list => (Array.isArray(list) ? list : []).slice(0, 40).map(f => ({
   key: String(f.key || '').replace(/[^a-zA-Z0-9_]/g, '').slice(0, 40),
   label: String(f.label || '').slice(0, 80),
@@ -233,7 +304,7 @@ function runAutomations(trigger, ctx = {}) {
     try {
       if (a.action_type === 'create_task' && (ctx.contact_id || ctx.deal_id)) {
         const owner = (ctx.deal_id && db.prepare('SELECT responsible_id FROM deals WHERE id=?').get(ctx.deal_id)?.responsible_id) || (ctx.contact_id && db.prepare('SELECT responsible_id FROM contacts WHERE id=?').get(ctx.contact_id)?.responsible_id) || null;
-        db.prepare('INSERT INTO tasks(title,due,contact_id,deal_id,responsible_id) VALUES(?,?,?,?,?)').run(a.action_value || a.name, 'Сегодня', ctx.contact_id || null, ctx.deal_id || null, owner);
+        db.prepare('INSERT INTO tasks(title,due,contact_id,deal_id,responsible_id) VALUES(?,?,?,?,?)').run(a.action_value || a.name, normalizeDue('сегодня'), ctx.contact_id || null, ctx.deal_id || null, owner);
       }
       if (a.action_type === 'change_stage' && ctx.deal_id && a.action_value) db.prepare('UPDATE deals SET stage=? WHERE id=?').run(a.action_value, ctx.deal_id);
       if (a.action_type === 'add_tag' && ctx.contact_id && a.action_value) { const c = db.prepare('SELECT tags FROM contacts WHERE id=?').get(ctx.contact_id); const tags = [...new Set([...(c?.tags || '').split(',').filter(Boolean), a.action_value])].join(','); db.prepare('UPDATE contacts SET tags=? WHERE id=?').run(tags, ctx.contact_id); }
@@ -255,7 +326,11 @@ export function ensureDeal(contact) {
   if (getSetting('AUTO_DEAL', '1') !== '1' || !contact) return null;
   const open = db.prepare("SELECT id FROM deals WHERE contact_id=? AND stage NOT IN ('won','lost') ORDER BY id DESC").get(contact.id);
   if (open) return null;
-  const stage = getSetting('AUTO_DEAL_STAGE', 'new');
+  // этап для новых обращений: первый этап воронки. Жёсткий код 'new' ломался,
+  // если воронку переименовали или удалили этот этап.
+  const firstStage = getStages(1)[0]?.code || 'new';
+  const wantedStage = getSetting('AUTO_DEAL_STAGE', '');
+  const stage = (wantedStage && db.prepare('SELECT 1 x FROM stages WHERE code=? AND pipeline_id=1').get(wantedStage)) ? wantedStage : firstStage;
   let ownerId = contact.responsible_id || null, ownerName = '';
   if (ownerId) ownerName = db.prepare('SELECT name FROM users WHERE id=?').get(ownerId)?.name || '';
   if (!ownerId && getSetting('AUTO_ASSIGN', '0') === '1') {
@@ -271,11 +346,22 @@ export function ensureDeal(contact) {
 
 export function upsertIncoming({ channel = 'whatsapp', chatType = '', phone = '', chatId = '', name = '', body = '', external_id = null, channelId = '', contentUri = '', author = '', email = '', subject = '', direction = 'in' }) {
   if (!body && !contentUri) return null;
+  // ограничиваем длину: вебхук — доверенный, но не бесконечный источник
+  const cap = (s, n) => String(s ?? '').slice(0, n);
+  name = cap(name, 120); body = cap(body, 100000); subject = cap(subject, 200); author = cap(author, 120);
   const ph = phone || (['whatsapp', 'viber'].includes(chatType || channel) ? chatId : '');
-  let contact = ph ? db.prepare('SELECT * FROM contacts').all().find(c => digits(c.phone) && digits(c.phone) === digits(ph)) : null;
-  if (!contact && email) contact = db.prepare('SELECT * FROM contacts').all().find(c => (c.email || '').toLowerCase() === String(email).toLowerCase());
+  // быстрый поиск по нормализованному телефону (индекс), раньше — полный скан
+  let contact = null;
+  const phNorm = digits(ph);
+  if (phNorm) {
+    const tail10 = phNorm.slice(-10);
+    contact = db.prepare('SELECT * FROM contacts WHERE phone_norm=?').get(phNorm)
+      || db.prepare('SELECT * FROM contacts WHERE phone_norm=?').get('7' + tail10)
+      || db.prepare('SELECT * FROM contacts WHERE phone_norm LIKE ?').get('%' + tail10);
+  }
+  if (!contact && email) contact = db.prepare('SELECT * FROM contacts WHERE lower(email)=lower(?)').get(String(email).trim());
   if (!contact && chatId) { const conv0 = db.prepare('SELECT * FROM conversations WHERE external_chat_id=?').get(String(chatId)); if (conv0) contact = db.prepare('SELECT * FROM contacts WHERE id=?').get(conv0.contact_id); }
-  if (!contact) { const r = db.prepare('INSERT INTO contacts(name,phone,email,source) VALUES(?,?,?,?)').run(name || ph || chatId || email || 'Новый клиент', ph, email || '', channel === 'email' ? 'email' : 'wazzup-' + (chatType || channel)); contact = db.prepare('SELECT * FROM contacts WHERE id=?').get(r.lastInsertRowid); log(`Новый контакт (${channel === 'email' ? 'email' : chatType || channel}): ${contact.name}`, 'contact', contact.id); }
+  if (!contact) { const r = db.prepare('INSERT INTO contacts(name,phone,email,source,phone_norm) VALUES(?,?,?,?,?)').run(name || ph || chatId || email || 'Новый клиент', ph, email || '', channel === 'email' ? 'email' : 'wazzup-' + (chatType || channel), phNorm || null); contact = db.prepare('SELECT * FROM contacts WHERE id=?').get(r.lastInsertRowid); log(`Новый контакт (${channel === 'email' ? 'email' : chatType || channel}): ${contact.name}`, 'contacts', contact.id); }
   let conv = db.prepare('SELECT * FROM conversations WHERE contact_id=?').get(contact.id);
   let dealId = null;
   if (!conv) {
@@ -290,7 +376,8 @@ export function upsertIncoming({ channel = 'whatsapp', chatType = '', phone = ''
   if (!dealId) dealId = ensureDeal(contact); // клиент вернулся, а открытой сделки нет — заводим новое обращение
   const openDeal = db.prepare("SELECT id FROM deals WHERE contact_id=? AND stage NOT IN ('won','lost') ORDER BY id DESC").get(contact.id);
   runAutomations('message_in', { contact_id: contact.id, deal_id: dealId || openDeal?.id });
-  broadcast('message', { conversation_id: conv.id });
+  // в событии есть имя и превью: интерфейс показывает понятное уведомление
+  broadcast('message', { conversation_id: conv.id, title: contact.name || conv.title || 'Клиент', preview: String(body || '').slice(0, 90), direction: 'in' });
   return conv;
 }
 
@@ -320,8 +407,8 @@ export async function sendViaWazzup(conv, text, user, chatTypeOverride = '', fil
   const channelId = (isUuid(conv.channel_id) ? conv.channel_id : '') || getSetting('WAZZUP_CHANNEL_ID');
   if (!channelId) throw new Error('Не выбран канал Wazzup. Настройки → Интеграции → «Проверить и синхронизировать каналы», затем выберите канал по умолчанию.');
   const chatType = normChatType(chatTypeOverride || conv.chat_type);
-  // whatsapp/viber/whatsgroup адресуются по номеру телефона или id чата, telegram/instagram — по chatId из вебхука
-  const chatId = ['whatsapp', 'viber', 'whatsgroup'].includes(chatType) ? (conv.external_chat_id || digits(conv.phone)) : (conv.external_chat_id || digits(conv.phone));
+  // адресат — id чата из вебхука или номер телефона клиента
+  const chatId = conv.external_chat_id || digits(conv.phone);
   if (!chatId) throw new Error('Нет адресата: у клиента не заполнен телефон или не пришло ни одного сообщения из этого канала.');
   const payload = {
     channelId, chatType, chatId,
@@ -335,23 +422,17 @@ export async function sendViaWazzup(conv, text, user, chatTypeOverride = '', fil
   catch (e) { throw new Error(wazzupError(e, e.status)); }
   return { delivered: true, mode: 'wazzup', id: data.messageId || data.id };
 }
-async function sendWhatsAppDirect(to, text) {
-  const token = getSetting('WHATSAPP_TOKEN'), phoneId = getSetting('WHATSAPP_PHONE_ID'); if (!token || !phoneId) return null;
-  const res = await fetch(`https://graph.facebook.com/v21.0/${phoneId}/messages`, { method: 'POST', headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' }, body: JSON.stringify({ messaging_product: 'whatsapp', to: digits(to), type: 'text', text: { body: text } }) });
-  const data = await res.json().catch(() => ({})); if (!res.ok) throw new Error(data?.error?.message || 'WhatsApp API ' + res.status);
-  return { delivered: true, mode: 'whatsapp-cloud', id: data?.messages?.[0]?.id };
-}
+// Wazzup объединяет WhatsApp, Telegram, Instagram и Viber в одном ключе —
+// второй провайдер не нужен, отправка идёт только через него.
 async function deliver(conv, channel, text, user, file = null) {
-  const provider = getSetting('MESSENGER_PROVIDER', 'wazzup');
-  if (provider === 'wazzup') { try { return await sendViaWazzup(conv, text, user, channel && channel !== 'site' ? channel : '', file); } catch (e) { if (channel !== 'whatsapp' || file) throw e; const d = await sendWhatsAppDirect(conv.phone, text).catch(() => null); if (d) return d; throw e; } }
-  if (channel === 'whatsapp' && !file) { const d = await sendWhatsAppDirect(conv.phone, text); if (d) return d; }
-  return { delivered: false, mode: 'local-only' };
+  if (!getSetting('WAZZUP_API_KEY')) throw new Error('WAZZUP_NOT_CONFIGURED');
+  return sendViaWazzup(conv, text, user, channel && channel !== 'site' ? channel : '', file);
 }
 
 // ---------- обслуживание: бэкапы и напоминания ----------
 function makeBackup(force = false) {
   const dir = join(DATA_DIR, 'backups'); mkdir(dir, { recursive: true });
-  const name = `crm-${new Date().toISOString().slice(0, 10)}.db`;
+  const name = `crm-${localDate()}.db`;
   const target = join(dir, name);
   if (!force && existsSync(target)) return null;
   try { db.exec('PRAGMA wal_checkpoint(TRUNCATE)') } catch {}
@@ -365,9 +446,11 @@ function makeBackup(force = false) {
   return name;
 }
 async function overdueTick() {
-  const today = new Date().toISOString().slice(0, 10);
+  const today = localDate();
+  const now = localNow();
   const rows = db.prepare("SELECT t.*, c.name contact_name FROM tasks t LEFT JOIN contacts c ON c.id=t.contact_id WHERE t.done=0 AND t.due IS NOT NULL AND t.due != '' AND (t.notified_at IS NULL OR t.notified_at != ?)").all(today);
-  const overdue = rows.filter(t => t.due.slice(0, 10) < today || /^\d{2}\.\d{2}\.\d{4}/.test(t.due));
+  // просрочено = срок уже прошёл (включая сегодняшнее время), а не только «вчера и раньше»
+  const overdue = rows.filter(t => (String(t.due).length === 10 ? t.due + ' 23:59:59' : String(t.due)) < now || /^\d{2}\.\d{2}\.\d{4}/.test(t.due));
   if (!overdue.length) return;
   const ids = overdue.map(t => t.id);
   db.prepare(`UPDATE tasks SET notified_at=? WHERE id IN (${ids.map(() => '?').join(',')})`).run(today, ...ids);
@@ -383,8 +466,13 @@ function startScheduler() {
     try {
       const hourly = getSetting('BACKUP_HOUR', '3');
       const now = new Date();
-      const day = now.toISOString().slice(0, 10);
-      if (lastBackupDay !== day && now.getHours() >= Number(hourly)) { lastBackupDay = day; try { makeBackup() } catch (e) { console.error('backup', e) } }
+      const day = localDate(now);
+      if (lastBackupDay !== day && now.getHours() >= Number(hourly)) {
+        lastBackupDay = day;
+        try { makeBackup() } catch (e) { console.error('backup', e) }
+        // лента активности не растёт бесконечно: храним последние 20 000 событий
+        try { db.prepare('DELETE FROM activities WHERE id NOT IN (SELECT id FROM activities ORDER BY id DESC LIMIT 20000)').run() } catch (e) { console.error('activities cleanup', e) }
+      }
       await overdueTick();
     } catch (e) { console.error('scheduler', e) }
   };
@@ -431,7 +519,7 @@ function companyRequisites() {
   return {
     name: g('COMPANY_NAME') || 'Моя компания', inn: g('COMPANY_INN'), kpp: g('COMPANY_KPP'), ogrn: g('COMPANY_OGRN'),
     address: g('COMPANY_ADDRESS'), phone: g('COMPANY_PHONE'), email: g('COMPANY_EMAIL'), site: g('COMPANY_SITE'),
-    bank: g('COMPANY_BANK'), account: g('COMPANY_ACCOUNT'), signer: g('COMPANY_SIGNER'), signer_position: g('COMPANY_SIGNER_POSITION'),
+    bank: g('COMPANY_BANK'), account: g('COMPANY_ACCOUNT'), corr: g('COMPANY_CORR'), signer: g('COMPANY_SIGNER'), signer_position: g('COMPANY_SIGNER_POSITION'),
     currency: g('CURRENCY') || '₽', doc_prefix: g('DOC_PREFIX') || 'КП',
   };
 }
@@ -490,7 +578,10 @@ const json = (res, code, obj) => { res.writeHead(code, { 'Content-Type': 'applic
 // простое ограничение частоты: защита от перебора пароля и от шторма запросов к источникам
 const RL = new Map();
 function rateLimit(key, limit, windowMs) {
-  const now = Date.now(), rec = RL.get(key);
+  const now = Date.now();
+  // периодически чистим просроченные записи, чтобы Map не росла бесконечно
+  if (RL.size > 10000) for (const k of RL.keys()) { const r = RL.get(k); if (now > r.resetAt) RL.delete(k); }
+  const rec = RL.get(key);
   if (!rec || now > rec.resetAt) { RL.set(key, { count: 1, resetAt: now + windowMs }); return { ok: true, left: limit - 1 } }
   rec.count++;
   return { ok: rec.count <= limit, left: Math.max(0, limit - rec.count), retryAfter: Math.ceil((rec.resetAt - now) / 1000) };
@@ -535,8 +626,9 @@ const asciiFileName = name => String(name || 'file').normalize('NFKD').toLowerCa
 const csv = rows => { if (!rows.length) return ''; const ks = Object.keys(rows[0]); const q = v => `"${String(v ?? '').replace(/"/g, '""')}"`; return [ks.join(';'), ...rows.map(r => ks.map(k => q(r[k])).join(';'))].join('\n'); };
 const ADMIN_ONLY = [
   /^\/api\/settings(\/.*)?$/, /^\/api\/users(\/.*)?$/, /^\/api\/pipelines(\/.*)?$/, /^\/api\/automations(\/.*)?$/,
-  /^\/api\/templates(\/.*)?$/, /^\/api\/custom-fields(\/.*)?$/, /^\/api\/competitor-sources(\/.*)?$/,
+  /^\/api\/custom-fields(\/.*)?$/, /^\/api\/competitor-sources(\/.*)?$/,
   /^\/api\/backups(\/.*)?$/, /^\/api\/integrations(\/.*)?$/, /^\/api\/prices\/ours(\/.*)?$/,
+  /^\/api\/demo\/cleanup$/,
 ];
 function requireAdmin(user, res) { if (user.role !== 'admin') { json(res, 403, { error: 'Только для администратора' }); return false; } return true; }
 
@@ -549,11 +641,41 @@ function validateUser(b, creating = false) {
 }
 
 const competitorsApi = createCompetitors({ db, json, readBody, log, broadcast, getSetting, setSetting });
+
+
+// начальное заполнение: только в полностью пустой базе, один раз,
+// после того как все таблицы (включая конкурентов) созданы
+if (!process.env.KARKAS_NO_SEED && SEED_MODE !== 'off' && !getSetting('SEED_DONE')) {
+  const hasTable = t => db.prepare("SELECT COUNT(*) n FROM sqlite_master WHERE type='table' AND name=?").get(t).n > 0;
+  const empty = ['contacts', 'deals', 'companies', 'conversations', 'competitors']
+    .every(t => !hasTable(t) || db.prepare(`SELECT COUNT(*) n FROM ${t}`).get().n === 0);
+  if (empty) {
+    try {
+      if (SEED_MODE === 'base') {
+        const admin = db.prepare("SELECT id FROM users WHERE role='admin' AND active=1 ORDER BY id LIMIT 1").get();
+        seedBase(db, admin.id, 0);
+        console.log('Загружены начальные данные: каталог, личные шаблоны администратора, пример правила (режим base). Всё редактируется в интерфейсе.');
+      } else {
+        const admin = db.prepare("SELECT id,name FROM users WHERE role='admin' AND active=1 ORDER BY id LIMIT 1").get();
+        seedDemo(db, admin.id, admin.name);
+        console.log('Загружены демонстрационные данные (режим demo). Удалить: Настройки → Данные и компания.');
+      }
+      setSetting('SEED_DONE', '1');
+    } catch (e) { console.error('Не удалось заполнить начальные данные:', e) }
+  }
+}
 export const server = http.createServer(async (req, res) => {
   const u = new URL(req.url, `http://${req.headers.host}`), p = u.pathname;
   applySecurityHeaders(req, res);
   try {
     // ===== публичные вебхуки =====
+    // защита от спам-шторма: лимит запросов с одного IP только на вебхуки
+    if (p.startsWith('/webhooks/')) {
+      const webhookIp = clientIp(req);
+      const hookLimit = Number(getSetting('WEBHOOK_RATE_LIMIT', '120'));
+      const rlHook = rateLimit('webhook:' + webhookIp, Number.isFinite(hookLimit) && hookLimit > 0 ? hookLimit : 120, 60000);
+      if (!rlHook.ok) { res.setHeader('Retry-After', String(rlHook.retryAfter || 60)); return json(res, 429, { error: 'Слишком много запросов — повторите позже' }) }
+    }
     if (p === '/webhooks/wazzup' && req.method === 'POST') {
       const secret = getSetting('WAZZUP_WEBHOOK_SECRET'); if (secret && u.searchParams.get('secret') !== secret && req.headers['x-webhook-secret'] !== secret) return json(res, 403, { error: 'bad secret' });
       const b = await readBody(req);
@@ -573,13 +695,18 @@ export const server = http.createServer(async (req, res) => {
       for (const cu of b.channelsUpdates || []) db.prepare('INSERT INTO channels(provider,external_id,state) VALUES(?,?,?) ON CONFLICT(external_id) DO UPDATE SET state=excluded.state').run('wazzup', cu.channelId, cu.state);
       return json(res, 200, { received: true });
     }
-    if (p === '/webhooks/whatsapp') {
-      if (req.method === 'GET') { const ok = u.searchParams.get('hub.mode') === 'subscribe' && u.searchParams.get('hub.verify_token') === getSetting('WHATSAPP_VERIFY_TOKEN', 'karkas-verify'); res.writeHead(ok ? 200 : 403); return res.end(ok ? u.searchParams.get('hub.challenge') : 'forbidden'); }
-      const payload = await readBody(req);
-      for (const e of payload.entry || []) for (const ch of e.changes || []) for (const msg of ch.value?.messages || []) upsertIncoming({ channel: 'whatsapp', chatType: 'whatsapp', phone: '+' + msg.from, name: ch.value.contacts?.find(c => c.wa_id === msg.from)?.profile?.name || '', body: msg.text?.body || '[медиа]', external_id: msg.id });
+    // общий вебхук: форма сайта, свой бот Telegram, любая система, умеющая POST
+    if (p === '/webhooks/generic' && req.method === 'POST') {
+      // Секрет необязателен, но если он задан в настройках — без него заявки не принимаются.
+      const secret = getSetting('WEBHOOK_SECRET');
+      if (secret && u.searchParams.get('secret') !== secret && req.headers['x-webhook-secret'] !== secret) return json(res, 403, { error: 'Неверный секрет вебхука' });
+      const b = await readBody(req);
+      const msg = (b.message && typeof b.message === 'object') ? b.message : b;
+      const channel = ['whatsapp', 'telegram', 'instagram', 'viber', 'email'].includes(b.channel) ? b.channel : 'site';
+      const name = String((msg.from && msg.from.first_name) || b.name || '').slice(0, 120);
+      upsertIncoming({ channel, chatType: b.chatType || channel, phone: String(b.phone || (msg.chat && msg.chat.id) || ''), chatId: String(b.chatId || ''), name, body: String(msg.text || b.body || ''), external_id: msg.message_id ? `${channel}-${msg.message_id}` : (b.external_id || null) });
       return json(res, 200, { received: true });
     }
-    if ((p === '/webhooks/telegram' || p === '/webhooks/generic') && req.method === 'POST') { const b = await readBody(req); const msg = b.message || b; upsertIncoming({ channel: p.includes('telegram') ? 'telegram' : (b.channel || 'site'), chatType: b.chatType || '', phone: b.phone || msg.chat?.id || '', chatId: b.chatId || '', name: msg.from?.first_name || b.name || '', body: msg.text || b.body || '', external_id: msg.message_id ? `tg-${msg.message_id}` : (b.external_id || null) }); return json(res, 200, { received: true }); }
     if (p === '/webhooks/email' && req.method === 'POST') {
       const secret = getSetting('EMAIL_WEBHOOK_SECRET');
       if (secret && u.searchParams.get('secret') !== secret && req.headers['x-webhook-secret'] !== secret) return json(res, 403, { error: 'bad secret' });
@@ -595,10 +722,18 @@ export const server = http.createServer(async (req, res) => {
       return json(res, 200, h, true);
     }
     if (p === '/api/auth/login' && req.method === 'POST') {
-      const ip = (req.headers['x-forwarded-for'] || '').split(',')[0].trim() || req.socket.remoteAddress || 'local';
-      const rl = rateLimit('login:' + ip, Number(getSetting('LOGIN_RATE_LIMIT', '12')), 300000);
+      const ip = clientIp(req);
+      const limit = Number(getSetting('LOGIN_RATE_LIMIT', '12'));
+      const rl = rateLimit('login:' + ip, limit, 300000);
       if (!rl.ok) { res.setHeader('Retry-After', String(rl.retryAfter || 300)); return json(res, 429, { error: `Слишком много попыток входа. Повторите через ${rl.retryAfter || 300} с.` }) }
-      const b = await readBody(req); const user = db.prepare('SELECT * FROM users WHERE email=? AND active=1').get(String(b.email || '').toLowerCase()); if (!user || !checkPass(String(b.password || ''), user.pass)) return json(res, 401, { error: 'Неверный e-mail или пароль' });
+      const b = await readBody(req);
+      // второй лимит — на конкретный аккаунт: распределённый перебор с разных IP тоже упирается в предел
+      const emailKey = String(b.email || '').trim().toLowerCase().slice(0, 160);
+      if (emailKey) { const rlAcc = rateLimit('login-acc:' + emailKey, Math.max(limit * 3, 30), 300000); if (!rlAcc.ok) { res.setHeader('Retry-After', String(rlAcc.retryAfter || 300)); return json(res, 429, { error: 'Слишком много попыток входа в этот аккаунт. Подождите несколько минут.' }) } }
+      const user = db.prepare('SELECT * FROM users WHERE email=? AND active=1').get(String(b.email || '').toLowerCase());
+      // проверяем пароль даже для несуществующего e-mail: время ответа не выдаёт, зарегистрирован ли адрес
+      const passOk = checkPass(String(b.password || ''), user ? user.pass : 'fake-salt:00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000');
+      if (!user || !passOk) return json(res, 401, { error: 'Неверный e-mail или пароль' });
       const token = sign({ id: user.id, email: user.email, name: user.name, role: user.role });
       res.setHeader('Set-Cookie', sessionCookie(req, token));
       return json(res, 200, { token, user: { id: user.id, name: user.name, email: user.email, role: user.role, must_change_password: user.must_change_password } }); }
@@ -608,11 +743,21 @@ export const server = http.createServer(async (req, res) => {
     }
 
     const bearer = (req.headers.authorization || '').replace(/^Bearer\s+/i, '');
-    const user = verify(bearer || cookieOf(req).karkas_token || u.searchParams.get('token') || '');
+    // токен в адресной строке допускаем только для GET (печать, вложения):
+    // иначе ссылка с ?token= могла бы инициировать изменение данных
+    const user = verify(bearer || cookieOf(req).karkas_token || (req.method === 'GET' ? u.searchParams.get('token') : '') || '');
     if (p.startsWith('/api/') && !user) return json(res, 401, { error: 'Требуется авторизация' });
     if (user?.must_change_password && (p.startsWith('/api/') || p.startsWith('/uploads/')) && !['/api/me', '/api/me/password'].includes(p)) return json(res, 403, { code: 'PASSWORD_CHANGE_REQUIRED', error: 'Сначала смените временный пароль' });
     if (user && user.role !== 'admin' && ['/api/settings', '/api/competitor-sources', '/api/backup', '/api/export/json', '/api/backups'].includes(p)) return json(res, 403, { error: 'Только для администратора' });
-    if (p === '/api/events') { res.writeHead(200, { 'Content-Type': 'text/event-stream', 'Cache-Control': 'no-cache', Connection: 'keep-alive' }); res.write('event: ready\ndata: {}\n\n'); res.userId = user.id; clients.add(res); req.on('close', () => clients.delete(res)); return; }
+    if (p === '/api/events') {
+      res.writeHead(200, { 'Content-Type': 'text/event-stream', 'Cache-Control': 'no-cache', Connection: 'keep-alive' });
+      res.write('event: ready\ndata: {}\n\n');
+      res.userId = user.id; clients.add(res);
+      // heartbeat: прокси не рвут «молчащие» соединения
+      const hb = setInterval(() => { try { res.write(': ping\n\n'); } catch {} }, 25000);
+      res.on('close', () => { clearInterval(hb); clients.delete(res); });
+      return;
+    }
     if (p === '/api/me') return json(res, 200, { user });
     if (p === '/api/meta') return json(res, 200, {
       version: VERSION, schema: SCHEMA_VERSION, user,
@@ -620,7 +765,7 @@ export const server = http.createServer(async (req, res) => {
       taskTypes: [{ id: 'call', name: 'Звонок' }, { id: 'meeting', name: 'Встреча' }, { id: 'message', name: 'Сообщение' }, { id: 'email', name: 'Письмо' }, { id: 'other', name: 'Другое' }],
       sources: ['manual', 'wazzup-whatsapp', 'wazzup-telegram', 'wazzup-instagram', 'wazzup-viber', 'whatsapp', 'telegram', 'email', 'site', 'avito', 'import'],
       customFields: getCustomFields(),
-      features: { email: !!getSetting('SMTP_HOST'), wazzup: !!getSetting('WAZZUP_API_KEY'), whatsapp: !!(getSetting('WHATSAPP_TOKEN') && getSetting('WHATSAPP_PHONE_ID')) },
+      features: { email: !!getSetting('SMTP_HOST'), wazzup: !!getSetting('WAZZUP_API_KEY') },
       salesTarget: Number(getSetting('SALES_TARGET', '0')) || 0,
     });
     if (user && p.startsWith('/api/') && user.role === 'viewer' && req.method !== 'GET' && p !== '/api/me/password') return json(res, 403, { error: 'Роль «Наблюдатель» — только просмотр' });
@@ -629,21 +774,26 @@ export const server = http.createServer(async (req, res) => {
 
     // ===== dashboard / analytics =====
     if (p === '/api/dashboard') {
-      const deals = db.prepare('SELECT * FROM deals').all(), stages = getStages(Number(u.searchParams.get('pipeline') || 1));
-      const today = new Date().toISOString().slice(0, 10);
+      const pipelineId = Number(u.searchParams.get('pipeline') || 1);
+      const stages = getStages(pipelineId);
+      const today = localDate();
       const myId = user?.id;
+      // агрегация в SQL: не выгружаем все сделки в память
+      const agg = db.prepare("SELECT COUNT(*) n, COALESCE(SUM(amount),0) s FROM deals WHERE stage NOT IN ('won','lost')").get();
+      const stageStats = new Map(db.prepare('SELECT stage, COUNT(*) n, COALESCE(SUM(amount),0) s FROM deals GROUP BY stage').all().map(r => [r.stage, r]));
+      const sumWhere = w => db.prepare(`SELECT COALESCE(SUM(amount),0) s FROM deals WHERE ${w}`).get().s;
+      const cntWhere = w => db.prepare(`SELECT COUNT(*) n FROM deals WHERE ${w}`).get().n;
       const myTasksOpen = db.prepare("SELECT COUNT(*) n FROM tasks WHERE done=0 AND (responsible_id=? OR (responsible_id IS NULL AND ? IS NULL))").get(myId, myId)?.n || 0;
-      const myTasksOverdue = db.prepare("SELECT COUNT(*) n FROM tasks WHERE done=0 AND (responsible_id=? OR (responsible_id IS NULL AND ? IS NULL)) AND due IS NOT NULL AND due != '' AND due < ?").get(myId, myId, today)?.n || 0;
+      const now = localNow();
+      const myTasksOverdue = db.prepare("SELECT COUNT(*) n FROM tasks WHERE done=0 AND (responsible_id=? OR (responsible_id IS NULL AND ? IS NULL)) AND due IS NOT NULL AND due != '' AND (CASE WHEN length(due)=10 THEN due || ' 23:59:59' ELSE due END) < ?").get(myId, myId, now)?.n || 0;
       const tasksToday = db.prepare("SELECT COUNT(*) n FROM tasks WHERE done=0 AND due LIKE ?").get(today + '%')?.n || 0;
-      const tasksOverdue = db.prepare("SELECT COUNT(*) n FROM tasks WHERE done=0 AND due IS NOT NULL AND due != '' AND due < ?").get(today)?.n || 0;
-      const activeDeals = deals.filter(d => !['won', 'lost'].includes(d.stage));
-      const activeDealsSum = activeDeals.reduce((a, d) => a + d.amount, 0);
+      const tasksOverdue = db.prepare("SELECT COUNT(*) n FROM tasks WHERE done=0 AND due IS NOT NULL AND due != '' AND (CASE WHEN length(due)=10 THEN due || ' 23:59:59' ELSE due END) < ?").get(now)?.n || 0;
       return json(res, 200, {
-        stages: stages.map(s => ({ ...s, count: deals.filter(d => d.stage === s.code).length, sum: deals.filter(d => d.stage === s.code).reduce((a, d) => a + d.amount, 0) })),
-        dealsTotal: activeDeals.length,
-        activeDealsSum,
-        revenue: deals.filter(d => d.stage === 'won').reduce((a, d) => a + d.amount, 0),
-        lostSum: deals.filter(d => d.stage === 'lost').reduce((a, d) => a + d.amount, 0),
+        stages: stages.map(s => { const st = stageStats.get(s.code) || { n: 0, s: 0 }; return { ...s, count: st.n, sum: st.s } }),
+        dealsTotal: agg.n,
+        activeDealsSum: agg.s,
+        revenue: sumWhere("stage='won'"),
+        lostSum: sumWhere("stage='lost'"),
         contacts: db.prepare('SELECT COUNT(*) n FROM contacts').get().n,
         companies: db.prepare('SELECT COUNT(*) n FROM companies').get().n,
         unread: db.prepare('SELECT COALESCE(SUM(unread),0) n FROM conversations').get().n,
@@ -652,34 +802,47 @@ export const server = http.createServer(async (req, res) => {
         tasksOverdue,
         myTasksOpen,
         myTasksOverdue,
+        conversion: (() => { const w = cntWhere("stage='won'"), l = cntWhere("stage='lost'"); return w + l ? Math.round(w / (w + l) * 100) : 0 })(),
+        monthRevenue: sumWhere("stage='won' AND substr(COALESCE(closed_at,updated_at,''),1,7)=substr(datetime('now','localtime'),1,7)"),
         activities: db.prepare('SELECT * FROM activities ORDER BY id DESC LIMIT 10').all(),
         recentDeals: db.prepare('SELECT d.*,c.name contact_name FROM deals d LEFT JOIN contacts c ON c.id=d.contact_id ORDER BY d.id DESC LIMIT 6').all()
       });
     }
     if (p === '/api/analytics') {
-      const deals = db.prepare('SELECT d.*,c.source FROM deals d LEFT JOIN contacts c ON c.id=d.contact_id').all(); const won = deals.filter(d => d.stage === 'won'), lost = deals.filter(d => d.stage === 'lost');
-      const by = (arr, key) => Object.values(arr.reduce((a, x) => { const k = x[key] || '—'; a[k] = a[k] || { name: k, count: 0, sum: 0 }; a[k].count++; a[k].sum += x.amount || 0; return a; }, {}));
-      const month = new Date().toISOString().slice(0, 7);
-      const monthWon = won.filter(d => String(d.closed_at || d.updated_at || '').slice(0, 7) === month);
+      // группировки в SQL — не выгружаем все сделки в память
+      const by = (sql) => db.prepare(sql).all().map(r => ({ name: r.name || '—', count: r.n, sum: r.s }));
+      const wonLost = db.prepare("SELECT SUM(stage='won') w, SUM(stage='lost') l, SUM(CASE WHEN stage='won' THEN amount ELSE 0 END) wonSum FROM deals").get();
+      const wonCount = wonLost.w || 0, lostCount = wonLost.l || 0, wonSum = wonLost.wonSum || 0;
+      const month = localDate().slice(0, 7);
+      const monthRow = db.prepare("SELECT COUNT(*) n, COALESCE(SUM(amount),0) s FROM deals WHERE stage='won' AND substr(COALESCE(closed_at,updated_at,''),1,7)=?").get(month);
       const target = Number(getSetting('SALES_TARGET', '0')) || 0;
-      const plan = { target, fact: monthWon.reduce((a, d) => a + d.amount, 0), month, deals: monthWon.length, percent: target ? Math.round(monthWon.reduce((a, d) => a + d.amount, 0) / target * 100) : null };
-      return json(res, 200, { plan, conversion: deals.length ? Math.round(won.length / Math.max(1, won.length + lost.length) * 100) : 0, avgCheck: won.length ? Math.round(won.reduce((a, d) => a + d.amount, 0) / won.length) : 0, forecast: deals.filter(d => !['won', 'lost'].includes(d.stage)).reduce((a, d) => a + d.amount, 0), bySource: by(deals, 'source'), byManager: by(deals, 'responsible'), byLoss: by(lost, 'loss_reason'), stages: getStages().map(s => ({ name: s.name, code: s.code, count: deals.filter(d => d.stage === s.code).length, sum: deals.filter(d => d.stage === s.code).reduce((a, x) => a + x.amount, 0) })) });
+      const plan = { target, fact: monthRow.s, month, deals: monthRow.n, percent: target ? Math.round(monthRow.s / target * 100) : null };
+      const forecast = db.prepare("SELECT COALESCE(SUM(amount),0) s FROM deals WHERE stage NOT IN ('won','lost')").get().s;
+      return json(res, 200, {
+        plan,
+        conversion: wonCount + lostCount ? Math.round(wonCount / (wonCount + lostCount) * 100) : 0,
+        avgCheck: wonCount ? Math.round(wonSum / wonCount) : 0,
+        forecast,
+        bySource: by('SELECT c.source name, COUNT(*) n, COALESCE(SUM(d.amount),0) s FROM deals d LEFT JOIN contacts c ON c.id=d.contact_id GROUP BY c.source'),
+        byManager: by('SELECT COALESCE(d.responsible,\'—\') name, COUNT(*) n, COALESCE(SUM(d.amount),0) s FROM deals d GROUP BY d.responsible'),
+        byLoss: by("SELECT COALESCE(loss_reason,'—') name, COUNT(*) n, COALESCE(SUM(amount),0) s FROM deals WHERE stage='lost' GROUP BY loss_reason"),
+        stages: getStages().map(s => { const r = db.prepare('SELECT COUNT(*) n, COALESCE(SUM(amount),0) s FROM deals WHERE stage=?').get(s.code); return { name: s.name, code: s.code, count: r.n, sum: r.s } }),
+      });
     }
     if (p === '/api/contacts/duplicates') {
-      const all = db.prepare('SELECT * FROM contacts ORDER BY id').all();
-      const groups = new Map();
-      const put = (k, c) => { if (!k) return; if (!groups.has(k)) groups.set(k, []); groups.get(k).push(c) };
-      for (const c of all) {
-        const p = digits(c.phone), e = String(c.email || '').toLowerCase().trim();
-        if (p && p.length >= 6) put('phone:' + p, c);
-        if (e.includes('@')) put('email:' + e, c);
-      }
-      const dupes = [...groups.entries()].filter(([, list]) => list.length > 1).map(([key, list]) => ({ key, type: key.split(':')[0], contacts: list }));
-      return json(res, 200, { groups: dupes, total: dupes.reduce((a, g) => a + g.contacts.length - 1, 0) });
+      // дубли ищем по нормализованному телефону и почте — индексы, а не полный скан
+      const phoneGroups = db.prepare("SELECT phone_norm k, COUNT(*) n FROM contacts WHERE phone_norm IS NOT NULL GROUP BY phone_norm HAVING n > 1").all();
+      const emailGroups = db.prepare("SELECT lower(email) k, COUNT(*) n FROM contacts WHERE email IS NOT NULL AND email != '' GROUP BY lower(email) HAVING n > 1").all();
+      const groups = [];
+      for (const g of phoneGroups) groups.push({ key: 'phone:' + g.k, type: 'phone', contacts: db.prepare('SELECT * FROM contacts WHERE phone_norm=? ORDER BY id').all(g.k) });
+      for (const g of emailGroups) groups.push({ key: 'email:' + g.k, type: 'email', contacts: db.prepare('SELECT * FROM contacts WHERE lower(email)=lower(?) ORDER BY id').all(g.k) });
+      return json(res, 200, { groups, total: groups.reduce((a, g) => a + g.contacts.length - 1, 0) });
     }
     if (p === '/api/contacts/merge' && req.method === 'POST') {
       const b = await readBody(req);
-      const keepId = Number(b.keep), mergeIds = (b.ids || []).map(Number).filter(id => id && id !== keepId);
+      // принимаем оба варианта имён полей: интерфейс шлёт keep_id/merge_ids, старые вызовы — keep/ids
+      const keepId = Number(b.keep_id ?? b.keep), mergeIds = [...new Set((b.merge_ids || b.ids || []).map(Number).filter(id => id && id !== keepId))];
+      if (mergeIds.length > 50) return json(res, 400, { error: 'За один раз можно объединить не больше 50 карточек' });
       const keep = db.prepare('SELECT * FROM contacts WHERE id=?').get(keepId);
       if (!keep || !mergeIds.length) return json(res, 400, { error: 'Укажите основного контакта и что с ним объединить' });
       const others = mergeIds.map(id => db.prepare('SELECT * FROM contacts WHERE id=?').get(id)).filter(Boolean);
@@ -706,6 +869,8 @@ export const server = http.createServer(async (req, res) => {
           }
           db.prepare('DELETE FROM contacts WHERE id=?').run(o.id);
         }
+        // телефон мог быть заполнен из объединяемой карточки — пересчитываем нормализованный вид
+        db.prepare('UPDATE contacts SET phone_norm=? WHERE id=?').run(digits(keep.phone) || null, keepId);
         db.exec('COMMIT');
       } catch (e) { db.exec('ROLLBACK'); throw e }
       log(`Контакты объединены: ${others.map(o => o.name).join(', ')} → ${keep.name}`, 'contacts', keepId, user.name);
@@ -718,28 +883,79 @@ export const server = http.createServer(async (req, res) => {
       const raw = String(u.searchParams.get('q') || '').trim();
       if (raw.length < 2) return json(res, 200, { contacts: [], deals: [], companies: [], tasks: [] });
       const needle = raw.toLowerCase();
-      const hit = (...vals) => vals.some(v => String(v ?? '').toLowerCase().includes(needle));
+      // телефон ищется и слитно: «9991234567» находит «+7 999 123-45-67»
+      const needleDigits = digits(raw);
+      const hit = (...vals) => vals.some(v => String(v ?? '').toLowerCase().includes(needle)
+        || (needleDigits.length >= 3 && digits(v).includes(needleDigits)));
       const contacts = db.prepare('SELECT id,name,phone,email,company FROM contacts ORDER BY id DESC LIMIT 2000').all().filter(c => hit(c.name, c.phone, c.email, c.company)).slice(0, 8);
       const deals = db.prepare('SELECT id,title,amount FROM deals ORDER BY id DESC LIMIT 2000').all().filter(d => hit(d.title, d.amount)).slice(0, 8);
       const companies = db.prepare('SELECT id,name,inn FROM companies ORDER BY id DESC LIMIT 1000').all().filter(c => hit(c.name, c.inn)).slice(0, 5);
       const tasks = db.prepare('SELECT id,title,due,done,type FROM tasks ORDER BY id DESC LIMIT 2000').all().filter(t => hit(t.title)).slice(0, 6);
       return json(res, 200, { contacts, deals, companies, tasks });
     }
-    if (p === '/api/export/json' || p === '/api/backup') { const tables = ['users', 'companies', 'contacts', 'pipelines', 'stages', 'deals', 'tasks', 'notes', 'products', 'templates', 'automations', 'conversations', 'messages', 'channels', 'competitors', 'competitor_checks', 'competitor_reports', 'reviews', 'price_rows']; const out = {}; tables.forEach(t => out[t] = db.prepare(`SELECT * FROM ${t}`).all()); res.writeHead(200, { 'Content-Type': 'application/json', 'Content-Disposition': 'attachment; filename=karkas-backup.json' }); return res.end(JSON.stringify(out, null, 2)); }
+    if (p === '/api/export/json' || p === '/api/backup') {
+      // полная выгрузка содержит пользователей и настройки — только администратор
+      if (!requireAdmin(user, res)) return;
+      const tables = ['users', 'companies', 'contacts', 'pipelines', 'stages', 'deals', 'tasks', 'notes', 'products', 'templates', 'automations', 'conversations', 'messages', 'channels', 'competitors', 'competitor_checks', 'competitor_reports', 'reviews', 'price_rows']; const out = {}; tables.forEach(t => out[t] = db.prepare(`SELECT * FROM ${t}`).all()); res.writeHead(200, { 'Content-Type': 'application/json', 'Content-Disposition': 'attachment; filename=karkas-backup.json' }); return res.end(JSON.stringify(out, null, 2)); }
 
     // ===== generic CRUD =====
     const CRUD = { contacts: ['name', 'phone', 'email', 'company', 'company_id', 'position', 'source', 'tags', 'notes', 'responsible_id', 'custom'], companies: ['name', 'inn', 'phone', 'email', 'site', 'notes'], tasks: ['title', 'type', 'due', 'priority', 'done', 'deal_id', 'contact_id', 'responsible_id', 'result', 'repeat'], products: ['name', 'sku', 'price', 'unit', 'active'], templates: ['name', 'body', 'channel'], automations: ['name', 'trigger_type', 'trigger_value', 'action_type', 'action_value', 'active'], notes: ['entity_type', 'entity_id', 'body', 'author'] };
     const mCrud = p.match(/^\/api\/(contacts|companies|tasks|products|templates|automations|notes)(?:\/(\d+))?$/);
     if (mCrud) { const [, table, id] = mCrud; const fields = CRUD[table];
-      // шаблоны и автоматизации меняет только администратор, товары удаляет тоже он —
-      // иначе правила и прайс может случайно переписать любой менеджер
-      if (req.method !== 'GET' && ['templates', 'automations'].includes(table) && !requireAdmin(user, res)) return;
+      if (table === 'templates') {
+        // шаблоны личные: каждый видит и правит только свои — без вкладок и переключателей
+        if (req.method === 'GET' && !id) return json(res, 200, db.prepare('SELECT * FROM templates WHERE user_id=? ORDER BY id DESC').all(user.id));
+        if (req.method === 'POST') {
+          const b = await readBody(req);
+          const r = db.prepare('INSERT INTO templates(name,body,channel,user_id) VALUES(?,?,?,?)')
+            .run(String(b.name || '').slice(0, 80) || 'Шаблон', String(b.body || '').slice(0, 20000),
+              ['whatsapp', 'telegram', 'instagram', 'viber', 'email', 'any'].includes(b.channel) ? b.channel : 'any', user.id);
+          log('Создан шаблон', 'templates', Number(r.lastInsertRowid), user.name);
+          broadcast('change', { table });
+          return json(res, 201, db.prepare('SELECT * FROM templates WHERE id=?').get(r.lastInsertRowid));
+        }
+        if (id) {
+          const tpl = db.prepare('SELECT * FROM templates WHERE id=?').get(id);
+          if (!tpl) return json(res, 404, { error: 'Шаблон не найден' });
+          if (tpl.user_id !== user.id) return json(res, 403, { error: 'Это чужой шаблон — можно менять только свои' });
+          if (req.method === 'PATCH') { const b = await readBody(req); const ks = Object.keys(b).filter(k => ['name', 'body', 'channel'].includes(k)); if (ks.length) db.prepare(`UPDATE templates SET ${ks.map(k => k + '=?')} WHERE id=?`).run(...ks.map(k => k === 'name' ? String(b[k]).slice(0, 80) : k === 'body' ? String(b[k]).slice(0, 20000) : b[k]), id); broadcast('change', { table }); return json(res, 200, db.prepare('SELECT * FROM templates WHERE id=?').get(id)); }
+          if (req.method === 'DELETE') { db.prepare('DELETE FROM templates WHERE id=?').run(id); log('Шаблон удалён', 'templates', Number(id), user.name); broadcast('change', { table }); return json(res, 200, { deleted: true }); }
+        }
+        return json(res, 405, { error: 'Метод не поддерживается' });
+      }
+      // автоматизации и товары удаляет администратор — иначе правила и прайс
+      // может случайно переписать любой менеджер
+      if (req.method !== 'GET' && table === 'automations' && !requireAdmin(user, res)) return;
       if (req.method === 'DELETE' && table === 'products' && !requireAdmin(user, res)) return;
       if (req.method === 'GET' && !id) { if (table === 'tasks') return json(res, 200, db.prepare('SELECT t.*,c.name contact_name,d.title deal_title,u.name responsible_name FROM tasks t LEFT JOIN contacts c ON c.id=t.contact_id LEFT JOIN deals d ON d.id=t.deal_id LEFT JOIN users u ON u.id=t.responsible_id ORDER BY done,due,id DESC').all()); if (table === 'notes') return json(res, 200, db.prepare('SELECT * FROM notes WHERE entity_type=? AND entity_id=? ORDER BY id DESC').all(u.searchParams.get('type'), u.searchParams.get('entity'))); return json(res, 200, db.prepare(`SELECT * FROM ${table} ORDER BY id DESC`).all()); }
       if (req.method === 'GET') return json(res, 200, db.prepare(`SELECT * FROM ${table} WHERE id=?`).get(id) || {});
-      if (req.method === 'POST') { const b = await readBody(req); if (table === 'notes') b.author = user.name; const ks = fields.filter(f => b[f] !== undefined); const r = db.prepare(`INSERT INTO ${table}(${ks}) VALUES(${ks.map(() => '?')})`).run(...ks.map(k => b[k])); log(`Создано (${table} #${r.lastInsertRowid})`, table, Number(r.lastInsertRowid), user.name); broadcast('change', { table }); return json(res, 201, db.prepare(`SELECT * FROM ${table} WHERE id=?`).get(r.lastInsertRowid)); }
+      if (req.method === 'POST') {
+        const b = await readBody(req); if (table === 'notes') b.author = user.name;
+        // обязательные поля проверяем до SQL: иначе пользователь увидит 500 вместо подсказки
+        const required = { contacts: 'name', companies: 'name', products: 'name', tasks: 'title', automations: 'name', templates: 'name' }[table];
+        if (required && !String(b[required] || '').trim()) return json(res, 400, { error: required === 'name' ? 'Укажите название' : 'Укажите название задачи' });
+        if (table === 'notes' && !String(b.body || '').trim()) return json(res, 400, { error: 'Заметка не может быть пустой' });
+        // при создании обязательные поля проверяются всегда, при частичном обновлении — только если custom передан
+        if (table === 'contacts') { const err = missingRequiredCustom('contacts', b.custom); if (err) return json(res, 400, { error: err }); }
+        // связанные записи должны существовать: понятная ошибка вместо сбоя внешнего ключа
+        const fk = { tasks: [['deal_id', 'deals'], ['contact_id', 'contacts'], ['responsible_id', 'users']], contacts: [['company_id', 'companies'], ['responsible_id', 'users']] }[table] || [];
+        for (const [field, target] of fk) {
+          if (b[field] && !db.prepare(`SELECT 1 x FROM ${target} WHERE id=?`).get(b[field])) return json(res, 400, { error: 'Связанная запись не найдена — обновите страницу и выберите из списка' });
+        }
+        if (table === 'tasks' && b.due) b.due = normalizeDue(String(b.due));
+        const ks = fields.filter(f => b[f] !== undefined), vals = ks.map(k => b[k]);
+        if (table === 'contacts' && b.phone !== undefined) { ks.push('phone_norm'); vals.push(digits(b.phone) || null); }
+        const r = db.prepare(`INSERT INTO ${table}(${ks}) VALUES(${ks.map(() => '?')})`).run(...vals);
+        log(`Создано (${table} #${r.lastInsertRowid})`, table, Number(r.lastInsertRowid), user.name);
+        broadcast('change', { table });
+        return json(res, 201, db.prepare(`SELECT * FROM ${table} WHERE id=?`).get(r.lastInsertRowid));
+      }
       if (req.method === 'PATCH' && id) {
-        const b = await readBody(req); const ks = Object.keys(b).filter(k => fields.includes(k));
+        const b = await readBody(req);
+        if (table === 'tasks' && b.due !== undefined) b.due = b.due ? normalizeDue(String(b.due)) : '';
+        const ks = Object.keys(b).filter(k => fields.includes(k));
+        if (table === 'contacts' && b.custom !== undefined) { const err = missingRequiredCustom('contacts', b.custom); if (err) return json(res, 400, { error: err }); }
+        if (table === 'contacts' && b.phone !== undefined && !ks.includes('phone_norm')) { ks.push('phone_norm'); b.phone_norm = digits(b.phone) || null; }
         if (ks.length) db.prepare(`UPDATE ${table} SET ${ks.map(k => k + '=?')} WHERE id=?`).run(...ks.map(k => b[k]), id);
         // закрыли повторяющуюся задачу — сразу создаём следующую по расписанию
         let nextTaskId = null;
@@ -750,7 +966,7 @@ export const server = http.createServer(async (req, res) => {
             const base = /^\d{4}-\d{2}-\d{2}/.test(t.due || '') ? new Date(String(t.due).replace(' ', 'T')) : new Date();
             const next = new Date(Math.max(base.getTime(), Date.now()) + days * 864e5);
             const time = /\d{2}:\d{2}/.test(t.due || '') ? String(t.due).slice(-5) : '10:00';
-            const due = `${next.toISOString().slice(0, 10)} ${time}`;
+            const due = `${localDate(next)} ${time}`;
             const r = db.prepare('INSERT INTO tasks(title,type,due,priority,done,deal_id,contact_id,responsible_id,result,repeat) VALUES(?,?,?,?,0,?,?,?,?,?)')
               .run(t.title, t.type, due, t.priority || 'normal', t.deal_id, t.contact_id, t.responsible_id, t.result, t.repeat);
             nextTaskId = Number(r.lastInsertRowid);
@@ -762,7 +978,23 @@ export const server = http.createServer(async (req, res) => {
         const row = db.prepare(`SELECT * FROM ${table} WHERE id=?`).get(id);
         return json(res, 200, nextTaskId ? { ...row, next_task_id: nextTaskId } : row);
       }
-      if (req.method === 'DELETE' && id) { db.prepare(`DELETE FROM ${table} WHERE id=?`).run(id); broadcast('change', { table }); return json(res, 200, { deleted: true }); }
+      if (req.method === 'DELETE' && id) {
+        // связанные записи не должны оставаться с «висячими» ссылками
+        if (table === 'contacts') {
+          db.prepare('UPDATE tasks SET contact_id=NULL WHERE contact_id=?').run(id);
+          db.prepare('UPDATE deals SET contact_id=NULL WHERE contact_id=?').run(id);
+          db.prepare("DELETE FROM notes WHERE entity_type='contacts' AND entity_id=?").run(id);
+        }
+        if (table === 'companies') {
+          db.prepare('UPDATE deals SET company_id=NULL WHERE company_id=?').run(id);
+          db.prepare('UPDATE contacts SET company_id=NULL WHERE company_id=?').run(id);
+          db.prepare("DELETE FROM notes WHERE entity_type='companies' AND entity_id=?").run(id);
+        }
+        const gone = db.prepare(`DELETE FROM ${table} WHERE id=?`).run(id).changes;
+        if (!gone) return json(res, 404, { error: 'Запись не найдена — обновите страницу' });
+        broadcast('change', { table });
+        return json(res, 200, { deleted: true });
+      }
     }
     // ===== pipelines & stages (configurable) =====
     if (p === '/api/pipelines') {
@@ -770,13 +1002,71 @@ export const server = http.createServer(async (req, res) => {
       if (req.method === 'POST') { if (!requireAdmin(user, res)) return; const b = await readBody(req); const r = db.prepare('INSERT INTO pipelines(name) VALUES(?)').run(b.name || 'Новая воронка'); const st = db.prepare('INSERT INTO stages(pipeline_id,code,name,color,sort,kind) VALUES(?,?,?,?,?,?)'); [['new', 'Неразобранное', '#f97316', 0, 'open'], ['won', 'Успешно реализовано', '#15803d', 1, 'won'], ['lost', 'Закрыто и не реализовано', '#78716c', 2, 'lost']].forEach(x => st.run(r.lastInsertRowid, ...x)); return json(res, 201, { id: r.lastInsertRowid }); }
     }
     const mPipe = p.match(/^\/api\/pipelines\/(\d+)$/);
-    if (mPipe && req.method === 'PUT') { if (!requireAdmin(user, res)) return; const b = await readBody(req); db.prepare('UPDATE pipelines SET name=? WHERE id=?').run(b.name, mPipe[1]); db.prepare('DELETE FROM stages WHERE pipeline_id=?').run(mPipe[1]); const st = db.prepare('INSERT INTO stages(pipeline_id,code,name,color,sort,kind) VALUES(?,?,?,?,?,?)'); (b.stages || []).forEach((s, i) => st.run(mPipe[1], s.code || ('s' + Date.now() + i), s.name, s.color || '#16a34a', i, s.kind || 'open')); log('Воронка и этапы обновлены', 'pipelines', Number(mPipe[1]), user.name); return json(res, 200, { saved: true }); }
-    if (mPipe && req.method === 'DELETE') { if (!requireAdmin(user, res)) return; db.prepare('DELETE FROM pipelines WHERE id=?').run(mPipe[1]); return json(res, 200, { deleted: true }); }
+    if (mPipe && req.method === 'PUT') {
+      if (!requireAdmin(user, res)) return;
+      const b = await readBody(req), pid = Number(mPipe[1]);
+      const pipe = db.prepare('SELECT * FROM pipelines WHERE id=?').get(pid);
+      if (!pipe) return json(res, 404, { error: 'Воронка не найдена' });
+      const list = Array.isArray(b.stages) ? b.stages : null;
+      if (!list) return json(res, 400, { error: 'Не передан список этапов' });
+      if (list.length < 2) return json(res, 400, { error: 'Нужно минимум 2 этапа: сделка не может «повиснуть» без этапа' });
+      const clean = [];
+      for (let i = 0; i < list.length; i++) {
+        const st = list[i] || {};
+        const name = String(st.name || '').trim().slice(0, 60);
+        if (!name) return json(res, 400, { error: `У этапа №${i + 1} нет названия` });
+        clean.push({ code: String(st.code || ('s' + Date.now() + i)).replace(/[^a-zA-Z0-9_-]/g, '').slice(0, 40) || ('s' + Date.now() + i), name, color: /^#[0-9a-f]{6}$/i.test(st.color || '') ? st.color : '#16a34a', kind: ['open', 'won', 'lost'].includes(st.kind) ? st.kind : 'open' });
+      }
+      if (new Set(clean.map(x => x.code)).size !== clean.length) return json(res, 400, { error: 'Этапы не должны повторяться' });
+      // нельзя терять сделки: этап с карточками сначала переносят
+      const keep = new Set(clean.map(x => x.code));
+      const lost = db.prepare('SELECT stage, COUNT(*) n FROM deals WHERE pipeline_id=? GROUP BY stage').all(pid).filter(r => !keep.has(r.stage));
+      if (lost.length) {
+        const names = lost.map(r => `«${r.stage}» — ${r.n}`).join(', ');
+        return json(res, 400, { error: `На удаляемых этапах есть сделки (${names}). Сначала переведите их на другой этап в канбане, затем сохраните воронку.` });
+      }
+      db.exec('BEGIN IMMEDIATE');
+      try {
+        db.prepare('UPDATE pipelines SET name=? WHERE id=?').run(String(b.name || pipe.name).trim().slice(0, 80) || pipe.name, pid);
+        db.prepare('DELETE FROM stages WHERE pipeline_id=?').run(pid);
+        const st = db.prepare('INSERT INTO stages(pipeline_id,code,name,color,sort,kind) VALUES(?,?,?,?,?,?)');
+        clean.forEach((x, i) => st.run(pid, x.code, x.name, x.color, i, x.kind));
+        db.exec('COMMIT');
+      } catch (e) { db.exec('ROLLBACK'); throw e }
+      log('Воронка и этапы обновлены', 'pipelines', pid, user.name);
+      broadcast('change', { table: 'pipelines' });
+      return json(res, 200, { saved: true, stages: getStages(pid) });
+    }
+    if (mPipe && req.method === 'DELETE') {
+      if (!requireAdmin(user, res)) return;
+      if (db.prepare('SELECT COUNT(*) n FROM pipelines').get().n <= 1) return json(res, 400, { error: 'Это единственная воронка — удалять её нельзя, иначе новым сделкам некуда попадать' });
+      const used = db.prepare('SELECT COUNT(*) n FROM deals WHERE pipeline_id=?').get(mPipe[1]).n;
+      if (used) return json(res, 400, { error: `В воронке ${used} сделок — перенесите их в другую воронку, потом удаляйте` });
+      db.prepare('DELETE FROM pipelines WHERE id=?').run(mPipe[1]);
+      return json(res, 200, { deleted: true });
+    }
 
     // ===== deals =====
     if (p === '/api/deals') {
       if (req.method === 'GET') return json(res, 200, { pipelines: db.prepare('SELECT * FROM pipelines').all(), stages: getStages(Number(u.searchParams.get('pipeline') || 1)), deals: db.prepare('SELECT d.*,c.name contact_name,c.phone contact_phone,co.name company_name,(SELECT COUNT(*) FROM tasks t WHERE t.deal_id=d.id AND t.done=0) as tasks_open,(SELECT MIN(t.due) FROM tasks t WHERE t.deal_id=d.id AND t.done=0) as next_task_due FROM deals d LEFT JOIN contacts c ON c.id=d.contact_id LEFT JOIN companies co ON co.id=d.company_id ORDER BY d.id DESC').all() });
-      if (req.method === 'POST') { const b = await readBody(req); const fields = ['title', 'amount', 'stage', 'pipeline_id', 'contact_id', 'company_id', 'responsible', 'responsible_id', 'priority', 'loss_reason', 'deadline', 'custom']; const ks = fields.filter(f => b[f] !== undefined); const r = db.prepare(`INSERT INTO deals(${ks}) VALUES(${ks.map(() => '?')})`).run(...ks.map(k => b[k])); log(`Сделка создана: ${b.title}`, 'deals', Number(r.lastInsertRowid), user.name); runAutomations('deal_created', { deal_id: Number(r.lastInsertRowid), contact_id: b.contact_id }); broadcast('change', { table: 'deals' }); return json(res, 201, db.prepare('SELECT * FROM deals WHERE id=?').get(r.lastInsertRowid)); }
+      if (req.method === 'POST') { const b = await readBody(req); if (!String(b.title || '').trim()) return json(res, 400, { error: 'Укажите название сделки' });
+        b.title = String(b.title).trim().slice(0, 200);
+        const pipelineId = Number(b.pipeline_id) || 1;
+        if (!db.prepare('SELECT 1 x FROM pipelines WHERE id=?').get(pipelineId)) return json(res, 400, { error: 'Воронка не найдена — обновите страницу и выберите другую' });
+        const stageList = getStages(pipelineId);
+        const stage = b.stage ? String(b.stage) : (stageList[0]?.code || 'new');
+        if (!stageList.some(x => x.code === stage)) return json(res, 400, { error: 'Этап не найден в выбранной воронке — обновите страницу' });
+        const amount = (b.amount === undefined || b.amount === null || b.amount === '') ? 0 : Number(b.amount);
+        if (!Number.isFinite(amount) || amount < 0) return json(res, 400, { error: 'Сумма сделки должна быть неотрицательным числом' });
+        b.pipeline_id = pipelineId; b.stage = stage; b.amount = Math.round(amount);
+        b.contact_id = b.contact_id ? Number(b.contact_id) : null;
+        b.company_id = b.company_id ? Number(b.company_id) : null;
+        if (b.contact_id !== null && (!Number.isInteger(b.contact_id) || b.contact_id <= 0)) return json(res, 400, { error: 'Некорректный клиент — выберите контакт из списка' });
+        if (b.company_id !== null && (!Number.isInteger(b.company_id) || b.company_id <= 0)) return json(res, 400, { error: 'Некорректная компания — выберите из списка' });
+        if (b.contact_id && !db.prepare('SELECT 1 x FROM contacts WHERE id=?').get(b.contact_id)) return json(res, 400, { error: 'Клиент не найден — выберите контакт из списка' });
+        if (b.company_id && !db.prepare('SELECT 1 x FROM companies WHERE id=?').get(b.company_id)) return json(res, 400, { error: 'Компания не найдена — обновите страницу и выберите из списка' });
+        if (b.responsible_id !== undefined && b.responsible_id !== null && b.responsible_id !== '' && !db.prepare('SELECT 1 x FROM users WHERE id=?').get(b.responsible_id)) return json(res, 400, { error: 'Ответственный не найден — обновите страницу и выберите сотрудника' });
+        { const err = missingRequiredCustom('deals', b.custom); if (err) return json(res, 400, { error: err }); } const fields = ['title', 'amount', 'stage', 'pipeline_id', 'contact_id', 'company_id', 'responsible', 'responsible_id', 'priority', 'loss_reason', 'deadline', 'custom']; const ks = fields.filter(f => b[f] !== undefined); const r = db.prepare(`INSERT INTO deals(${ks}) VALUES(${ks.map(() => '?')})`).run(...ks.map(k => b[k])); log(`Сделка создана: ${b.title}`, 'deals', Number(r.lastInsertRowid), user.name); runAutomations('deal_created', { deal_id: Number(r.lastInsertRowid), contact_id: b.contact_id }); broadcast('change', { table: 'deals' }); return json(res, 201, db.prepare('SELECT * FROM deals WHERE id=?').get(r.lastInsertRowid)); }
     }
     // ===== печать документов по сделке: коммерческое предложение или счёт =====
     if (/^\/api\/deals\/\d+\/print$/.test(p) && req.method === 'GET') {
@@ -792,23 +1082,63 @@ export const server = http.createServer(async (req, res) => {
     if (mDeal) { const id = mDeal[1];
       if (mDeal[2] === 'products') {
         if (req.method === 'GET') return json(res, 200, db.prepare('SELECT * FROM deal_products WHERE deal_id=?').all(id));
-        if (req.method === 'POST') { const b = await readBody(req); const pr = b.product_id ? db.prepare('SELECT * FROM products WHERE id=?').get(b.product_id) : null; const r = db.prepare('INSERT INTO deal_products(deal_id,product_id,name,price,qty) VALUES(?,?,?,?,?)').run(id, b.product_id || null, b.name || pr?.name, b.price ?? pr?.price ?? 0, b.qty || 1); const sum = db.prepare('SELECT COALESCE(SUM(price*qty),0) s FROM deal_products WHERE deal_id=?').get(id).s; db.prepare('UPDATE deals SET amount=? WHERE id=?').run(sum, id); broadcast('change', { table: 'deals' }); return json(res, 201, db.prepare('SELECT * FROM deal_products WHERE id=?').get(r.lastInsertRowid)); }
+        if (req.method === 'POST') {
+          if (!db.prepare('SELECT id FROM deals WHERE id=?').get(id)) return json(res, 404, { error: 'Сделка не найдена' });
+          const b = await readBody(req);
+          const pr = b.product_id ? db.prepare('SELECT * FROM products WHERE id=?').get(b.product_id) : null;
+          const price = Math.max(0, Number(b.price ?? pr?.price ?? 0) || 0), qty = Math.max(0.001, Number(b.qty) || 1);
+          const name = String(b.name || pr?.name || 'Позиция').slice(0, 200);
+          const r = db.prepare('INSERT INTO deal_products(deal_id,product_id,name,price,qty) VALUES(?,?,?,?,?)').run(id, b.product_id || null, name, price, qty); const sum = db.prepare('SELECT COALESCE(SUM(price*qty),0) s FROM deal_products WHERE deal_id=?').get(id).s; db.prepare('UPDATE deals SET amount=? WHERE id=?').run(sum, id); broadcast('change', { table: 'deals' }); return json(res, 201, db.prepare('SELECT * FROM deal_products WHERE id=?').get(r.lastInsertRowid)); }
         return json(res, 405, { error: 'Метод не поддерживается' });
       }
       if (req.method === 'GET') {
         const deal = db.prepare('SELECT d.*,c.name contact_name,c.phone contact_phone,c.email contact_email,u.name responsible_name FROM deals d LEFT JOIN contacts c ON c.id=d.contact_id LEFT JOIN users u ON u.id=d.responsible_id WHERE d.id=?').get(id);
+        if (!deal) return json(res, 404, { error: 'Сделка не найдена' });
         const products = db.prepare('SELECT dp.*,pr.name product_name FROM deal_products dp LEFT JOIN products pr ON pr.id=dp.product_id WHERE dp.deal_id=?').all(id);
         // переписка клиента по этой сделке — единый диалог прямо в карточке
-        const conv = deal?.contact_id ? db.prepare('SELECT id,channels,unread,chat_type FROM conversations WHERE contact_id=? ORDER BY last_at DESC').get(deal.contact_id) : null;
+        const conv = deal?.contact_id ? db.prepare('SELECT id,title,channels,unread,chat_type FROM conversations WHERE contact_id=? ORDER BY last_at DESC').get(deal.contact_id) : null;
         const messages = conv ? db.prepare('SELECT * FROM messages WHERE conversation_id=? ORDER BY id DESC LIMIT 40').all(conv.id).reverse() : [];
         return json(res, 200, { deal, notes: db.prepare("SELECT * FROM notes WHERE entity_type='deals' AND entity_id=? ORDER BY id DESC").all(id), tasks: db.prepare('SELECT * FROM tasks WHERE deal_id=? ORDER BY id DESC').all(id), products, history: db.prepare("SELECT * FROM activities WHERE entity_type='deals' AND entity_id=? ORDER BY id DESC LIMIT 20").all(id), conversation: conv, messages });
       }
-      if (req.method === 'PATCH') { const b = await readBody(req); const old = db.prepare('SELECT * FROM deals WHERE id=?').get(id); const fields = ['title', 'amount', 'stage', 'pipeline_id', 'contact_id', 'company_id', 'responsible', 'responsible_id', 'priority', 'loss_reason', 'deadline', 'custom']; const ks = Object.keys(b).filter(k => fields.includes(k)); if (ks.length) db.prepare(`UPDATE deals SET ${ks.map(k => k + '=?')},updated_at=datetime('now')${b.stage && ['won', 'lost'].includes(b.stage) ? ",closed_at=datetime('now')" : ''} WHERE id=?`).run(...ks.map(k => b[k]), id); if (b.stage && old && b.stage !== old.stage) { const s = db.prepare('SELECT name FROM stages WHERE code=?').get(b.stage); log(`Сделка «${old.title}» → этап «${s?.name || b.stage}»`, 'deals', Number(id), user.name); runAutomations('stage_changed', { deal_id: Number(id), contact_id: old.contact_id, stage: b.stage }); } broadcast('change', { table: 'deals' }); return json(res, 200, db.prepare('SELECT * FROM deals WHERE id=?').get(id)); }
-      if (req.method === 'DELETE') { db.prepare('DELETE FROM deals WHERE id=?').run(id); return json(res, 200, { deleted: true }); }
+      if (req.method === 'PATCH') { const b = await readBody(req); const old = db.prepare('SELECT * FROM deals WHERE id=?').get(id);
+        if (!old) return json(res, 404, { error: 'Сделка не найдена' });
+        if (b.title !== undefined && !String(b.title || '').trim()) return json(res, 400, { error: 'Название сделки не может быть пустым' });
+        if (b.title !== undefined) b.title = String(b.title).trim().slice(0, 200);
+        if (b.pipeline_id !== undefined) { const pid = Number(b.pipeline_id); if (!db.prepare('SELECT 1 x FROM pipelines WHERE id=?').get(pid)) return json(res, 400, { error: 'Воронка не найдена — обновите страницу' }); b.pipeline_id = pid; }
+        const dealPipeline = Number(b.pipeline_id ?? old.pipeline_id) || 1;
+        const dealStages = getStages(dealPipeline);
+        if (b.stage !== undefined) {
+          b.stage = String(b.stage);
+          if (!dealStages.some(x => x.code === b.stage)) return json(res, 400, { error: 'Этап не найден в выбранной воронке — обновите страницу' });
+        } else if (b.pipeline_id !== undefined && !dealStages.some(x => x.code === old.stage)) {
+          // воронку сменили, а этап остался от старой — ставим первый этап новой
+          b.stage = dealStages[0]?.code || old.stage;
+        }
+        if (b.amount !== undefined) { const amount = b.amount === null || b.amount === '' ? 0 : Number(b.amount); if (!Number.isFinite(amount) || amount < 0) return json(res, 400, { error: 'Сумма сделки должна быть неотрицательным числом' }); b.amount = Math.round(amount); }
+        if (b.contact_id !== undefined) { b.contact_id = b.contact_id ? Number(b.contact_id) : null; if (b.contact_id !== null && (!Number.isInteger(b.contact_id) || b.contact_id <= 0)) return json(res, 400, { error: 'Некорректный клиент — выберите контакт из списка' }); if (b.contact_id && !db.prepare('SELECT 1 x FROM contacts WHERE id=?').get(b.contact_id)) return json(res, 400, { error: 'Клиент не найден — выберите контакт из списка' }); }
+        if (b.company_id !== undefined) { b.company_id = b.company_id ? Number(b.company_id) : null; if (b.company_id !== null && (!Number.isInteger(b.company_id) || b.company_id <= 0)) return json(res, 400, { error: 'Некорректная компания — выберите из списка' }); if (b.company_id && !db.prepare('SELECT 1 x FROM companies WHERE id=?').get(b.company_id)) return json(res, 400, { error: 'Компания не найдена — обновите страницу и выберите из списка' }); }
+        if (b.responsible_id !== undefined && b.responsible_id !== null && b.responsible_id !== '' && !db.prepare('SELECT 1 x FROM users WHERE id=?').get(b.responsible_id)) return json(res, 400, { error: 'Ответственный не найден — обновите страницу и выберите сотрудника' });
+        if (b.custom !== undefined) { const err = missingRequiredCustom('deals', b.custom); if (err) return json(res, 400, { error: err }); }
+        const fields = ['title', 'amount', 'stage', 'pipeline_id', 'contact_id', 'company_id', 'responsible', 'responsible_id', 'priority', 'loss_reason', 'deadline', 'custom']; const ks = Object.keys(b).filter(k => fields.includes(k)); if (ks.length) db.prepare(`UPDATE deals SET ${ks.map(k => k + '=?')},updated_at=datetime('now')${b.stage && ['won', 'lost'].includes(b.stage) ? ",closed_at=datetime('now')" : ''} WHERE id=?`).run(...ks.map(k => b[k]), id); if (b.stage && old && b.stage !== old.stage) { const s = db.prepare('SELECT name FROM stages WHERE code=?').get(b.stage); log(`Сделка «${old.title}» → этап «${s?.name || b.stage}»`, 'deals', Number(id), user.name); runAutomations('stage_changed', { deal_id: Number(id), contact_id: old.contact_id, stage: b.stage }); } broadcast('change', { table: 'deals' }); return json(res, 200, db.prepare('SELECT * FROM deals WHERE id=?').get(id)); }
+      if (req.method === 'DELETE') {
+        const d = db.prepare('SELECT * FROM deals WHERE id=?').get(id);
+        if (!d) return json(res, 404, { error: 'Сделка не найдена' });
+        db.exec('BEGIN IMMEDIATE');
+        try {
+          // задачи не удаляем: они остаются в списке дел и у клиента, просто без привязки к сделке
+          db.prepare('UPDATE tasks SET deal_id=NULL WHERE deal_id=?').run(id);
+          db.prepare('DELETE FROM deal_products WHERE deal_id=?').run(id);
+          db.prepare('DELETE FROM deals WHERE id=?').run(id);
+          db.exec('COMMIT');
+        } catch (e) { db.exec('ROLLBACK'); throw e }
+        log(`Сделка удалена: ${d.title}`, 'deals', Number(id), user.name);
+        broadcast('change', { table: 'deals' });
+        return json(res, 200, { deleted: true, tasks_kept: db.prepare('SELECT COUNT(*) n FROM tasks WHERE deal_id IS NULL AND contact_id IS NOT NULL').get().n ? true : false });
+      }
     }
     const mDp = p.match(/^\/api\/deal_products\/(\d+)$/);
     if (mDp) { const id = mDp[1]; const row = db.prepare('SELECT * FROM deal_products WHERE id=?').get(id); if (!row) return json(res, 404, { error: 'Позиция не найдена' });
-      if (req.method === 'PATCH') { const b = await readBody(req); db.prepare('UPDATE deal_products SET qty=?,price=? WHERE id=?').run(b.qty ?? row.qty, b.price ?? row.price, id); }
+      if (req.method === 'PATCH') { const b = await readBody(req); const qty = b.qty === undefined ? row.qty : Math.max(0.001, Number(b.qty) || row.qty), price = b.price === undefined ? row.price : Math.max(0, Number(b.price) || 0); db.prepare('UPDATE deal_products SET qty=?,price=? WHERE id=?').run(qty, price, id); }
       if (req.method === 'DELETE') db.prepare('DELETE FROM deal_products WHERE id=?').run(id);
       const sum = db.prepare('SELECT COALESCE(SUM(price*qty),0) s FROM deal_products WHERE deal_id=?').get(row.deal_id).s; db.prepare('UPDATE deals SET amount=? WHERE id=?').run(sum, row.deal_id); return json(res, 200, { saved: true, amount: sum }); }
     // ===== users / team =====
@@ -906,13 +1236,23 @@ export const server = http.createServer(async (req, res) => {
     if (mConv) { const id = mConv[1];
       if (req.method === 'GET') { db.prepare('UPDATE conversations SET unread=0 WHERE id=?').run(id); return json(res, 200, db.prepare('SELECT * FROM messages WHERE conversation_id=? ORDER BY id').all(id)); }
       if (req.method === 'POST') { const b = await readBody(req); const conv = db.prepare('SELECT cv.*,c.phone FROM conversations cv LEFT JOIN contacts c ON c.id=cv.contact_id WHERE cv.id=?').get(id); if (!conv) return json(res, 404, { error: 'Чат не найден' }); if (b.channel_id) conv.channel_id = b.channel_id; if (b.chat_type) conv.chat_type = b.chat_type; if (b.chatId) conv.external_chat_id = b.chatId;
-        const file = b.contentUri ? { contentUri: String(b.contentUri) } : (b.fileUrl ? { contentUri: String(b.fileUrl) } : null);
+        // ссылка на вложение — только http(s) или наш /uploads/: javascript: и data: не пройдут
+        const rawUri = String(b.contentUri || b.fileUrl || '').trim();
+        if (rawUri && !/^(https?:\/\/|\/uploads\/)/i.test(rawUri)) return json(res, 400, { error: 'Ссылка на файл должна начинаться с http://, https:// или /uploads/' });
+        const file = rawUri ? { contentUri: rawUri.slice(0, 2048) } : null;
         if (!String(b.body || '').trim() && !file) return json(res, 400, { error: 'Пустое сообщение: введите текст или приложите ссылку на файл' });
         let send = { delivered: false, mode: 'local' }, status = 'local'; const wantChannel = b.chat_type || b.channel || conv.chat_type || 'whatsapp';
-        try { send = await deliver(conv, wantChannel, b.body || '', user, file); status = send.delivered ? 'sent' : 'local'; } catch (e) { status = 'error'; send = { delivered: false, mode: 'error: ' + e.message }; }
+        // письма идут через SMTP отдельным действием: мессенджер их не отправляет
+        if (wantChannel === 'email') return json(res, 400, { error: 'Письмо отправляется кнопкой «Письмо» в шапке чата — через настроенный почтовый сервер' });
+        try { send = await deliver(conv, wantChannel, b.body || '', user, file); status = send.delivered ? 'sent' : 'local'; }
+        catch (e) {
+          // без подключённого Wazzup сообщение честно остаётся в CRM
+          if (String(e.message) === 'WAZZUP_NOT_CONFIGURED') { status = 'local'; send = { delivered: false, mode: 'local-only', hint: 'Wazzup не подключён — сообщение сохранено в CRM. Настройки → Интеграции: вставьте API-ключ Wazzup, и ответ уйдёт клиенту.' }; }
+          else { status = 'error'; send = { delivered: false, mode: 'error: ' + e.message }; }
+        }
         const body = String(b.body || '').trim() || (file ? '[вложение]' : '');
         const r = db.prepare('INSERT INTO messages(conversation_id,channel,direction,body,content_uri,content_name,content_type,status,external_id,author) VALUES(?,?,?,?,?,?,?,?,?,?)').run(id, wantChannel, 'out', body, file?.contentUri || null, b.contentName ? safeFileName(b.contentName) : null, b.contentType || null, status, send.id || null, user.name);
-        db.prepare("UPDATE conversations SET last_at=datetime('now') WHERE id=?").run(id); broadcast('message', { conversation_id: Number(id) }); return json(res, 201, { message: db.prepare('SELECT * FROM messages WHERE id=?').get(r.lastInsertRowid), send }); }
+        db.prepare("UPDATE conversations SET last_at=datetime('now') WHERE id=?").run(id); broadcast('message', { conversation_id: Number(id), direction: 'out' }); return json(res, 201, { message: db.prepare('SELECT * FROM messages WHERE id=?').get(r.lastInsertRowid), send }); }
     }
     const mEmail = p.match(/^\/api\/conversations\/(\d+)\/email$/);
     if (mEmail && req.method === 'POST') {
@@ -945,7 +1285,7 @@ export const server = http.createServer(async (req, res) => {
       const extByType = { 'image/png': 'png', 'image/jpeg': 'jpg', 'image/gif': 'gif', 'image/webp': 'webp', 'application/pdf': 'pdf', 'text/plain': 'txt', 'text/csv': 'csv', 'application/zip': 'zip', 'application/msword': 'doc', 'application/vnd.openxmlformats-officedocument.wordprocessingml.document': 'docx', 'application/vnd.ms-excel': 'xls', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet': 'xlsx' };
       const ext = extByType[contentType] || 'bin';
       const safeName = safeFileName(b.filename || ('файл.' + ext));
-      const stored = `${new Date().toISOString().slice(0, 10).replace(/-/g, '')}-${randomBytes(6).toString('hex')}-${asciiFileName(b.filename || ('file.' + ext))}`;
+      const stored = `${localDate().replace(/-/g, '')}-${randomBytes(6).toString('hex')}-${asciiFileName(b.filename || ('file.' + ext))}`;
       mkdir(UPLOAD_DIR, { recursive: true });
       writeFileSync(join(UPLOAD_DIR, stored), raw);
       log(`Файл загружен в чат #${cid}: ${safeName}`, 'conversations', cid, user.name);
@@ -980,14 +1320,43 @@ export const server = http.createServer(async (req, res) => {
     }
     // CSV export/import
     if (p === '/api/export/contacts') { res.writeHead(200, { 'Content-Type': 'text/csv; charset=utf-8', 'Content-Disposition': 'attachment; filename=contacts.csv' }); return res.end('﻿' + csv(db.prepare('SELECT name,phone,email,company,source,tags FROM contacts').all())); }
-    if (p === '/api/export/deals') { res.writeHead(200, { 'Content-Type': 'text/csv; charset=utf-8', 'Content-Disposition': 'attachment; filename=deals.csv' }); return res.end('﻿' + csv(db.prepare('SELECT title,amount,stage,priority,deadline,created_at FROM deals').all())); }
-    if (p === '/api/import/contacts' && req.method === 'POST') { const b = await readBody(req); const lines = String(b.csv || '').split(/\r?\n/).slice(1).filter(Boolean); let n = 0; for (const line of lines) { const [name, phone, email, company] = line.split(/;|,/).map(x => x.replace(/^"|"$/g, '')); if (name) { db.prepare('INSERT INTO contacts(name,phone,email,company,source) VALUES(?,?,?,?,?)').run(name, phone || '', email || '', company || '', 'import'); n++; } } return json(res, 200, { imported: n }); }
+    if (p === '/api/export/deals') {
+      res.writeHead(200, { 'Content-Type': 'text/csv; charset=utf-8', 'Content-Disposition': 'attachment; filename=deals.csv' });
+      const rows = db.prepare(`SELECT d.title 'Название', d.amount 'Сумма', COALESCE(c.name,'') 'Клиент', COALESCE(c.phone,'') 'Телефон', d.stage 'Этап', d.priority 'Приоритет', COALESCE(d.deadline,'') 'Срок', COALESCE(d.loss_reason,'') 'Причина отказа', datetime(d.created_at,'localtime') 'Создана' FROM deals d LEFT JOIN contacts c ON c.id=d.contact_id ORDER BY d.id DESC`).all();
+      return res.end('﻿' + csv(rows));
+    }
+    if (p === '/api/import/contacts' && req.method === 'POST') {
+      const b = await readBody(req);
+      // CSV с кавычками: простой split по ; или , ломается на полях «Иван;Иванов»
+      const parseCsvLine = line => { const out = []; let cur = '', q = false; for (let i = 0; i < line.length; i++) { const ch = line[i]; if (ch === '"') { if (q && line[i + 1] === '"') { cur += '"'; i++ } else q = !q } else if ((ch === ';' || ch === ',') && !q) { out.push(cur); cur = '' } else cur += ch } out.push(cur); return out.map(x => x.trim()) };
+      const lines = String(b.csv || '').split(/\r?\n/).filter(l => l.trim());
+      if (!lines.length) return json(res, 400, { error: 'Пустой CSV — вставьте строки с контактами' });
+      if (lines.length > 5001) return json(res, 400, { error: 'За один раз можно импортировать не больше 5000 контактов — разбейте файл на части' });
+      const start = /^(имя|name)\b/i.test(lines[0]) ? 1 : 0; // первая строка — заголовок
+      let n = 0, skipped = 0;
+      const ins = db.prepare('INSERT INTO contacts(name,phone,email,company,source,phone_norm) VALUES(?,?,?,?,?,?)');
+      const exists = db.prepare('SELECT id FROM contacts WHERE phone_norm=?');
+      db.exec('BEGIN IMMEDIATE');
+      try {
+        for (const line of lines.slice(start)) {
+          const [name, phone, email, company] = parseCsvLine(line);
+          if (!name) continue;
+          const norm = digits(phone) || null;
+          // повторный импорт того же файла не плодит дубли
+          if (norm && exists.get(norm)) { skipped++; continue }
+          ins.run(name.slice(0, 120), phone || '', email || '', company || '', 'import', norm); n++;
+        }
+        db.exec('COMMIT');
+      } catch (e) { db.exec('ROLLBACK'); throw e }
+      broadcast('change', { table: 'contacts' });
+      return json(res, 200, { imported: n, skipped, message: skipped ? `Добавлено ${n}, пропущено дублей ${skipped}` : `Добавлено контактов: ${n}` });
+    }
 
     // ===== channels & integrations (all configurable from UI) =====
     if (p === '/api/channels') return json(res, 200, db.prepare('SELECT * FROM channels ORDER BY id DESC').all());
     if (p === '/api/integrations/wazzup/test' && req.method === 'POST') { try { const data = await wazzupFetch('/channels'); const list = data.channels || data.data || data || []; return json(res, 200, { ok: true, channels: list }); } catch (e) { return json(res, 400, { ok: false, error: e.message }); } }
     if (p === '/api/integrations/wazzup/sync' && req.method === 'POST') { try { const data = await wazzupFetch('/channels'); const list = data.channels || data.data || []; for (const ch of list) db.prepare('INSERT INTO channels(provider,external_id,name,transport,phone,state,raw) VALUES(?,?,?,?,?,?,?) ON CONFLICT(external_id) DO UPDATE SET name=excluded.name,transport=excluded.transport,phone=excluded.phone,state=excluded.state').run('wazzup', ch.channelId || ch.id, ch.name || ch.plainId || '', ch.transport || ch.type || '', ch.plainId || ch.phone || '', ch.state || '', JSON.stringify(ch)); if (list[0] && !getSetting('WAZZUP_CHANNEL_ID')) setSetting('WAZZUP_CHANNEL_ID', list[0].channelId || list[0].id); return json(res, 200, { synced: list.length, channels: db.prepare("SELECT * FROM channels WHERE provider='wazzup'").all() }); } catch (e) { return json(res, 400, { error: e.message }); } }
-    if (p === '/api/integrations/wazzup/webhook' && req.method === 'POST') { const b = await readBody(req); try { await wazzupFetch('/webhooks', { method: 'PATCH', body: JSON.stringify({ webhooksUri: b.url }) }); setSetting('WAZZUP_WEBHOOK_URL', b.url); return json(res, 200, { saved: true }); } catch (e) { return json(res, 400, { error: e.message + ' — можно указать вебхук вручную в кабинете Wazzup' }); } }
+    if (p === '/api/integrations/wazzup/webhook' && req.method === 'POST') { const b = await readBody(req); const hookUrl = String(b.url || '').trim(); if (!/^https?:\/\//i.test(hookUrl) || hookUrl.length > 2048) return json(res, 400, { error: 'Укажите корректный адрес вебхука (http/https)' }); try { await wazzupFetch('/webhooks', { method: 'PATCH', body: JSON.stringify({ webhooksUri: hookUrl }) }); setSetting('WAZZUP_WEBHOOK_URL', hookUrl); return json(res, 200, { saved: true }); } catch (e) { return json(res, 400, { error: e.message + ' — можно указать вебхук вручную в кабинете Wazzup' }); } }
     if (p === '/api/integrations/email/test' && req.method === 'POST') {
       if (!requireAdmin(user, res)) return;
       const rl = rateLimit('mailtest', 10, 60000); if (!rl.ok) return json(res, 429, { error: 'Слишком часто — подождите минуту' });
@@ -1004,14 +1373,54 @@ export const server = http.createServer(async (req, res) => {
       } catch (e) { return json(res, 400, { ok: false, error: e.message }) }
     }
     if (p === '/api/settings') {
-      if (req.method === 'GET') { const mask = v => v ? '••••••' + String(v).slice(-4) : ''; return json(res, 200, { version: VERSION, company: { name: getSetting('COMPANY_NAME'), currency: getSetting('CURRENCY', '₽') }, sales_target: Number(getSetting('SALES_TARGET', '0')) || 0, email: { host: getSetting('SMTP_HOST'), port: getSetting('SMTP_PORT', '587'), secure: getSetting('SMTP_SECURE', ''), user: getSetting('SMTP_USER'), pass: mask(getSetting('SMTP_PASS')), from: getSetting('MAIL_FROM'), webhook_secret: getSetting('EMAIL_WEBHOOK_SECRET'), test_to: getSetting('SMTP_TEST_TO'), configured: !!getSetting('SMTP_HOST') }, maintenance: { backup_keep_days: getSetting('BACKUP_KEEP_DAYS', '7'), backup_hour: getSetting('BACKUP_HOUR', '3'), notify_webhook: getSetting('NOTIFY_WEBHOOK') }, requisites: companyRequisites(), advanced: { frame_ancestors: getSetting('FRAME_ANCESTORS'), login_rate_limit: getSetting('LOGIN_RATE_LIMIT', '12') }, messenger_provider: getSetting('MESSENGER_PROVIDER', 'wazzup'), auto_deal: getSetting('AUTO_DEAL', '1'), auto_assign: getSetting('AUTO_ASSIGN', '0'), logo: { custom: !!findCustomLogo(), env: !!process.env.LOGO_FILE }, wazzup: { api_key: mask(getSetting('WAZZUP_API_KEY')), api_url: getSetting('WAZZUP_API_URL', 'https://api.wazzup24.com/v3'), channel_id: getSetting('WAZZUP_CHANNEL_ID'), webhook_secret: getSetting('WAZZUP_WEBHOOK_SECRET'), configured: !!getSetting('WAZZUP_API_KEY') }, whatsapp: { token: mask(getSetting('WHATSAPP_TOKEN')), phone_id: getSetting('WHATSAPP_PHONE_ID'), verify_token: getSetting('WHATSAPP_VERIFY_TOKEN', 'karkas-verify'), configured: !!(getSetting('WHATSAPP_TOKEN') && getSetting('WHATSAPP_PHONE_ID')) }, telegram: { configured: !!getSetting('TELEGRAM_BOT_TOKEN') } }); }
-      if (req.method === 'PUT') { if (!requireAdmin(user, res)) return; const b = await readBody(req); const clean = v => (v && !String(v).includes('•')) ? v : null; if (clean(b.WAZZUP_API_KEY)) setSetting('WAZZUP_API_KEY', b.WAZZUP_API_KEY); for (const k of ['WAZZUP_API_URL', 'WAZZUP_CHANNEL_ID', 'WAZZUP_WEBHOOK_SECRET', 'WHATSAPP_PHONE_ID', 'WHATSAPP_VERIFY_TOKEN', 'COMPANY_NAME', 'CURRENCY', 'MESSENGER_PROVIDER', 'AUTO_DEAL', 'AUTO_DEAL_STAGE', 'AUTO_ASSIGN']) if (b[k] !== undefined) setSetting(k, b[k]); if (clean(b.WHATSAPP_TOKEN)) setSetting('WHATSAPP_TOKEN', b.WHATSAPP_TOKEN); if (clean(b.TELEGRAM_BOT_TOKEN)) setSetting('TELEGRAM_BOT_TOKEN', b.TELEGRAM_BOT_TOKEN);
-        for (const k of ['SMTP_HOST', 'SMTP_PORT', 'SMTP_SECURE', 'SMTP_USER', 'MAIL_FROM', 'EMAIL_WEBHOOK_SECRET', 'SALES_TARGET', 'BACKUP_KEEP_DAYS', 'BACKUP_HOUR', 'NOTIFY_WEBHOOK', 'FRAME_ANCESTORS', 'LOGIN_RATE_LIMIT', 'SMTP_TEST_TO', 'COMPANY_INN', 'COMPANY_KPP', 'COMPANY_OGRN', 'COMPANY_ADDRESS', 'COMPANY_PHONE', 'COMPANY_EMAIL', 'COMPANY_SITE', 'COMPANY_BANK', 'COMPANY_ACCOUNT', 'COMPANY_SIGNER', 'COMPANY_SIGNER_POSITION', 'DOC_PREFIX']) if (b[k] !== undefined) {
-          if (k === 'SALES_TARGET') { setSetting('SALES_TARGET', String(Number(String(b[k]).replace(/[^\d.]/g, '')) || 0)); continue }
-          setSetting(k, String(b[k]));
+      if (req.method === 'GET') {
+        const mask = v => v ? '••••••' + String(v).slice(-4) : '';
+        const num = (k, d) => { const n = Number(getSetting(k, String(d))); return Number.isFinite(n) ? n : d };
+        return json(res, 200, {
+          version: VERSION,
+          company: { name: getSetting('COMPANY_NAME'), currency: getSetting('CURRENCY', '₽') },
+          sales_target: num('SALES_TARGET', 0),
+          seed_mode: SEED_MODE,
+          demo: demoCounts(db),
+          email: { host: getSetting('SMTP_HOST'), port: getSetting('SMTP_PORT', '587'), secure: getSetting('SMTP_SECURE', ''), user: getSetting('SMTP_USER'), pass: mask(getSetting('SMTP_PASS')), from: getSetting('MAIL_FROM'), webhook_secret: getSetting('EMAIL_WEBHOOK_SECRET'), test_to: getSetting('SMTP_TEST_TO'), configured: !!getSetting('SMTP_HOST') },
+          maintenance: { backup_keep_days: num('BACKUP_KEEP_DAYS', 7), backup_hour: num('BACKUP_HOUR', 3), notify_webhook: getSetting('NOTIFY_WEBHOOK') },
+          requisites: companyRequisites(),
+          advanced: { frame_ancestors: getSetting('FRAME_ANCESTORS'), login_rate_limit: num('LOGIN_RATE_LIMIT', 12) },
+          auto_deal: getSetting('AUTO_DEAL', '1'), auto_assign: getSetting('AUTO_ASSIGN', '0'),
+          webhook: { secret: getSetting('WEBHOOK_SECRET'), configured: !!getSetting('WEBHOOK_SECRET') },
+          logo: { custom: !!findCustomLogo(), env: !!process.env.LOGO_FILE },
+          wazzup: { api_key: mask(getSetting('WAZZUP_API_KEY')), api_url: getSetting('WAZZUP_API_URL', 'https://api.wazzup24.com/v3'), channel_id: getSetting('WAZZUP_CHANNEL_ID'), webhook_secret: getSetting('WAZZUP_WEBHOOK_SECRET'), configured: !!getSetting('WAZZUP_API_KEY') },
+        });
+      }
+      if (req.method === 'PUT') {
+        if (!requireAdmin(user, res)) return;
+        const b = await readBody(req);
+        const clean = v => (v && !String(v).includes('•')) ? String(v).slice(0, 512) : null;
+        const putNum = (k, v, min, max, d) => { const n = Number(String(v).replace(/[^\d.-]/g, '')); if (Number.isFinite(n)) setSetting(k, String(Math.min(max, Math.max(min, n)))); };
+        if (clean(b.WAZZUP_API_KEY)) setSetting('WAZZUP_API_KEY', clean(b.WAZZUP_API_KEY));
+        for (const k of ['WAZZUP_API_URL', 'WAZZUP_CHANNEL_ID', 'WAZZUP_WEBHOOK_SECRET', 'COMPANY_NAME', 'CURRENCY', 'AUTO_DEAL', 'AUTO_DEAL_STAGE', 'AUTO_ASSIGN', 'SMTP_HOST', 'SMTP_PORT', 'SMTP_SECURE', 'SMTP_USER', 'MAIL_FROM', 'EMAIL_WEBHOOK_SECRET', 'NOTIFY_WEBHOOK', 'COMPANY_INN', 'COMPANY_KPP', 'COMPANY_OGRN', 'COMPANY_ADDRESS', 'COMPANY_PHONE', 'COMPANY_EMAIL', 'COMPANY_SITE', 'COMPANY_BANK', 'COMPANY_ACCOUNT', 'COMPANY_CORR', 'COMPANY_SIGNER', 'COMPANY_SIGNER_POSITION', 'DOC_PREFIX', 'SMTP_TEST_TO', 'WEBHOOK_SECRET']) if (b[k] !== undefined) setSetting(k, clean(b[k]) ?? String(b[k]).slice(0, 512));
+        if (clean(b.SMTP_PASS)) setSetting('SMTP_PASS', clean(b.SMTP_PASS));
+        if (b.SALES_TARGET !== undefined) putNum('SALES_TARGET', b.SALES_TARGET, 0, 1e15, 0);
+        if (b.BACKUP_KEEP_DAYS !== undefined) putNum('BACKUP_KEEP_DAYS', b.BACKUP_KEEP_DAYS, 0, 3650, 7);
+        if (b.BACKUP_HOUR !== undefined) putNum('BACKUP_HOUR', b.BACKUP_HOUR, 0, 23, 3);
+        if (b.LOGIN_RATE_LIMIT !== undefined) putNum('LOGIN_RATE_LIMIT', b.LOGIN_RATE_LIMIT, 1, 10000, 12);
+        // FRAME_ANCESTORS: только хосты и схемы — иначе ломаем CSP и сам заголовок
+        if (b.FRAME_ANCESTORS !== undefined) {
+          const fa = String(b.FRAME_ANCESTORS).replace(/[\r\n\t]/g, ' ').replace(/[^a-zA-Z0-9\s:'"*,.\/-]/g, '').trim().slice(0, 512);
+          setSetting('FRAME_ANCESTORS', fa);
         }
-        if (clean(b.SMTP_PASS)) setSetting('SMTP_PASS', b.SMTP_PASS);
-        log('Настройки обновлены', null, null, user.name); return json(res, 200, { saved: true }); }
+        log('Настройки обновлены', null, null, user.name);
+        return json(res, 200, { saved: true });
+      }
+    }
+    // удаление демонстрационных данных: всё, что помечено demo=1
+    if (p === '/api/demo/cleanup' && req.method === 'POST') {
+      if (!requireAdmin(user, res)) return;
+      const removed = cleanDemo(db);
+      setSetting('SEED_DONE', '1'); // после очистки примеры не вернутся при перезапуске
+      log('Демонстрационные данные удалены (' + removed + ' записей)', null, null, user.name);
+      broadcast('change', { table: 'all' });
+      return json(res, 200, { removed });
     }
     // ===== массовые действия: выделили записи и применили к ним одно изменение =====
     if (p === '/api/bulk' && req.method === 'POST') {
@@ -1020,12 +1429,37 @@ export const server = http.createServer(async (req, res) => {
       const fields = CRUD[table];
       if (!fields || !ids.length) return json(res, 400, { error: 'Нечего обрабатывать: укажите таблицу и хотя бы одну запись' });
       if (ids.length > 500) return json(res, 400, { error: 'За один раз можно изменить не больше 500 записей' });
-      if ((b.action === 'delete' && (table === 'products' || table === 'templates' || table === 'automations')) && !requireAdmin(user, res)) return;
-      if (b.action === 'delete') { const st = db.prepare(`DELETE FROM ${table} WHERE id=?`); for (const id of ids) st.run(id) }
+      if ((b.action === 'delete' && (table === 'products' || table === 'automations')) && !requireAdmin(user, res)) return;
+      if (b.action === 'delete' && table === 'templates') {
+        // шаблоны личные: массово удаляем только свои, чужие не трогаем
+        const st = db.prepare('DELETE FROM templates WHERE id=? AND user_id=?');
+        for (const id of ids) st.run(id, user.id);
+        broadcast('change', { table });
+        return json(res, 200, { done: ids.length });
+      }
+      if (b.action === 'delete') {
+        const st = db.prepare(`DELETE FROM ${table} WHERE id=?`);
+        for (const id of ids) {
+          // связи рвём так же, как при одиночном удалении: иначе остаются «висячие» задачи и заметки
+          if (table === 'contacts') {
+            db.prepare('UPDATE tasks SET contact_id=NULL WHERE contact_id=?').run(id);
+            db.prepare('UPDATE deals SET contact_id=NULL WHERE contact_id=?').run(id);
+            db.prepare("DELETE FROM notes WHERE entity_type='contacts' AND entity_id=?").run(id);
+          }
+          if (table === 'companies') {
+            db.prepare('UPDATE deals SET company_id=NULL WHERE company_id=?').run(id);
+            db.prepare('UPDATE contacts SET company_id=NULL WHERE company_id=?').run(id);
+            db.prepare("DELETE FROM notes WHERE entity_type='companies' AND entity_id=?").run(id);
+          }
+          st.run(id);
+        }
+      }
       else {
         const patch = {}; for (const k of Object.keys(b.patch || {})) if (fields.includes(k) && b.patch[k] !== undefined) patch[k] = b.patch[k];
         const ks = Object.keys(patch);
         if (!ks.length) return json(res, 400, { error: 'Не передано ни одного допустимого поля' });
+        if (table === 'contacts' && patch.phone !== undefined) { ks.push('phone_norm'); patch.phone_norm = digits(patch.phone) || null; }
+        if (table === 'tasks' && patch.due !== undefined) patch.due = patch.due ? normalizeDue(String(patch.due)) : '';
         const st = db.prepare(`UPDATE ${table} SET ${ks.map(k => k + '=?').join(',')} WHERE id=?`);
         for (const id of ids) st.run(...ks.map(k => patch[k]), id);
         log(`Массовое изменение (${table}): ${ids.length} записей — ${ks.join(', ')}`, table, null, user.name);
@@ -1092,7 +1526,45 @@ export const server = http.createServer(async (req, res) => {
     }
     res.writeHead(200, { ...headers, 'Content-Length': st.size });
     res.end(readFileSync(file));
-  } catch (e) { console.error(e); json(res, 500, { error: e.message }); }
+  } catch (e) {
+    console.error(e);
+    // если ответ уже начали отдавать (файл/поток), повторно заголовки не пишем
+    if (res.headersSent) { try { res.end() } catch {} return; }
+    // слишком большое тело — это ошибка клиента, а не сбой сервера
+    if (/Слишком большой запрос/.test(e.message)) return json(res, 413, { error: 'Слишком большой запрос: уменьшите файл или разбейте данные на части' });
+    json(res, 500, { error: 'Внутренняя ошибка сервера. Попробуйте ещё раз; если повторяется — посмотрите логи.' });
+  }
 });
+// медленные/зависшие клиенты не держат соединения и память бесконечно
+server.headersTimeout = 30000;
+server.requestTimeout = 120000;
+server.keepAliveTimeout = 65000;
+server.maxHeadersCount = 100;
 server.listen(PORT, HOST, () => console.log(`КаркасCRM запущена: http://${HOST}:${PORT} | администратор: ${ADMIN_EMAIL}`));
+// понятная ошибка вместо «тихого» зависания, если порт занят или нет прав
+server.on('error', e => {
+  if (e.code === 'EADDRINUSE') console.error(`Порт ${PORT} уже занят другим процессом. Остановите его или задайте другой PORT.`);
+  else if (e.code === 'EACCES') console.error(`Нет прав слушать порт ${PORT}. Выберите порт выше 1024.`);
+  else console.error('Не удалось запустить сервер:', e);
+  process.exit(1);
+});
+
+// ── устойчивость: аккуратное завершение и защита от падения процесса ──
+let shuttingDown = false;
+const graceful = (sig) => {
+  if (shuttingDown) return;
+  shuttingDown = true;
+  console.log(`Получен ${sig} — завершаюсь аккуратно…`);
+  for (const res of clients) { try { res.end(); } catch {} }
+  clients.clear();
+  scheduler && clearInterval(scheduler);
+  server.close(() => { try { db.exec('PRAGMA wal_checkpoint(TRUNCATE)'); db.close(); } catch {} process.exit(0); });
+  // если что-то зависло — принудительный выход через 5 секунд
+  setTimeout(() => process.exit(0), 5000).unref();
+};
+process.on('SIGTERM', () => graceful('SIGTERM'));
+process.on('SIGINT', () => graceful('SIGINT'));
+// логируем, но не даём одному сбойному запросу убить всю CRM
+process.on('uncaughtException', e => console.error('uncaughtException:', e));
+process.on('unhandledRejection', e => console.error('unhandledRejection:', e));
 export { db, getSetting, nowDue, normalizeDue, fixTaskDues, VERSION };
