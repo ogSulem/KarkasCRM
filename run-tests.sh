@@ -11,10 +11,11 @@ node --check backend/src/competitors.js
 node --check backend/src/smtp.js
 node --check frontend/public/app.js
 
-echo "▶ 2/4 Интеграционные тесты (API + конкуренты + миграции базы)"
+echo "▶ 2/4 Интеграционные тесты (API + конкуренты + миграции базы + копия в S3)"
 node --experimental-sqlite --test tests/api.test.js tests/competitors.test.js
 node --experimental-sqlite tests/migrate.test.mjs
 node --experimental-sqlite tests/seed.test.mjs
+node --test tests/backup-s3.test.mjs
 
 echo "▶ 3/4 Проверка docker-compose и Caddyfile"
 if python3 -c 'import yaml' 2>/dev/null; then
@@ -59,10 +60,13 @@ grep -q 'proxy_set_header Host $host' "$NGINX" || { echo "  ❌ nginx.conf: не
 echo "  ✅ nginx.conf: реальный IP клиента, Host, размер тела и таймауты для чатов"
 
 echo "  • .env.example описывает необязательные параметры"
-for key in PUBLIC_URL LOGO_FILE ALLOW_PRIVATE_FETCH KARKAS_NO_SEED; do
+for key in PUBLIC_URL LOGO_FILE ALLOW_PRIVATE_FETCH KARKAS_NO_SEED S3_ENDPOINT S3_BUCKET S3_ACCESS_KEY S3_SECRET_KEY; do
   grep -q "^$key=" .env.example || { echo "  ❌ .env.example: нет $key"; exit 1; }
 done
-echo "  ✅ .env.example: PUBLIC_URL, LOGO_FILE, ALLOW_PRIVATE_FETCH, KARKAS_NO_SEED"
+for key in S3_ENDPOINT S3_BUCKET S3_ACCESS_KEY S3_SECRET_KEY; do
+  grep -q "$key" docker-compose.yml || { echo "  ❌ docker-compose.yml: не пробрасывается $key"; exit 1; }
+done
+echo "  ✅ .env.example и compose: PUBLIC_URL, LOGO_FILE, ALLOW_PRIVATE_FETCH, KARKAS_NO_SEED, S3_*"
 
 echo "▶ 4/4 Smoke-тест интерфейса (нужен jsdom, иначе шаг пропускается)"
 if node -e "import('jsdom').then(()=>process.exit(0)).catch(()=>process.exit(1))" 2>/dev/null; then

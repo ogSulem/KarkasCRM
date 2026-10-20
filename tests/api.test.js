@@ -142,6 +142,15 @@ test('контакты, компании, задачи, заметки, поис
   assert.ok((await call('/api/search?q=Иван')).body.contacts.length >= 1);
   const csv = (await call('/api/export/contacts')).body;
   assert.ok(String(csv).includes('Иван Тестов'), 'CSV-экспорт контактов');
+  {
+    // Выгрузка сделок открывается в Excel: даты должны быть 05.11.2026, а не 2026-11-05.
+    const dl = (await call('/api/deals', { method: 'POST', body: JSON.stringify({ title: 'Сделка для выгрузки', deadline: '2026-11-05' }) })).body;
+    const dealsCsv = String((await call('/api/export/deals')).body);
+    assert.match(dealsCsv, /Сделка для выгрузки/);
+    assert.match(dealsCsv, /"05\.11\.2026"/, 'срок в выгрузке — дд.мм.гггг');
+    assert.doesNotMatch(dealsCsv, /2026-11-05/, 'ISO-даты в выгрузке нет');
+    await call('/api/deals/' + dl.id, { method: 'DELETE' });
+  }
   assert.ok((await call('/api/export/json')).body.contacts.length > 0, 'полный бэкап');
   assert.ok((await call('/api/backup')).body.contacts.length > 0, 'старый адрес бэкапа тоже жив');
 });
@@ -182,8 +191,12 @@ test('автоматизации, шаблоны, интеграции, кома
   assert.ok(tpl.id);
   // текст шаблона и канал не должны меняться местами
   assert.equal(tpl.body, 'Здравствуйте, {name}!', 'в шаблоне сохраняется текст ответа');
-  assert.equal(tpl.channel, 'any', 'канал по умолчанию — «любой»');
-  assert.equal((await call('/api/templates', { method: 'POST', body: JSON.stringify({ name: 'WA', body: 'Текст для WhatsApp', channel: 'whatsapp' }) })).body.channel, 'whatsapp');
+  assert.equal(tpl.channel, 'any', 'канал у шаблона не используется');
+  // канал из старой формы игнорируется: куда отправить, выбирают в чате
+  assert.equal((await call('/api/templates', { method: 'POST', body: JSON.stringify({ name: 'WA', body: 'Текст для WhatsApp', channel: 'whatsapp' }) })).body.channel, 'any');
+  const changed = (await call('/api/templates/' + tpl.id, { method: 'PATCH', body: JSON.stringify({ channel: 'telegram', body: 'Новый текст' }) })).body;
+  assert.equal(changed.channel, 'any', 'канал через API тоже не меняется');
+  assert.equal(changed.body, 'Новый текст');
   // Wazzup: маскировка ключа и синхронизация каналов
   await call('/api/settings', { method: 'PUT', body: JSON.stringify({ WAZZUP_API_KEY: 'test-api-key-123456', WAZZUP_CHANNEL_ID: 'e0629e11-0f67-4567-92a9-2237e91ec1b9' }) });
   const set = (await call('/api/settings')).body;
@@ -546,7 +559,7 @@ test('печать КП и счёта: реквизиты, позиции и с�
   assert.equal(settings.requisites.inn, '7712345678', 'реквизиты сохраняются');
   assert.equal(settings.requisites.signer, 'Петров П. П.');
   const client = (await call('/api/contacts', { method: 'POST', body: JSON.stringify({ name: 'Заказчик Печати', phone: '+7 916 000-11-22', email: 'print@example.com' }) })).body;
-  const deal = (await call('/api/deals', { method: 'POST', body: JSON.stringify({ title: 'Дом 8×10', amount: 0, contact_id: client.id }) })).body;
+  const deal = (await call('/api/deals', { method: 'POST', body: JSON.stringify({ title: 'Дом 8×10', amount: 0, contact_id: client.id, deadline: '2026-11-05' }) })).body;
   assert.ok(deal.id, 'сделка для печати создана');
   await call(`/api/deals/${deal.id}/products`, { method: 'POST', body: JSON.stringify({ name: 'Каркасный дом 8×10', price: 3000000, qty: 1 }) });
   await call(`/api/deals/${deal.id}/products`, { method: 'POST', body: JSON.stringify({ name: 'Фундамент', price: 200000, qty: 2 }) });
@@ -560,6 +573,8 @@ test('печать КП и счёта: реквизиты, позиции и с�
   assert.match(html, /Фундамент/);
   assert.match(html, /3\s?400\s?000/, 'итог считается по позициям');
   assert.match(html, /window\.print\(\)/, 'на странице есть кнопка печати');
+  assert.match(html, /05\.11\.2026/, 'срок в документе — в формате дд.мм.гггг');
+  assert.doesNotMatch(html, /2026-11-05/, 'сырой ISO-даты в документе нет');
   const invoice = await (await fetch(base + `/api/deals/${deal.id}/print?doc=invoice&token=` + h.Authorization.split(' ')[1])).text();
   assert.match(invoice, /Счёт на оплату/);
   assert.match(invoice, /НДС 20%/);

@@ -47,19 +47,19 @@ const DEMO_PRODUCTS = [
 ];
 
 const DEMO_TEMPLATES = [
-  ['Приветствие', 'whatsapp', 'Здравствуйте, {name}! Спасибо за обращение! Уточните, пожалуйста, площадь будущего дома и участок — подготовлю расчёт сегодня.'],
-  ['Расчёт стоимости', 'whatsapp', 'Здравствуйте! Расчёт по вашему проекту: {sum}. Срок строительства — от 6 недель. Могу прислать смету и КП письмом, удобно?'],
-  ['Осмотр участка', 'telegram', 'Добрый день! Договорились на осмотр участка: {date}. Подскажите подъездные пути — подойдёт ли техника круглый год?'],
-  ['Повторный контакт', 'any', 'Здравствуйте, {name}! Напоминаю о нашем разговоре — остались вопросы по проекту дома? Готов ответить и отправить смету.'],
+  ['Приветствие', 'Здравствуйте, {name}! Спасибо за обращение! Уточните, пожалуйста, площадь будущего дома и участок — подготовлю расчёт сегодня.'],
+  ['Расчёт стоимости', 'Здравствуйте! Расчёт по вашему проекту: {sum}. Срок строительства — от 6 недель. Могу прислать смету и КП письмом, удобно?'],
+  ['Осмотр участка', 'Добрый день! Договорились на осмотр участка: {date}. Подскажите подъездные пути — подойдёт ли техника круглый год?'],
+  ['Повторный контакт', 'Здравствуйте, {name}! Напоминаю о нашем разговоре — остались вопросы по проекту дома? Готов ответить и отправить смету.'],
 ];
 
 // Начальное заполнение: каталог, личные шаблоны администратора, правило.
 export function seedBase(db, adminId, demo = 0) {
   const prod = db.prepare('INSERT INTO products(name,sku,price,unit,active,demo) VALUES(?,?,?,?,1,?)');
   for (const [name, sku, price, unit] of DEMO_PRODUCTS) prod.run(name, sku, price, unit, demo);
-  // порядок аргументов — как в списке колонок: name, body, channel, demo, user_id
-  const tpl = db.prepare('INSERT INTO templates(name,body,channel,demo,user_id) VALUES(?,?,?,?,?)');
-  for (const [name, channel, body] of DEMO_TEMPLATES) tpl.run(name, body, channel, demo, adminId);
+  // канал у шаблона больше не используется: куда отправить, выбирается в чате
+  const tpl = db.prepare("INSERT INTO templates(name,body,channel,demo,user_id) VALUES(?,?,'any',?,?)");
+  for (const [name, body] of DEMO_TEMPLATES) tpl.run(name, body, demo, adminId);
   db.prepare(`INSERT INTO automations(name,trigger_type,trigger_value,action_type,action_value,active,demo)
               VALUES('Новый лид — позвонить','deal_created','','create_task','Позвонить клиенту: уточнить задачу и участок',1,?)`).run(demo);
 }

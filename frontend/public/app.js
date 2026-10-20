@@ -286,7 +286,29 @@ const dt = s => {
   if (d && !isNaN(d)) return dtFmt(d);
   return raw.replace('T', ' ').slice(0, 16);
 };
-const dueText = s => s ? String(s).replace('T', ' ').slice(0, 16) : '';
+// Даты в привычном формате СНГ: 31.12.2026 (а не 2026-12-31).
+// В ISO оставляем только значения для полей ввода <input type="date">.
+const MONTHS_NOM = ['январь', 'февраль', 'март', 'апрель', 'май', 'июнь', 'июль', 'август', 'сентябрь', 'октябрь', 'ноябрь', 'декабрь'];
+function monthText(ym) {
+  const m = String(ym || '').match(/^(\d{4})-(\d{2})/);
+  if (!m) return ym || '';
+  const name = MONTHS_NOM[Number(m[2]) - 1];
+  return name ? `${name} ${m[1]}` : ym;
+}
+// Месяц коротко: «2026-10» → «10.2026» (привычно для СНГ, в отличие от ISO).
+function monthShort(ym) {
+  const m = String(ym || '').match(/^(\d{4})-(\d{2})/);
+  return m ? `${m[2]}.${m[1]}` : (ym || '');
+}
+// «2026-10-20», «2026-10-20 09:30», «2026-10-20T09:30» → «20.10.2026[ 09:30]»
+function dateText(value) {
+  const raw = String(value ?? '').trim();
+  if (!raw) return '';
+  const m = raw.match(/^(\d{4})-(\d{2})-(\d{2})(?:[ T](\d{2}):(\d{2}))?/);
+  if (!m) return raw;
+  return `${m[3]}.${m[2]}.${m[1]}${m[4] ? ' ' + m[4] + ':' + m[5] : ''}`;
+}
+const dueText = s => dateText(s);
 // Локальная дата YYYY-MM-DD. toISOString() здесь нельзя: в Москве он отдаёт
 // вчерашний день до 03:00, из-за чего «сегодня» и неделя съезжали на сутки.
 const isoDate = (d = new Date()) => `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
@@ -298,7 +320,7 @@ function fmtDayMonth(iso) {
   const t = new Date(); const tomorrow = new Date(t.getFullYear(), t.getMonth(), t.getDate() + 1);
   if (isoDate(d) === isoDate(t)) return 'сегодня';
   if (isoDate(d) === isoDate(tomorrow)) return 'завтра';
-  return `${m[3]}.${m[2]}`;
+  return `${m[3]}.${m[2]}.${m[1]}`;
 }
 // Внешние ссылки: только http(s). «site.ru» превращаем в https://site.ru,
 // а javascript:/data: отбрасываем — иначе получится XSS через поле «Сайт».
@@ -310,6 +332,16 @@ function siteHref(u) {
   return '';
 }
 const num = v => (String(v ?? '').replace(/[^\d.-]/g, '') || 0) * 1;
+// Русское склонение после числа: 1 задача / 2 задачи / 5 задач.
+// last2 — чтобы 11–14 не превращались в «задачи» по ошибке.
+function plural(n, one, few, many) {
+  const x = Math.abs(Math.round(Number(n) || 0));
+  const last2 = x % 100, last = x % 10;
+  if (last2 >= 11 && last2 <= 14) return many;
+  if (last === 1) return one;
+  if (last >= 2 && last <= 4) return few;
+  return many;
+}
 
 async function api(path, opt = {}) {
   let r;
@@ -462,8 +494,9 @@ function cfFor(entity) {
 function cfValues(custom) {
   try { return typeof custom === 'string' ? JSON.parse(custom || '{}') : (custom || {}); } catch { return {}; }
 }
-function cfInputs(entity, obj = {}, grid = 2) {
-  const fields = cfFor(entity);
+// Обязательные свои поля показываем сразу в форме, необязательные — под «Дополнительно».
+function cfInputs(entity, obj = {}, grid = 2, only = 'all') {
+  const fields = cfFor(entity).filter(f => only === 'all' ? true : only === 'required' ? f.required : !f.required);
   if (!fields.length) return '';
   const val = cfValues(obj.custom);
   return `<div style="display:grid;grid-template-columns:repeat(${grid},1fr);gap:12px">${fields.map(f => {
@@ -772,11 +805,11 @@ async function dashboard(v) {
      <div class="attn-grid" ${!todayTasks && !overdueTasks && !unreadChats ? 'style="display:none"' : ''}>
        <div class="attn-card today clickable-card" onclick="state.taskScope='all';state.taskFilter='today';go('tasks')" title="Открыть задачи на сегодня">
          <span style="font-size:12.5px">${icon('calendar', 14)} На сегодня</span>
-         <b>${todayTasks} задач</b>
+         <b>${todayTasks}</b> <small>задач</small>
        </div>
        <div class="attn-card warn clickable-card" onclick="state.taskScope='all';state.taskFilter='overdue';go('tasks')" title="Открыть просроченные задачи">
          <span style="font-size:12.5px">${icon('clock', 14)} Просрочено</span>
-         <b>${overdueTasks} задач</b>
+         <b>${overdueTasks}</b> <small>задач</small>
        </div>
        <div class="attn-card chat clickable-card" onclick="go('inbox')" title="Открыть непрочитанные диалоги">
          <span style="font-size:12.5px">${icon('inbox', 14)} Непрочитанных чатов</span>
@@ -795,7 +828,8 @@ async function dashboard(v) {
      <div class="kpi clickable-card" onclick="go('pipe')" title="Перейти в Сделки">
        <i>${icon('pipe', 20)}</i>
        <span>Активных сделок</span>
-       <b>${d.dealsTotal} <small style="font-weight:normal">(${fmt(d.activeDealsSum || 0)})</small></b>
+       <b>${d.dealsTotal}</b>
+       <small>на сумму ${fmt(d.activeDealsSum || 0)}</small>
      </div>
      <div class="kpi clickable-card" onclick="go('analytics')" title="Перейти в Аналитику">
        <i>${icon('analytics', 20)}</i>
@@ -806,18 +840,21 @@ async function dashboard(v) {
      <div class="kpi clickable-card" onclick="go('tasks')" title="Перейти в Задачи">
        <i>${icon('tasks', 20)}</i>
        <span>Задачи</span>
-       <b>${d.tasksOpen} открытых</b>
+       <b>${d.tasksOpen}</b>
+       <small>открытых</small>
        ${d.tasksOverdue ? `<small style="color:#dc2626">просрочено: ${d.tasksOverdue}</small>` : `<small>на сегодня: ${d.tasksToday}</small>`}
      </div>
      <div class="kpi clickable-card" onclick="go('inbox')" title="Перейти в Чаты">
        <i>${icon('inbox', 20)}</i>
        <span>Чаты</span>
-       <b class="accent">${d.unread} непрочитанных</b>
+       <b class="accent">${d.unread}</b>
+       <small>${plural(d.unread, 'непрочитанный чат', 'непрочитанных чата', 'непрочитанных чатов')}</small>
      </div>
      <div class="kpi clickable-card" onclick="go('contacts')" title="Перейти в Контакты">
        <i>${icon('contacts', 20)}</i>
        <span>База</span>
-       <b>${d.contacts} <small>/ ${d.companies} комп.</small></b>
+       <b>${d.contacts}</b>
+       <small>компаний: ${d.companies}</small>
      </div>
    </div>
 
@@ -897,7 +934,7 @@ async function pipe(v) {
    <h3><span style="color:${esc(s.color)}">● ${esc(s.name)}</span><span style="display:inline-flex;align-items:center;gap:6px"><small style="font-weight:normal;color:var(--muted)">${fmt(colSum)}</small><span>${colDeals.length}</span><button type="button" class="btn-col-add" onclick="openDeal(null,'${s.code}')" title="Добавить сделку в этап «${esc(s.name)}»">${icon('plus', 12)}</button></span></h3>
    <div class="deals">${colDeals.map(x => `<article class="deal ${selSet('deals').has(x.id) ? 'selected' : ''}" draggable="true" ondragstart="dragDealStart(event,${x.id})" ondragend="dragDealEnd()" onclick="openDealCard(${x.id})" style="border-left-color:${esc(s.color)}${selSet('deals').has(x.id) ? ';box-shadow:0 0 0 2px var(--green)' : ''}">
     <b>${esc(x.title)}</b><input type="checkbox" title="Выбрать для массового действия" style="position:absolute;top:8px;right:8px" ${selSet('deals').has(x.id) ? 'checked' : ''} onclick="event.stopPropagation()" onchange="toggleSel('deals',${x.id})"><span class="sum">${fmt(x.amount)}</span>
-    <small>${icon('contact', 13)} ${esc(x.contact_name || 'Без контакта')}${x.deadline ? ' · ' + icon('clock', 13) + ' ' + esc(x.deadline) : ''}</small>
+    <small>${icon('contact', 13)} ${esc(x.contact_name || 'Без контакта')}${x.deadline ? ' · ' + icon('clock', 13) + ' ' + esc(dateText(x.deadline)) : ''}</small>
     <div>${dealTaskBadge(x)}</div>
     <div class="deal-foot"><span class="prio ${esc(x.priority)}">${x.priority === 'high' ? 'высокий' : x.priority === 'low' ? 'низкий' : 'обычный'}</span><span><button class="btn sm" onclick="event.stopPropagation();moveDeal(${x.id},1)">→</button></span></div></article>`).join('') || '<small style="padding:6px;color:var(--muted)">Пусто — перетащите сюда карточку</small>'}</div></div>`;
   }).join('')}</div>
@@ -959,10 +996,11 @@ async function openDeal(contactId, stageCode) {
    <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px"><label>Сумма (${CUR()})<input name="amount" type="number" value="0" placeholder="0"></label>
    <label>Контакт<select name="contact_id"><option value="">— выбрать —</option>${state.contacts.map(c => `<option value="${c.id}" ${c.id === contactId ? 'selected' : ''}>${esc(c.name)}</option>`).join('')}</select></label></div>
    <label>Этап<select name="stage">${def.map(s => `<option value="${esc(s.code)}" ${s.code === curStage ? 'selected' : ''}>${esc(s.name)}</option>`).join('')}</select></label>
+   ${cfInputs('deals', {}, 2, 'required')}
    ${formMore(`<div style="display:grid;grid-template-columns:1fr 1fr;gap:12px"><label>Ответственный<select name="responsible_id">${userOptions(meId())}</select></label>
    <label>Приоритет<select name="priority"><option value="normal">Обычный</option><option value="high">Высокий</option><option value="low">Низкий</option></select></label></div>
    <label>Дедлайн<input name="deadline" type="date"></label>
-   ${cfInputs('deals')}`)}
+   ${cfInputs('deals', {}, 2, 'optional')}`)}
    <button class="btn primary w">Создать сделку</button></form>`);
 }
 
@@ -1055,11 +1093,12 @@ function dealTab(deal, d) {
      <label>Этап<select name="stage">${selStages(deal.stage, state.cardStages)}</select></label></div>
      <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px"><label>Клиент<select name="contact_id"><option value="">— без контакта —</option>${(state.contacts || []).map(c => `<option value="${c.id}" ${c.id === deal.contact_id ? 'selected' : ''}>${esc(c.name)}</option>`).join('')}</select></label>
      <label>Компания<select name="company_id"><option value="">— без компании —</option>${(state.cardCompanies || []).map(c => `<option value="${c.id}" ${c.id === deal.company_id ? 'selected' : ''}>${esc(c.name)}</option>`).join('')}</select></label></div>
+     ${cfInputs('deals', deal, 2, 'required')}
      ${formMore(`<div style="display:grid;grid-template-columns:1fr 1fr;gap:12px"><label>Дедлайн<input name="deadline" type="date" value="${esc((deal.deadline || '').slice(0, 10))}"></label>
      <label>Ответственный<select name="responsible_id">${userOptions(deal.responsible_id)}</select></label></div>
      <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px"><label>Приоритет<select name="priority"><option value="normal" ${deal.priority === 'normal' ? 'selected' : ''}>Обычный</option><option value="high" ${deal.priority === 'high' ? 'selected' : ''}>Высокий</option><option value="low" ${deal.priority === 'low' ? 'selected' : ''}>Низкий</option></select></label>
      <label>Причина отказа (если сделка проиграна)<input name="loss_reason" value="${esc(deal.loss_reason || '')}"></label></div>
-     ${cfInputs('deals', deal)}`, true)}
+     ${cfInputs('deals', deal, 2, 'optional')}`, true)}
      <div style="display:flex;gap:8px;margin-top:12px"><button class="btn primary">Сохранить изменения</button><button class="btn danger" type="button" onclick="del('deals',${deal.id})">Удалить</button></div></form>`;
   }
   if (state.dealTab === 'chat') {
@@ -1189,12 +1228,12 @@ async function inbox(v) {
      <div class="composer-row">
        <button type="button" class="btn icon-btn composer-ico" title="Прикрепить фото или файл" onclick="$('#chatFile').click()">${icon('paperclip', 17)}</button>
        <input type="file" id="chatFile" class="hidden" accept="image/png,image/jpeg,image/gif,image/webp,application/pdf,text/plain,text/csv,application/zip,.doc,.docx,.xls,.xlsx" onchange="uploadChatFile(this,${cur.id})">
-       <button type="button" class="btn icon-btn composer-ico" title="Прикрепить ссылку на файл" onclick="openAttachment()">${icon('link', 16)}</button>
        <input id="msgText" placeholder="Сообщение (Enter — отправить)…" required autocomplete="off">
        <button class="btn send-btn" title="Отправить сообщение">${icon('arrowUp', 17)}</button>
      </div>
      <div class="composer-row composer-sub">
-       <select id="msgChannel" class="composer-select" title="Канал отправки">${channelOptions(cur)}</select>
+       <span class="composer-label">Куда отправить</span>
+       <select id="msgChannel" class="composer-select" title="Канал отправки" aria-label="Куда отправить">${channelOptions(cur)}</select>
        <select id="msgTmpl" class="composer-select" title="Шаблон ответа" onchange="if(this.value){const t=$('#msgText');t.value=this.value;this.value='';t.focus();t.setSelectionRange(t.value.length,t.value.length)}"><option value="">Шаблоны ответов…</option>${templates.map(t => `<option value="${esc(tmpl(t.name, { body: t.body, name: cur.title, sum: cur.deal_amount ? fmt(cur.deal_amount) : '—', date: new Date().toLocaleDateString('ru-RU') }))}">${esc(t.name)}</option>`).join('')}</select>
        <button type="button" class="tmpl-settings" onclick="go('settings','templates')">${icon('settings', 12)} настроить шаблоны</button>
      </div></form>` : '<div class="empty">Выберите диалог</div>'}</div>
@@ -1274,17 +1313,6 @@ async function uploadChatFile(input, cid) {
   };
   reader.readAsDataURL(file);
 }
-function openAttachment() {
-  openModal(`<h3>Прикрепить ссылку на файл</h3><form onsubmit="return sendAttachment(event)"><label>Ссылка на файл (PDF, фото, документ)*<input name="url" type="url" required placeholder="https://…/kommercheskoe-predlozhenie.pdf"></label><label>Подпись к файлу<input name="text" placeholder="Коммерческое предложение"></label><button class="btn primary w">Отправить в диалог</button></form>`);
-}
-async function sendAttachment(e) {
-  e.preventDefault(); const { url, text } = Object.fromEntries(new FormData(e.target));
-  try {
-    await api(`/api/conversations/${state.conv}/messages`, { method: 'POST', body: JSON.stringify({ body: text || 'Файл по ссылке', contentUri: url, contentName: text || 'ссылка на файл', channel: $('#msgChannel')?.value || 'whatsapp' }) });
-    closeModal(); toast('Файл отправлен'); refreshInbox();
-  } catch (err) { toast(err.message, 'err'); }
-  return false;
-}
 function openEmailComposer(cid) {
   // обращение по имени: письмо не должно начинаться с обезличенного «Здравствуйте!»
   const conv = (state.cache.convs || []).find(c => Number(c.id) === Number(cid)) || {};
@@ -1350,7 +1378,7 @@ function weekCalendar(tasksList) {
   const today = isoDate(now);
   return `<div class="calendar">${days.map((d, i) => {
     const list = tasksList.filter(t => normalizeDue(t.due).startsWith(d));
-    return `<div class="cal-day ${d === today ? 'today' : ''}"><h4><span>${names[i]}</span><small>${d.slice(5)}</small></h4>
+    return `<div class="cal-day ${d === today ? 'today' : ''}"><h4><span>${names[i]}</span><small>${d.slice(8, 10)}.${d.slice(5, 7)}</small></h4>
       ${list.map(t => {
         const isOver = !t.done && d < today;
         return `<div class="cal-task ${isOver ? 'overdue' : ''} ${t.done ? 'done' : ''}" onclick="openTask(${t.id})"><b>${esc(t.title)}</b><small>${esc(t.due ? t.due.slice(11, 16) : '')} · ${esc(t.contact_name || '')}</small></div>`;
@@ -1519,13 +1547,14 @@ async function openContact(id) {
    <label>Имя клиента*<input name="name" required value="${esc(c.name || '')}" placeholder="Иван Петров"></label>
    <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px"><label>Телефон<input name="phone" value="${esc(c.phone || '')}" placeholder="+7 999 123-45-67"></label>
    <label>E-mail<input name="email" type="email" value="${esc(c.email || '')}" placeholder="ivan@mail.ru"></label></div>
+   ${cfInputs('contacts', c, 2, 'required')}
    ${formMore(`<div style="display:grid;grid-template-columns:1fr 1fr;gap:12px"><label>Компания<select name="company_id"><option value="">— частное лицо —</option>${comps.map(x => `<option value="${x.id}" ${x.id === c.company_id ? 'selected' : ''}>${esc(x.name)}</option>`).join('')}</select></label>
    <label>Должность<input name="position" value="${esc(c.position || '')}" placeholder="Собственник / застройщик"></label></div>
    <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px"><label>Ответственный<select name="responsible_id">${userOptions(c.responsible_id || meId())}</select></label>
    <label>Источник<select name="source">${sourceOptions(c.source)}</select></label></div>
    <label>Теги (через запятую)<input name="tags" value="${esc(c.tags || '')}" placeholder="VIP, каркас, участок"></label>
-   <label>Заметки<textarea name="notes" rows="2">${esc(c.notes || '')}</textarea></label>`, !!id && !!(c.tags || c.notes || c.position || (c.company_id)))}
-   ${cfInputs('contacts', c)}
+   <label>Заметки<textarea name="notes" rows="2">${esc(c.notes || '')}</textarea></label>
+   ${cfInputs('contacts', c, 2, 'optional')}`, !!id && !!(c.tags || c.notes || c.position || (c.company_id)))}
    <button class="btn primary w">${id ? 'Сохранить' : 'Создать контакт'}</button></form>`);
 }
 
@@ -1813,7 +1842,7 @@ async function analytics(v) {
   const plan = a.plan || {};
   v.innerHTML = `
   <div class="grid">
-   <div class="kpi"><i>${icon('money', 20)}</i><span>План продаж (${esc(plan.month || 'текущий месяц')})</span><b>${plan.target ? fmt(plan.target) : 'Не задан'}</b>${plan.percent !== null ? `<small class="${plan.percent >= 100 ? 'green' : ''}">Факт: ${fmt(plan.fact)} (${plan.percent}%)</small>` : '<small>Задайте цель внизу</small>'}</div>
+   <div class="kpi" title="${esc(plan.month ? monthText(plan.month) : 'текущий месяц')}"><i>${icon('money', 20)}</i><span>Продано за ${esc(plan.month ? monthShort(plan.month) : 'этот месяц')}</span><b class="green">${fmt(plan.fact)}</b>${plan.target ? `<small class="${plan.percent >= 100 ? 'green' : ''}">план ${fmt(plan.target)} · выполнено ${plan.percent}%</small>` : '<small>план не задан — укажите цель внизу</small>'}</div>
    <div class="kpi"><i>${icon('analytics', 20)}</i><span>Конверсия воронки</span><b class="green">${a.conversion}%</b><small>успешных к закрытым</small></div>
    <div class="kpi"><i>${icon('money', 20)}</i><span>Средний чек сделки</span><b>${fmt(a.avgCheck)}</b></div>
    <div class="kpi"><i>${icon('pipe', 20)}</i><span>Прогноз (сделки в работе)</span><b class="accent">${fmt(a.forecast)}</b></div>
@@ -1821,7 +1850,9 @@ async function analytics(v) {
   <div class="cols"><div>
    <div class="card"><h3>Сделки по этапам воронки</h3>${a.stages.map(s => `<p style="display:flex;justify-content:space-between;margin:8px 0 2px"><span>${esc(s.name)} · ${s.count}</span><b>${fmt(s.sum)}</b></p><div class="bar"><i style="width:${Math.round(s.sum / max * 100)}%"></i></div>`).join('')}</div>
    <div class="card"><h3>Сделки по источникам</h3><table><tr><th>Источник</th><th>Сделок</th><th>Сумма</th></tr>${a.bySource.map(x => `<tr><td>${esc(sourceLabel(x.name))}</td><td>${x.count}</td><td><b>${fmt(x.sum)}</b></td></tr>`).join('') || '<tr><td colspan="3"><small>Пока нет сделок</small></td></tr>'}</table></div>
-   <div class="card"><h3>План продаж на месяц</h3>${(state.me && state.me.role) === 'admin' ? `<form onsubmit="return setSalesPlan(event)"><div style="display:flex;gap:10px;align-items:flex-end"><label style="margin:0;flex:1">Целевая выручка на месяц (${CUR()})<input name="target" type="number" value="${plan.target || ''}" placeholder="3000000"></label><button class="btn primary">Сохранить цель</button></div></form>` : `<p><small>Цель на месяц задаёт администратор. Текущая цель: <b>${plan.target ? fmt(plan.target) : 'не задана'}</b>.</small></p>`}</div>
+   <div class="card"><h3>План продаж — ${esc(monthShort(plan.month || new Date().toISOString().slice(0, 7)))}</h3>
+    <p><small>План — цель на <b>${esc(monthText(plan.month || new Date().toISOString().slice(0, 7)))}</b>, факт — сумма успешных сделок, закрытых за этот же месяц. Они стоят рядом, чтобы сразу видеть, сколько осталось продать до конца месяца: план минус факт. План не мешает работе — это ориентир для команды.</small></p>
+    ${(state.me && state.me.role) === 'admin' ? `<form onsubmit="return setSalesPlan(event)"><div style="display:flex;gap:10px;align-items:flex-end"><label style="margin:0;flex:1">Целевая выручка на месяц (${CUR()})<input name="target" type="number" value="${plan.target || ''}" placeholder="3000000"></label><button class="btn primary">Сохранить цель</button></div></form>` : `<p><small>Цель на месяц задаёт администратор. Текущая цель: <b>${plan.target ? fmt(plan.target) : 'не задана'}</b>.</small></p>`}</div>
   </div><div>
    <div class="card"><h3>Результаты по менеджерам</h3><table><tr><th>Менеджер</th><th>Сделок</th><th>Сумма</th></tr>${a.byManager.map(x => `<tr><td>${esc(x.name)}</td><td>${x.count}</td><td><b>${fmt(x.sum)}</b></td></tr>`).join('') || '<tr><td colspan="3"><small>Нет данных</small></td></tr>'}</table></div>
    <div class="card"><h3>Причины проигрыша сделок</h3><table><tr><th>Причина</th><th>Число</th><th>Сумма потерь</th></tr>${a.byLoss.map(x => `<tr><td>${esc(x.name || 'Не указана')}</td><td>${x.count}</td><td><b>${fmt(x.sum)}</b></td></tr>`).join('') || '<tr><td colspan="3"><small>Сделок в отказе нет</small></td></tr>'}</table></div>
@@ -2122,11 +2153,12 @@ async function settings(v) {
     const cf = await api('/api/custom-fields');
     const rows = cf.fields;
     body = `<div class="settings-cols"><div class="card"><div class="row" style="border:0"><div><h3>Свои поля для контактов и сделок</h3><small>Дополнительные строки в карточке: площадь участка, тип фундамента, дата замера — что удобно именно вам.</small></div><button class="btn sm primary" onclick="editField(-1)">${icon('plus', 13)} Добавить поле</button></div>
-     <table><tr><th>Название</th><th>Где</th><th>Тип</th><th>Обязательное</th><th></th></tr>${rows.map((f, i) => `<tr><td><b>${esc(f.label)}</b></td><td>${({ contacts: 'Контакты', deals: 'Сделки', both: 'Везде' })[f.entity] || esc(f.entity)}</td><td>${({ text: 'Текст', number: 'Число', date: 'Дата', select: 'Список', phone: 'Телефон', email: 'E-mail' })[f.type] || esc(f.type)}${f.options && f.options.length ? '<br><small>' + f.options.map(esc).join(', ') + '</small>' : ''}</td><td>${f.required ? 'Да' : '—'}</td><td><button class="btn sm" title="Изменить поле" onclick="editField(${i})">${icon('edit', 13)}</button> <button class="btn sm danger" title="Удалить поле" onclick="delField(${i})">${icon('close', 13)}</button></td></tr>`).join('') || '<tr><td colspan="5"><div class="empty">Своих полей пока нет</div></td></tr>'}</table>
+     <table><tr><th>Название</th><th>Где</th><th>Тип</th><th>В форме</th><th></th></tr>${rows.map((f, i) => `<tr><td><b>${esc(f.label)}</b></td><td>${({ contacts: 'Контакты', deals: 'Сделки', both: 'Везде' })[f.entity] || esc(f.entity)}</td><td>${({ text: 'Текст', number: 'Число', date: 'Дата', select: 'Список', phone: 'Телефон', email: 'E-mail' })[f.type] || esc(f.type)}${f.options && f.options.length ? '<br><small>' + f.options.map(esc).join(', ') + '</small>' : ''}</td><td>${f.required ? '<b>Сразу</b><br><small>обязательное</small>' : 'Под «Дополнительно»'}</td><td><button class="btn sm" title="Изменить поле" onclick="editField(${i})">${icon('edit', 13)}</button> <button class="btn sm danger" title="Удалить поле" onclick="delField(${i})">${icon('close', 13)}</button></td></tr>`).join('') || '<tr><td colspan="5"><div class="empty">Своих полей пока нет</div></td></tr>'}</table>
      <p><small>Например: «Площадь участка», «Тип фундамента», «Дата замера». Новое поле сразу появляется в форме создания и в карточке клиента или сделки, а его значения попадают в выгрузку контактов в CSV.</small></p></div>
      <div><div class="card"><h3>Как работают свои поля</h3>
       <p><small>Введите понятное название — технический код система сделает сама, видеть его не нужно. Поле появится в форме и в карточке, значения сохранятся вместе с клиентом или сделкой.</small></p>
-      <p><small><b>Где показывать:</b> «Везде» — и в контактах, и в сделках; можно ограничить одним разделом. <b>Обязательное</b> поле нельзя сохранить пустым.</small></p>
+      <p><small><b>Обязательное</b> поле нельзя сохранить пустым, и оно показывается сразу в основной части формы. Необязательные поля не мешают: они убраны под «Дополнительно» и всегда доступны в карточке.</small></p>
+      <p><small><b>Где показывать:</b> «Везде» — и в контактах, и в сделках; можно ограничить одним разделом.</small></p>
       <p><small><b>Удаление</b> убирает поле из форм и карточек; ранее введённые значения остаются в базе, но больше не показываются. Если поле нужно снова — создайте его с тем же названием.</small></p></div></div></div>`;
   } else if (state.settingsTab === 'competitors') {
     const cs = await api('/api/competitor-sources');
@@ -2155,7 +2187,7 @@ async function settings(v) {
      <td><button class="btn sm" title="Изменить правило" onclick="openAutomation(${a.id})">${icon('edit', 13)}</button> <button class="btn sm danger" title="Удалить правило" onclick="del('automations',${a.id})">${icon('close', 13)}</button></td></tr>`).join('') || '<tr><td colspan="5"><div class="empty">Правил нет</div></td></tr>'}</table></div>`;
   } else if (state.settingsTab === 'templates') {
     const rows = await api('/api/templates');
-    const tplRow = t => `<div class="tpl-row"><div class="tpl-main"><b>${esc(t.name)}</b> <span class="tag grey">${esc(channelLabel(t.channel))}</span>
+    const tplRow = t => `<div class="tpl-row"><div class="tpl-main"><b>${esc(t.name)}</b>
       <p>${esc(t.body)}</p></div><div class="tpl-actions"><button class="btn sm" title="Изменить шаблон" onclick="openTemplate(${t.id})">${icon('edit', 13)}</button><button class="btn sm danger" title="Удалить шаблон" onclick="delTemplate(${t.id})">${icon('trash', 13)}</button></div></div>`;
     body = `<div class="settings-cols"><div>
      <div class="card"><div class="row" style="border:0"><div><h3>Мои шаблоны (${rows.length})</h3><small>Заготовки частых ответов. В чате выбираются из списка «Шаблоны ответов…» над полем ввода.</small></div><button class="btn sm primary" onclick="openTemplate()">${icon('plus', 13)} Новый шаблон</button></div>
@@ -2163,7 +2195,7 @@ async function settings(v) {
     </div><div>
      <div class="card"><h3>Как это работает</h3><p><small>Шаблоны <b>личные</b>: каждый сотрудник видит и правит только свои. При выборе в чате текст подставляется в поле ввода — его можно поправить перед отправкой.</small></p>
       <p><small><b>Подстановки:</b> {name} — имя клиента, {sum} — сумма его открытой сделки, {date} — сегодняшняя дата. Если сделки ещё нет, вместо {sum} будет «—».</small></p>
-      <p><small><b>Канал</b> — подсказка, где шаблон уместен (WhatsApp, Telegram, почта…). Подставить шаблон можно в любой чат; «Любой канал» подходит везде.</small></p></div>
+      <p><small>Куда отправить ответ, выбирается прямо в чате над полем ввода — шаблон не привязан к каналу и подходит для любого.</small></p></div>
     </div></div>`;
   } else if (state.settingsTab === 'team') {
     const rows = await api('/api/users');
@@ -2204,6 +2236,10 @@ async function settings(v) {
        <div style="display:flex;gap:8px;flex-wrap:wrap"><button class="btn primary sm" onclick="makeBackup()">${icon('plus', 13)} Создать копию сейчас</button>
        <button class="btn sm" onclick="download('/api/export/json','karkas-backup.json')" title="Полная выгрузка всех данных в JSON">${icon('download', 13)} Выгрузить данные (JSON)</button></div>
        <div id="backupList" style="margin-top:10px">Загрузка…</div>
+       <details class="form-more"><summary>Копии на другом сервере</summary>
+        <p><small>Копии из списка лежат на этом же сервере: они спасают от случайного удаления, но не от поломки диска. Чтобы была вторая копия в другом месте, включите выгрузку в облачное хранилище S3 — файлы уходят туда автоматически по расписанию. Настройка — в <b>DEPLOY.md, раздел 7.1</b>: адрес хранилища, ведро и ключи доступа вписываются в <code>.env</code> на сервере, дальше одна строка в cron. Стоимость — примерно 100–200 ₽ в месяц.</small></p>
+        <p><small>Проверять восстановление стоит раз в квартал: скачайте копию и поднимите её на тестовом сервере. Копия, которую ни разу не восстанавливали, копией не считается.</small></p>
+       </details>
      </div>
      <div class="card"><h3>Логотип компании</h3>
       <p><small>Загрузка необязательна: по умолчанию используется logo.jpg из комплекта. PNG, JPG, GIF или WebP, до 4 МБ. Логотип показывается на странице входа, в боковой панели, во вкладке браузера и на документах.</small></p>
@@ -2393,8 +2429,8 @@ async function saveAutomation(e, id) { e.preventDefault(); const b = Object.from
 async function openTemplate(id = null) {
   const rows = await api('/api/templates'); const t = id ? (rows.find(x => x.id === id) || {}) : {};
   openModal(`<h3>${id ? 'Шаблон' : 'Новый шаблон'}</h3><form onsubmit="return saveTemplate(event,${id || 'null'})"><label>Название<input name="name" required value="${esc(t.name || '')}" placeholder="Приветствие"></label>
-   <label>Текст сообщения<textarea name="body" rows="4" required>${esc(t.body || '')}</textarea></label><label>Канал<select name="channel">${['any', 'whatsapp', 'telegram', 'instagram', 'viber', 'email'].map(c => `<option value="${c}" ${c === (t.channel || 'any') ? 'selected' : ''}>${channelLabel(c)}</option>`).join('')}</select></label>
-   <p><small>Подстановки: {name} — имя клиента, {sum} — сумма сделки. Текст можно изменить после подстановки в чате.</small></p>
+   <label>Текст сообщения<textarea name="body" rows="5" required placeholder="Здравствуйте, {name}! …">${esc(t.body || '')}</textarea></label>
+   <p><small>Подстановки: {name} — имя клиента, {sum} — сумма его открытой сделки, {date} — сегодняшняя дата. Текст можно поправить после подстановки в чате.</small></p>
    <button class="btn primary w">Сохранить</button></form>`);
 }
 async function saveTemplate(e, id) {

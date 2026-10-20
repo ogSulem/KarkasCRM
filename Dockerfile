@@ -27,6 +27,7 @@ ENV NODE_ENV=production \
 # репозитория — то есть меняется вместе с кодом, и отдельно обновлять его не нужно.
 COPY backend ./backend
 COPY frontend ./frontend
+COPY scripts ./scripts
 COPY logo.jpg VERSION package.json ./
 
 # tzdata — чтобы TZ=Europe/Moscow реально работал: в alpine по умолчанию нет базы

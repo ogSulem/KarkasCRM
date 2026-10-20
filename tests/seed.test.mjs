@@ -47,14 +47,14 @@ ok('demo: каталог, шаблоны, правило, конкуренты',
   const codes = ['whatsapp', 'telegram', 'instagram', 'viber', 'email', 'any'];
   const tpls = db.prepare('SELECT name, body, channel FROM templates').all();
   ok('demo: в шаблонах текст ответа, а не код канала', tpls.every(t => String(t.body || '').length > 20 && !codes.includes(String(t.body))), JSON.stringify(tpls.map(t => t.body.slice(0, 12))));
-  ok('demo: канал шаблона — известный код', tpls.every(t => codes.includes(String(t.channel))), JSON.stringify(tpls.map(t => t.channel)));
+  ok('demo: шаблон не привязан к каналу (канал выбирается в чате)', tpls.every(t => t.channel === 'any'), JSON.stringify(tpls.map(t => t.channel)));
   // имитируем базу ранней версии: текст и канал перепутаны
   db.prepare('UPDATE templates SET body=channel, channel=body WHERE id=1').run();
   db.close();
   const again = startIn(r.dir, 'demo');
   const fixed = new DatabaseSync(join(r.dir, 'crm.db'));
   const row = fixed.prepare('SELECT body, channel FROM templates WHERE id=1').get();
-  ok('старая база: перепутанные текст и канал исправляются при запуске', /Здравствуйте/.test(String(row.body)) && ['whatsapp', 'telegram'].includes(row.channel), JSON.stringify(row).slice(0, 80));
+  ok('старая база: перепутанные текст и канал исправляются при запуске', /Здравствуйте/.test(String(row.body)) && row.channel === 'any', JSON.stringify(row).slice(0, 80));
   fixed.close();
 }
 rmSync(r.dir, { recursive: true, force: true });
