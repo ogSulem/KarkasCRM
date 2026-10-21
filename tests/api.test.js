@@ -811,6 +811,104 @@ test('передача ответственного: коллега получа
   } finally { ctrl.abort(); await pump.catch(() => {}); }
 });
 
+test('автоматизации: правило проверяется при сохранении и работает по событию', async () => {
+  // валидация до записи: опечатка в правиле не должна ломать работу с клиентами
+  const badStage = await call('/api/automations', { method: 'POST', body: JSON.stringify({ name: 'Плохой этап', trigger_type: 'deal_created', action_type: 'change_stage', action_value: 'этапа-не-существует' }) });
+  assert.equal(badStage.status, 400);
+  assert.match(badStage.body.error, /Такого этапа нет/);
+  const badTrigger = await call('/api/automations', { method: 'POST', body: JSON.stringify({ name: 'Плохое событие', trigger_type: 'когда-нибудь', action_type: 'create_task', action_value: 'Позвонить' }) });
+  assert.equal(badTrigger.status, 400);
+  assert.match(badTrigger.body.error, /Выберите событие/);
+  const noTag = await call('/api/automations', { method: 'POST', body: JSON.stringify({ name: 'Без тега', trigger_type: 'message_in', action_type: 'add_tag' }) });
+  assert.equal(noTag.status, 400);
+  assert.match(noTag.body.error, /Укажите тег/);
+  const noTask = await call('/api/automations', { method: 'POST', body: JSON.stringify({ name: 'Без текста', trigger_type: 'deal_created', action_type: 'create_task', action_value: '  ' }) });
+  assert.equal(noTask.status, 400);
+  assert.match(noTask.body.error, /Напишите текст задачи/);
+  const noName = await call('/api/automations', { method: 'POST', body: JSON.stringify({ trigger_type: 'deal_created', action_type: 'create_task', action_value: 'Позвонить' }) });
+  assert.equal(noName.status, 400);
+  assert.match(noName.body.error, /Укажите название/);
+
+  const stages = (await call('/api/pipelines')).body[0].stages;
+  const won = stages.find(s2 => s2.kind === 'won');
+  const lost = stages.find(s2 => s2.kind === 'lost');
+  const rules = [];
+  rules.push((await call('/api/automations', { method: 'POST', body: JSON.stringify({ name: 'Лид — позвонить', trigger_type: 'deal_created', action_type: 'create_task', action_value: 'Позвонить по автоматизации' }) })).body.id);
+  rules.push((await call('/api/automations', { method: 'POST', body: JSON.stringify({ name: 'Смета — тег', trigger_type: 'message_in', trigger_value: 'смета', action_type: 'add_tag', action_value: 'Запросил смету' }) })).body.id);
+  rules.push((await call('/api/automations', { method: 'POST', body: JSON.stringify({ name: 'Дожим — успех', trigger_type: 'stage_changed', action_type: 'change_stage', action_value: won.code }) })).body.id);
+
+  try {
+    // 1) новая сделка → задача ответственному
+    const contact = (await call('/api/contacts', { method: 'POST', body: JSON.stringify({ name: 'Авто Клиент', phone: '+7 999 444-33-22' }) })).body;
+    const deal = (await call('/api/deals', { method: 'POST', body: JSON.stringify({ title: 'Авто-сделка', amount: 100000, stage: stages[0].code, contact_id: contact.id }) })).body;
+    const tasks = await call('/api/tasks');
+    assert.ok(tasks.body.some(t => t.title === 'Позвонить по автоматизации' && t.deal_id === deal.id), 'правило создало задачу по новой сделке');
+
+    // 2) смена этапа → правило переводит сделку дальше и закрывает её корректно
+    await call('/api/deals/' + deal.id, { method: 'PATCH', body: JSON.stringify({ stage: lost.code }) });
+    const moved = (await call('/api/deals/' + deal.id)).body.deal;
+    assert.equal(moved.stage, won.code, 'сделка переведена правилом на этап успеха');
+    assert.ok(moved.closed_at, 'дата закрытия проставлена — выручка попадёт в нужный месяц');
+
+    // 3) ключевое слово в сообщении → тег клиенту
+    await call('/webhooks/generic', { method: 'POST', body: JSON.stringify({ channel: 'site', name: 'Авто Клиент', phone: '+7 999 444-33-22', body: 'Пришлите, пожалуйста, смету на дом' }) });
+    const tagged = (await call('/api/contacts/' + contact.id)).body;
+    assert.match(tagged.tags || '', /Запросил смету/);
+
+    // 4) без ключевого слова тег не ставится, повторно — не дублируется
+    await call('/webhooks/generic', { method: 'POST', body: JSON.stringify({ channel: 'site', name: 'Авто Клиент', phone: '+7 999 444-33-22', body: 'Просто вопрос про дом' }) });
+    await call('/webhooks/generic', { method: 'POST', body: JSON.stringify({ channel: 'site', name: 'Авто Клиент', phone: '+7 999 444-33-22', body: 'И ещё раз смета' }) });
+    const again = (await call('/api/contacts/' + contact.id)).body;
+    assert.equal((again.tags.match(/Запросил смету/g) || []).length, 1, 'тег не дублируется и не ставится без повода');
+
+    // 5) выключенное правило не срабатывает
+    await call('/api/automations/' + rules[0], { method: 'PATCH', body: JSON.stringify({ active: 0 }) });
+    const deal2 = (await call('/api/deals', { method: 'POST', body: JSON.stringify({ title: 'Авто-сделка 2', amount: 50000, stage: stages[0].code }) })).body;
+    const tasks2 = await call('/api/tasks');
+    assert.ok(!tasks2.body.some(t => t.title === 'Позвонить по автоматизации' && t.deal_id === deal2.id), 'выключенное правило молчит');
+
+    // 6) частичное обновление правила тоже проверяется
+    const broken = await call('/api/automations/' + rules[2], { method: 'PATCH', body: JSON.stringify({ action_value: 'этап-удалён' }) });
+    assert.equal(broken.status, 400, 'нельзя сохранить правило с несуществующим этапом');
+    assert.match(broken.body.error, /Такого этапа нет/);
+  } finally {
+    // правила убираем: они не должны влиять на остальные сценарии
+    for (const id of rules) if (id) await call('/api/automations/' + id, { method: 'DELETE' });
+    const left = await call('/api/automations');
+    assert.ok(!left.body.some(a => /Авто|Лид — позвонить|Дожим/.test(a.name)), 'тестовые правила удалены');
+  }
+});
+
+test('заметку можно изменить, а не только удалить', async () => {
+  const c = (await call('/api/contacts', { method: 'POST', body: JSON.stringify({ name: 'Заметочный клиент', phone: '+7 999 111-22-33' }) })).body;
+  const n = (await call('/api/notes', { method: 'POST', body: JSON.stringify({ entity_type: 'contacts', entity_id: c.id, body: 'Первая версия заметки' }) })).body;
+  const upd = await call('/api/notes/' + n.id, { method: 'PATCH', body: JSON.stringify({ body: 'Исправленная версия заметки' }) });
+  assert.equal(upd.status, 200);
+  assert.equal(upd.body.body, 'Исправленная версия заметки');
+  const list = await call('/api/notes?type=contacts&entity=' + c.id);
+  assert.equal(list.body.length, 1, 'новая заметка не добавилась — старая изменена');
+  assert.equal(list.body[0].body, 'Исправленная версия заметки');
+  assert.ok(list.body[0].author, 'автор заметки сохранён');
+});
+
+test('последний вход виден администратору и скрыт от остальных', async () => {
+  const created = (await call('/api/users', { method: 'POST', body: JSON.stringify({ name: 'Вход Контроль', email: 'login-check@example.com', password: 'temporary-pass-1', role: 'manager' }) })).body;
+  assert.ok(created.id);
+  const login = await readyLogin('/api/auth/login', { method: 'POST', body: JSON.stringify({ email: 'login-check@example.com', password: 'temporary-pass-1' }) });
+  assert.ok(login.body.token);
+  const asAdmin = await call('/api/users');
+  const me = asAdmin.body.find(u => u.id === created.id);
+  assert.ok(me.last_login, 'администратор видит, когда сотрудник заходил');
+  assert.ok(me.email, 'администратор видит e-mail сотрудника');
+  const adminRow = asAdmin.body.find(u => u.email === 'admin@example.com');
+  assert.ok(adminRow.last_login, 'время входа администратора тоже отмечено');
+  const asManager = await call('/api/users', { headers: { Authorization: 'Bearer ' + login.body.token } });
+  const seen = asManager.body.find(u => u.id === created.id);
+  assert.equal(seen.last_login, undefined, 'менеджер не видит чужие входы');
+  assert.equal(seen.email, undefined, 'менеджер не видит чужие e-mail');
+  assert.equal(seen.name, 'Вход Контроль', 'имя и роль доступны для выбора ответственного');
+});
+
 test('защита входа: ограничение попыток подбора пароля', async () => {
   const codes = [];
   for (let i = 0; i < 16; i++) codes.push((await readyLogin('/api/auth/login', { method: 'POST', body: JSON.stringify({ email: 'admin@example.com', password: 'wrong-' + i }) })).status);

@@ -231,6 +231,67 @@ test('чистая установка: в списке только конкур
   assert.ok(full.report.links.some(l => /rusprofile/.test(l.url)), 'есть ссылки ручной проверки');
 });
 
+test('прайс можно не только загрузить, но и скачать обратно таблицей', async () => {
+  await call('/api/prices', { method: 'POST', body: JSON.stringify({ csv: 'Позиция;Цена;Ед\nДом 8×10 «Север»;3900000;шт\nБаня 4×6;920000;шт\n', scope: 'ours' }) });
+  const r = await fetch(base + '/api/prices/export?scope=ours', { headers: h });
+  assert.equal(r.status, 200);
+  assert.match(r.headers.get('content-disposition') || '', /our-prices\.csv/);
+  assert.match(r.headers.get('content-type') || '', /text\/csv/);
+  const bytes = Buffer.from(await r.clone().arrayBuffer());
+  assert.equal(bytes.subarray(0, 3).toString('hex'), 'efbbbf', 'BOM — Excel откроет файл в UTF-8 и не сломает кириллицу');
+  const text = await r.text(); // Response.text() сам снимает BOM — как это делает Excel
+  assert.match(text, /Наименование;Цена;Ед;Артикул;Примечание/);
+  assert.match(text, /Дом 8×10 «Север»/);
+  // скачанный файл загружается обратно без правок
+  const again = await call('/api/prices', { method: 'POST', body: JSON.stringify({ csv: text.replace('\uFEFF', ''), scope: 'ours' }) });
+  assert.equal(again.body.imported, 2, 'своя же выгрузка разбирается тем же парсером');
+  // прайс конкурента
+  const comp = (await call('/api/competitors')).body.find(c => c.inn === INN);
+  const cRes = await fetch(base + `/api/prices/export?scope=competitor&competitor=${comp.id}`, { headers: h });
+  assert.equal(cRes.status, 200);
+  assert.match(cRes.headers.get('content-disposition') || '', new RegExp(`competitor-${comp.id}\\.csv`));
+  assert.match(await cRes.text(), /Наименование;Цена/);
+  // без входа файл не отдаётся
+  assert.equal((await fetch(base + '/api/prices/export?scope=ours')).status, 401);
+});
+
+test('поиск конкурента понимает поле query из интерфейса', async () => {
+  const r = await call('/api/competitors/find', { method: 'POST', body: JSON.stringify({ query: 'ООО «Запрос Query»', city: 'Тула' }) });
+  assert.equal(r.status, 200);
+  assert.equal(r.body.created, true, 'карточка создана');
+  assert.match(r.body.competitor.name, /Запрос Query/);
+  assert.ok(Array.isArray(r.body.results) && r.body.results.length === 8, 'проверка прошла по всем источникам');
+  const empty = await call('/api/competitors/find', { method: 'POST', body: JSON.stringify({ query: '   ' }) });
+  assert.equal(empty.status, 400);
+  assert.match(empty.body.error, /название или ИНН/);
+});
+
+test('диагностика источников: видно, кто отвечает, а кто просит ключ', async () => {
+  await call('/api/competitor-sources', { method: 'PUT', body: JSON.stringify({
+    RUSPROFILE_URL: url('rusprofile'), FEDRESURS_API_URL: url('fedresurs'), KAD_API_URL: url('kad'),
+    FNS_API_URL: url('fns'), FSSP_API_URL: url('fssp'), GOOGLE_API_URL: url('google'),
+    TWOGIS_API_URL: url('2gis'), YANDEX_API_URL: url('yandex'), COMPETITOR_TIMEOUT_MS: '5000',
+    FNS_API_KEY: 'test-fns-key', FSSP_TOKEN: 'test-fssp-token', GOOGLE_PLACES_KEY: 'test-google-key',
+    TWOGIS_KEY: 'test-2gis-key', YANDEX_API_KEY: 'test-yandex-key',
+  }) });
+  const r = await call('/api/competitor-sources/check', { method: 'POST' });
+  assert.equal(r.status, 200);
+  assert.equal(r.body.results.length, 8, 'проверены все источники');
+  assert.ok(r.body.results.every(x => x.name && x.status && typeof x.ms === 'number' && 'needsKey' in x && 'keySet' in x), 'у каждого источника статус и время ответа');
+  const okCount = r.body.results.filter(x => x.status === 'ok').length;
+  assert.ok(okCount >= 6, 'источники отвечают: ' + JSON.stringify(r.body.results.map(x => x.status)));
+  // диагностика ничего не пишет в базу
+  const list = (await call('/api/competitors')).body;
+  assert.ok(!list.some(c => /Сбербанк/.test(c.name)), 'тестовая компания не стала карточкой конкурента');
+  // ключи убираем — источник честно помечается «нужен ключ»
+  await call('/api/competitor-sources', { method: 'PUT', body: JSON.stringify({ FNS_API_KEY: '' }) });
+  const r2 = await call('/api/competitor-sources/check', { method: 'POST' });
+  const fns = r2.body.results.find(x => x.key === 'fns');
+  assert.equal(fns.status, 'skipped');
+  assert.equal(fns.keySet, false);
+  assert.match(fns.summary, /Не задан ключ/);
+});
+
 test('источник без соединения помечается «blocked», а отчёт честно сообщает о нехватке данных', async () => {
   await call('/api/competitor-sources', { method: 'PUT', body: JSON.stringify({ RUSPROFILE_URL: 'http://127.0.0.1:9', FEDRESURS_API_URL: 'http://127.0.0.1:9', KAD_API_URL: 'http://127.0.0.1:9', COMPETITOR_TIMEOUT_MS: '1500', FNS_API_KEY: '', FSSP_TOKEN: '', GOOGLE_PLACES_KEY: '', TWOGIS_KEY: '', YANDEX_API_KEY: '' }) });
   const r = await call('/api/competitors/find', { method: 'POST', body: JSON.stringify({ name: 'ООО Без Связи', inn: '6600000000' }) });

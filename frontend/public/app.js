@@ -423,12 +423,28 @@ function pushToast({ title = '', text = '', kind = 'ok', actionLabel = '', onAct
   el._t = setTimeout(close, timeout);
 }
 function openModal(html) {
+  closeMenu();
   $('#modalBody').innerHTML = html;
+  lockFormsForViewer($('#modalBody'));
   $('#modal').classList.remove('hidden');
   // курсор сразу в первом пустом поле: форма заполняется с клавиатуры, но
   // открытая на просмотр карточка не перехватывает ввод и не портит текст
   const first = $('#modalBody input:not([type=hidden]):not([type=checkbox]):not([disabled]), #modalBody textarea, #modalBody select');
   if (first && !String(first.value || '').length) setTimeout(() => { try { first.focus({ preventScroll: true }); } catch {} }, 30);
+}
+// Наблюдатель видит карточки и отчёты, но формы в окнах становятся только для
+// чтения: сервер изменения всё равно отклоняет, а человеку сразу понятно почему.
+function lockFormsForViewer(root) {
+  if (canEdit() || !root || !root.querySelectorAll) return;
+  root.querySelectorAll('form').forEach(f => {
+    f.querySelectorAll('input,select,textarea,button').forEach(el => { el.disabled = true; });
+    if (!f.querySelector('.viewer-lock')) {
+      const note = document.createElement('p');
+      note.className = 'form-hint viewer-lock';
+      note.textContent = 'Режим просмотра: изменения вносит сотрудник с ролью «Менеджер» или «Администратор».';
+      f.appendChild(note);
+    }
+  });
 }
 function closeModal() {
   $('#modal').classList.add('hidden');
@@ -480,6 +496,11 @@ async function team() {
   return __team;
 }
 function meId() { return (state.me && state.me.id) || null; }
+// Права в интерфейсе повторяют права на сервере: наблюдатель только читает,
+// менеджер ведёт клиентов и сделки, администратор меняет настройки и справочники.
+const amAdmin = () => (state.me && state.me.role) === 'admin';
+const canEdit = () => (state.me && state.me.role) !== 'viewer';
+const viewerNote = () => canEdit() ? '' : `<div class="notice info">${icon('eye', 15)} <b>Режим просмотра.</b> Все данные и выгрузки доступны, а изменения вносят сотрудники с ролью «Менеджер» или «Администратор».</div>`;
 function userOptions(selId) {
   return `<option value="">— не назначен —</option>` + __team.map(u => `<option value="${u.id}" ${u.id === selId ? 'selected' : ''}>${esc(u.name)} (${esc(roleLabel(u.role))})</option>`).join('');
 }
@@ -664,6 +685,9 @@ async function boot() {
     $('#uEmail').textContent = me.user.email;
     $('#uAva').textContent = (me.user.name || 'A')[0].toUpperCase();
     state.me = me.user;
+    // роль на теле страницы: для наблюдателя прячем кнопки создания в шапке
+    document.body.classList.remove('role-admin', 'role-manager', 'role-viewer');
+    document.body.classList.add('role-' + (['admin', 'manager', 'viewer'].includes(me.user.role) ? me.user.role : 'manager'));
     if (me.user.must_change_password) {
       $('#login').classList.add('hidden'); $('#app').classList.add('hidden');
       $('#passwordChange').classList.remove('hidden');
@@ -768,6 +792,34 @@ function restoreFocus(f) {
 const __liveTimers = {};
 function liveSearch(key, run, ms = 160) { clearTimeout(__liveTimers[key]); __liveTimers[key] = setTimeout(run, ms); }
 
+/* ---------- переключатели состояния ----------
+   Кнопки и вкладки вызывают функции, а не пишут в state напрямую: так обработчики
+   работают в любом браузере, их можно проверить тестом и легко найти по имени. */
+function setSettingsTab(tab) { state.settingsTab = tab; render(); }
+function setDealTab(tab, id) { state.dealTab = tab; openDealCard(id); }
+function setCompTab(tab, id) { state.compTab = tab; openCompetitorCard(id); }
+function setPipeline(id) { state.pipeline = Number(id) || 1; render(); }
+function setDealScope(scope) { state.dealScope = scope; render(); }
+function setDealQuery(value) { state.dealQuery = value; render(); }
+function setTaskScope(scope) { state.taskScope = scope; render(); }
+function setTaskView(view) { state.taskView = view; render(); }
+function clearTaskFilter() { state.taskFilter = ''; render(); }
+function clearTaskQuery() { state.taskQuery = ''; render(); }
+function showMoreTasks() { state.taskLimit = (state.taskLimit || 50) + 50; render(); }
+function goTasks(scope, filter) { state.taskScope = scope || 'all'; state.taskFilter = filter || ''; go('tasks'); }
+function setContactFilter(field, value) { state.contactFilter = state.contactFilter || {}; state.contactFilter[field] = value; render(); }
+function setContactQuery(value) { state.contactFilter = state.contactFilter || {}; state.contactFilter.q = value; state.contactLimit = 50; render(); }
+function showMoreContacts() { state.contactLimit = (state.contactLimit || 50) + 50; render(); }
+function setCompanyQuery(value) { state.companyQuery = value; render(); }
+function showMoreCompanies() { state.companyLimit = (state.companyLimit || 100) + 100; render(); }
+function setProductQuery(value) { state.productQuery = value; render(); }
+function setProductScope(scope) { state.productScope = scope; render(); }
+function setCompQuery(value) { state.compQuery = value; render(); }
+function clearCompQuery() { state.compQuery = ''; render(); }
+function setTeamQuery(value) { state.teamQuery = value; render(); }
+function setTplQuery(value) { state.tplQuery = value; render(); }
+function openConv(id) { state.conv = id; go('inbox'); }
+
 // Очередь отрисовки: если пользователь быстро переключает разделы, ответ старого
 // запроса не должен перетереть новый экран. Каждый вызов видит актуальный state.view.
 let renderQueue = Promise.resolve();
@@ -777,6 +829,7 @@ function render() {
 }
 async function renderNow() {
   const v = $('#view');
+  closeMenu();
   const focus = captureFocus();
   try {
     if (state.view === 'dashboard') return await dashboard(v);
@@ -804,12 +857,12 @@ async function openNotifications() {
   const convs = (await api('/api/conversations')).filter(c => c.unread);
   const rowHtml = t => {
     const meta = taskDueMeta(t.due, t.done);
-    return `<div class="row"><span><b>${esc(t.title)}</b><br><small>${esc(meta.label)}${t.contact_name ? ' · ' + esc(t.contact_name) : ''}</small></span><button class="btn sm mark" onclick="toggleTask(${t.id},1);closeModal()">${icon('check', 13)} Выполнить</button></div>`;
+    return `<div class="row"><span><b>${esc(t.title)}</b><br><small>${esc(meta.label)}${t.contact_name ? ' · ' + esc(t.contact_name) : ''}</small></span>${canEdit() ? `<button class="btn sm mark" onclick="toggleTask(${t.id},1);closeModal()">${icon('check', 13)} Выполнить</button>` : ''}</div>`;
   };
   const empty = 'Ничего не ждёт — можно спокойно работать с клиентами.';
   openModal(`<h3>${icon('bell', 18)} Уведомления</h3>
    <p class="form-hint">Здесь всё, что требует вашего внимания сейчас. Колокольчик показывает общее число, а сообщения клиентов всплывают внизу экрана с кнопкой «Открыть чат».</p>
-   <h4 style="margin:12px 0 4px;color:#dc2626">Просрочено: ${over.length}</h4>
+   <h4 class="danger-text" style="margin:12px 0 4px">Просрочено: ${over.length}</h4>
    <p class="form-hint" style="margin:0 0 4px">Срок уже прошёл — лучше заняться этим первым.</p>
    ${over.map(rowHtml).join('') || `<small>${empty}</small>`}
    <h4 style="margin:16px 0 4px;color:var(--green)">Сегодня: ${now.length}</h4>
@@ -817,9 +870,9 @@ async function openNotifications() {
    ${now.map(rowHtml).join('') || '<small>На сегодня задач нет.</small>'}
    <h4 style="margin:16px 0 4px">${icon('inbox', 15)} Непрочитанные чаты: ${convs.length}</h4>
    <p class="form-hint" style="margin:0 0 4px">Клиент написал и ждёт ответа.</p>
-   ${convs.map(c => `<div class="row"><span><b>${esc(c.title)}</b><br><small>${esc(c.last_body || '')}</small></span><button class="btn sm" onclick="closeModal();state.conv=${c.id};go('inbox')">Открыть чат</button></div>`).join('') || '<small>Все сообщения прочитаны.</small>'}
+   ${convs.map(c => `<div class="row"><span><b>${esc(c.title)}</b><br><small>${esc(c.last_body || '')}</small></span><button class="btn sm" onclick="closeModal();openConv(${c.id})">Открыть чат</button></div>`).join('') || '<small>Все сообщения прочитаны.</small>'}
    <div style="display:flex;gap:8px;flex-wrap:wrap;margin-top:16px">
-     <button class="btn sm" onclick="closeModal();state.taskScope='all';state.taskFilter='overdue';go('tasks')">Все задачи</button>
+     <button class="btn sm" onclick="closeModal();goTasks('all','overdue')">Все задачи</button>
      <button class="btn sm" onclick="closeModal();go('inbox')">Все чаты</button>
      <button class="btn sm" onclick="closeModal()">Закрыть</button>
    </div>`);
@@ -859,11 +912,11 @@ async function dashboard(v) {
       ? `<div class="all-clear">${icon('checkCircle', 16)} <b>Всё под контролем</b> — просроченных задач и непрочитанных чатов нет</div>`
       : `<h3 style="margin-bottom:8px">${icon('alertCircle', 16)} Требует внимания</h3>`}
      <div class="attn-grid" ${!todayTasks && !overdueTasks && !unreadChats ? 'style="display:none"' : ''}>
-       <div class="attn-card today clickable-card" onclick="state.taskScope='all';state.taskFilter='today';go('tasks')" title="Открыть задачи на сегодня">
+       <div class="attn-card today clickable-card" onclick="goTasks('all','today')" title="Открыть задачи на сегодня">
          <span style="font-size:12.5px">${icon('calendar', 14)} На сегодня</span>
          <b>${todayTasks}</b> <small>задач</small>
        </div>
-       <div class="attn-card warn clickable-card" onclick="state.taskScope='all';state.taskFilter='overdue';go('tasks')" title="Открыть просроченные задачи">
+       <div class="attn-card warn clickable-card" onclick="goTasks('all','overdue')" title="Открыть просроченные задачи">
          <span style="font-size:12.5px">${icon('clock', 14)} Просрочено</span>
          <b>${overdueTasks}</b> <small>задач</small>
        </div>
@@ -898,7 +951,7 @@ async function dashboard(v) {
        <span>Задачи</span>
        <b>${d.tasksOpen}</b>
        <small>открытых</small>
-       ${d.tasksOverdue ? `<small style="color:#dc2626">просрочено: ${d.tasksOverdue}</small>` : `<small>на сегодня: ${d.tasksToday}</small>`}
+       ${d.tasksOverdue ? `<small class="danger-text">просрочено: ${d.tasksOverdue}</small>` : `<small>на сегодня: ${d.tasksToday}</small>`}
      </div>
      <div class="kpi clickable-card" onclick="go('inbox')" title="Перейти в Чаты">
        <i>${icon('inbox', 20)}</i>
@@ -914,18 +967,17 @@ async function dashboard(v) {
      </div>
    </div>
 
-  ${d.contacts === 0 && d.dealsTotal === 0 ? `<div class="card" style="box-shadow:none;border-color:#bbf7d0;background:#f0fdf4"><b>База пустая — самое время начать</b><br><small>Добавьте первый контакт кнопкой «+ Контакт» вверху страницы: сделки, задачи и чаты можно вести прямо из его карточки. Каналы связи и почта подключаются в разделе «Настройки».</small></div>` : ''}
+  ${d.contacts === 0 && d.dealsTotal === 0 ? `<div class="card tint-ok"><b>База пустая — самое время начать</b><br><small>Добавьте первый контакт кнопкой «+ Контакт» вверху страницы: сделки, задачи и чаты можно вести прямо из его карточки. Каналы связи и почта подключаются в разделе «Настройки».</small></div>` : ''}
   <div class="cols"><div>
    <div class="card"><h3>Воронка продаж</h3>${d.stages.map(s => `<p style="display:flex;justify-content:space-between;margin:8px 0 2px"><span>${esc(s.name)} · ${s.count}</span><b>${fmt(s.sum)}</b></p><div class="bar"><i style="width:${Math.round(s.sum / max * 100)}%"></i></div>`).join('')}</div>
    <div class="card"><h3>Последние сделки</h3><table class="mini"><tr><th>Сделка</th><th>Клиент</th><th>Этап</th><th>Сумма</th></tr>${d.recentDeals.map(x => `<tr><td><b>${esc(x.title)}</b></td><td>${esc(x.contact_name || '—')}</td><td>${esc((d.stages.find(s => s.code === x.stage) || {}).name || x.stage)}</td><td><b>${fmt(x.amount)}</b></td></tr>`).join('')}</table></div></div>
-  <div class="card"><h3>Лента активности</h3><div class="list">${d.activities.map(a => `<div class="row"><span>• ${esc(a.text)}<br><small>${esc(dt(a.created_at))}${a.user_name ? ' · ' + esc(a.user_name) : ''}</small></span></div>`).join('') || '<small>Пока пусто</small>'}</div><hr>
-   <h3>Мои задачи</h3><div class="list">${myTasksBlock()}</div><hr>
-   <h3>Быстрые действия</h3><div style="display:flex;flex-direction:column;gap:8px">
-   <button class="btn orange" onclick="openDeal()">${icon('plus', 14)} Новая сделка</button>
-   <button class="btn primary" onclick="openContact()">${icon('plus', 14)} Контакт</button>
-   <button class="btn" onclick="openTask()">${icon('plus', 14)} Задача</button>
-   ${(state.me && state.me.role) === 'admin' ? `<button class="btn" onclick="go('settings','integrations')">${icon('settings', 14)} Настроить каналы связи</button>` : `<button class="btn" onclick="go('settings','profile')">${icon('profile', 14)} Мой профиль</button>`}
-   <button class="btn" onclick="go('competitors')">${icon('competitor', 14)} Проверить конкурента</button></div></div></div>`;
+  <div>
+   <div class="card"><div class="row" style="border:0"><h3>Мои задачи</h3><button class="btn sm" onclick="go('tasks')">Все задачи</button></div>
+    <div class="list">${myTasksBlock()}</div></div>
+   <div class="card"><h3>Последние события компании</h3>
+    <p class="form-hint" style="margin:-2px 0 8px">Короткая лента: что недавно меняли коллеги. Всё важное по вашим клиентам — в «Моих задачах» выше.</p>
+    <div class="list feed">${d.activities.map(a => `<div class="row"><span>• ${esc(a.text)}<br><small>${esc(dt(a.created_at))}${a.user_name ? ' · ' + esc(a.user_name) : ''}</small></span></div>`).join('') || '<small>Пока пусто</small>'}</div></div>
+  </div></div>`;
 }
 
 function getAvatarColor(str = '') {
@@ -976,23 +1028,23 @@ async function pipe(v) {
   const noTaskCount = d.deals.filter(x => !x.tasks_open && !['won', 'lost'].includes(x.stage)).length;
   const overdueCount = d.deals.filter(x => x.tasks_open > 0 && taskDueMeta(x.next_task_due).overdue && !['won', 'lost'].includes(x.stage)).length;
 
-  v.innerHTML = `${bulkBar('deals', `${bulkStage()}${bulkOwner('deals')}`)}<div class="card" style="display:flex;gap:10px;align-items:center;flex-wrap:wrap">
-    <b>Воронка:</b><select style="width:auto" onchange="state.pipeline=+this.value;render()">${d.pipelines.map(p => `<option value="${p.id}" ${p.id === state.pipeline ? 'selected' : ''}>${esc(p.name)}</option>`).join('')}</select>
-    <span class="tabs" style="margin:0"><button class="${state.dealScope !== 'mine' && state.dealScope !== 'notask' && state.dealScope !== 'overdue' ? 'active' : ''}" onclick="state.dealScope='all';render()">Все сделки</button><button class="${state.dealScope === 'mine' ? 'active' : ''}" onclick="state.dealScope='mine';render()">Мои (${d.deals.filter(x => x.responsible_id === meId()).length})</button><button class="${state.dealScope === 'notask' ? 'active' : ''}" onclick="state.dealScope='notask';render()">Без задач (${noTaskCount})</button><button class="${state.dealScope === 'overdue' ? 'active' : ''}" onclick="state.dealScope='overdue';render()">Просрочено (${overdueCount})</button></span>
+  v.innerHTML = `${viewerNote()}${canEdit() ? bulkBar('deals', `${bulkStage()}${bulkOwner('deals')}`) : ''}<div class="card toolbar">
+    <b>Воронка:</b><select style="width:auto" onchange="setPipeline(this.value)">${d.pipelines.map(p => `<option value="${p.id}" ${p.id === state.pipeline ? 'selected' : ''}>${esc(p.name)}</option>`).join('')}</select>
+    <span class="tabs" style="margin:0"><button class="${state.dealScope !== 'mine' && state.dealScope !== 'notask' && state.dealScope !== 'overdue' ? 'active' : ''}" onclick="setDealScope('all')">Все сделки</button><button class="${state.dealScope === 'mine' ? 'active' : ''}" onclick="setDealScope('mine')">Мои (${d.deals.filter(x => x.responsible_id === meId()).length})</button><button class="${state.dealScope === 'notask' ? 'active' : ''}" onclick="setDealScope('notask')">Без задач (${noTaskCount})</button><button class="${state.dealScope === 'overdue' ? 'active' : ''}" onclick="setDealScope('overdue')">Просрочено (${overdueCount})</button></span>
     <span class="tag" title="Сделок в текущем фильтре">Показано: ${shown.length}${shown.length !== shown.filter(x => !['won', 'lost'].includes(x.stage)).length ? ` · в работе: ${shown.filter(x => !['won', 'lost'].includes(x.stage)).length}` : ''}</span><span class="tag orange" title="Сумма активных сделок в фильтре">В работе на ${fmt(shown.filter(x => !['won', 'lost'].includes(x.stage)).reduce((a, x) => a + x.amount, 0))}</span>
     <button class="btn sm" style="margin-left:auto" onclick="download('/api/export/deals','deals.csv')" title="Выгрузить сделки в CSV">${icon('download', 13)} Экспорт</button>
-    <input id="dealSearch" style="max-width:210px" placeholder="Поиск по сделкам и клиентам" value="${esc(state.dealQuery || '')}" oninput="liveSearch('deals',()=>{state.dealQuery=this.value;render()})">
+    <input id="dealSearch" style="max-width:210px" placeholder="Поиск по сделкам и клиентам" value="${esc(state.dealQuery || '')}" oninput="liveSearch('deals',()=>setDealQuery(this.value))">
     ${(state.me && state.me.role) === 'admin' ? `<button class="btn sm" onclick="openPipelineEditor()">${icon('settings', 13)} Настроить воронку</button>` : ''}</div>
   <div class="kanban">${d.stages.map(s => {
     const colDeals = shown.filter(x => x.stage === s.code);
     const colSum = colDeals.reduce((a, x) => a + x.amount, 0);
-    return `<div class="col" ondragover="dragOver(event,this)" ondragleave="this.classList.remove('drag-over')" ondrop="dropDeal(event,'${s.code}',this)">
-   <h3><span style="color:${esc(s.color)}">● ${esc(s.name)}</span><span style="display:inline-flex;align-items:center;gap:6px"><small style="font-weight:normal;color:var(--muted)">${fmt(colSum)}</small><span>${colDeals.length}</span><button type="button" class="btn-col-add" onclick="openDeal(null,'${s.code}')" title="Добавить сделку в этап «${esc(s.name)}»">${icon('plus', 12)}</button></span></h3>
-   <div class="deals">${colDeals.map(x => `<article class="deal ${selSet('deals').has(x.id) ? 'selected' : ''}" draggable="true" ondragstart="dragDealStart(event,${x.id})" ondragend="dragDealEnd()" onclick="openDealCard(${x.id})" style="border-left-color:${esc(s.color)}${selSet('deals').has(x.id) ? ';box-shadow:0 0 0 2px var(--green)' : ''}">
-    <b>${esc(x.title)}</b><input type="checkbox" title="Выбрать для массового действия" style="position:absolute;top:8px;right:8px" ${selSet('deals').has(x.id) ? 'checked' : ''} onclick="event.stopPropagation()" onchange="toggleSel('deals',${x.id})"><span class="sum">${fmt(x.amount)}</span>
+    return `<div class="col" ${canEdit() ? `ondragover="dragOver(event,this)" ondragleave="this.classList.remove('drag-over')" ondrop="dropDeal(event,'${s.code}',this)"` : ''}>
+   <h3><span style="color:${esc(s.color)}">● ${esc(s.name)}</span><span style="display:inline-flex;align-items:center;gap:6px"><small style="font-weight:normal;color:var(--muted)">${fmt(colSum)}</small><span>${colDeals.length}</span>${canEdit() ? `<button type="button" class="btn-col-add" onclick="openDeal(null,'${s.code}')" title="Добавить сделку в этап «${esc(s.name)}»">${icon('plus', 12)}</button>` : ''}</span></h3>
+   <div class="deals">${colDeals.map(x => `<article class="deal ${selSet('deals').has(x.id) ? 'selected' : ''}" ${canEdit() ? `draggable="true" ondragstart="dragDealStart(event,${x.id})" ondragend="dragDealEnd()"` : ''} onclick="openDealCard(${x.id})" style="border-left-color:${esc(s.color)}${selSet('deals').has(x.id) ? ';box-shadow:0 0 0 2px var(--green)' : ''}">
+    <b>${esc(x.title)}</b>${canEdit() ? `<input type="checkbox" title="Выбрать для массового действия" style="position:absolute;top:8px;right:8px" ${selSet('deals').has(x.id) ? 'checked' : ''} onclick="event.stopPropagation()" onchange="toggleSel('deals',${x.id})">` : ''}<span class="sum">${fmt(x.amount)}</span>
     <small>${icon('contact', 13)} ${esc(x.contact_name || 'Без контакта')}${x.deadline ? ' · ' + icon('clock', 13) + ' ' + esc(dateText(x.deadline)) : ''}</small>
     <div>${dealTaskBadge(x)}</div>
-    <div class="deal-foot"><span class="prio ${esc(x.priority)}">${x.priority === 'high' ? 'высокий' : x.priority === 'low' ? 'низкий' : 'обычный'}</span><span><button class="btn sm" onclick="event.stopPropagation();moveDeal(${x.id},1)">→</button></span></div></article>`).join('') || '<small style="padding:6px;color:var(--muted)">Пусто — перетащите сюда карточку</small>'}</div></div>`;
+    <div class="deal-foot"><span class="prio ${esc(x.priority)}">${x.priority === 'high' ? 'высокий' : x.priority === 'low' ? 'низкий' : 'обычный'}</span>${canEdit() ? `<span><button class="btn sm" title="Передвинуть на следующий этап" onclick="event.stopPropagation();moveDeal(${x.id},1)">→</button></span>` : ''}</div></article>`).join('') || '<small style="padding:6px;color:var(--muted)">Пусто — перетащите сюда карточку</small>'}</div></div>`;
   }).join('')}</div>
   <div id="dropCloseBar" class="drop-close-bar hidden">
     <div class="drop-zone won" ondragover="event.preventDefault();this.classList.add('drag-target')" ondragleave="this.classList.remove('drag-target')" ondrop="dropDeal(event,'won',this);dragDealEnd()">${icon('checkCircle', 16)} Успешно реализовано</div>
@@ -1121,23 +1173,23 @@ async function openDealCard(id) {
        <button class="btn sm" onclick="printDoc(${deal.id},'invoice')" title="Счёт на оплату">${icon('fileText', 13)} Счёт</button>
      </div>
    </div>
-   ${!done && !openTasks ? `<div class="card" style="box-shadow:none;border-color:#fdba74;background:#fff7ed;margin:10px 0;padding:10px 12px"><b>${icon('alertCircle', 15)} У сделки нет открытых задач</b> — она может зависнуть. <button class="btn sm" style="margin-left:6px" onclick="openTask(null,{deal_id:${deal.id},contact_id:${deal.contact_id || 'null'}})">${icon('plus', 13)} Поставить задачу</button></div>` : ''}
+   ${!done && !openTasks ? `<div class="card tint-warn" style="margin:10px 0;padding:10px 12px"><b>${icon('alertCircle', 15)} У сделки нет открытых задач</b> — она может зависнуть. <button class="btn sm" style="margin-left:6px" onclick="openTask(null,{deal_id:${deal.id},contact_id:${deal.contact_id || 'null'}})">${icon('plus', 13)} Поставить задачу</button></div>` : ''}
    ${!done && openTasks && nextTask ? `<p style="margin:6px 0 0"><small>${icon('clock', 13)} Ближайшая задача: <b>${esc(nextTask.title)}</b> — ${esc(taskDueMeta(nextTask.due).label)}</small></p>` : ''}
    ${done ? '' : `<div class="card-actions">
      ${deal.contact_phone ? `<a class="btn sm" href="tel:${esc(String(deal.contact_phone).replace(/[^+\d]/g, ''))}">${icon('phone', 13)} Позвонить</a>` : ''}
      ${deal.contact_phone ? `<a class="btn sm" href="https://wa.me/${esc(String(deal.contact_phone).replace(/[^\d]/g, ''))}" target="_blank" rel="noopener">${icon('whatsapp', 13)} WhatsApp</a>` : ''}
      <button class="btn sm" onclick="openTask(null,{deal_id:${deal.id},contact_id:${deal.contact_id || 'null'}})">${icon('plus', 13)} Задача</button>
-     <button class="btn sm primary" onclick="state.dealTab='products';openDealCard(${deal.id})">${icon('products', 13)} Добавить товар</button>
+     <button class="btn sm primary" onclick="setDealTab('products',${deal.id})">${icon('products', 13)} Добавить товар</button>
      <button class="btn sm" style="margin-left:auto" onclick="quickDealStage(${deal.id},'${esc(kindStage('won'))}')">${icon('checkCircle', 13)} Выиграна</button>
      <button class="btn sm danger" onclick="quickDealStage(${deal.id},'${esc(kindStage('lost'))}')">${icon('xCircle', 13)} Отказ</button>
    </div>`}
    <div class="tabs" style="margin-bottom:12px">
-     <button class="${state.dealTab === 'details' ? 'active' : ''}" onclick="state.dealTab='details';openDealCard(${id})">Детали</button>
-     <button class="${state.dealTab === 'chat' ? 'active' : ''}" onclick="state.dealTab='chat';openDealCard(${id})">Переписка</button>
-     <button class="${state.dealTab === 'products' ? 'active' : ''}" onclick="state.dealTab='products';openDealCard(${id})">Товары (${d.products.length})</button>
-     <button class="${state.dealTab === 'tasks' ? 'active' : ''}" onclick="state.dealTab='tasks';openDealCard(${id})">Задачи (${d.tasks.length})</button>
-     <button class="${state.dealTab === 'notes' ? 'active' : ''}" onclick="state.dealTab='notes';openDealCard(${id})">Заметки (${d.notes.length})</button>
-     <button class="${state.dealTab === 'history' ? 'active' : ''}" onclick="state.dealTab='history';openDealCard(${id})">История</button>
+     <button class="${state.dealTab === 'details' ? 'active' : ''}" onclick=\"setDealTab('details',${id})\">Детали</button>
+     <button class="${state.dealTab === 'chat' ? 'active' : ''}" onclick=\"setDealTab('chat',${id})\">Переписка</button>
+     <button class="${state.dealTab === 'products' ? 'active' : ''}" onclick=\"setDealTab('products',${id})\">Товары (${d.products.length})</button>
+     <button class="${state.dealTab === 'tasks' ? 'active' : ''}" onclick=\"setDealTab('tasks',${id})\">Задачи (${d.tasks.length})</button>
+     <button class="${state.dealTab === 'notes' ? 'active' : ''}" onclick=\"setDealTab('notes',${id})\">Заметки (${d.notes.length})</button>
+     <button class="${state.dealTab === 'history' ? 'active' : ''}" onclick=\"setDealTab('history',${id})\">История</button>
    </div>
    <div id="dealCardTab">${dealTab(deal, d)}</div>`);
 }
@@ -1161,7 +1213,7 @@ function dealTab(deal, d) {
   }
   if (state.dealTab === 'chat') {
     if (!d.conversation) return '<div class="empty">У этой сделки нет контакта или переписки</div>';
-    return `<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px"><b>Чат: ${esc(d.conversation.title)}</b><button class="btn sm" onclick="closeModal();state.conv=${d.conversation.id};go('inbox')">Открыть в разделе Чаты →</button></div>
+    return `<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px"><b>Чат: ${esc(d.conversation.title)}</b><button class="btn sm" onclick="closeModal();openConv(${d.conversation.id})">Открыть в разделе Чаты →</button></div>
     <div class="msgs" style="max-height:360px">${d.messages.map(msgHtml).join('') || '<small>Сообщений пока нет</small>'}</div>`;
   }
   if (state.dealTab === 'products') {
@@ -1181,7 +1233,7 @@ function dealTab(deal, d) {
   }
   if (state.dealTab === 'notes') {
     return `<form onsubmit="return addNote(event,'deals',${deal.id})"><label>Новая заметка<textarea name="body" rows="2" required placeholder="Договорились перезвонить после замера…"></textarea></label><button class="btn sm primary">Добавить</button></form>
-     <div class="list" style="margin-top:12px">${d.notes.map(n => `<div class="row"><span>${esc(n.body)}<br><small>${esc(n.author || '—')} · ${esc(dt(n.created_at))}</small></span><button class="btn sm danger" onclick="delNote(${n.id},null,${deal.id})">${icon('close', 13)}</button></div>`).join('') || '<small>Заметок нет</small>'}</div>`;
+     <div class="list" style="margin-top:12px">${d.notes.map(n => noteRow(n, 'deals', deal.id, `${n.id},null,${deal.id}`)).join('') || '<small>Заметок нет — запишите договорённости, чтобы не держать их в голове</small>'}</div>`;
   }
   if (state.dealTab === 'history') {
     return `<div class="list">${d.history.map(a => `<div class="row"><span>• ${esc(a.text)}<br><small>${esc(dt(a.created_at))}${a.user_name ? ' · ' + esc(a.user_name) : ''}</small></span></div>`).join('') || '<small>История пуста</small>'}</div>`;
@@ -1191,11 +1243,42 @@ function dealTab(deal, d) {
 async function addNote(e, entity_type, entity_id) {
   e.preventDefault();
   const body = new FormData(e.target).get('body');
-  await api('/api/notes', { method: 'POST', body: JSON.stringify({ entity_type, entity_id, body }) });
+  try { await api('/api/notes', { method: 'POST', body: JSON.stringify({ entity_type, entity_id, body }) }); }
+  catch (err) { toast(err.message, 'err'); return false; }
   toast('Заметка добавлена');
-  if (entity_type === 'deals') openDealCard(entity_id);
-  else render();
+  reopenCard(entity_type, entity_id);
   return false;
+}
+// Заметку можно поправить: опечатка или новая деталь не заставляют писать её заново.
+async function editNote(id, entity_type, entity_id) {
+  let n;
+  try { n = await api('/api/notes/' + id); } catch (e) { return toast(e.message, 'err'); }
+  openModal(`<h3>Изменить заметку</h3><form onsubmit="return saveNote(event,${id},'${entity_type}',${entity_id})">
+   <label>Текст заметки<textarea name="body" rows="4" required>${esc(n.body || '')}</textarea></label>
+   <p class="form-hint">Автор и дата создания сохраняются — история карточки остаётся честной.</p>
+   <div style="display:flex;gap:8px;flex-wrap:wrap"><button class="btn primary">Сохранить заметку</button>
+   <button type="button" class="btn" onclick="reopenCard('${entity_type}',${entity_id})">Отмена</button></div></form>`);
+}
+async function saveNote(e, id, entity_type, entity_id) {
+  e.preventDefault();
+  const body = new FormData(e.target).get('body');
+  try { await api('/api/notes/' + id, { method: 'PATCH', body: JSON.stringify({ body }) }); }
+  catch (err) { toast(err.message, 'err'); return false; }
+  toast('Заметка обновлена');
+  reopenCard(entity_type, entity_id);
+  return false;
+}
+// После изменения заметки возвращаем человека в ту же карточку, а не в список.
+function reopenCard(entity_type, entity_id) {
+  if (entity_type === 'deals') openDealCard(entity_id);
+  else if (entity_type === 'contacts') openContactCard(entity_id);
+  else { closeModal(); render(); }
+}
+// Строка заметки: текст, автор и понятные кнопки «Изменить» и «Удалить».
+function noteRow(n, entity_type, entity_id, delArgs) {
+  return `<div class="row"><span>${esc(n.body)}<br><small>${esc(n.author || '—')} · ${esc(dt(n.created_at))}</small></span>
+   ${canEdit() ? `<span style="display:flex;gap:6px;flex:none"><button class="btn sm" title="Изменить заметку" onclick="editNote(${n.id},'${entity_type}',${entity_id})">${icon('edit', 13)} Изменить</button>
+   <button class="btn sm danger" title="Удалить заметку" onclick="delNote(${delArgs})">${icon('close', 13)}</button></span>` : ''}</div>`;
 }
 async function addDealProduct(dealId) {
   const prods = await api('/api/products');
@@ -1273,16 +1356,17 @@ async function inbox(v) {
 
   v.innerHTML = `<div class="inbox">
    <div class="convs"><div style="padding:10px;border-bottom:1px solid var(--line)"><input id="convSearch" placeholder="Поиск диалогов" oninput="filterConvs(this.value)"></div>
-   <div id="convList">${convs.map(c => `<div class="conv ${c.id === (cur || {}).id ? 'active' : ''}" onclick="state.conv=${c.id};render()">
+   <div id="convList">${convs.map(c => `<div class="conv ${c.id === (cur || {}).id ? 'active' : ''}" onclick="openConv(${c.id})">
     <b><span>${esc(c.title)}</span>${c.unread ? `<span class="badge">${c.unread}</span>` : ''}</b>
     <p>${esc(c.last_body || '—')}</p><small>${chan(c.channels)} · ${esc(dt(c.last_at))}</small></div>`).join('') || '<div class="empty">Чатов пока нет</div>'}</div></div>
    <div class="chat">${cur ? `
     <div class="chat-head"><div><b>${esc(cur.title)}</b> <small>${esc(cur.phone || '')}</small></div>
       <div style="display:flex;gap:6px">
-        <button class="btn sm" onclick="openEmailComposer(${cur.id})">${icon('email', 13)} Письмо</button>
+        <button class="btn sm" onclick="attachContact(${cur.contact_id})">${icon('contact', 13)} Карточка клиента</button>
+        ${canEdit() ? `<button class="btn sm" onclick="openEmailComposer(${cur.id})">${icon('email', 13)} Письмо</button>` : ''}
       </div></div>
     <div class="msgs" id="chatMsgs">${msgs.map(msgHtml).join('') || '<div class="empty">Диалог пуст</div>'}</div>
-    <form class="composer" onsubmit="return sendMsg(event,${cur.id})">
+    ${canEdit() ? `<form class="composer" onsubmit="return sendMsg(event,${cur.id})">
      <div class="composer-row">
        <button type="button" class="btn icon-btn composer-ico" title="Прикрепить фото или файл" onclick="$('#chatFile').click()">${icon('paperclip', 17)}</button>
        <input type="file" id="chatFile" class="hidden" accept="image/png,image/jpeg,image/gif,image/webp,application/pdf,text/plain,text/csv,application/zip,.doc,.docx,.xls,.xlsx" onchange="uploadChatFile(this,${cur.id})">
@@ -1294,8 +1378,8 @@ async function inbox(v) {
        <select id="msgChannel" class="composer-select" title="Канал отправки" aria-label="Куда отправить">${channelOptions(cur)}</select>
        <select id="msgTmpl" class="composer-select" title="Шаблон ответа" onchange="if(this.value){const t=$('#msgText');t.value=this.value;this.value='';t.focus();t.setSelectionRange(t.value.length,t.value.length)}"><option value="">Шаблоны ответов…</option>${templates.map(t => `<option value="${esc(tmpl(t.name, { body: t.body, name: cur.title, sum: cur.deal_amount ? fmt(cur.deal_amount) : '—', date: new Date().toLocaleDateString('ru-RU') }))}">${esc(t.name)}</option>`).join('')}</select>
        <button type="button" class="tmpl-settings" onclick="go('settings','templates')">${icon('settings', 12)} настроить шаблоны</button>
-     </div></form>` : '<div class="empty">Выберите диалог</div>'}</div>
-   <div class="profile">${cur ? `<h3>Клиент</h3><p><b>${esc(cur.title || '')}</b></p><p>${icon('phone', 13)} ${esc(cur.phone || '—')}<br>${icon('email', 13)} ${esc(cur.email || '—')}</p><p>Каналы: ${chan(cur.channels)}${(cur.channels || '').includes('email') ? ' <span class="tag grey">почта подключена</span>' : ''}</p><p><button class="btn sm" onclick="attachContact(${cur.contact_id})">Открыть карточку клиента</button></p><hr><h3>Быстрые действия</h3><div style="display:flex;flex-direction:column;gap:6px">${cur.phone ? `<a class="btn sm" href="tel:${esc(String(cur.phone).replace(/[^+\d]/g, ''))}">${icon('phone', 13)} Позвонить</a>` : ''}<button class="btn sm" onclick="openTask(null,{contact_id:${cur.contact_id}})">+ Задача</button><button class="btn sm" onclick="quickDeal(${cur.contact_id})">+ Сделка</button><button class="btn sm" onclick="quickNote(${cur.contact_id})">+ Заметка</button></div>` : '<div class="empty">Выберите чат</div>'}</div></div>`;
+     </div></form>` : `<div class="composer"><p class="form-hint" style="margin:0">${icon('eye', 14)} Режим просмотра: переписка доступна для чтения, отвечает менеджер или администратор.</p></div>`}` : '<div class="empty">Выберите диалог</div>'}</div>
+   <div class="profile">${cur ? `<h3>Клиент</h3><p><b>${esc(cur.title || '')}</b></p><p>${icon('phone', 13)} ${esc(cur.phone || '—')}<br>${icon('email', 13)} ${esc(cur.email || '—')}</p><p>Каналы: ${chan(cur.channels)}${(cur.channels || '').includes('email') ? ' <span class="tag grey">почта подключена</span>' : ''}</p><p><button class="btn sm" onclick="attachContact(${cur.contact_id})">Открыть карточку клиента</button></p><hr><h3>Быстрые действия</h3><div style="display:flex;flex-direction:column;gap:6px">${cur.phone ? `<a class="btn sm" href="tel:${esc(String(cur.phone).replace(/[^+\d]/g, ''))}">${icon('phone', 13)} Позвонить</a>` : ''}${canEdit() ? `<button class="btn sm" onclick="openTask(null,{contact_id:${cur.contact_id}})">+ Задача</button><button class="btn sm" onclick="quickDeal(${cur.contact_id})">+ Сделка</button><button class="btn sm" onclick="quickNote(${cur.contact_id})">+ Заметка</button>` : ''}</div>` : '<div class="empty">Выберите чат</div>'}</div></div>`;
   const mDiv = $('#chatMsgs');
   if (mDiv) mDiv.scrollTop = mDiv.scrollHeight;
 }
@@ -1321,7 +1405,7 @@ function filterConvs(q) {
   const list = state.cache.convs || [];
   const qL = q.toLowerCase();
   const filtered = list.filter(c => `${c.title} ${c.last_body || ''} ${c.phone || ''}`.toLowerCase().includes(qL));
-  $('#convList').innerHTML = filtered.map(c => `<div class="conv ${c.id === state.conv ? 'active' : ''}" onclick="state.conv=${c.id};render()">
+  $('#convList').innerHTML = filtered.map(c => `<div class="conv ${c.id === state.conv ? 'active' : ''}" onclick="openConv(${c.id})">
     <b><span>${esc(c.title)}</span>${c.unread ? `<span class="badge">${c.unread}</span>` : ''}</b>
     <p>${esc(c.last_body || '—')}</p><small>${chan(c.channels)} · ${esc(dt(c.last_at))}</small></div>`).join('') || '<div class="empty">Не найдено</div>';
 }
@@ -1459,30 +1543,32 @@ async function contacts(v) {
   });
   const tagsAll = [...new Set(list.flatMap(c => (c.tags || '').split(',').map(s => s.trim()).filter(Boolean)))];
 
-  v.innerHTML = `${bulkBar('contacts', `${bulkOwner('contacts')}<button class="btn sm" onclick="bulkAddTag()">${icon('tag', 13)} Добавить тег</button><button class="btn sm danger" onclick="bulkApply('contacts','delete')">${icon('trash', 13)} Удалить</button>`)}
-  <div class="card" style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
-   <input id="contactSearch" style="max-width:220px" placeholder="Поиск по имени, тел, почте" value="${esc(f.q)}" oninput="liveSearch('contacts',()=>{state.contactFilter.q=this.value;state.contactLimit=50;render()})">
-   <select style="width:auto" onchange="state.contactFilter.owner=this.value;render()"><option value="">Все ответственные</option>${__team.map(u => `<option value="${u.id}" ${f.owner == u.id ? 'selected' : ''}>${esc(u.name)}</option>`).join('')}</select>
-   <select style="width:auto" onchange="state.contactFilter.source=this.value;render()"><option value="">Все источники</option>${['manual', 'wazzup-whatsapp', 'wazzup-telegram', 'wazzup-instagram', 'wazzup-viber', 'site', 'avito', 'email', 'import'].map(s => `<option value="${s}" ${f.source === s ? 'selected' : ''}>${sourceLabel(s)}</option>`).join('')}</select>
-   ${tagsAll.length ? `<select style="width:auto" onchange="state.contactFilter.tag=this.value;render()"><option value="">Все теги</option>${tagsAll.map(t => `<option value="${esc(t)}" ${f.tag === t ? 'selected' : ''}>${esc(t)}</option>`).join('')}</select>` : ''}
+  v.innerHTML = `${viewerNote()}${canEdit() ? bulkBar('contacts', `${bulkOwner('contacts')}<button class="btn sm" onclick="bulkAddTag()">${icon('tag', 13)} Добавить тег</button><button class="btn sm danger" onclick="bulkApply('contacts','delete')">${icon('trash', 13)} Удалить</button>`) : ''}
+  <div class="card toolbar">
+   <input id="contactSearch" style="max-width:220px" placeholder="Поиск по имени, тел, почте" value="${esc(f.q)}" oninput="liveSearch('contacts',()=>setContactQuery(this.value))">
+   <select style="width:auto" onchange="setContactFilter('owner',this.value)"><option value="">Все ответственные</option>${__team.map(u => `<option value="${u.id}" ${f.owner == u.id ? 'selected' : ''}>${esc(u.name)}</option>`).join('')}</select>
+   <select style="width:auto" onchange="setContactFilter('source',this.value)"><option value="">Все источники</option>${['manual', 'wazzup-whatsapp', 'wazzup-telegram', 'wazzup-instagram', 'wazzup-viber', 'site', 'avito', 'email', 'import'].map(s => `<option value="${s}" ${f.source === s ? 'selected' : ''}>${sourceLabel(s)}</option>`).join('')}</select>
+   ${tagsAll.length ? `<select style="width:auto" onchange="setContactFilter('tag',this.value)"><option value="">Все теги</option>${tagsAll.map(t => `<option value="${esc(t)}" ${f.tag === t ? 'selected' : ''}>${esc(t)}</option>`).join('')}</select>` : ''}
    ${(f.q || f.owner || f.source || f.tag) ? `<button class="btn sm ghost" onclick="resetContactFilter()">Сбросить</button>` : ''}
    <span class="tag grey" style="margin-left:auto">показано ${Math.min(filtered.length, state.contactLimit || 50)} из ${filtered.length}${filtered.length !== list.length ? ` (всего в базе ${list.length})` : ''}</span>
-   <details class="dropdown"><summary class="btn sm">${icon('more', 13)} Ещё</summary><div class="dropdown-pop">
-     <button type="button" onclick="closeDropdown(this);openDuplicates()">${icon('search', 13)} Поиск дублей</button>
-     <button type="button" onclick="closeDropdown(this);download('/api/export/contacts','contacts.csv')">${icon('download', 13)} Экспорт в CSV</button>
-     <button type="button" onclick="closeDropdown(this);importContacts()">${icon('upload', 13)} Импорт из CSV</button>
-   </div></details>
-   <button class="btn sm primary" onclick="openContact()">${icon('plus', 13)} Новый контакт</button></div>
+   <button class="btn sm" onclick="openMenu(event, contactsMoreMenu())" title="Дубли, экспорт и импорт">${icon('more', 13)} Ещё</button>
+   ${canEdit() ? `<button class="btn sm primary" onclick="openContact()">${icon('plus', 13)} Новый контакт</button>` : ''}</div>
   <div class="card"><table><tr><th class="sel"></th><th>Клиент</th><th>Телефон / E-mail</th><th>Компания</th><th>Источник</th><th>Теги</th><th>Ответственный</th><th></th></tr>
-   ${filtered.slice(0, state.contactLimit || 50).map(c => `<tr class="${selSet('contacts').has(c.id) ? 'selected' : ''}"><td class="sel"><input type="checkbox" ${selSet('contacts').has(c.id) ? 'checked' : ''} onchange="toggleSel('contacts',${c.id})"></td>
+   ${filtered.slice(0, state.contactLimit || 50).map(c => `<tr class="${selSet('contacts').has(c.id) ? 'selected' : ''}"><td class="sel">${canEdit() ? `<input type="checkbox" title="Выбрать для массового действия" ${selSet('contacts').has(c.id) ? 'checked' : ''} onchange="toggleSel('contacts',${c.id})">` : ''}</td>
     <td><a href="#" onclick="openContactCard(${c.id});return false"><b>${esc(c.name)}</b></a></td><td>${esc(c.phone || '—')}<br><small>${esc(c.email || '')}</small></td><td>${esc(c.company || '—')}</td><td><span class="tag grey">${esc(sourceLabel(c.source))}</span></td>
     <td>${(c.tags || '').split(',').filter(Boolean).map(t => `<span class="tag">${esc(t.trim())}</span>`).join('')}</td>
     <td><small>${esc(__team.find(u => u.id === c.responsible_id)?.name || '—')}</small></td>
-    <td style="white-space:nowrap"><button class="btn sm" onclick="openContactCard(${c.id})">Карточка</button> <button class="btn sm" onclick="openDeal(${c.id})">+ Сделка</button> <button class="btn sm danger" onclick="del('contacts',${c.id})">${icon('close', 13)}</button></td></tr>`).join('') || '<tr><td colspan="8"><div class="empty">Контактов не найдено</div></td></tr>'}</table>
-   ${filtered.length > (state.contactLimit || 50) ? `<div style="text-align:center;margin-top:10px"><button class="btn" onclick="state.contactLimit=(state.contactLimit||50)+50;render()">Показать ещё 50</button></div>` : ''}</div>`;
+    <td style="white-space:nowrap"><button class="btn sm" onclick="openContactCard(${c.id})">Карточка</button>${canEdit() ? ` <button class="btn sm" onclick="openDeal(${c.id})">+ Сделка</button> <button class="btn sm danger" title="Удалить контакт" onclick="del('contacts',${c.id})">${icon('close', 13)}</button>` : ''}</td></tr>`).join('') || '<tr><td colspan="8"><div class="empty">Контактов не найдено</div></td></tr>'}</table>
+   ${filtered.length > (state.contactLimit || 50) ? `<div style="text-align:center;margin-top:10px"><button class="btn" onclick="showMoreContacts()">Показать ещё 50</button></div>` : ''}</div>`;
 }
 
 function resetContactFilter() { state.contactFilter = { q: '', owner: '', source: '', tag: '' }; render(); }
+// Пункты меню «Ещё» в контактах: чтение доступно всем, загрузка — не наблюдателю.
+function contactsMoreMenu() {
+  return `<button type="button" onclick="closeMenu();openDuplicates()">${icon('search', 13)} Найти дубли клиентов</button>
+   <button type="button" onclick="closeMenu();download('/api/export/contacts','contacts.csv')">${icon('download', 13)} Выгрузить в CSV</button>
+   ${canEdit() ? `<button type="button" onclick="closeMenu();importContacts()">${icon('upload', 13)} Загрузить список из CSV</button>` : ''}`;
+}
 function bulkAddTag() {
   askInput({ title: 'Тег для выбранных контактов', label: 'Название тега', okText: 'Добавить тег' }, tag => {
     if (!tag) return;
@@ -1566,7 +1652,7 @@ async function openContactCard(id) {
      <div><h3 style="margin:0">${esc(c.name)}</h3><small>${esc(c.company || 'Частное лицо')} · источник: ${esc(sourceLabel(c.source))}</small></div>
      <div style="margin-left:auto;display:flex;gap:6px;flex-wrap:wrap">
        ${rawPhone ? `<a class="btn sm" href="https://wa.me/${rawPhone}" target="_blank" rel="noopener">${icon('whatsapp', 13)} WhatsApp</a><a class="btn sm" href="tel:${esc(String(c.phone).replace(/[^+\d]/g, ''))}">${icon('phone', 13)} Позвонить</a>` : ''}
-       ${conv ? `<button class="btn sm" onclick="closeModal();state.conv=${conv.id};go('inbox')">${icon('chat', 13)} Чат</button>` : ''}
+       ${conv ? `<button class="btn sm" onclick="closeModal();openConv(${conv.id})">${icon('chat', 13)} Чат</button>` : ''}
        <button class="btn sm" onclick="openTask(null,{contact_id:${c.id}})">+ Задача</button>
        <button class="btn sm primary" onclick="openDeal(${c.id})">+ Сделка</button>
        <button class="btn sm" onclick="openContact(${c.id})">Редактировать</button>
@@ -1586,11 +1672,12 @@ async function openContactCard(id) {
        <button class="btn sm" style="margin-top:8px" onclick="openTask(null,{contact_id:${c.id}})">+ Задача клиенту</button>
        <h4 style="margin-top:16px">Заметки</h4>
        <form onsubmit="return addNote(event,'contacts',${c.id})"><textarea name="body" rows="2" required placeholder="Заметка о клиенте…"></textarea><button class="btn sm primary" style="margin-top:6px">Добавить заметку</button></form>
-       <div class="list" style="margin-top:10px">${notes.map(n => `<div class="row"><span>${esc(n.body)}<br><small>${esc(n.author || '—')} · ${esc(dt(n.created_at))}</small></span><button class="btn sm danger" onclick="delNote(${n.id},${c.id})">${icon('close', 13)}</button></div>`).join('') || '<small>Заметок нет</small>'}</div>
+       <div class="list" style="margin-top:10px">${notes.map(n => noteRow(n, 'contacts', c.id, `${n.id},${c.id}`)).join('') || '<small>Заметок нет</small>'}</div>
      </div>
      <div>
-       <h4>Контактные данные</h4>
-       <p>Телефон: <b>${esc(c.phone || '—')}</b><br>E-mail: <b>${esc(c.email || '—')}</b><br>Ответственный: <b>${esc(__team.find(u => u.id === c.responsible_id)?.name || 'Не назначен')}</b></p>
+       <div class="row" style="border:0;padding-bottom:2px"><h4 style="margin:0">Контактные данные</h4>${canEdit() ? `<button class="btn sm" onclick="openContact(${c.id})">${icon('edit', 13)} Изменить</button>` : ''}</div>
+       <p>Телефон: <b>${esc(c.phone || '—')}</b><br>E-mail: <b>${esc(c.email || '—')}</b><br>Компания: <b>${esc(c.company || '—')}</b><br>Ответственный: <b>${esc(__team.find(u => u.id === c.responsible_id)?.name || 'Не назначен')}</b></p>
+       ${c.notes ? `<p><small><b>Заметка в карточке:</b> ${esc(c.notes)}</small></p>` : ''}
        ${cfTable('contacts', c) ? `<h4>Свои поля</h4><table class="mini">${cfTable('contacts', c)}</table>` : ''}
        <p><small>Создан: ${esc(dt(c.created_at))}</small></p>
      </div>
@@ -1665,12 +1752,12 @@ async function companies(v) {
   const rows = await api('/api/companies');
   const q = (state.companyQuery || '').trim().toLowerCase();
   const shown = q ? rows.filter(c => `${c.name} ${c.inn || ''} ${c.phone || ''} ${c.email || ''}`.toLowerCase().includes(q)) : rows;
-  v.innerHTML = `<div class="card"><div class="row" style="border:0;flex-wrap:wrap;gap:8px"><h3>Компании (${shown.length}${shown.length !== rows.length ? ` из ${rows.length}` : ''})</h3>
-   <input id="companySearch" style="max-width:240px" placeholder="Название, ИНН, телефон" value="${esc(state.companyQuery || '')}" oninput="liveSearch('companies',()=>{state.companyQuery=this.value;render()})">
-   <button class="btn sm primary" style="margin-left:auto" onclick="openCompany()">+ Компания</button></div>
+  v.innerHTML = `${viewerNote()}<div class="card"><div class="row" style="border:0;flex-wrap:wrap;gap:8px"><h3>Компании (${shown.length}${shown.length !== rows.length ? ` из ${rows.length}` : ''})</h3>
+   <input id="companySearch" style="max-width:240px" placeholder="Поиск: название, ИНН, телефон, почта" value="${esc(state.companyQuery || '')}" oninput="liveSearch('companies',()=>setCompanyQuery(this.value))">
+   ${canEdit() ? `<button class="btn sm primary" style="margin-left:auto" onclick="openCompany()">+ Компания</button>` : ''}</div>
   <table><tr><th>Компания</th><th>ИНН</th><th>Телефон</th><th>E-mail</th><th>Сайт</th><th></th></tr>
-   ${shown.slice(0, state.companyLimit || 100).map(c => `<tr><td><b>${esc(c.name)}</b></td><td>${esc(c.inn || '—')}</td><td>${esc(c.phone || '—')}</td><td>${esc(c.email || '—')}</td><td>${siteHref(c.site) ? `<a href="${esc(siteHref(c.site))}" target="_blank" rel="noopener">${esc(c.site)}</a>` : '—'}</td><td><button class="btn sm" onclick="openCompany(${c.id})">${icon('edit', 13)}</button> <button class="btn sm danger" onclick="del('companies',${c.id})">${icon('close', 13)}</button></td></tr>`).join('') || '<tr><td colspan="6"><div class="empty">Компаний не найдено</div></td></tr>'}</table>
-   ${shown.length > (state.companyLimit || 100) ? `<div style="text-align:center;margin-top:10px"><button class="btn" onclick="state.companyLimit=(state.companyLimit||100)+100;render()">Показать ещё</button></div>` : ''}</div>`;
+   ${shown.slice(0, state.companyLimit || 100).map(c => `<tr><td><b>${esc(c.name)}</b></td><td>${esc(c.inn || '—')}</td><td>${esc(c.phone || '—')}</td><td>${esc(c.email || '—')}</td><td>${siteHref(c.site) ? `<a href="${esc(siteHref(c.site))}" target="_blank" rel="noopener">${esc(c.site)}</a>` : '—'}</td><td style="white-space:nowrap">${canEdit() ? `<button class="btn sm" title="Открыть карточку компании" onclick="openCompany(${c.id})">${icon('edit', 13)} Изменить</button> <button class="btn sm danger" title="Удалить компанию" onclick="del('companies',${c.id})">${icon('close', 13)}</button>` : `<button class="btn sm" onclick="openCompany(${c.id})">Открыть</button>`}</td></tr>`).join('') || '<tr><td colspan="6"><div class="empty">Компаний не найдено — измените поиск или добавьте компанию</div></td></tr>'}</table>
+   ${shown.length > (state.companyLimit || 100) ? `<div style="text-align:center;margin-top:10px"><button class="btn" onclick="showMoreCompanies()">Показать ещё</button></div>` : ''}</div>`;
 }
 async function openCompany(id) {
   const c = id ? await api('/api/companies/' + id) : {};
@@ -1712,6 +1799,8 @@ async function tasks(v) {
   let rows = state.taskScope === 'mine' ? all.filter(t => t.responsible_id === meId() || !t.responsible_id) : all;
   if (state.taskFilter === 'today') rows = rows.filter(t => !t.done && normalizeDue(t.due).slice(0, 10) === today);
   if (state.taskFilter === 'overdue') rows = rows.filter(t => !t.done && normalizeDue(t.due) !== '' && normalizeDue(t.due).slice(0, 10) < today);
+  const tq = (state.taskQuery || '').trim().toLowerCase();
+  if (tq) rows = rows.filter(t => `${t.title} ${t.contact_name || ''} ${t.deal_title || ''} ${t.responsible_name || ''} ${t.result || ''}`.toLowerCase().includes(tq));
   const groups = [
     ['Просроченные', rows.filter(t => !t.done && normalizeDue(t.due).slice(0, 10) < today && normalizeDue(t.due) !== '')],
     ['Сегодня', rows.filter(t => !t.done && normalizeDue(t.due).slice(0, 10) === today)],
@@ -1722,30 +1811,34 @@ async function tasks(v) {
   const mineOpen = all.filter(t => !t.done && (t.responsible_id === meId() || !t.responsible_id)).length;
 
   v.innerHTML = `<div class="card"><div class="row" style="border:0;flex-wrap:wrap;gap:8px"><b>Задач: ${rows.length}</b>
-   <span class="tabs" style="margin:0"><button class="${state.taskScope === 'mine' ? 'active' : ''}" onclick="state.taskScope='mine';render()">Мои (${mineOpen})</button><button class="${state.taskScope === 'all' ? 'active' : ''}" onclick="state.taskScope='all';render()">Все (${all.filter(t => !t.done).length})</button></span>
-   ${state.taskFilter ? `<span class="tag orange" style="display:inline-flex;gap:6px;align-items:center">${state.taskFilter === 'today' ? 'Только на сегодня' : 'Только просроченные'}<button class="btn sm" style="padding:0 4px" title="Сбросить фильтр" onclick="state.taskFilter='';render()">×</button></span>` : ''}
-   <span class="tabs" style="margin:0"><button class="${state.taskView === 'list' ? 'active' : ''}" onclick="state.taskView='list';render()">${icon('list', 14)} Список</button><button class="${state.taskView === 'week' ? 'active' : ''}" onclick="state.taskView='week';render()">${icon('calendar', 14)} Неделя</button></span>
-   <button class="btn sm ${state.taskSelectMode ? 'active' : ''}" onclick="toggleTaskSelect()">${state.taskSelectMode ? 'Отменить выбор' : 'Выбрать несколько'}</button>
-   <button class="btn sm primary" style="margin-left:auto" onclick="openTask()">${icon('plus', 14)} Задача</button></div>
+   <span class="tabs" style="margin:0"><button class="${state.taskScope === 'mine' ? 'active' : ''}" onclick="setTaskScope('mine')">Мои (${mineOpen})</button><button class="${state.taskScope === 'all' ? 'active' : ''}" onclick="setTaskScope('all')">Все (${all.filter(t => !t.done).length})</button></span>
+   ${state.taskFilter ? `<span class="tag orange" style="display:inline-flex;gap:6px;align-items:center">${state.taskFilter === 'today' ? 'Только на сегодня' : 'Только просроченные'}<button class="btn sm" style="padding:0 4px" title="Сбросить фильтр" onclick="clearTaskFilter()">×</button></span>` : ''}
+   ${state.taskQuery ? `<span class="tag grey" style="display:inline-flex;gap:6px;align-items:center">Поиск: ${esc(state.taskQuery)}<button class="btn sm" style="padding:0 4px" title="Очистить поиск" onclick="clearTaskQuery()">×</button></span>` : ''}
+   <span class="tabs" style="margin:0"><button class="${state.taskView === 'list' ? 'active' : ''}" onclick="setTaskView('list')">${icon('list', 14)} Список</button><button class="${state.taskView === 'week' ? 'active' : ''}" onclick="setTaskView('week')">${icon('calendar', 14)} Неделя</button></span>
+   <input id="taskSearch" style="max-width:220px" placeholder="Поиск по задачам" value="${esc(state.taskQuery || '')}" oninput="liveSearch('tasks',()=>setTaskQuery(this.value))">
+   ${canEdit() ? `<button class="btn sm ${state.taskSelectMode ? 'active' : ''}" onclick="toggleTaskSelect()">${state.taskSelectMode ? 'Отменить выбор' : 'Выбрать несколько'}</button>` : ''}
+   ${canEdit() ? `<button class="btn sm primary" style="margin-left:auto" onclick="openTask()">${icon('plus', 14)} Задача</button>` : ''}</div>
    ${state.taskScope === 'mine' ? `<p><small>Здесь задачи, назначенные на вас (${esc((state.me && state.me.name) || '')}), и неназначенные — их удобно разобрать первыми.</small></p>` : ''}
    ${state.taskView === 'week' ? weekCalendar(rows) : ''}
-   ${state.taskView !== 'week' && state.taskSelectMode ? bulkBar('tasks', `<button class="btn sm" onclick="bulkApply('tasks','update',{done:1})">${icon('check', 14)} Выполнить выбранные</button> <button class="btn sm" onclick="bulkRescheduleTasks()">Перенести</button> <button class="btn sm danger" onclick="bulkApply('tasks','delete')">${icon('trash', 14)} Удалить</button>`) : ''}
+   ${state.taskView !== 'week' && state.taskSelectMode && canEdit() ? bulkBar('tasks', `<button class="btn sm" onclick="bulkApply('tasks','update',{done:1})">${icon('check', 14)} Выполнить выбранные</button> <button class="btn sm" onclick="bulkRescheduleTasks()">Перенести</button> <button class="btn sm danger" onclick="bulkApply('tasks','delete')">${icon('trash', 14)} Удалить</button>`) : ''}
    ${state.taskView === 'week' ? '' : groups.map(([t, list]) => list.length ? `<h3 style="margin-top:12px">${t} <small>${list.length}</small></h3>${list.slice(0, state.taskLimit || 50).map(x => {
      const meta = taskDueMeta(x.due, x.done);
      return `<div class="row taskrow ${selSet('tasks').has(x.id) ? 'selected' : ''}">
        <div style="display:flex;gap:10px;align-items:center;min-width:0;flex:1">
-         ${state.taskSelectMode ? `<input type="checkbox" style="width:16px" ${selSet('tasks').has(x.id) ? 'checked' : ''} onchange="toggleSel('tasks',${x.id})" title="Выбрать для действия">` : ''}
-         <button type="button" class="btn sm mark ${x.done ? 'done' : ''}" onclick="toggleTask(${x.id}, ${x.done ? 0 : 1})">${x.done ? icon('check', 13) + ' Выполнено' : 'Выполнить'}</button>
+         ${state.taskSelectMode && canEdit() ? `<input type="checkbox" style="width:16px" ${selSet('tasks').has(x.id) ? 'checked' : ''} onchange="toggleSel('tasks',${x.id})" title="Выбрать для действия">` : ''}
+         ${canEdit() ? `<button type="button" class="btn sm mark ${x.done ? 'done' : ''}" onclick="toggleTask(${x.id}, ${x.done ? 0 : 1})">${x.done ? icon('check', 13) + ' Выполнено' : 'Выполнить'}</button>` : ''}
          <span class="${x.done ? 'task-done' : ''}">${types[x.type] || icon('task', 14)} <b>${esc(x.title)}</b>${x.repeat && x.repeat !== 'none' ? ' <span class="tag grey" title="Повторяется">' + icon('repeat', 12) + ' ' + ({ daily: 'ежедневно', weekly: 'еженедельно', monthly: 'ежемесячно' }[x.repeat] || '') + '</span>' : ''}</span>
          <small class="${meta.overdue ? 'task-due-overdue' : (meta.label.startsWith('сегодня') ? 'task-due-today' : '')}">${esc(meta.label)}${x.contact_name ? ' · ' + esc(x.contact_name) : ''}${x.deal_title ? ' · ' + esc(x.deal_title) : ''}${x.responsible_name ? ' · ' + esc(x.responsible_name) : ''}</small>
        </div>
-       <span style="display:flex;gap:6px;flex-shrink:0">
+       ${canEdit() ? `<span style="display:flex;gap:6px;flex-shrink:0">
          ${x.done ? '' : `<button class="btn sm" title="Перенести на завтра" onclick="reschedule(${x.id},1)">Завтра</button><button class="btn sm" title="Перенести на неделю" onclick="reschedule(${x.id},7)">+7 дн.</button>`}
-         <button class="btn sm" onclick="openTask(${x.id})">${icon('edit', 13)}</button>
-         <button class="btn sm danger" onclick="del('tasks',${x.id})">${icon('close', 13)}</button>
-       </span>
+         <button class="btn sm" title="Изменить задачу" onclick="openTask(${x.id})">${icon('edit', 13)}</button>
+         <button class="btn sm danger" title="Удалить задачу" onclick="del('tasks',${x.id})">${icon('close', 13)}</button>
+       </span>` : ''}
      </div>`;
-   }).join('')}${list.length > (state.taskLimit || 50) ? `<div style="margin:6px 0 10px"><small>Показано ${state.taskLimit || 50} из ${list.length}. <button class="btn sm" onclick="state.taskLimit=(state.taskLimit||50)+50;render()">Показать ещё</button></small></div>` : ''}` : '').join('') || '<div class="empty-state"><span class="ico">' + icon('target', 36) + '</span><b>Задач нет</b>Поставьте первое дело — звонок, встречу или письмо.<br><button class="btn primary" onclick="openTask()">' + icon('plus', 14) + ' Задача</button></div>'}</div>`;
+   }).join('')}${list.length > (state.taskLimit || 50) ? `<div style="margin:6px 0 10px"><small>Показано ${state.taskLimit || 50} из ${list.length}. <button class="btn sm" onclick="showMoreTasks()">Показать ещё</button></small></div>` : ''}` : '').join('') || `<div class="empty-state"><span class="ico">${icon('target', 36)}</span><b>Задач нет</b>${state.taskQuery || state.taskFilter
+      ? 'Под этот фильтр ничего не подошло — измените условия поиска выше.'
+      : 'Поставьте первое дело — звонок, встречу или письмо: кнопка «Задача» в правом верхнем углу списка и в шапке страницы.'}</div>`}</div>`;
 }
 
 function toggleTaskSelect() {
@@ -1876,12 +1969,12 @@ async function products(v) {
   const onlyActive = state.productScope !== 'all';
   const shown = rows.filter(p => (!onlyActive || p.active) && (!q || `${p.name} ${p.sku || ''} ${p.unit || ''}`.toLowerCase().includes(q)));
   const archived = rows.filter(p => !p.active).length;
-  v.innerHTML = `<div class="card"><div class="row" style="border:0;flex-wrap:wrap;gap:8px"><h3>Каталог (${shown.length})</h3>
-   <span class="tabs" style="margin:0"><button class="${onlyActive ? 'active' : ''}" onclick="state.productScope='active';render()">В продаже</button><button class="${!onlyActive ? 'active' : ''}" onclick="state.productScope='all';render()">Все${archived ? ` (+${archived} в архиве)` : ''}</button></span>
-   <input id="productSearch" style="max-width:240px" placeholder="Название или артикул" value="${esc(state.productQuery || '')}" oninput="liveSearch('products',()=>{state.productQuery=this.value;render()})">
-   <button class="btn sm primary" style="margin-left:auto" onclick="openProduct()">+ Товар / проект</button></div>
+  v.innerHTML = `${viewerNote()}<div class="card"><div class="row" style="border:0;flex-wrap:wrap;gap:8px"><h3>Каталог (${shown.length})</h3>
+   <span class="tabs" style="margin:0"><button class="${onlyActive ? 'active' : ''}" onclick="setProductScope('active')">В продаже</button><button class="${!onlyActive ? 'active' : ''}" onclick="setProductScope('all')">Все${archived ? ` (+${archived} в архиве)` : ''}</button></span>
+   <input id="productSearch" style="max-width:240px" placeholder="Поиск: название или артикул" value="${esc(state.productQuery || '')}" oninput="liveSearch('products',()=>setProductQuery(this.value))">
+   ${canEdit() ? `<button class="btn sm primary" style="margin-left:auto" onclick="openProduct()">+ Товар / проект</button>` : ''}</div>
   <table><tr><th>Артикул</th><th>Название</th><th>Цена</th><th>Ед.</th><th>В продаже</th><th></th></tr>
-   ${shown.map(p => `<tr><td><code>${esc(p.sku || '—')}</code></td><td><b>${esc(p.name)}</b></td><td>${fmt(p.price)}</td><td>${esc(p.unit || 'шт')}</td><td>${p.active ? 'Да' : '<span class="tag grey">Архив</span>'}</td><td><button class="btn sm" onclick="openProduct(${p.id})">${icon('edit', 13)}</button> <button class="btn sm danger" onclick="del('products',${p.id})">${icon('close', 13)}</button></td></tr>`).join('') || '<tr><td colspan="6"><div class="empty">Ничего не найдено — измените фильтр или добавьте позицию</div></td></tr>'}</table></div>`;
+   ${shown.map(p => `<tr><td><code>${esc(p.sku || '—')}</code></td><td><b>${esc(p.name)}</b></td><td>${fmt(p.price)}</td><td>${esc(p.unit || 'шт')}</td><td>${p.active ? 'Да' : '<span class="tag grey">Архив</span>'}</td><td style="white-space:nowrap">${canEdit() ? `<button class="btn sm" title="Изменить позицию" onclick="openProduct(${p.id})">${icon('edit', 13)} Изменить</button>${amAdmin() ? ` <button class="btn sm danger" title="Удалить из каталога" onclick="del('products',${p.id})">${icon('close', 13)}</button>` : ''}` : `<button class="btn sm" onclick="openProduct(${p.id})">Открыть</button>`}</td></tr>`).join('') || '<tr><td colspan="6"><div class="empty">Ничего не найдено — измените фильтр или добавьте позицию</div></td></tr>'}</table></div>`;
 }
 async function openProduct(id) {
   const p = id ? await api('/api/products/' + id) : {};
@@ -1915,6 +2008,12 @@ async function analytics(v) {
   </div>
   <div class="cols"><div>
    <div class="card"><h3>Сделки по этапам воронки</h3>${a.stages.map(s => `<p style="display:flex;justify-content:space-between;margin:8px 0 2px"><span>${esc(s.name)} · ${s.count}</span><b>${fmt(s.sum)}</b></p><div class="bar"><i style="width:${Math.round(s.sum / max * 100)}%"></i></div>`).join('')}</div>
+   <div class="card"><h3>Выручка по месяцам</h3>
+    <p class="form-hint" style="margin-top:-2px">Считаем месяц, в котором сделка закрылась успешно. Столбики — сумма продаж, под ними число сделок.</p>
+    ${(a.byMonth || []).length ? (a.byMonth || []).map(m => {
+      const maxM = Math.max(...(a.byMonth || []).map(x => x.s), 1);
+      return `<p style="display:flex;justify-content:space-between;margin:8px 0 2px"><span>${esc(monthText(m.ym))}</span><b>${fmt(m.s)}</b></p><div class="bar"><i style="width:${Math.round((m.s || 0) / maxM * 100)}%"></i></div><p class="form-hint" style="margin:-8px 0 10px">сделок: ${m.n}</p>`;
+    }).join('') : '<p><small>Успешных сделок пока нет — как только первая закроется, здесь появится её месяц.</small></p>'}</div>
    <div class="card"><h3>Сделки по источникам</h3><table><tr><th>Источник</th><th>Сделок</th><th>Сумма</th></tr>${a.bySource.map(x => `<tr><td>${esc(sourceLabel(x.name))}</td><td>${x.count}</td><td><b>${fmt(x.sum)}</b></td></tr>`).join('') || '<tr><td colspan="3"><small>Пока нет сделок</small></td></tr>'}</table></div>
    <div class="card"><h3>План продаж — ${esc(monthShort(plan.month || new Date().toISOString().slice(0, 7)))}</h3>
     <p><small>План — цель на <b>${esc(monthText(plan.month || new Date().toISOString().slice(0, 7)))}</b>, факт — сумма успешных сделок, закрытых за этот же месяц. Они стоят рядом, чтобы сразу видеть, сколько осталось продать до конца месяца: план минус факт. План не мешает работе — это ориентир для команды.</small></p>
@@ -1931,57 +2030,129 @@ async function setSalesPlan(e) {
 }
 
 /* ---------- competitors view ---------- */
-const RISK_COLORS = { low: '#16a34a', mid: '#f97316', high: '#dc2626' };
-const RISK_LABELS = { low: 'Низкий риск', mid: 'Средний риск', high: 'Высокий риск' };
+// Уровень риска сервер считает словами — цвета подбираем к тем же словам,
+// иначе плашка всегда оставалась серой и подписи «нет» вместо уровня.
+const RISK_COLORS = { низкий: '#16a34a', умеренный: '#ca8a04', повышенный: '#f97316', высокий: '#dc2626' };
+const RISK_LABELS = { низкий: 'низкий', умеренный: 'умеренный', повышенный: 'повышенный', высокий: 'высокий' };
+const riskColor = level => RISK_COLORS[String(level || '').toLowerCase()] || '#64748b';
 
 async function competitorsView(v) {
   const list = await api('/api/competitors');
-  v.innerHTML = `
-  <div class="card" style="display:flex;gap:10px;align-items:center;flex-wrap:wrap">
-    <div style="flex:1;min-width:240px;position:relative"><input id="compSearch" placeholder="Введите название или ИНН конкурента для проверки…" onkeydown="if(event.key==='Enter')findCompetitor(this.value)"></div>
-    <button class="btn primary" onclick="findCompetitor($('#compSearch').value)">${icon('search', 14)} Найти и проверить</button>
-    <button class="btn" onclick="openCompetitor()">+ Добавить вручную</button>
-    <button class="btn" onclick="openPriceImport(null,'ours')">${icon('excel', 14)} Наш прайс-лист</button>
+  const ours = await api('/api/prices?scope=ours').catch(() => ({ rows: [] }));
+  const q = (state.compQuery || '').trim().toLowerCase();
+  const shown = q ? list.filter(c => `${c.name} ${c.inn || ''} ${c.city || ''} ${c.website || ''} ${c.phone || ''}`.toLowerCase().includes(q)) : list;
+  v.innerHTML = `${viewerNote()}
+  <div class="card toolbar">
+    <input id="compSearch" style="flex:1;min-width:240px" placeholder="Название или ИНН конкурента — найдём и проверим по открытым источникам" onkeydown="if(event.key==='Enter')findCompetitor(this.value)">
+    ${canEdit() ? `<button class="btn primary" onclick="findCompetitor($('#compSearch').value)">${icon('search', 14)} Найти и проверить</button>
+    <button class="btn" onclick="openCompetitor()">+ Добавить вручную</button>` : ''}
+    <button class="btn" title="Показать нашу таблицу цен" onclick="openOurPrices()">${icon('excel', 14)} Наш прайс-лист${ours.rows.length ? ` (${ours.rows.length})` : ''}</button>
   </div>
   <div class="card">
-   <div class="row" style="border:0"><h3>Конкуренты на контроле (${list.length})</h3><small>ФНС · ФССП · Суды · Банкротство · Отзывы · Сравнение цен</small></div>
+   <div class="row" style="border:0;flex-wrap:wrap;gap:8px">
+     <h3>Конкуренты на контроле (${shown.length}${shown.length !== list.length ? ` из ${list.length}` : ''})</h3>
+     <input id="compFilter" style="max-width:250px" placeholder="Поиск по списку: название, ИНН, город" value="${esc(state.compQuery || '')}" oninput="liveSearch('compList',()=>setCompQuery(this.value))">
+     ${state.compQuery ? `<button class="btn sm ghost" onclick="clearCompQuery()">Сбросить</button>` : ''}
+     <small style="margin-left:auto">ФНС · ФССП · Суды · Банкротство · Отзывы · Сравнение цен</small></div>
    <table><tr><th>Конкурент</th><th>ИНН</th><th>Город / сайт</th><th>Риск</th><th>Проверка</th><th>Цены</th><th></th></tr>
-    ${list.map(c => `<tr>
+    ${shown.map(c => `<tr>
      <td><a href="#" onclick="openCompetitorCard(${c.id});return false"><b>${esc(c.name)}</b></a></td>
      <td><code>${esc(c.inn || '—')}</code></td><td>${esc(c.city || '—')}<br><small>${siteHref(c.website) ? `<a href="${esc(siteHref(c.website))}" target="_blank" rel="noopener">${esc(c.website)}</a>` : ''}</small></td>
-     <td><span class="tag" style="background:${RISK_COLORS[c.level] || '#e2e8f0'}22;color:${RISK_COLORS[c.level] || 'var(--ink)'}">риск ${c.risk ?? 0} (${RISK_LABELS[c.level] || 'нет'})</span></td>
+     <td>${c.risk === null || c.risk === undefined ? '<span class="tag grey">не проверялся</span>' : `<span class="tag risk-tag" style="--risk:${esc(riskColor(c.level))}" title="Риск-оценка от 0 до 100 по открытым источникам">риск ${c.risk} · ${esc(RISK_LABELS[String(c.level || '').toLowerCase()] || c.level || '—')}</span>`}</td>
      <td><small>${esc(dt(c.checked_at) || 'не проверялся')}</small></td>
      <td><small>позиций: ${c.prices || 0}</small></td>
      <td style="white-space:nowrap">
-       <button class="btn sm" onclick="checkCompetitor(${c.id})">${icon('refresh', 13)} Проверить</button>
        <button class="btn sm" onclick="openCompetitorCard(${c.id})">Отчёт</button>
-       <button class="btn sm" onclick="openCompetitor(${c.id})">${icon('edit', 13)}</button>
-       <button class="btn sm danger" onclick="delCompetitor(${c.id})">${icon('close', 13)}</button>
-     </td></tr>`).join('') || '<tr><td colspan="7"><div class="empty">Конкурентов пока нет — введите название выше</div></td></tr>'}
+       ${canEdit() ? `<button class="btn sm" onclick="checkCompetitor(${c.id})">${icon('refresh', 13)} Проверить</button>
+       <button class="btn sm" title="Изменить карточку конкурента" onclick="openCompetitor(${c.id})">${icon('edit', 13)}</button>
+       <button class="btn sm danger" title="Удалить конкурента" onclick="delCompetitor(${c.id})">${icon('close', 13)}</button>` : ''}
+     </td></tr>`).join('') || `<tr><td colspan="7"><div class="empty">${q ? 'Ничего не найдено — измените поиск' : 'Конкурентов пока нет — введите название выше'}</div></td></tr>`}
    </table>
   </div>`;
 }
 
+/* ---------- наша таблица цен ---------- */
+// Название приводим к одному виду, чтобы «Дом 8×10» и «дом 8x10» считались одной позицией.
+function normItem(s) { return String(s || '').toLowerCase().replace(/[«»"'`]/g, '').replace(/[^a-zа-я0-9]+/gi, ' ').trim(); }
+function comparePrices(ours, theirs) {
+  const map = new Map((theirs || []).map(r => [normItem(r.item), r]));
+  return (ours || []).map(o => {
+    const k = normItem(o.item);
+    if (!k) return null;
+    const hit = map.get(k) || [...map.entries()].find(([key]) => key && (key.includes(k) || k.includes(key)))?.[1];
+    return hit ? { item: o.item, ours: Number(o.price) || 0, theirs: Number(hit.price) || 0 } : null;
+  }).filter(Boolean);
+}
+function ourPriceRows(rows) {
+  return `<tr><th>Позиция</th><th>Цена</th><th>Ед.</th><th>Артикул</th></tr>` + (rows.map(r => `<tr><td><b>${esc(r.item)}</b>${r.note ? `<br><small>${esc(r.note)}</small>` : ''}</td><td>${fmt(r.price)}</td><td>${esc(r.unit || 'шт')}</td><td><code>${esc(r.sku || '—')}</code></td></tr>`).join('')
+    || `<tr><td colspan="4"><div class="empty">Таблица не загружена${amAdmin() ? ' — нажмите «Загрузить нашу таблицу цен»' : ' — её загрузит администратор'}</div></td></tr>`);
+}
+function filterOurPrices(q) {
+  const needle = String(q || '').trim().toLowerCase();
+  const rows = (state.ourPrices || []).filter(r => `${r.item} ${r.sku || ''} ${r.unit || ''} ${r.note || ''}`.toLowerCase().includes(needle));
+  const t = $('#ourPriceTable');
+  if (t) t.innerHTML = ourPriceRows(rows);
+  const c = $('#ourPriceCount');
+  if (c) c.textContent = needle ? `Найдено позиций: ${rows.length}` : '';
+}
+// Кнопка «Наш прайс-лист» показывает таблицу: менять её может только администратор.
+// backId — карточка конкурента, из которой открыли таблицу: возвращаем человека назад.
+async function openOurPrices(backId = null) {
+  const d = await api('/api/prices?scope=ours').catch(() => ({ rows: [] }));
+  const rows = d.rows || [];
+  state.ourPrices = rows;
+  state.ourPricesBack = backId || null;
+  const sum = rows.reduce((a, r) => a + (Number(r.price) || 0), 0);
+  openModal(`<h3>${icon('excel', 18)} Наша таблица цен</h3>
+   <p class="form-hint">По этой таблице CRM сравнивает ваши цены с ценами конкурента во вкладке «Сравнение цен». Позиций: <b>${rows.length}</b>${rows.length ? ` · суммарно на <b>${fmt(sum)}</b>` : ''}.</p>
+   <div style="display:flex;gap:8px;flex-wrap:wrap;margin:10px 0">
+     <button class="btn sm" onclick="download('/api/prices/export?scope=ours','our-prices.csv')">${icon('download', 13)} Скачать таблицу (CSV)</button>
+     ${amAdmin() ? `<button class="btn sm primary" onclick="openPriceImport(null,'ours')">${icon('upload', 13)} Загрузить нашу таблицу цен</button>` : ''}
+     ${state.ourPricesBack ? `<button class="btn sm" onclick="openCompetitorCard(${state.ourPricesBack})">${icon('arrowLeft', 13)} Назад к отчёту</button>` : ''}
+   </div>
+   ${amAdmin() ? '' : '<p class="form-hint">Обновляет таблицу администратор: Настройки → Конкуренты и источники. Вы видите её для сравнения цен в переговорах.</p>'}
+   <input id="ourPriceFilter" placeholder="Поиск по позициям" oninput="filterOurPrices(this.value)" style="margin-bottom:8px">
+   <p class="form-hint" id="ourPriceCount" style="margin:0 0 6px"></p>
+   <div class="list" style="max-height:50vh"><table class="mini" id="ourPriceTable">${ourPriceRows(rows)}</table></div>`);
+}
+
+// Одно сообщение на действие: кнопка показывает «идёт проверка», тост — только результат.
+function busyButton(matcher, on) {
+  const btn = $$('#view .btn, #modalBody .btn').find(b => matcher.test(b.textContent || ''));
+  if (!btn) return null;
+  btn.classList.toggle('loading', on);
+  btn.disabled = on;
+  return btn;
+}
 async function findCompetitor(query) {
-  if (!query || !query.trim()) return toast('Введите название или ИНН');
-  toast('Поиск и сбор сведений о конкуренте…');
+  const q = String(query || '').trim();
+  if (!q) {
+    toast('Введите название или ИНН конкурента');
+    const field = $('#compSearch');
+    if (field) field.focus();
+    return;
+  }
+  const btn = busyButton(/Найти и проверить/, true);
   try {
     // проверка по открытым источникам может занять больше стандартных 30 секунд
-    const res = await api('/api/competitors/find', { method: 'POST', body: JSON.stringify({ query }), signal: AbortSignal.timeout(120000) });
-    toast('Конкурент добавлен и проверен');
-    render();
-    if (res.id) openCompetitorCard(res.id);
+    const res = await api('/api/competitors/find', { method: 'POST', body: JSON.stringify({ query: q }), signal: AbortSignal.timeout(120000) });
+    const id = (res.competitor && res.competitor.id) || res.id;
+    toast(res.created ? 'Конкурент добавлен и проверен' : 'Проверка обновлена');
+    await render();
+    if (id) openCompetitorCard(id);
   } catch (e) { toast(e.message, 'err'); }
+  finally { busyButton(/Найти и проверить/, false); }
 }
 
 async function checkCompetitor(id) {
-  toast('Проверяем конкурента по открытым источникам…');
+  const btn = busyButton(/Проверить сейчас|Проверить/, true);
   try {
     await api(`/api/competitors/${id}/check`, { method: 'POST', signal: AbortSignal.timeout(120000) });
-    toast('Проверка завершена');
-    render();
+    toast('Проверка завершена — отчёт обновлён');
+    await render();
     openCompetitorCard(id);
   } catch (e) { toast(e.message, 'err'); }
+  finally { busyButton(/Проверить сейчас|Проверить/, false); }
 }
 
 function delCompetitor(id) {
@@ -2009,22 +2180,24 @@ async function saveCompetitor(e, id) {
 
 async function openCompetitorCard(id) {
   const c = await api('/api/competitors/' + id);
+  if (!state.ourPrices) state.ourPrices = (await api('/api/prices?scope=ours').catch(() => ({ rows: [] }))).rows || [];
   state.compTab = state.compTab || 'report';
   openModal(`
    <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px">
      <div><h3 style="margin:0">${esc(c.name)}</h3><small>ИНН: ${esc(c.inn || '—')} · ${esc(c.city || '')}</small></div>
-     <div style="display:flex;gap:6px">
-       <button class="btn sm primary" onclick="checkCompetitor(${c.id})">${icon('refresh', 13)} Проверить сейчас</button>
-       <button class="btn sm" onclick="openPriceImport(${c.id},'theirs')">${icon('excel', 13)} Загрузить прайс</button>
+     <div style="display:flex;gap:6px;flex-wrap:wrap">
+       ${canEdit() ? `<button class="btn sm primary" onclick="checkCompetitor(${c.id})">${icon('refresh', 13)} Проверить сейчас</button>
+       <button class="btn sm" onclick="openPriceImport(${c.id},'theirs')">${icon('excel', 13)} Загрузить прайс</button>` : ''}
+       ${(c.prices || []).length ? `<button class="btn sm" title="Скачать прайс конкурента таблицей CSV" onclick="download('/api/prices/export?scope=competitor&competitor=${c.id}','competitor-prices.csv')">${icon('download', 13)} Скачать прайс</button>` : ''}
      </div>
    </div>
    <div class="tabs" style="margin-bottom:12px">
-     <button class="${state.compTab === 'report' ? 'active' : ''}" onclick="state.compTab='report';openCompetitorCard(${id})">Сводный отчёт</button>
-     <button class="${state.compTab === 'sources' ? 'active' : ''}" onclick="state.compTab='sources';openCompetitorCard(${id})">Источники (${(c.checks || []).length})</button>
-     <button class="${state.compTab === 'debts' ? 'active' : ''}" onclick="state.compTab='debts';openCompetitorCard(${id})">Долги и суды</button>
-     <button class="${state.compTab === 'reviews' ? 'active' : ''}" onclick="state.compTab='reviews';openCompetitorCard(${id})">Отзывы (${(c.reviews || []).length})</button>
-     <button class="${state.compTab === 'prices' ? 'active' : ''}" onclick="state.compTab='prices';openCompetitorCard(${id})">Сравнение цен</button>
-     <button class="${state.compTab === 'history' ? 'active' : ''}" onclick="state.compTab='history';openCompetitorCard(${id})">История</button>
+     <button class="${state.compTab === 'report' ? 'active' : ''}" onclick=\"setCompTab('report',${id})\">Сводный отчёт</button>
+     <button class="${state.compTab === 'sources' ? 'active' : ''}" onclick=\"setCompTab('sources',${id})\">Источники (${(c.checks || []).length})</button>
+     <button class="${state.compTab === 'debts' ? 'active' : ''}" onclick=\"setCompTab('debts',${id})\">Долги и суды</button>
+     <button class="${state.compTab === 'reviews' ? 'active' : ''}" onclick=\"setCompTab('reviews',${id})\">Отзывы (${(c.reviews || []).length})</button>
+     <button class="${state.compTab === 'prices' ? 'active' : ''}" onclick=\"setCompTab('prices',${id})\">Сравнение цен</button>
+     <button class="${state.compTab === 'history' ? 'active' : ''}" onclick=\"setCompTab('history',${id})\">История</button>
    </div>
    <div id="compTabBody">${competitorTab(c)}</div>`);
 }
@@ -2034,13 +2207,13 @@ function competitorTab(c) {
   const checks = c.checks || [];
   const g = key => checks.find(s => s.source === key) || {};
   if (state.compTab === 'report') {
-    const color = RISK_COLORS[rep.level] || 'var(--ink)';
+    const color = rep.color || riskColor(rep.level);
     return `
      <div class="grid" style="margin-bottom:12px">
-       <div class="kpi"><span style="color:var(--muted)">Риск-скор</span><b style="font-size:28px;color:${color}">${rep.risk ?? '—'} / 100</b><small>${RISK_LABELS[rep.level] || 'проверок не было'}</small></div>
-       <div class="kpi"><span style="color:var(--muted)">Исполнительные производства</span><b>${fmt((g('fssp').data || {}).total || 0)}</b><small>по базе ФССП</small></div>
-       <div class="kpi"><span style="color:var(--muted)">Арбитражные дела</span><b>${Number((g('kad').data || {}).total || 0)} дел</b><small>Кад.Арбитр</small></div>
-       <div class="kpi"><span style="color:var(--muted)">Средний рейтинг</span><b>${(rep.reviews && rep.reviews.avgRating) ? rep.reviews.avgRating + ' ' + icon('star', 12) : '—'}</b><small>карты и отзывы</small></div>
+       <div class="kpi"><span>Риск-оценка</span><b class="risk-value" style="--risk:${esc(color)}">${rep.risk ?? '—'} / 100</b><small>${esc(RISK_LABELS[String(rep.level || '').toLowerCase()] || rep.level || 'проверок не было')}</small></div>
+       <div class="kpi"><span>Исполнительные производства</span><b>${fmt((g('fssp').data || {}).total || 0)}</b><small>по базе ФССП</small></div>
+       <div class="kpi"><span>Арбитражные дела</span><b>${Number((g('kad').data || {}).total || 0)} дел</b><small>Кад.Арбитр</small></div>
+       <div class="kpi"><span>Средний рейтинг</span><b>${(rep.reviews && rep.reviews.avgRating) ? rep.reviews.avgRating + ' ' + icon('star', 12) : '—'}</b><small>карты и отзывы</small></div>
      </div>
      <div class="card" style="box-shadow:none;border-color:var(--line)">
        <h4>Вердикт разведки</h4>
@@ -2072,17 +2245,31 @@ function competitorTab(c) {
      <div class="list">${(c.reviews || []).map(r => `<div class="row"><span><b>${esc(r.author || 'Клиент')}</b> (${r.rating} ${icon('star', 12)}) — <small>${esc(r.source || 'карты')}</small><br>${esc(r.text)}</span><button class="btn sm danger" onclick="delReview(${r.id},${c.id})">${icon('close', 13)}</button></div>`).join('') || '<small>Отзывов пока нет</small>'}</div>`;
   }
   if (state.compTab === 'prices') {
-    const pairs = (rep.pricing && rep.pricing.pairs) || [];
-    return `<div class="row" style="border:0"><h4>Сравнение с нашей таблицей цен</h4><button class="btn sm primary" onclick="openPriceImport(${c.id},'theirs')">Загрузить прайс конкурента</button></div>
-     <p><small>Загружено позиций конкурента: ${(c.prices || []).length}. Сравнение строится по совпадающим названиям, когда загружены оба прайса.</small></p>
-     <table><tr><th>Позиция / проект</th><th>Цена конкурента</th><th>Наша цена</th><th>Разница</th></tr>
+    // сравнение считается по текущим таблицам: загрузили новый прайс — цифры сразу свежие
+    const ours = state.ourPrices || [];
+    const theirs = c.prices || [];
+    const pairs = comparePrices(ours, theirs);
+    const diffs = pairs.map(x => (x.theirs - x.ours) / (x.ours || 1) * 100);
+    const avg = diffs.length ? Math.round(diffs.reduce((a, b) => a + b, 0) / diffs.length) : 0;
+    const weCheaper = diffs.filter(d => d > 0).length;
+    const theyCheaper = diffs.filter(d => d < 0).length;
+    return `<div class="row" style="border:0;flex-wrap:wrap;gap:8px"><h4>Сравнение с нашей таблицей цен</h4>
+      <span style="display:flex;gap:6px;flex-wrap:wrap"><button class="btn sm" onclick="openOurPrices(${c.id})">${icon('excel', 13)} Наша таблица (${ours.length})</button>
+      ${canEdit() ? `<button class="btn sm primary" onclick="openPriceImport(${c.id},'theirs')">${icon('upload', 13)} Загрузить прайс конкурента</button>` : ''}</span></div>
+     ${pairs.length ? `<div class="grid" style="margin:6px 0 12px">
+       <div class="kpi"><span>Сопоставлено позиций</span><b>${pairs.length}</b><small>из ${ours.length} наших и ${theirs.length} конкурента</small></div>
+       <div class="kpi"><span>Средняя разница</span><b class="${avg > 0 ? 'green' : avg < 0 ? 'accent' : ''}">${avg > 0 ? '+' : ''}${avg}%</b><small>${avg > 0 ? 'конкурент дороже — мы выигрываем ценой' : avg < 0 ? 'конкурент дешевле — готовьте обоснование ценности' : 'цены совпадают'}</small></div>
+       <div class="kpi"><span>Где мы дешевле</span><b>${weCheaper}</b><small>позиций</small></div>
+       <div class="kpi"><span>Где дешевле конкурент</span><b>${theyCheaper}</b><small>позиций</small></div></div>` : ''}
+     <table><tr><th>Позиция / проект</th><th>Наша цена</th><th>Цена конкурента</th><th>Разница</th></tr>
       ${pairs.map(x => {
         const diff = (x.theirs || 0) - (x.ours || 0);
-        return `<tr><td><b>${esc(x.item)}</b></td><td>${fmt(x.theirs)}</td><td>${fmt(x.ours)}</td><td><span class="tag ${diff <= 0 ? '' : 'orange'}">${diff <= 0 ? 'Мы дешевле на ' + fmt(-diff) : 'Конкурент дешевле на ' + fmt(diff)}</span></td></tr>`;
-      }).join('') || '<tr><td colspan="4"><small>Сравнение пусто — загрузите свой и конкурентский прайсы и запустите проверку</small></td></tr>'}</table>`;
+        const pct = x.ours ? Math.round(diff / x.ours * 100) : 0;
+        return `<tr><td><b>${esc(x.item)}</b></td><td>${fmt(x.ours)}</td><td>${fmt(x.theirs)}</td><td><span class="tag ${diff > 0 ? '' : diff < 0 ? 'orange' : 'grey'}">${diff === 0 ? 'одинаково' : (diff > 0 ? `мы дешевле на ${fmt(diff)} (${pct}%)` : `конкурент дешевле на ${fmt(-diff)} (${Math.abs(pct)}%)`)}</span></td></tr>`;
+      }).join('') || `<tr><td colspan="4"><small>${!ours.length ? 'Наша таблица цен не загружена — без неё сравнивать нечего.' : !theirs.length ? 'Прайс конкурента не загружен — загрузите его таблицей или вставьте текстом.' : 'Совпадающих позиций не нашлось: названия в таблицах разные. Сравнение строится по похожим наименованиям.'}</small></td></tr>`}</table>`;
   }
   if (state.compTab === 'history') {
-    return `<div class="list">${(c.history || []).map(h => `<div class="row"><span><b style="color:${RISK_COLORS[h.level] || 'var(--ink)'}">риск ${h.risk}</b> · ${esc(h.level)}<br><small>${esc(h.verdict || '')}</small></span><small>${esc(dt(h.created_at))}</small></div>`).join('') || '<small>Проверок ещё не было</small>'}</div>`;
+    return `<div class="list">${(c.history || []).map(h => `<div class="row"><span><b class="risk-value sm" style="--risk:${esc(riskColor(h.level))}">риск ${h.risk}</b> · ${esc(RISK_LABELS[String(h.level || '').toLowerCase()] || h.level || '')}<br><small>${esc(h.verdict || '')}</small></span><small>${esc(dt(h.created_at))}</small></div>`).join('') || '<small>Проверок ещё не было</small>'}</div>`;
   }
 }
 
@@ -2093,8 +2280,13 @@ async function saveReview(e, cid) { e.preventDefault(); const b = Object.fromEnt
 async function delReview(rid, cid) { await api('/api/reviews/' + rid, { method: 'DELETE' }); toast('Удалено'); openCompetitorCard(cid); }
 
 function openPriceImport(competitorId, scope) {
-  openModal(`<h3>Загрузка прайс-таблицы (Excel / CSV)</h3>
-   <p><small>${scope === 'ours' ? 'Наша таблица цен — используется для сравнения во всех отчётах.' : 'Прайс конкурента — для сравнения позиций.'}</small></p>
+  const ours = scope === 'ours';
+  openModal(`<h3>${ours ? 'Замена нашей таблицы цен' : 'Загрузка прайса конкурента'} (Excel / CSV)</h3>
+   <p class="form-hint">${ours
+    ? 'Наша таблица цен используется для сравнения во всех отчётах по конкурентам.'
+    : 'Прайс конкурента нужен для сравнения позиций во вкладке «Сравнение цен».'}</p>
+   ${ours ? `<div class="notice warn" style="margin-bottom:10px">Загрузка <b>полностью заменяет</b> текущую таблицу. Сначала скачайте её, поправьте в Excel и загрузите обратно — так ничего не потеряется.<div style="margin-top:8px"><button type="button" class="btn sm" onclick="download('/api/prices/export?scope=ours','our-prices.csv')">${icon('download', 13)} Скачать текущую таблицу</button></div></div>`
+     : `<p class="form-hint">Загрузка заменит предыдущий прайс этого конкурента.</p>`}
    <p><small>Первая строка — заголовки: <code>Наименование;Цена;Ед</code>. Например: <code>Дом 8×10;3850000;шт</code>. Подойдёт файл CSV (обычная таблица) или первый лист Excel; цены — числами. <a href="/examples/prices.csv" download>Скачать пример</a>.</small></p>
    <div class="tabs"><button class="active" onclick="this.parentElement.nextElementSibling.classList.remove('hidden');this.nextElementSibling.classList.remove('active');this.classList.add('active');">Файл .xlsx / .csv</button><button onclick="openPriceTextForm(${competitorId},'${scope}')">Текст / ссылки</button></div>
    <div><form onsubmit="return importPriceFile(event,${competitorId || 'null'},'${scope}')">
@@ -2113,7 +2305,7 @@ async function importPriceFile(e, competitorId, scope) {
       const url = competitorId ? `/api/competitors/${competitorId}/prices` : '/api/prices/ours';
       await api(url, { method: 'POST', body: JSON.stringify({ base64, filename: file.name, scope }) });
       closeModal(); toast('Прайс-таблица успешно загружена');
-      if (competitorId) openCompetitorCard(competitorId); else render();
+      afterPriceImport(competitorId);
     } catch (err) { toast(err.message, 'err'); }
   };
   reader.readAsDataURL(file);
@@ -2132,8 +2324,17 @@ async function importPriceText(e, competitorId, scope) {
   const endpoint = competitorId ? `/api/competitors/${competitorId}/prices` : '/api/prices/ours';
   await api(endpoint, { method: 'POST', body: JSON.stringify({ url, text, scope }) });
   closeModal(); toast('Цены сохранены');
-  if (competitorId) openCompetitorCard(competitorId); else render();
+  afterPriceImport(competitorId);
   return false;
+}
+// Таблица загружена: сбрасываем кэш и возвращаем человека туда, откуда он пришёл.
+function afterPriceImport(competitorId) {
+  state.ourPrices = null;
+  if (competitorId) return openCompetitorCard(competitorId);
+  const back = state.ourPricesBack;
+  state.ourPricesBack = null;
+  if (back) return openCompetitorCard(back);
+  return render();
 }
 
 /* ---------- settings ---------- */
@@ -2161,7 +2362,7 @@ async function settings(v) {
 
   if (state.settingsTab === 'integrations') {
     const chans = state.channels.length ? state.channels : await api('/api/channels').catch(() => []); state.channels = chans;
-    body = `${!isAdmin ? '<div class="card" style="box-shadow:none;border-color:#fde68a;background:#fffbeb"><b>Режим просмотра</b><br><small>Ключи и настройки интеграций меняет администратор. Вы можете работать с чатами, сделками и задачами — всё остальное доступно.</small></div>' : ''}
+    body = `${!isAdmin ? '<div class="card tint-info"><b>Режим просмотра</b><br><small>Ключи и настройки интеграций меняет администратор. Вы можете работать с чатами, сделками и задачами — всё остальное доступно.</small></div>' : ''}
     <div class="settings-cols"><div>
      <div class="card"><h3>Адрес CRM в интернете</h3>
       <p><small>По этому адресу CRM открывают сотрудники, и сюда же обращаются Wazzup и формы с сайта. Он подставляется во все ссылки ниже.</small></p>
@@ -2190,7 +2391,7 @@ async function settings(v) {
      <div class="card"><h3>Заявки с сайта и из других сервисов</h3>
       <p><small>Готовая форма для сайта и «входная дверь» для любых заявок: имя, телефон и вопрос попадают в CRM, а она сама создаёт клиента, чат и сделку. Код формы копируется кнопкой ниже и вставляется на страницу сайта. Сюда же можно направить заявки с Авито, лендинга или своего бота — если сервис умеет отправлять данные на адрес (это называется вебхук).</small></p>
       ${hookLine(origin + '/webhooks/generic' + (s.webhook?.secret ? '?secret=' + encodeURIComponent(s.webhook.secret) : ''))}
-      <details style="margin:4px 0 10px"><summary><small>Пример запроса</small></summary><pre style="white-space:pre-wrap;font-size:12px;background:#f1f5f9;border-radius:8px;padding:10px">curl -X POST '${esc(origin)}/webhooks/generic${s.webhook?.secret ? '?secret=' + esc(s.webhook.secret) : ''}' \
+      <details style="margin:4px 0 10px"><summary><small>Пример запроса</small></summary><pre class="code-block">curl -X POST '${esc(origin)}/webhooks/generic${s.webhook?.secret ? '?secret=' + esc(s.webhook.secret) : ''}' \
   -H 'Content-Type: application/json' \
   -d '{"channel":"site","name":"Иван","phone":"+7 999 123-45-67","body":"Нужен дом 8×10"}'</pre></details>
       <label>Код защиты (чтобы чужие не присылали заявки)
@@ -2222,9 +2423,10 @@ async function settings(v) {
     const cf = await api('/api/custom-fields');
     const rows = cf.fields;
     body = `<div class="settings-cols"><div class="card"><div class="row" style="border:0"><div><h3>Свои поля для контактов и сделок</h3><small>Дополнительные строки в карточке: площадь участка, тип фундамента, дата замера — что удобно именно вам. Название, обязательность и варианты списка меняются кнопкой «Изменить».</small></div><button class="btn sm primary" onclick="editField(-1)">${icon('plus', 13)} Добавить поле</button></div>
-     <table><tr><th>Название</th><th>Раздел</th><th>Тип</th><th>Обязательное</th><th style="width:210px"></th></tr>${rows.map((f, i) => `<tr><td><b>${esc(f.label)}</b></td><td>${({ contacts: 'Контакты', deals: 'Сделки', both: 'Контакты и сделки' })[f.entity] || esc(f.entity)}</td><td>${({ text: 'Текст', number: 'Число', date: 'Дата', select: 'Список', phone: 'Телефон', email: 'E-mail' })[f.type] || esc(f.type)}${f.options && f.options.length ? '<br><small>' + f.options.map(esc).join(', ') + '</small>' : ''}</td><td>${f.required ? '<b>Да</b><br><small>сначала, со звёздочкой</small>' : 'Нет<br><small>ниже, можно позже</small>'}</td><td style="white-space:nowrap"><button class="btn sm" onclick="editField(${i})">${icon('edit', 13)} Изменить</button> <button class="btn sm danger" onclick="delField(${i})">${icon('trash', 13)} Удалить</button></td></tr>`).join('') || '<tr><td colspan="5"><div class="empty">Своих полей пока нет</div></td></tr>'}</table>
+     <table id="cfFields"><tr><th>Название</th><th>Раздел</th><th>Тип</th><th>Обязательное</th><th style="width:210px"></th></tr>${rows.map((f, i) => `<tr><td><b>${esc(f.label)}</b></td><td>${({ contacts: 'Контакты', deals: 'Сделки', both: 'Контакты и сделки' })[f.entity] || esc(f.entity)}</td><td>${({ text: 'Текст', number: 'Число', date: 'Дата', select: 'Список', phone: 'Телефон', email: 'E-mail' })[f.type] || esc(f.type)}${f.options && f.options.length ? '<br><small>' + f.options.map(esc).join(', ') + '</small>' : ''}</td><td>${f.required ? '<b>Да</b><br><small>сначала, со звёздочкой</small>' : 'Нет<br><small>ниже, можно позже</small>'}</td><td style="white-space:nowrap"><button class="btn sm" onclick="editField(${i})">${icon('edit', 13)} Изменить</button> <button class="btn sm danger" onclick="delField(${i})">${icon('trash', 13)} Удалить</button></td></tr>`).join('') || '<tr><td colspan="5"><div class="empty">Своих полей пока нет</div></td></tr>'}</table>
      <p><small>Например: «Площадь участка», «Тип фундамента», «Дата замера». Новое поле сразу появляется в форме создания и в карточке клиента или сделки, а его значения попадают в выгрузку контактов в CSV.</small></p></div>
-     <div><div class="card"><h3>Как работают свои поля</h3>
+     <div>${builtinFieldsCard()}
+      <div class="card"><h3>Как работают свои поля</h3>
       <p><small>Введите понятное название — технический код система сделает сама, видеть его не нужно. Поле появится в форме и в карточке, значения сохранятся вместе с клиентом или сделкой.</small></p>
       <p><small><b>Обязательное</b> поле нельзя сохранить пустым: оно стоит первым, подписано жирным и звёздочкой. Необязательные идут ниже спокойным шрифтом — их можно заполнить сразу или позже, они не мешают сохранить карточку.</small></p>
       <p><small><b>Изменить</b> можно любое своё поле: переименовать, сменить тип, раздел или сделать обязательным. Новые настройки сразу видны в формах и карточках.</small></p>
@@ -2233,35 +2435,105 @@ async function settings(v) {
   } else if (state.settingsTab === 'competitors') {
     const cs = await api('/api/competitor-sources');
     const ours = await api('/api/prices?scope=ours');
-    const KEY_FIELDS = [['FNS_API_KEY', 'Ключ api-fns.ru (ФНС)', 'api-fns.ru'], ['FSSP_TOKEN', 'Токен ФССП (долги)', 'api-ip.fssprus.ru'], ['GOOGLE_PLACES_KEY', 'Ключ Google Places', 'Places API'], ['TWOGIS_KEY', 'Ключ 2ГИС', '2gis.ru'], ['YANDEX_API_KEY', 'Ключ Яндекс Геопоиска', 'Geosearch API']];
+    state.ourPrices = ours.rows || [];
+    // ключ → что он даёт и где взять. Без ключа источник не ломается: остаются ссылки.
+    const KEY_FIELDS = [
+      ['FNS_API_KEY', 'Ключ api-fns.ru (данные ФНС)', 'api-fns.ru — платный доступ к ЕГРЮЛ. Без ключа: ссылка «ФНС: Прозрачный бизнес» в отчёте'],
+      ['FSSP_TOKEN', 'Токен ФССП (долги у приставов)', 'api-ip.fssprus.ru — платный доступ к банку данных. Без токена: ссылка на fssp.gov.ru, суммы смотрятся вручную'],
+      ['GOOGLE_PLACES_KEY', 'Ключ Google Places', 'console.cloud.google.com — рейтинг и отзывы на Google Картах. Без ключа: ссылка на поиск отзывов'],
+      ['TWOGIS_KEY', 'Ключ 2ГИС', 'dev.2gis.ru — рейтинг и отзывы в 2ГИС. Без ключа: ссылка на карточку организации'],
+      ['YANDEX_API_KEY', 'Ключ Яндекс Геопоиска', 'developer.tech.yandex.ru — карточка организации на Яндекс Картах. Без ключа: ссылка на карты']
+    ];
+    const sum = (ours.rows || []).reduce((a, r) => a + (Number(r.price) || 0), 0);
+    // источник без ключа работает всегда; с ключом — данные подтягиваются сами
+    const readyLabel = src => !src.needs.length ? 'работает без ключа' : (src.configured ? 'ключ задан — данные подтягиваются сами' : 'ключа нет — данные по ссылкам');
     body = `<div class="settings-cols"><div>
-     <div class="card"><h3>Статус источников</h3><table class="mini"><tr><th>Источник</th><th>Что даёт</th><th>Готовность</th></tr>${cs.sources.map(s => `<tr><td><b>${esc(s.name)}</b>${s.needs.length ? `<br><small>нужен ключ</small>` : '<br><small>без ключа</small>'}</td><td><small>${esc(s.about)}</small></td><td><span class="tag ${s.configured ? '' : 'grey'}">${s.configured ? 'готов' : s.needs.length ? 'нет ключа' : 'по ссылкам'}</span></td></tr>`).join('')}</table></div>
-     ${isAdmin ? `<div class="card"><h3>Ключи источников (хранятся на сервере)</h3><form onsubmit="return saveCompetitorKeys(event)">${KEY_FIELDS.map(([k, label, hint]) => `<label>${esc(label)}<input name="${k}" placeholder="${cs.keys[k] ? '•••••• (сохранён)' : esc(hint)}"></label>`).join('')}<button class="btn primary">Сохранить ключи</button></form></div>` : `<div class="card"><h3>Ключи источников</h3><p><small>Ключи источников задаёт администратор: Настройки → Конкуренты и источники. Отчёты и ссылки доступны всем — можно проверять конкурентов прямо сейчас.</small></p></div>`}
-     <div class="card"><h3>Наша таблица цен</h3>${ours.rows.length ? `<p><b>Загружено позиций: ${ours.rows.length}</b></p>` : '<p><small>Пока не загружена.</small></p>'}<button class="btn primary w" onclick="openPriceImport(null,'ours')">Загрузить нашу таблицу цен</button></div>
+     <div class="card"><h3>Наша таблица цен</h3>
+      <p class="form-hint">По ней CRM сравнивает ваши цены с ценами конкурента во вкладке «Сравнение цен». Позиций: <b>${ours.rows.length}</b>${ours.rows.length ? ` · суммарно на <b>${fmt(sum)}</b>` : ''}.</p>
+      ${ours.rows.length ? `<div class="list" style="max-height:240px"><table class="mini">${ourPriceRows(ours.rows)}</table></div>` : '<p><small>Таблица не загружена — без неё сравнение цен в отчётах не строится.</small></p>'}
+      <div style="display:flex;gap:8px;flex-wrap:wrap;margin-top:10px">
+        <button class="btn sm" onclick="openOurPrices()">${icon('table', 13)} Показать всю таблицу</button>
+        <button class="btn sm" onclick="download('/api/prices/export?scope=ours','our-prices.csv')">${icon('download', 13)} Скачать CSV</button>
+        ${isAdmin ? `<button class="btn sm primary" onclick="openPriceImport(null,'ours')">${icon('upload', 13)} Загрузить или заменить</button>` : ''}
+      </div>
+      <p><small>${isAdmin ? 'Загрузка заменяет таблицу целиком: скачайте CSV, поправьте в Excel и загрузите обратно — так ничего не потеряется.' : 'Менеджеры видят таблицу и сравнение цен, а обновляет её администратор.'}</small></p>
+     </div>
+     <div class="card"><h3>Источники проверки</h3>
+      <p class="form-hint">Ключи <b>не обязательны</b>. Без них CRM не молчит: в отчёте остаются прямые ссылки на официальные реестры, по которым сотрудник проверяет компанию за минуту. С ключом те же данные подтягиваются сами и попадают в риск-оценку.</p>
+      <table class="mini"><tr><th>Источник</th><th>Что даёт</th><th>Ключ</th><th>Готовность</th></tr>${cs.sources.map(src => `<tr><td><b>${esc(src.name)}</b></td><td><small>${esc(src.about)}</small></td><td>${src.needs.length ? (src.configured ? '<span class="tag">задан</span>' : '<span class="tag grey">не задан</span>') : '<span class="tag grey">не нужен</span>'}</td><td><small>${esc(readyLabel(src))}</small></td></tr>`).join('')}</table>
+      <div style="display:flex;gap:8px;flex-wrap:wrap;margin-top:10px">
+        ${isAdmin ? `<button class="btn sm" onclick="probeSources(this)">${icon('sync', 13)} Проверить доступность источников</button>` : ''}
+        <button class="btn sm" onclick="go('competitors')">${icon('competitor', 13)} Открыть раздел «Конкуренты»</button>
+      </div>
+      <div id="srcProbe" style="margin-top:10px"></div>
+     </div>
+     ${isAdmin ? `<div class="card"><h3>Ключи источников</h3>
+      <p class="form-hint">Хранятся на вашем сервере и нужны только тем источникам, которые отдают данные по ключу. Пустое поле — источник работает по ссылкам.</p>
+      <form onsubmit="return saveCompetitorKeys(event)">${KEY_FIELDS.map(([k, label, hint]) => `<label>${esc(label)}<input name="${k}" placeholder="${cs.keys[k] ? '•••••• (сохранён)' : 'вставьте ключ или оставьте пустым'}"></label><p class="form-hint" style="margin:-6px 0 10px">${esc(hint)}</p>`).join('')}<button class="btn primary">Сохранить ключи</button></form></div>`
+      : `<div class="card"><h3>Ключи источников</h3><p><small>Ключи задаёт администратор: Настройки → Конкуренты и источники. Отчёты, ссылки и сравнение цен доступны вам и без ключей.</small></p></div>`}
     </div><div>
-     <div class="card"><h3>Принцип работы разведки</h3><p><small>CRM собирает информацию по открытым реестрам, судам, долгам и картам, оценивает риск работы с клиентом и подсказывает менеджеру, на что обратить внимание.</small></p></div>
+     <div class="card"><h3>Как работает разведка конкурентов</h3>
+      <p><small>CRM опрашивает открытые реестры и карты, собирает долги, суды, банкротство и отзывы, считает риск-оценку от 0 до 100 и подсказывает менеджеру аргументы для переговоров.</small></p>
+      <p><small><b>Без ключей</b> доступны: Федресурс (банкротство), Кад.Арбитр (суды), Rusprofile и ссылки на ФНС, ФССП, Яндекс Карты, 2ГИС, Авито и Госзакупки. <b>С ключами</b> добавляются готовые суммы долгов, данные ЕГРЮЛ и рейтинги с карт.</small></p>
+      <p><small>Отзывы и прайс конкурента можно внести вручную прямо в его карточке — сравнение цен и рейтинг появятся в отчёте сразу.</small></p></div>
      ${isAdmin ? `<div class="card"><h3>Адреса сервисов проверки</h3><p><small>Нужны только техническому специалисту — обычно здесь ничего менять не надо. Если сервис сменил адрес, его можно поправить.</small></p><form onsubmit="return saveCompetitorUrls(event)">${[['FNS_API_URL', 'ФНС API'], ['FSSP_API_URL', 'ФССП API'], ['FEDRESURS_API_URL', 'Федресурс'], ['KAD_API_URL', 'Арбитр'], ['RUSPROFILE_URL', 'Rusprofile'], ['GOOGLE_API_URL', 'Google Places'], ['TWOGIS_API_URL', '2ГИС'], ['YANDEX_API_URL', 'Яндекс Геопоиск']].map(([k, n]) => `<label>${n}<input name="${k}" value="${esc((cs.urls || {})[k] || '')}"></label>`).join('')}<button class="btn">Сохранить адреса</button></form></div>` : ''}
     </div></div>`;
   } else if (state.settingsTab === 'pipelines') {
     const pl = await api('/api/pipelines');
-    body = `<div class="card"><div class="row" style="border:0"><h3>Воронки и этапы</h3><button class="btn sm primary" onclick="addPipeline()">+ Воронка</button></div>
-    ${pl.map(p => `<div class="card" style="box-shadow:none"><b>${esc(p.name)}</b> <small>${p.stages.length} этапов</small> <button class="btn sm" onclick="editPipeline(${p.id})">Редактировать этапы</button> ${pl.length > 1 ? `<button class="btn sm danger" onclick="del('pipelines',${p.id})">${icon('close', 13)}</button>` : ''}
-     <div style="margin-top:8px">${p.stages.map(s => `<span class="tag" style="background:${esc(s.color)}22;color:${esc(s.color)}">● ${esc(s.name)}</span>`).join(' ')}</div></div>`).join('')}</div>`;
+    const allDeals = (await api('/api/deals')).deals;
+    body = `<div class="settings-cols"><div class="card">
+     <div class="row" style="border:0"><div><h3>Воронки и этапы</h3><small>Этапы — путь сделки от обращения до оплаты. Кнопки управления справа в карточке воронки.</small></div><button class="btn sm primary" onclick="addPipeline()">+ Воронка</button></div>
+     ${pl.map(p => {
+       const used = allDeals.filter(d => (d.pipeline_id || 1) === p.id).length;
+       const open = allDeals.filter(d => (d.pipeline_id || 1) === p.id && !['won', 'lost'].includes(d.stage)).length;
+       return `<div class="card pipe-card">
+        <div class="pipe-main"><b>${esc(p.name)}</b>
+         <small>${p.stages.length} этапов · сделок: ${used}${open ? `, в работе: ${open}` : ''}</small>
+         <div class="pipe-stages">${p.stages.map((st, i) => `<span class="tag stage-tag" style="--st:${esc(st.color)}" title="${esc(st.kind === 'won' ? 'Этап успеха: сделка считается проданной' : st.kind === 'lost' ? 'Этап отказа: сделка считается потерянной' : 'Обычный этап воронки')}">${i + 1}. ${esc(st.name)}${st.kind === 'won' ? ' · успех' : st.kind === 'lost' ? ' · отказ' : ''}</span>`).join('')}</div></div>
+        <div class="pipe-actions"><button class="btn sm" onclick="editPipeline(${p.id})">${icon('edit', 13)} Редактировать</button>
+         ${pl.length > 1 ? `<button class="btn sm danger" title="${used ? 'В воронке есть сделки — сначала перенесите их в другую воронку' : 'Удалить воронку'}" onclick="del('pipelines',${p.id})">${icon('trash', 13)}</button>` : ''}</div>
+       </div>`;
+     }).join('')}</div>
+     <div><div class="card"><h3>Как устроены воронки</h3>
+      <p><small>Одна воронка — один путь сделки. Обычно хватает общей: «Неразобранное → Переговоры → Успешно → Закрыто и не реализовано». Отдельная воронка нужна, если направления продаются по-разному: например, дома и бани.</small></p>
+      <p><small><b>Редактировать</b> — названия, цвета, порядок и тип этапа. Тип важен: этап «успех» попадает в выручку, «отказ» — в причины проигрыша, остальные считаются работой в процессе.</small></p>
+      <p><small>Удалить можно только пустую воронку: пока в ней есть сделки, CRM не даст её убрать — сначала перенесите сделки в другую воронку.</small></p></div></div></div>`;
   } else if (state.settingsTab === 'automations') {
     const rows = await api('/api/automations');
-    const trg = { deal_created: 'Создана сделка', message_in: 'Входящее сообщение', stage_changed: 'Смена этапа' };
-    const act = { create_task: 'Создать задачу', change_stage: 'Перевести на этап', add_tag: 'Добавить тег' };
-    body = `<div class="card"><div class="row" style="border:0"><h3>Автоматизации</h3><button class="btn sm primary" onclick="openAutomation()">+ Правило</button></div>
-    <table><tr><th>Название</th><th>Когда</th><th>Что сделать</th><th>Вкл.</th><th></th></tr>${rows.map(a => `<tr><td><b>${esc(a.name)}</b></td><td>${trg[a.trigger_type] || esc(a.trigger_type)}</td><td>${act[a.action_type] || esc(a.action_type)}: <small>${esc(a.action_value || '')}</small></td>
-     <td><input type="checkbox" style="width:auto" ${a.active ? 'checked' : ''} onchange="api('/api/automations/${a.id}',{method:'PATCH',body:JSON.stringify({active:this.checked?1:0})}).then(()=>toast('Обновлено'))"></td>
-     <td><button class="btn sm" title="Изменить правило" onclick="openAutomation(${a.id})">${icon('edit', 13)}</button> <button class="btn sm danger" title="Удалить правило" onclick="del('automations',${a.id})">${icon('close', 13)}</button></td></tr>`).join('') || '<tr><td colspan="5"><div class="empty">Правил нет</div></td></tr>'}</table></div>`;
+    const pl = await api('/api/pipelines');
+    const stageName = code => (pl.flatMap(p => p.stages).find(s2 => s2.code === code) || {}).name || code;
+    const whenText = a => a.trigger_type === 'deal_created' ? 'Появилась новая сделка'
+      : a.trigger_type === 'message_in' ? (a.trigger_value ? `Клиент написал сообщение со словом «${a.trigger_value}»` : 'Клиент написал сообщение')
+      : a.trigger_type === 'stage_changed' ? (a.trigger_value ? `Сделку перевели на этап «${stageName(a.trigger_value)}»` : 'Сделку перевели на другой этап')
+      : a.trigger_type;
+    const whatText = a => a.action_type === 'create_task' ? `Создать задачу «${a.action_value}»`
+      : a.action_type === 'change_stage' ? `Перевести сделку на этап «${stageName(a.action_value)}»`
+      : a.action_type === 'add_tag' ? `Добавить клиенту тег «${a.action_value}»`
+      : a.action_value;
+    body = `<div class="settings-cols"><div class="card">
+     <div class="row" style="border:0"><div><h3>Автоматизации (${rows.length})</h3><small>Простые правила: «когда случилось — сделай». Работают сами, без участия сотрудника.</small></div><button class="btn sm primary" onclick="openAutomation()">+ Правило</button></div>
+     <table><tr><th>Правило</th><th>Когда срабатывает</th><th>Что делает</th><th>Вкл.</th><th style="width:210px"></th></tr>
+      ${rows.map(a => `<tr><td><b>${esc(a.name)}</b></td><td><small>${esc(whenText(a))}</small></td><td><small>${esc(whatText(a))}</small></td>
+       <td><input type="checkbox" style="width:auto" title="${a.active ? 'Правило работает — снимите, чтобы выключить' : 'Правило выключено'}" ${a.active ? 'checked' : ''} onchange="toggleAutomation(${a.id},this)"></td>
+       <td style="white-space:nowrap"><button class="btn sm" onclick="openAutomation(${a.id})">${icon('edit', 13)} Изменить</button> <button class="btn sm danger" onclick="del('automations',${a.id})">${icon('trash', 13)} Удалить</button></td></tr>`).join('')
+        || `<tr><td colspan="5"><div class="empty">Правил нет. Начните с простого: «Появилась новая сделка → создать задачу «Позвонить клиенту»».</div></td></tr>`}</table></div>
+     <div><div class="card"><h3>Как это работает</h3>
+      <p><small>Правило проверяется каждый раз, когда происходит событие: создана сделка, клиент написал в чат или сделку перевели на другой этап.</small></p>
+      <p><small><b>Создать задачу</b> — дело появляется у ответственного за сделку или клиента, срок сегодня 14:00. Он сразу получает уведомление.</small></p>
+      <p><small><b>Перевести на этап</b> — сделка сама переезжает на нужный этап, дата закрытия и аналитика пересчитываются.</small></p>
+      <p><small><b>Добавить тег</b> — клиенту ставится метка; по тегам работает фильтр в контактах.</small></p>
+      <p><small>Правила придуманы так, чтобы не зациклиться: перевод на этап, где сделка уже стоит, ничего не меняет, а тег не дублируется.</small></p></div></div></div>`;
   } else if (state.settingsTab === 'templates') {
     const rows = await api('/api/templates');
+    const tq = (state.tplQuery || '').trim().toLowerCase();
+    const shown = tq ? rows.filter(t => `${t.name} ${t.body}`.toLowerCase().includes(tq)) : rows;
     const tplRow = t => `<div class="tpl-row"><div class="tpl-main"><b>${esc(t.name)}</b>
-      <p>${esc(t.body)}</p></div><div class="tpl-actions"><button class="btn sm" title="Изменить шаблон" onclick="openTemplate(${t.id})">${icon('edit', 13)}</button><button class="btn sm danger" title="Удалить шаблон" onclick="delTemplate(${t.id})">${icon('trash', 13)}</button></div></div>`;
+      <p>${esc(t.body)}</p></div>${canEdit() ? `<div class="tpl-actions"><button class="btn sm" title="Изменить шаблон" onclick="openTemplate(${t.id})">${icon('edit', 13)}</button><button class="btn sm danger" title="Удалить шаблон" onclick="delTemplate(${t.id})">${icon('trash', 13)}</button></div>` : ''}</div>`;
     body = `<div class="settings-cols"><div>
-     <div class="card"><div class="row" style="border:0"><div><h3>Мои шаблоны (${rows.length})</h3><small>Заготовки частых ответов. В чате выбираются из списка «Шаблоны ответов…» над полем ввода.</small></div><button class="btn sm primary" onclick="openTemplate()">${icon('plus', 13)} Новый шаблон</button></div>
-     ${rows.map(tplRow).join('') || `<div class="empty">Шаблонов пока нет. Создайте первый — например, приветствие или условия доставки.</div>`}</div>
+     <div class="card"><div class="row" style="border:0;flex-wrap:wrap;gap:8px"><div><h3>Мои шаблоны (${rows.length})</h3><small>Заготовки частых ответов. В чате выбираются из списка «Шаблоны ответов…» над полем ввода.</small></div>
+      <input id="tplSearch" style="max-width:200px;margin-left:auto" placeholder="Поиск по шаблонам" value="${esc(state.tplQuery || '')}" oninput="liveSearch('tpl',()=>setTplQuery(this.value))">
+      ${canEdit() ? `<button class="btn sm primary" onclick="openTemplate()">${icon('plus', 13)} Новый шаблон</button>` : ''}</div>
+     ${shown.map(tplRow).join('') || `<div class="empty">${tq ? 'Ничего не найдено — измените поиск' : 'Шаблонов пока нет. Создайте первый — например, приветствие или условия доставки.'}</div>`}</div>
     </div><div>
      <div class="card"><h3>Как это работает</h3><p><small>Шаблоны <b>личные</b>: каждый сотрудник видит и правит только свои. При выборе в чате текст подставляется в поле ввода — его можно поправить перед отправкой.</small></p>
       <p><small><b>Подстановки:</b> {name} — имя клиента, {sum} — сумма его открытой сделки, {date} — сегодняшняя дата. Если сделки ещё нет, вместо {sum} будет «—».</small></p>
@@ -2271,18 +2543,36 @@ async function settings(v) {
     const rows = await api('/api/users');
     const allDeals = (await api('/api/deals')).deals;
     const allTasks = await api('/api/tasks');
+    const uq = (state.teamQuery || '').trim().toLowerCase();
+    const shown = uq ? rows.filter(x => `${x.name} ${x.email || ''} ${roleLabel(x.role)}`.toLowerCase().includes(uq)) : rows;
     const stat = id => {
       const my = allDeals.filter(d => d.responsible_id === id);
       const open = my.filter(d => !['won', 'lost'].includes(d.stage));
       const tasks = allTasks.filter(t => t.responsible_id === id && !t.done);
       return { open: open.length, sum: open.reduce((a, d) => a + d.amount, 0), won: my.filter(d => d.stage === 'won').length, tasks: tasks.length };
     };
-    body = `<div class="card"><div class="row" style="border:0"><h3>Команда</h3><button class="btn sm primary" onclick="openUser()">+ Пользователь</button></div>
-    <table><tr><th>Сотрудник</th><th>E-mail</th><th>Роль</th><th>Сделки в работе</th><th>Задачи</th><th>Вход</th><th></th></tr>${rows.map(x => { const st = stat(x.id); return `<tr><td><b>${esc(x.name)}</b></td><td>${esc(x.email)}</td><td>${esc(roleLabel(x.role))}</td><td>${st.open} на ${fmt(st.sum)}<br><small>успешных: ${st.won}</small></td><td>${st.tasks}</td><td>${x.active ? 'разрешён' : 'отключён'}</td><td><button class="btn sm" title="Изменить сотрудника" onclick="openUser(${x.id})">${icon('edit', 13)}</button></td></tr>`; }).join('')}</table>
-    <div style="margin-top:14px"><div class="card" style="box-shadow:none"><h3>Права ролей</h3><p><small><b>Администратор</b> — всё, включая настройки, команду, интеграции и данные.<br><b>Менеджер</b> — контакты, компании, сделки, задачи, заметки и все чаты; настройки и справочники меняет админ.<br><b>Наблюдатель</b> — только чтение и выгрузки.</small></p></div></div></div>`;
+    body = `<div class="settings-cols"><div class="card">
+     <div class="row" style="border:0;flex-wrap:wrap;gap:8px"><div><h3>Команда (${rows.length})</h3><small>Доступ в CRM выдаёт администратор: e-mail — это логин, пароль сотрудник меняет при первом входе.</small></div>
+      <input id="teamSearch" style="max-width:220px;margin-left:auto" placeholder="Поиск: имя, e-mail, роль" value="${esc(state.teamQuery || '')}" oninput="liveSearch('team',()=>setTeamQuery(this.value))">
+      <button class="btn sm primary" onclick="openUser()">+ Пользователь</button></div>
+     <table><tr><th>Сотрудник</th><th>E-mail (логин)</th><th>Роль</th><th>Сделки в работе</th><th>Задачи</th><th>Последний вход</th><th>Доступ</th><th></th></tr>
+      ${shown.map(x => { const st = stat(x.id); return `<tr>
+        <td><b>${esc(x.name)}</b>${x.must_change_password ? '<br><small>работает по временному паролю</small>' : ''}</td>
+        <td>${esc(x.email || '—')}</td><td>${esc(roleLabel(x.role))}</td>
+        <td>${st.open} на ${fmt(st.sum)}<br><small>успешных: ${st.won}</small></td><td>${st.tasks}</td>
+        <td><small>${esc(x.last_login ? dt(x.last_login) : 'ещё не входил')}</small></td>
+        <td>${x.active ? '<span class="tag">разрешён</span>' : '<span class="tag grey">отключён</span>'}</td>
+        <td style="white-space:nowrap"><button class="btn sm" title="Изменить данные, роль, доступ или выдать новый пароль" onclick="openUser(${x.id})">${icon('edit', 13)} Изменить</button></td></tr>`; }).join('')
+        || `<tr><td colspan="8"><div class="empty">${uq ? 'Никого не нашли — измените поиск' : 'Сотрудников пока нет'}</div></td></tr>`}</table></div>
+     <div><div class="card"><h3>Права ролей</h3>
+      <p><small><b>Администратор</b> — всё: настройки, команда, интеграции, воронки, свои поля, каталог, резервные копии и наша таблица цен.</small></p>
+      <p><small><b>Менеджер</b> — клиенты, компании, сделки, задачи, заметки, все чаты, каталог, шаблоны сообщений и проверка конкурентов. E-mail коллег ему не показывается.</small></p>
+      <p><small><b>Наблюдатель</b> — только просмотр и выгрузки: руководитель или бухгалтер видит цифры, но ничего не меняет.</small></p>
+      <hr><p><small><b>Первый вход.</b> После создания сотрудника CRM показывает данные для входа одним окном — скопируйте и передайте их лично. При первом входе человек задаёт свой пароль (от 12 символов), а выданный вами перестаёт работать.</small></p>
+      <p><small><b>Уволился сотрудник?</b> Снимите галочку «Сотрудник может входить в CRM» — все его сеансы завершатся сразу. Карточки и переписка останутся в базе; сделки и задачи можно передать другому человеку массовым действием.</small></p></div></div></div>`;
   } else if (state.settingsTab === 'data') {
     const demoRows = Object.values(s.demo || {}).reduce((a, b) => a + b, 0);
-    body = `${demoRows ? `<div class="card" style="box-shadow:none;border-color:#fde68a;background:#fffbeb"><h3>${icon('sparkles', 16)} Демонстрационные данные</h3><p><small>Сейчас в базе примеры: клиентов ${s.demo?.contacts || 0}, сделок ${s.demo?.deals || 0}, задач ${s.demo?.tasks || 0}, чатов ${s.demo?.conversations || 0}, конкурентов ${s.demo?.competitors || 0}, товаров каталога ${s.demo?.products || 0}, шаблонов ${s.demo?.templates || 0}, правил ${s.demo?.automations || 0}. Их можно редактировать как обычные данные или удалить одной кнопкой — тогда CRM будет полностью чистой.</small></p><button class="btn danger sm" onclick="cleanDemo()">${icon('trash', 13)} Удалить демонстрационные данные</button></div>` : ''}
+    body = `${demoRows ? `<div class="card tint-info"><h3>${icon('sparkles', 16)} Демонстрационные данные</h3><p><small>Сейчас в базе примеры: клиентов ${s.demo?.contacts || 0}, сделок ${s.demo?.deals || 0}, задач ${s.demo?.tasks || 0}, чатов ${s.demo?.conversations || 0}, конкурентов ${s.demo?.competitors || 0}, товаров каталога ${s.demo?.products || 0}, шаблонов ${s.demo?.templates || 0}, правил ${s.demo?.automations || 0}. Их можно редактировать как обычные данные или удалить одной кнопкой — тогда CRM будет полностью чистой.</small></p><button class="btn danger sm" onclick="cleanDemo()">${icon('trash', 13)} Удалить демонстрационные данные</button></div>` : ''}
     <div class="settings-cols"><div><div class="card"><h3>Название компании</h3><form onsubmit="return saveCompanySettings(event)"><div style="display:grid;grid-template-columns:2fr 1fr;gap:12px"><label>Название<input name="COMPANY_NAME" value="${esc(s.company.name)}"></label><label>Валюта<input name="CURRENCY" value="${esc(s.company.currency)}"></label></div>
      <label>Автосоздание сделки при обращении<select name="AUTO_DEAL"><option value="1" ${s.auto_deal === '1' ? 'selected' : ''}>Да — создавать сделку «Неразобранное»</option><option value="0" ${s.auto_deal !== '1' ? 'selected' : ''}>Нет</option></select></label>
      <p class="form-hint">Когда клиент впервые пишет в чат или оставляет заявку на сайте, CRM сразу создаёт сделку. Так обращение не потеряется, даже если менеджер ещё не открыл чат.</p>
@@ -2308,10 +2598,7 @@ async function settings(v) {
        <div style="display:flex;gap:8px;flex-wrap:wrap"><button class="btn primary sm" onclick="makeBackup()">${icon('plus', 13)} Создать копию сейчас</button>
        <button class="btn sm" onclick="download('/api/export/json','karkas-backup.json')" title="Текстовый файл со всеми данными — для переноса в другую программу">${icon('download', 13)} Скачать все данные</button></div>
        <div id="backupList" style="margin-top:10px">Загрузка…</div>
-       <details class="settings-more"><summary>Копии на другом сервере</summary>
-        <p><small>Копии из списка лежат на этом же сервере: они спасают от случайного удаления, но не от поломки диска. Чтобы была вторая копия в другом месте, включите выгрузку в облачное хранилище S3 — файлы уходят туда автоматически по расписанию. Настройка — в <b>DEPLOY.md, раздел 7.1</b>: адрес хранилища, ведро и ключи доступа вписываются в <code>.env</code> на сервере, дальше одна строка в cron. Стоимость — примерно 100–200 ₽ в месяц.</small></p>
-        <p><small>Проверять восстановление стоит раз в квартал: скачайте копию и поднимите её на тестовом сервере. Копия, которую ни разу не восстанавливали, копией не считается.</small></p>
-       </details>
+       <p><small>Копии создаются автоматически и лежат на сервере. Вторая копия в облаке настраивается при установке — см. <b>DEPLOY.md, раздел 7.1</b>.</small></p>
      </div>
      <div class="card"><h3>Логотип компании</h3>
       <p><small>Загрузка необязательна: по умолчанию используется logo.jpg из комплекта. PNG, JPG, GIF или WebP, до 4 МБ. Логотип показывается на странице входа, в боковой панели, во вкладке браузера и на документах.</small></p>
@@ -2375,7 +2662,7 @@ async function settings(v) {
     </div></div>`;
   }
 
-  v.innerHTML = `<div class="tabs">${Object.entries(tabs).map(([k, n]) => `<button class="${state.settingsTab === k ? 'active' : ''}" onclick="state.settingsTab='${k}';render()">${n}</button>`).join('')}</div>${body}`;
+  v.innerHTML = `<div class="tabs">${Object.entries(tabs).map(([k, n]) => `<button class="${state.settingsTab === k ? 'active' : ''}" onclick="setSettingsTab('${k}')">${n}</button>`).join('')}</div>${body}`;
   if (state.settingsTab === 'data') loadBackups();
 }
 
@@ -2387,6 +2674,64 @@ function translit(s) {
   const map = { а: 'a', б: 'b', в: 'v', г: 'g', д: 'd', е: 'e', ё: 'e', ж: 'zh', з: 'z', и: 'i', й: 'y', к: 'k', л: 'l', м: 'm', н: 'n', о: 'o', п: 'p', р: 'r', с: 's', т: 't', у: 'u', ф: 'f', х: 'h', ц: 'ts', ч: 'ch', ш: 'sh', щ: 'sch', ъ: '', ы: 'y', ь: '', э: 'e', ю: 'yu', я: 'ya' };
   return String(s).toLowerCase().split('').map(ch => (ch in map ? map[ch] : (/[a-z0-9]/.test(ch) ? ch : '_'))).join('').replace(/_+/g, '_').replace(/^_|_$/g, '').slice(0, 40);
 }
+// Поля, которые уже есть в карточках: их не добавляют — ими пользуются.
+// Справочник нужен, чтобы человек видел всю картину, а не только свои поля.
+const BUILTIN_FIELDS = {
+  contacts: {
+    title: 'Контакты', where: 'в карточке клиента (кнопка «Редактировать»)',
+    rows: [
+      ['Имя клиента', 'да', 'Обязательное: без имени карточка не сохранится'],
+      ['Телефон', 'нет', 'По нему CRM находит клиента и узнаёт дубли'],
+      ['E-mail', 'нет', 'На него уходит письмо из чата'],
+      ['Компания', 'нет', 'Связь с карточкой компании из раздела «Компании»'],
+      ['Должность', 'нет', 'Кем работает клиент'],
+      ['Источник', 'нет', 'Откуда пришёл: сайт, WhatsApp, Авито, импорт'],
+      ['Теги', 'нет', 'Метки через запятую — по ним работает фильтр'],
+      ['Заметки', 'нет', 'Короткая памятка; история заметок — в карточке клиента'],
+      ['Ответственный', 'нет', 'Сотрудник, который ведёт клиента'],
+    ]
+  },
+  deals: {
+    title: 'Сделки', where: 'в карточке сделки (вкладка «Сведения»)',
+    rows: [
+      ['Название сделки', 'да', 'Обязательное: его видно на доске и в документах'],
+      ['Сумма', 'нет', 'Считается в выручке и аналитике'],
+      ['Этап', 'да', 'Меняется перетаскиванием карточки на доске'],
+      ['Клиент и компания', 'нет', 'Привязка к базе'],
+      ['Ответственный', 'нет', 'Кто ведёт сделку'],
+      ['Приоритет', 'нет', 'Обычный, высокий или низкий'],
+      ['Причина отказа', 'нет', 'Заполняется при закрытии в минус — попадает в аналитику'],
+      ['Срок (дедлайн)', 'нет', 'До какого числа нужно закрыть'],
+      ['Заметки', 'нет', 'История договорённостей во вкладке «Заметки»'],
+    ]
+  },
+  companies: {
+    title: 'Компании', where: 'в карточке компании',
+    rows: [['Название организации', 'да', 'Обязательное'], ['ИНН', 'нет', 'Для документов и проверки контрагента'],
+      ['Телефон', 'нет', 'Общий телефон компании'], ['E-mail', 'нет', 'Почта для документов'],
+      ['Сайт', 'нет', 'Открывается ссылкой из списка'], ['Заметки', 'нет', 'Договорённости и особенности']]
+  },
+  tasks: {
+    title: 'Задачи', where: 'в окне задачи',
+    rows: [['Название', 'да', 'Обязательное: что именно сделать'], ['Тип', 'нет', 'Звонок, встреча, сообщение, письмо или дело'],
+      ['Срок выполнения', 'нет', 'Дата и время; без срока задача попадает в «Активные»'],
+      ['Приоритет', 'нет', 'Обычный, высокий или низкий'], ['Исполнитель', 'нет', 'Кому назначена'],
+      ['Клиент и сделка', 'нет', 'Привязка — задача видна в обеих карточках'],
+      ['Повтор', 'нет', 'Ежедневно, еженедельно или ежемесячно'], ['Результат', 'нет', 'Что получилось — заполняется при выполнении']]
+  }
+};
+function setBuiltinTab(key) { state.builtinTab = key; render(); }
+function builtinFieldsCard() {
+  const key = state.builtinTab || 'contacts';
+  const set = BUILTIN_FIELDS[key];
+  return `<div class="card"><h3>Поля, которые уже есть в карточках</h3>
+   <p class="form-hint" style="margin-top:-2px">Это встроенные поля — они всегда на месте, добавлять их не нужно. Меняются ${esc(set.where)}. Свои поля ниже добавляются к ним и работают так же.</p>
+   <div class="tabs" style="margin-bottom:10px">${Object.entries(BUILTIN_FIELDS).map(([k, v]) => `<button class="${k === key ? 'active' : ''}" onclick="setBuiltinTab('${k}')">${esc(v.title)}</button>`).join('')}</div>
+   <table class="mini" id="builtinFields"><tr><th>Поле</th><th>Обязательное</th><th>Зачем</th></tr>
+    ${set.rows.map(([name, req, why]) => `<tr><td><b>${esc(name)}</b></td><td>${req === 'да' ? '<span class="tag">да</span>' : '<span class="tag grey">нет</span>'}</td><td><small>${esc(why)}</small></td></tr>`).join('')}</table>
+   <p><small>Заметки, теги и историю переписки видно в карточке клиента и сделки: там же заметку можно изменить или удалить. Удалить встроенное поле нельзя — оно часть карточки.</small></p></div>`;
+}
+
 async function editField(i) {
   const list = await loadFields(); const f = i >= 0 ? list[i] : { key: '', label: '', type: 'text', entity: 'both', options: [], required: false };
   openModal(`<h3>${i >= 0 ? 'Своё поле' : 'Новое поле карточки'}</h3><p><small>${i >= 0 ? 'Изменения сразу появятся в формах и карточках; уже введённые значения сохранятся.' : 'Поле появится в форме создания и в карточке выбранного раздела.'}</small></p><form onsubmit="return saveField(event,${i})">
@@ -2434,6 +2779,28 @@ async function testWazzup() {
   toast(sync.error ? sync.error : `Каналов найдено и сохранено: ${sync.synced ?? n}`); state.channels = []; render();
 }
 async function registerWazzupWebhook() { const url = location.origin + '/webhooks/wazzup'; try { await api('/api/integrations/wazzup/webhook', { method: 'POST', body: JSON.stringify({ url }) }); toast('Вебхук зарегистрирован'); } catch (e) { toast(e.message, 'err'); } }
+// Диагностика источников: один запрос — видно, кто отвечает, а кто просит ключ.
+const PROBE_STATUS = { ok: ['отвечает', ''], skipped: ['нужен ключ', 'grey'], blocked: ['закрыт от автоматических запросов', 'orange'], error: ['не ответил', 'orange'] };
+async function probeSources(btn) {
+  const host = $('#srcProbe');
+  if (!host) return;
+  if (btn) { btn.classList.add('loading'); btn.disabled = true; }
+  host.innerHTML = '<p class="form-hint" style="margin:0">Опрашиваем источники тестовой компанией… Это занимает до минуты.</p>';
+  try {
+    const d = await api('/api/competitor-sources/check', { method: 'POST', signal: AbortSignal.timeout(150000) });
+    host.innerHTML = `<h4>Доступность источников</h4>
+     <table class="mini"><tr><th>Источник</th><th>Статус</th><th>Ответ</th><th>Время</th></tr>
+     ${(d.results || []).map(r => { const [label, cls] = PROBE_STATUS[r.status] || [r.status, 'grey'];
+       return `<tr><td><b>${esc(r.name)}</b></td><td><span class="tag ${cls}">${esc(label)}</span></td><td><small>${esc(r.summary || '—')}</small></td><td><small>${(r.ms / 1000).toFixed(1)} с</small></td></tr>`; }).join('')}</table>
+     <p><small>Проверка ничего не сохраняет: это только опрос доступности. «Закрыт от автоматических запросов» — обычное дело для сайтов с защитой от роботов: данные в этом случае смотрятся по ссылкам в отчёте.</small></p>`;
+    toast('Источники проверены');
+  } catch (e) {
+    host.innerHTML = `<p class="form-hint">${esc(e.message)}</p>`;
+    toast(e.message, 'err');
+  } finally {
+    if (btn) { btn.classList.remove('loading'); btn.disabled = false; }
+  }
+}
 async function saveCompetitorKeys(e) { e.preventDefault(); const b = {}; for (const [k, v] of new FormData(e.target)) if (v && !String(v).includes('•')) b[k] = v; await api('/api/competitor-sources', { method: 'PUT', body: JSON.stringify(b) }); toast('Ключи сохранены'); render(); return false; }
 async function saveCompetitorUrls(e) { e.preventDefault(); const b = {}; for (const [k, v] of new FormData(e.target)) if (v) b[k] = v; await api('/api/competitor-sources', { method: 'PUT', body: JSON.stringify(b) }); toast('Адреса сохранены'); render(); return false; }
 async function saveCompanySettings(e) { e.preventDefault(); await api('/api/settings', { method: 'PUT', body: JSON.stringify(Object.fromEntries(new FormData(e.target))) }); toast('Сохранено'); return false; }
@@ -2488,16 +2855,68 @@ async function pkSave() {
   } catch (err) { toast(err.message, 'err'); }
   finally { if (btn) btn.disabled = false; }
 }
+const AUTO_TRIGGERS = { deal_created: 'Появилась новая сделка', message_in: 'Клиент написал сообщение', stage_changed: 'Сделку перевели на другой этап' };
+const AUTO_ACTIONS = { create_task: 'Создать задачу', change_stage: 'Перевести сделку на этап', add_tag: 'Добавить клиенту тег' };
+function autoStageOptions(sel) {
+  const list = window.__autoStages || [];
+  return list.map(s2 => `<option value="${esc(s2.code)}" ${s2.code === sel ? 'selected' : ''}>${esc(s2.name)}${s2.kind === 'won' ? ' (успех)' : s2.kind === 'lost' ? ' (отказ)' : ''}</option>`).join('');
+}
+// Условие события: для смены этапа — этап из списка, для сообщения — ключевое слово.
+function autoTriggerField(a) {
+  const t = a.trigger_type || 'deal_created';
+  if (t === 'stage_changed') return `<label>На какой этап перевели<select name="trigger_value"><option value="">Любой этап</option>${autoStageOptions(a.trigger_value)}</select></label>
+   <p class="form-hint" style="margin:-6px 0 10px">«Любой этап» — правило сработает на каждом переходе. Выберите конкретный этап, чтобы правило не повторялось лишний раз.</p>`;
+  if (t === 'message_in') return `<label>Слово или фраза в сообщении (необязательно)<input name="trigger_value" value="${esc(a.trigger_value || '')}" placeholder="смета, цена, ипотека"></label>
+   <p class="form-hint" style="margin:-6px 0 10px">Пусто — правило срабатывает на любое входящее сообщение. Можно несколько слов через запятую — хватит любого из них. Слово ищется по основе: «смета» находит и «смету», и «сметы», регистр не важен.</p>`;
+  return `<input type="hidden" name="trigger_value" value="">`;
+}
+// Значение действия: этап выбирается из воронки, тег и текст задачи пишутся словами.
+function autoActionField(a) {
+  const t = a.action_type || 'create_task';
+  if (t === 'change_stage') return `<label>Этап, на который перевести сделку<select name="action_value" required>${autoStageOptions(a.action_value)}</select></label>
+   <p class="form-hint" style="margin:-6px 0 10px">Этап берётся из вашей воронки. Если сделка уже на этом этапе, правило ничего не меняет.</p>`;
+  if (t === 'add_tag') return `<label>Тег<input name="action_value" required value="${esc(a.action_value || '')}" placeholder="Горячий, Нужна смета, Ипотека"></label>
+   <p class="form-hint" style="margin:-6px 0 10px">Тег появится в карточке клиента и в фильтре контактов. Повторно один и тот же тег не ставится.</p>`;
+  return `<label>Текст задачи<input name="action_value" required value="${esc(a.action_value || '')}" placeholder="Позвонить клиенту: уточнить задачу и участок"></label>
+   <p class="form-hint" style="margin:-6px 0 10px">Задача ставится ответственному за сделку или клиента, срок — сегодня 14:00. Он получит уведомление.</p>`;
+}
+// При смене события или действия поле значения меняется на подходящее по смыслу.
+function autoFields(form) {
+  const draft = { trigger_type: form.elements.trigger_type.value, action_type: form.elements.action_type.value, trigger_value: '', action_value: '' };
+  const tv = $('#autoTriggerValue'); if (tv) tv.innerHTML = autoTriggerField(draft);
+  const av = $('#autoActionValue'); if (av) av.innerHTML = autoActionField(draft);
+}
 async function openAutomation(id) {
   const rows = await api('/api/automations'); const a = id ? (rows.find(x => x.id === id) || {}) : {};
-  openModal(`<h3>${id ? 'Правило' : 'Новая автоматизация'}</h3><form onsubmit="return saveAutomation(event,${id || 'null'})">
-   <label>Название<input name="name" required value="${esc(a.name || '')}"></label>
-   <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px"><label>Когда<select name="trigger_type">${Object.entries({ deal_created: 'Создана сделка', message_in: 'Входящее сообщение', stage_changed: 'Смена этапа' }).map(([k, n]) => `<option value="${k}" ${k === a.trigger_type ? 'selected' : ''}>${n}</option>`).join('')}</select></label>
-   <label>Что сделать<select name="action_type">${Object.entries({ create_task: 'Создать задачу', change_stage: 'Перевести на этап', add_tag: 'Добавить тег' }).map(([k, n]) => `<option value="${k}" ${k === a.action_type ? 'selected' : ''}>${n}</option>`).join('')}</select></label></div>
-   <label>Значение действия: текст задачи, название этапа или тег<input name="action_value" value="${esc(a.action_value || '')}"></label>
-   <button class="btn primary w">Сохранить</button></form>`);
+  const pl = await api('/api/pipelines');
+  window.__autoStages = pl.flatMap(p => p.stages.map(st => ({ ...st, pipeline: p.name })));
+  openModal(`<h3>${id ? 'Правило автоматизации' : 'Новое правило автоматизации'}</h3>
+   <p class="form-hint">Правило состоит из двух частей: <b>когда</b> случилось и <b>что</b> сделать. Пример: «Появилась новая сделка → создать задачу «Позвонить клиенту»».</p>
+   <form onsubmit="return saveAutomation(event,${id || 'null'})">
+   ${fld('Название правила', `<input name="name" required value="${esc(a.name || '')}" placeholder="Новый лид — позвонить">`, true)}
+   ${fld('Когда срабатывает', `<select name="trigger_type" onchange="autoFields(this.form)">${Object.entries(AUTO_TRIGGERS).map(([k, n]) => `<option value="${k}" ${k === (a.trigger_type || 'deal_created') ? 'selected' : ''}>${n}</option>`).join('')}</select>`, true)}
+   <div id="autoTriggerValue">${autoTriggerField(a)}</div>
+   ${fld('Что сделать', `<select name="action_type" onchange="autoFields(this.form)">${Object.entries(AUTO_ACTIONS).map(([k, n]) => `<option value="${k}" ${k === (a.action_type || 'create_task') ? 'selected' : ''}>${n}</option>`).join('')}</select>`, true)}
+   <div id="autoActionValue">${autoActionField(a)}</div>
+   <label class="check-line"><input type="checkbox" name="active" style="width:auto" ${a.active === 0 ? '' : 'checked'}><span>Правило включено <small>(можно сохранить выключенным и включить позже)</small></span></label>
+   <button class="btn primary w">${id ? 'Сохранить правило' : 'Создать правило'}</button></form>`);
 }
-async function saveAutomation(e, id) { e.preventDefault(); const b = Object.fromEntries(new FormData(e.target)); await api(id ? '/api/automations/' + id : '/api/automations', { method: id ? 'PATCH' : 'POST', body: JSON.stringify(b) }); closeModal(); toast('Правило сохранено'); render(); return false; }
+async function saveAutomation(e, id) {
+  e.preventDefault();
+  const b = Object.fromEntries(new FormData(e.target));
+  b.active = e.target.elements.active && e.target.elements.active.checked ? 1 : 0;
+  try {
+    await api(id ? '/api/automations/' + id : '/api/automations', { method: id ? 'PATCH' : 'POST', body: JSON.stringify(b) });
+  } catch (err) { toast(err.message, 'err'); return false; }
+  closeModal(); toast(id ? 'Правило сохранено' : 'Правило создано и уже работает'); render(); return false;
+}
+// Переключатель «Вкл.» в таблице правил: при ошибке галочка возвращается назад.
+async function toggleAutomation(id, el) {
+  try {
+    await api('/api/automations/' + id, { method: 'PATCH', body: JSON.stringify({ active: el.checked ? 1 : 0 }) });
+    toast(el.checked ? 'Правило включено' : 'Правило выключено');
+  } catch (e) { el.checked = !el.checked; toast(e.message, 'err'); }
+}
 async function openTemplate(id = null) {
   const rows = await api('/api/templates'); const t = id ? (rows.find(x => x.id === id) || {}) : {};
   openModal(`<h3>${id ? 'Шаблон' : 'Новый шаблон'}</h3><form onsubmit="return saveTemplate(event,${id || 'null'})"><label>Название<input name="name" required value="${esc(t.name || '')}" placeholder="Приветствие"></label>
@@ -2677,9 +3096,48 @@ function del(table, id, name = '') {
 /* ---------- global search + realtime ---------- */
 let searchT;
 const si = $('#globalSearch');
-function closeDropdown(el) {
-  const d = el && el.closest && el.closest('details');
-  if (d) d.open = false;
+/* ---------- выпадающее меню ----------
+   Меню крепится к body и ставится по координатам кнопки: его не прячет
+   ни таблица снизу, ни карточка с собственной рамкой, ни край экрана. */
+let __menuCleanup = null;
+function closeMenu() {
+  const m = document.getElementById('popMenu');
+  if (m) m.remove();
+  if (__menuCleanup) { __menuCleanup(); __menuCleanup = null; }
+}
+function openMenu(evt, html) {
+  evt.preventDefault(); evt.stopPropagation();
+  closeMenu();
+  const anchor = evt.currentTarget || evt.target;
+  const m = document.createElement('div');
+  m.id = 'popMenu';
+  m.className = 'dropdown-pop menu-fixed';
+  m.innerHTML = html;
+  document.body.appendChild(m);
+  const place = () => {
+    const r = anchor.getBoundingClientRect();
+    const mw = m.offsetWidth || 220, mh = m.offsetHeight || 140;
+    const left = Math.min(Math.max(8, r.right - mw), Math.max(8, window.innerWidth - mw - 8));
+    // снизу места мало — открываем вверх
+    const top = (r.bottom + 6 + mh > window.innerHeight - 8) ? Math.max(8, r.top - mh - 6) : r.bottom + 6;
+    m.style.left = left + 'px';
+    m.style.top = top + 'px';
+  };
+  place();
+  const onKey = e => { if (e.key === 'Escape') { closeMenu(); anchor.focus && anchor.focus(); } };
+  const onDoc = e => { if (!m.contains(e.target) && e.target !== anchor) closeMenu(); };
+  document.addEventListener('click', onDoc, true);
+  document.addEventListener('keydown', onKey);
+  window.addEventListener('resize', place);
+  window.addEventListener('scroll', closeMenu, true);
+  __menuCleanup = () => {
+    document.removeEventListener('click', onDoc, true);
+    document.removeEventListener('keydown', onKey);
+    window.removeEventListener('resize', place);
+    window.removeEventListener('scroll', closeMenu, true);
+  };
+  const first = m.querySelector('button');
+  if (first) first.focus({ preventScroll: true });
 }
 function closeSearchResults(clear = false) {
   const box = $('#searchResults');

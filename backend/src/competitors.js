@@ -535,6 +535,26 @@ export function createCompetitors(ctx) {
       return json(res, 200, { saved: true });
     }
     }
+    // Диагностика источников: один запрос ко всем источникам с нейтральными данными.
+    // Ничего не сохраняет — показывает, кто отвечает, кто требует ключ, кто закрыт антиботом.
+    if (p === '/api/competitor-sources/check' && req.method === 'POST') {
+      if (!await admin()) return;
+      const probe = { name: 'ПАО Сбербанк', inn: '7707083893', ogrn: '1027700132195', city: 'Москва' };
+      const started = Date.now();
+      const timed = (promise, ms) => Promise.race([promise, new Promise((_, rej) => setTimeout(() => rej(new Error(`не ответил за ${Math.round(ms / 1000)} с`)), ms))]);
+      const results = await Promise.all(SOURCE_DEFS.map(async def => {
+        const t0 = Date.now();
+        const needsKey = def.needs.length > 0;
+        const keySet = def.needs.every(k => !!getSetting(k));
+        try {
+          const r = await timed(RUNNERS[def.key](probe), 20000);
+          return { key: def.key, name: def.name, kind: def.kind, status: r.status, summary: r.summary, ms: Date.now() - t0, needsKey, keySet };
+        } catch (e) {
+          return { key: def.key, name: def.name, kind: def.kind, status: 'error', summary: e.message, ms: Date.now() - t0, needsKey, keySet };
+        }
+      }));
+      return json(res, 200, { results, ms: Date.now() - started, probe: probe.name });
+    }
     if (p === '/api/competitor-links') { const q = { name: u.searchParams.get('name') || '', inn: u.searchParams.get('inn') || '', ogrn: u.searchParams.get('ogrn') || '' }; return json(res, 200, { links: linksFor(q) }); }
     if (p === '/api/competitors') {
       if (req.method === 'GET') {
@@ -587,6 +607,20 @@ export function createCompetitors(ctx) {
       log(`Импорт прайса (${out.scope}): ${out.imported} позиций`, 'competitors', null, user.name); broadcast('change', { table: 'price_rows' });
       return json(res, 201, out);
     }
+    if (p === '/api/prices/export' && req.method === 'GET') {
+      // «сгрузить» прайс обратно в таблицу: колонки те же, что при загрузке,
+      // поэтому файл можно поправить в Excel и загрузить снова
+      const scope = u.searchParams.get('scope') === 'competitor' ? 'competitor' : 'ours';
+      const compId = scope === 'competitor' ? Number(u.searchParams.get('competitor') || 0) : null;
+      const rows = scope === 'ours'
+        ? db.prepare("SELECT item,price,unit,sku,note FROM price_rows WHERE scope='ours' ORDER BY item").all()
+        : db.prepare('SELECT item,price,unit,sku,note FROM price_rows WHERE scope=? AND competitor_id=? ORDER BY item').all(scope, compId);
+      const q = v => `"${String(v ?? '').replace(/"/g, '""')}"`;
+      const csv = ['Наименование;Цена;Ед;Артикул;Примечание', ...rows.map(r => [r.item, r.price, r.unit, r.sku, r.note].map(q).join(';'))].join('\r\n');
+      const name = scope === 'ours' ? 'our-prices.csv' : `competitor-${compId || 'prices'}.csv`;
+      res.writeHead(200, { 'Content-Type': 'text/csv; charset=utf-8', 'Content-Disposition': `attachment; filename=${name}` });
+      return res.end('\uFEFF' + csv);
+    }
     if (p === '/api/prices') {
       const scope = u.searchParams.get('scope') || 'ours'; const compId = u.searchParams.get('competitor');
       const rows = scope === 'ours'
@@ -601,9 +635,11 @@ export function createCompetitors(ctx) {
       return json(res, 400, { error: 'Не передан URL таблицы' });
     }
     if (p === '/api/competitors/find' && req.method === 'POST') {
-      // «Пишем название конкурента» — ищем и сразу проверяем
+      // «Пишем название конкурента» — ищем и сразу проверяем.
+      // Интерфейс присылает query, старые вызовы — name; принимаем оба.
       const b = await readBody(req);
-      const name = String(b.name || '').trim(); if (!name) return json(res, 400, { error: 'Укажите название или ИНН конкурента' });
+      const name = String(b.query || b.name || '').trim().slice(0, 200);
+      if (!name) return json(res, 400, { error: 'Укажите название или ИНН конкурента' });
       const inn = digits(name).length >= 10 ? digits(name) : (digits(b.inn) || '');
       let comp = inn ? db.prepare('SELECT * FROM competitors WHERE inn=?').get(inn) : db.prepare('SELECT * FROM competitors WHERE lower(name)=lower(?)').get(name);
       let created = false;

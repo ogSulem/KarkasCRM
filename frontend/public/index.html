@@ -76,9 +76,10 @@
     <div><h2 id="title">Рабочий стол</h2><p id="subtitle"></p></div>
     <div class="head-actions">
       <div class="searchbox"><span class="search-ico" id="searchIco"></span><input id="globalSearch" placeholder="Поиск: клиенты, сделки, компании, задачи" autocomplete="off" aria-label="Глобальный поиск по клиентам, сделкам, компаниям и задачам"><div id="searchResults" class="search-results hidden"></div></div>
-      <button class="btn orange" onclick="openDeal()">+ Сделка</button>
-      <button class="btn primary" onclick="openContact()">+ Контакт</button>
-      <button class="btn" onclick="openTask()">+ Задача</button>
+      <span class="tag grey head-readonly" title="Ваша роль — «Наблюдатель»: доступны просмотр и выгрузки">Только просмотр</span>
+      <button class="btn orange head-create" onclick="openDeal()">+ Сделка</button>
+      <button class="btn primary head-create" onclick="openContact()">+ Контакт</button>
+      <button class="btn head-create" onclick="openTask()">+ Задача</button>
       <button class="btn icon-btn" id="themeBtn" title="Светлая / тёмная тема" onclick="toggleTheme()"></button>
       <button class="btn icon-btn" id="bellBtn" title="Уведомления" onclick="openNotifications()"><span id="bellIcon"></span><span class="pill orange" id="bellCount" style="margin-left:4px"></span></button>
     </div>
