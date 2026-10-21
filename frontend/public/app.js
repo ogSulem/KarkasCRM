@@ -1214,7 +1214,7 @@ function dealTab(deal, d) {
   if (state.dealTab === 'details') {
     return `<form onsubmit="return saveDeal(event,${deal.id})">
      ${formLegend()}
-     ${fld('Название', `<input name="title" required value="${esc(deal.title)}">`, true)}
+     ${fld('Название сделки', `<input name="title" required value="${esc(deal.title)}">`, true)}
      ${cfInputs('deals', deal, 2, 'required')}
      ${grid2(`${fld('Сумма (' + CUR() + ')', `<input name="amount" type="number" value="${deal.amount}">`)}
        ${fld('Этап', `<select name="stage">${selStages(deal.stage, state.cardStages)}</select>`)}`)}
@@ -2211,6 +2211,8 @@ async function openCompetitor(id) {
    <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px"><label>ИНН<input name="inn" value="${esc(c.inn || '')}"></label><label>ОГРН<input name="ogrn" value="${esc(c.ogrn || '')}"></label></div>
    <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px"><label>Город<input name="city" value="${esc(c.city || '')}"></label><label>Сайт<input name="website" value="${esc(c.website || '')}" placeholder="brusdom.ru"></label></div>
    <label>Телефон<input name="phone" value="${esc(c.phone || '')}"></label>
+   <label>Ссылка на прайс<input name="price_url" value="${esc(c.price_url || '')}" placeholder="https://…/price.csv"></label>
+   <p class="form-hint" style="margin-top:-4px">Если конкурент публикует прайс таблицей, укажите адрес — CRM сама подтянет его при каждой проверке, и позиции попадут в сравнение цен.</p>
    <label>Заметки<textarea name="notes" rows="2">${esc(c.notes || '')}</textarea></label>
    <button class="btn primary w">Сохранить</button></form>`);
 }
@@ -2244,6 +2246,17 @@ async function openCompetitorCard(id) {
    <div id="compTabBody">${competitorTab(c)}</div>`);
 }
 
+// Ссылки на реестры берём из отчёта: их уже собрал сервер по ИНН, ОГРН и названию.
+// Держать два зашитых адреса в разметке — значит показывать меньше, чем CRM знает.
+function reportLinks(rep, c) {
+  const links = (rep && Array.isArray(rep.links) && rep.links.length) ? rep.links : [
+    { label: 'Rusprofile: поиск по названию', url: 'https://www.rusprofile.ru/search?query=' + encodeURIComponent(c.inn || c.name || '') },
+    { label: 'ФНС: Прозрачный бизнес', url: 'https://pb.nalog.ru/search.html?query=' + encodeURIComponent(c.inn || c.name || '') },
+  ];
+  return `<p class="form-hint" style="margin-bottom:6px">Ссылки для ручной проверки — каждая открывается в новой вкладке:</p>
+   <div class="report-links">${links.map(l => `<a href="${esc(l.url)}" target="_blank" rel="noopener">${esc(l.label)}</a>`).join('')}</div>`;
+}
+
 function competitorTab(c) {
   const rep = c.report || {};
   const checks = c.checks || [];
@@ -2262,7 +2275,7 @@ function competitorTab(c) {
        <p>${esc(rep.verdict || 'Запустите проверку конкурента для получения сводки.')}</p>
        <h4 style="margin-top:12px">Аргументы для менеджера в переговорах:</h4>
        <div class="list">${(rep.talking_points || []).map(p => `<div class="row"><span>• ${esc(p)}</span></div>`).join('') || '<small>Факторы риска не выявлены — аргументов пока нет</small>'}</div>
-       <hr><p><small>Ссылки для ручной проверки: <a href="https://www.rusprofile.ru/search?query=${encodeURIComponent(c.inn || c.name)}" target="_blank" rel="noopener">rusprofile.ru</a> · <a href="https://pb.nalog.ru/search.html?query=${encodeURIComponent(c.inn || c.name)}" target="_blank" rel="noopener">pb.nalog.ru (ФНС)</a></small></p>
+       <hr>${reportLinks(rep, c)}
      </div>`;
   }
   if (state.compTab === 'sources') {
@@ -2749,10 +2762,10 @@ const BUILTIN_FIELDS = {
       ['E-mail', 'нет', 'На него уходит письмо из чата'],
       ['Компания', 'нет', 'Связь с карточкой компании из раздела «Компании»'],
       ['Должность', 'нет', 'Кем работает клиент'],
+      ['Ответственный', 'нет', 'Сотрудник, который ведёт клиента'],
       ['Источник', 'нет', 'Откуда пришёл: сайт, WhatsApp, Авито, импорт'],
       ['Теги', 'нет', 'Метки через запятую — по ним работает фильтр'],
       ['Заметки', 'нет', 'Короткая памятка; история заметок — в карточке клиента'],
-      ['Ответственный', 'нет', 'Сотрудник, который ведёт клиента'],
     ]
   },
   deals: {
@@ -2760,13 +2773,13 @@ const BUILTIN_FIELDS = {
     rows: [
       ['Название сделки', 'да', 'Обязательное: его видно на доске и в документах'],
       ['Сумма', 'нет', 'Считается в выручке и аналитике'],
-      ['Этап', 'да', 'Меняется перетаскиванием карточки на доске'],
-      ['Клиент и компания', 'нет', 'Привязка к базе'],
+      ['Этап', 'нет', 'Есть всегда: меняется перетаскиванием карточки на доске'],
+      ['Клиент', 'нет', 'Привязка к карточке клиента'],
+      ['Компания', 'нет', 'Привязка к карточке компании'],
+      ['Дедлайн', 'нет', 'До какого числа нужно закрыть'],
       ['Ответственный', 'нет', 'Кто ведёт сделку'],
       ['Приоритет', 'нет', 'Обычный, высокий или низкий'],
       ['Причина отказа', 'нет', 'Заполняется при закрытии в минус — попадает в аналитику'],
-      ['Срок (дедлайн)', 'нет', 'До какого числа нужно закрыть'],
-      ['Заметки', 'нет', 'История договорённостей во вкладке «Заметки»'],
     ]
   },
   companies: {
@@ -2777,11 +2790,15 @@ const BUILTIN_FIELDS = {
   },
   tasks: {
     title: 'Задачи', where: 'в окне задачи',
-    rows: [['Название', 'да', 'Обязательное: что именно сделать'], ['Тип', 'нет', 'Звонок, встреча, сообщение, письмо или дело'],
-      ['Срок выполнения', 'нет', 'Дата и время; без срока задача попадает в «Активные»'],
-      ['Приоритет', 'нет', 'Обычный, высокий или низкий'], ['Исполнитель', 'нет', 'Кому назначена'],
-      ['Клиент и сделка', 'нет', 'Привязка — задача видна в обеих карточках'],
-      ['Повтор', 'нет', 'Ежедневно, еженедельно или ежемесячно'], ['Результат', 'нет', 'Что получилось — заполняется при выполнении']]
+    rows: [['Что сделать', 'да', 'Обязательное: что именно сделать'],
+      ['Срок', 'нет', 'Дата и время; без срока задача попадает в «Активные»'],
+      ['Тип', 'нет', 'Звонок, встреча, сообщение, письмо или дело'],
+      ['Клиент', 'нет', 'Привязка — задача видна в карточке клиента'],
+      ['Сделка', 'нет', 'Привязка — задача видна в карточке сделки'],
+      ['Ответственный', 'нет', 'Кому назначена'],
+      ['Приоритет', 'нет', 'Обычный, высокий или низкий'],
+      ['Повтор задачи', 'нет', 'Каждый день, каждую неделю или каждый месяц'],
+      ['Результат', 'нет', 'Что получилось — заполняется при выполнении']]
   }
 };
 function setBuiltinTab(key) { state.builtinTab = key; render(); }

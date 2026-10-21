@@ -606,3 +606,7 @@ html[data-theme=dark] .toast-item .toast-x{color:#0d1417}
 html[data-theme=dark] ::selection{background:#166534;color:#fff}
 html[data-theme=dark] *::-webkit-scrollbar-thumb{background:#33454f;background-clip:content-box}
 html[data-theme=dark] *::-webkit-scrollbar-thumb:hover{background:#465c69;background-clip:content-box}
+
+/* Ссылки на реестры в отчёте о конкуренте: компактный переносимый список */
+.report-links { display: flex; flex-wrap: wrap; gap: 6px 14px; font-size: 13px }
+.report-links a { white-space: nowrap }

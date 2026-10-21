@@ -1895,7 +1895,7 @@ export const server = http.createServer(async (req, res) => {
     }
 
     // ===== конкуренты: разведка (долги, суды, банкротство, отзывы, прайс-таблицы) =====
-    if (/^\/api\/(competitors|competitor-sources|competitor-links|competitors\/find|prices|reviews)/.test(p)) {
+    if (/^\/api\/(competitors|competitor-sources|competitors\/find|prices|reviews)/.test(p)) {
       const handled = await competitorsApi.handle(req, res, { p, u, user });
       if (handled !== false) return;
     }
