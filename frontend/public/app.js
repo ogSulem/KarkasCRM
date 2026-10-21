@@ -1,6 +1,7 @@
 // КаркасCRM — одностраничный интерфейс (без сборки и внешних зависимостей)
 const $ = s => document.querySelector(s);
-const $$ = s => document.querySelectorAll(s);
+// именно массив: у NodeList нет find/filter/some, а в интерфейсе они нужны
+const $$ = s => Array.from(document.querySelectorAll(s));
 
 // SVG Vector Icon Dictionary (~77 icons + eye/eyeOff)
 const ICON_PATHS = {
@@ -399,8 +400,17 @@ const download = async (path, name) => {
 // Всплывающие уведомления. Простой toast — короткая новость «сохранено/ошибка».
 // notify — важное событие с заголовком и действием («Открыть чат», «Открыть задачу»):
 // так сотрудник не пропустит сообщение клиента и сможет перейти в один клик.
+// Технические сообщения браузера («...is not a function», «Cannot read properties…»)
+// человеку ни о чём не говорят: превращаем их в понятный текст, а подробности — в консоль.
+const TECH_ERROR = /is not a function|cannot read propert|is not defined|undefined is not|null is not an object|illegal invocation|failed to construct|is not iterable|invalid state/i;
+function humanError(msg) {
+  const text = String(msg || '').trim();
+  if (!text || !TECH_ERROR.test(text)) return text;
+  console.error('Техническая ошибка интерфейса:', text);
+  return 'Действие не выполнено из-за сбоя в интерфейсе. Обновите страницу (F5) — введённые данные сохранятся. (' + text.slice(0, 60) + ')';
+}
 function toast(t, kind = 'ok') {
-  pushToast({ text: String(t || ''), kind: kind === 'err' ? 'error' : 'ok', timeout: kind === 'err' ? 5200 : 2600 });
+  pushToast({ text: kind === 'err' ? humanError(t) : String(t || ''), kind: kind === 'err' ? 'error' : 'ok', timeout: kind === 'err' ? 5200 : 2600 });
 }
 function notify({ title, text = '', kind = 'message', actionLabel = '', onAction = null, timeout = 7000 }) {
   pushToast({ title, text, kind, actionLabel, onAction, timeout });
@@ -435,13 +445,18 @@ function openModal(html) {
 // Наблюдатель видит карточки и отчёты, но формы в окнах становятся только для
 // чтения: сервер изменения всё равно отклоняет, а человеку сразу понятно почему.
 function lockFormsForViewer(root) {
-  if (canEdit() || !root || !root.querySelectorAll) return;
+  if (canEdit()) return;
+  lockForm(root, 'Режим просмотра: изменения вносит сотрудник с ролью «Менеджер» или «Администратор».');
+}
+// Форма открывается на просмотр: поля гаснут, а под ними — понятная причина.
+function lockForm(root, text) {
+  if (!root || !root.querySelectorAll) return;
   root.querySelectorAll('form').forEach(f => {
     f.querySelectorAll('input,select,textarea,button').forEach(el => { el.disabled = true; });
     if (!f.querySelector('.viewer-lock')) {
       const note = document.createElement('p');
       note.className = 'form-hint viewer-lock';
-      note.textContent = 'Режим просмотра: изменения вносит сотрудник с ролью «Менеджер» или «Администратор».';
+      note.textContent = text;
       f.appendChild(note);
     }
   });
@@ -742,7 +757,7 @@ const TITLES = {
   inbox: ['Чаты', 'Одна переписка на клиента: WhatsApp, Telegram, Instagram, Viber и почта'],
   contacts: ['Контакты', 'Клиенты с историей, сделками и перепиской'],
   companies: ['Компании', 'Юридические лица и связанные с ними клиенты'],
-  products: ['Каталог', 'Дома, бани, комплектации и услуги — то, что вы продаёте'],
+  products: ['Каталог', 'Ваш прайс-лист: дома, бани и услуги — то, что продаёте, и по каким ценам'],
   analytics: ['Аналитика', 'Сколько продали, конверсия, план и результаты менеджеров'],
   competitors: ['Конкуренты', 'Проверка по открытым источникам и сравнение цен'],
   settings: ['Настройки', 'Компания, интеграции, поля, команда и резервные копии']
@@ -804,6 +819,7 @@ function setDealQuery(value) { state.dealQuery = value; render(); }
 function setTaskScope(scope) { state.taskScope = scope; render(); }
 function setTaskView(view) { state.taskView = view; render(); }
 function clearTaskFilter() { state.taskFilter = ''; render(); }
+function setTaskQuery(value) { state.taskQuery = value; state.taskLimit = 50; render(); }
 function clearTaskQuery() { state.taskQuery = ''; render(); }
 function showMoreTasks() { state.taskLimit = (state.taskLimit || 50) + 50; render(); }
 function goTasks(scope, filter) { state.taskScope = scope || 'all'; state.taskFilter = filter || ''; go('tasks'); }
@@ -975,6 +991,7 @@ async function dashboard(v) {
    <div class="card"><div class="row" style="border:0"><h3>Мои задачи</h3><button class="btn sm" onclick="go('tasks')">Все задачи</button></div>
     <div class="list">${myTasksBlock()}</div></div>
    <div class="card"><h3>Последние события компании</h3>
+    <p class="form-hint">Короткая лента о том, что недавно меняли коллеги: кто добавил клиента, перевёл сделку на этап или отправил письмо. Руководителю видно работу без отчётов, а себе — что уже сделано.</p>
     <div class="list feed">${d.activities.map(a => `<div class="row"><span>• ${esc(a.text)}<br><small>${esc(dt(a.created_at))}${a.user_name ? ' · ' + esc(a.user_name) : ''}</small></span></div>`).join('') || '<small>Пока пусто</small>'}</div></div>
   </div></div>`;
 }
@@ -1367,7 +1384,7 @@ async function inbox(v) {
     <div class="msgs" id="chatMsgs">${msgs.map(msgHtml).join('') || '<div class="empty">Диалог пуст</div>'}</div>
     ${canEdit() ? `<form class="composer" onsubmit="return sendMsg(event,${cur.id})">
      <div class="composer-row">
-       <button type="button" class="btn icon-btn composer-ico" title="Прикрепить фото или файл" onclick="$('#chatFile').click()">${icon('paperclip', 17)}</button>
+       <button type="button" class="btn icon-btn composer-ico" title="Прикрепить фото или файл" onclick="document.getElementById('chatFile').click()">${icon('paperclip', 17)}</button>
        <input type="file" id="chatFile" class="hidden" accept="image/png,image/jpeg,image/gif,image/webp,application/pdf,text/plain,text/csv,application/zip,.doc,.docx,.xls,.xlsx" onchange="uploadChatFile(this,${cur.id})">
        <input id="msgText" placeholder="Сообщение (Enter — отправить)…" required autocomplete="off">
        <button class="btn send-btn" title="Отправить сообщение">${icon('arrowUp', 17)}</button>
@@ -1966,14 +1983,20 @@ async function products(v) {
   const rows = await api('/api/products');
   const q = (state.productQuery || '').trim().toLowerCase();
   const onlyActive = state.productScope !== 'all';
-  const shown = rows.filter(p => (!onlyActive || p.active) && (!q || `${p.name} ${p.sku || ''} ${p.unit || ''}`.toLowerCase().includes(q)));
+  const shown = rows.filter(p => (!onlyActive || p.active) && (!q || `${p.name} ${p.sku || ''} ${p.unit || ''} ${p.note || ''}`.toLowerCase().includes(q)));
   const archived = rows.filter(p => !p.active).length;
-  v.innerHTML = `${viewerNote()}<div class="card"><div class="row" style="border:0;flex-wrap:wrap;gap:8px"><h3>Каталог (${shown.length})</h3>
+  const onSale = rows.filter(p => p.active);
+  const noPrice = onSale.filter(p => !(Number(p.price) > 0)).length;
+  v.innerHTML = `${viewerNote()}<div class="card"><div class="row" style="border:0;flex-wrap:wrap;gap:8px"><h3>Каталог и прайс-лист (${shown.length})</h3>
    <span class="tabs" style="margin:0"><button class="${onlyActive ? 'active' : ''}" onclick="setProductScope('active')">В продаже</button><button class="${!onlyActive ? 'active' : ''}" onclick="setProductScope('all')">Все${archived ? ` (+${archived} в архиве)` : ''}</button></span>
-   <input id="productSearch" style="max-width:240px" placeholder="Поиск: название или артикул" value="${esc(state.productQuery || '')}" oninput="liveSearch('products',()=>setProductQuery(this.value))">
-   ${canEdit() ? `<button class="btn sm primary" style="margin-left:auto" onclick="openProduct()">+ Товар / проект</button>` : ''}</div>
+   <input id="productSearch" style="max-width:230px" placeholder="Поиск: название, артикул, примечание" value="${esc(state.productQuery || '')}" oninput="liveSearch('products',()=>setProductQuery(this.value))">
+   <button class="btn sm" title="Скачать прайс-лист таблицей CSV — откроется в Excel" onclick="download('/api/prices/export?scope=ours','price-list.csv')">${icon('download', 13)} Скачать прайс</button>
+   ${amAdmin() ? `<button class="btn sm" title="Загрузить прайс из Excel или CSV" onclick="openPriceImport(null,'ours')">${icon('upload', 13)} Загрузить из файла</button>` : ''}
+   ${amAdmin() ? `<button class="btn sm primary" style="margin-left:auto" onclick="openProduct()">+ Товар / проект</button>` : ''}</div>
+  <p class="form-hint" style="margin:-2px 0 10px">Это <b>один список</b>: отсюда позиции берутся в сделки, и эти же цены CRM сравнивает с ценами конкурентов (раздел «Конкуренты» → «Наш прайс-лист»). В продаже: <b>${onSale.length}</b>${archived ? ` · в архиве: ${archived}` : ''}${noPrice ? ` · без цены: ${noPrice} — в сравнении они не участвуют` : ''}.</p>
+  ${amAdmin() ? '' : '<p class="form-hint" style="margin:-6px 0 10px">Прайс-лист меняет администратор. Нужной позиции нет? Добавьте её прямо в сделку — сумма пересчитается, а общий прайс останется неизменным.</p>'}
   <table><tr><th>Артикул</th><th>Название</th><th>Цена</th><th>Ед.</th><th>В продаже</th><th></th></tr>
-   ${shown.map(p => `<tr><td><code>${esc(p.sku || '—')}</code></td><td><b>${esc(p.name)}</b></td><td>${fmt(p.price)}</td><td>${esc(p.unit || 'шт')}</td><td>${p.active ? 'Да' : '<span class="tag grey">Архив</span>'}</td><td style="white-space:nowrap">${canEdit() ? `<button class="btn sm" title="Изменить позицию" onclick="openProduct(${p.id})">${icon('edit', 13)} Изменить</button>${amAdmin() ? ` <button class="btn sm danger" title="Удалить из каталога" onclick="del('products',${p.id})">${icon('close', 13)}</button>` : ''}` : `<button class="btn sm" onclick="openProduct(${p.id})">Открыть</button>`}</td></tr>`).join('') || '<tr><td colspan="6"><div class="empty">Ничего не найдено — измените фильтр или добавьте позицию</div></td></tr>'}</table></div>`;
+   ${shown.map(p => `<tr><td><code>${esc(p.sku || '—')}</code></td><td><b>${esc(p.name)}</b>${p.note ? `<br><small>${esc(p.note)}</small>` : ''}</td><td>${Number(p.price) > 0 ? fmt(p.price) : '<span class="tag grey">цена не указана</span>'}</td><td>${esc(p.unit || 'шт')}</td><td>${p.active ? 'Да' : '<span class="tag grey">Архив</span>'}</td><td style="white-space:nowrap">${amAdmin() ? `<button class="btn sm" title="Изменить позицию" onclick="openProduct(${p.id})">${icon('edit', 13)} Изменить</button> <button class="btn sm danger" title="Удалить из каталога" onclick="del('products',${p.id})">${icon('close', 13)}</button>` : `<button class="btn sm" title="Посмотреть позицию" onclick="openProduct(${p.id})">Открыть</button>`}</td></tr>`).join('') || '<tr><td colspan="6"><div class="empty">Ничего не найдено — измените фильтр или добавьте позицию</div></td></tr>'}</table></div>`;
 }
 async function openProduct(id) {
   const p = id ? await api('/api/products/' + id) : {};
@@ -1983,14 +2006,18 @@ async function openProduct(id) {
    ${fld('Цена (' + CUR() + ')', `<input name="price" type="number" required value="${p.price || 0}" placeholder="0">`, true)}
    ${grid2(`${fld('Единица измерения', `<input name="unit" value="${esc(p.unit || 'шт')}" placeholder="шт, м², услуга">`)}
      ${fld('Артикул / код', `<input name="sku" value="${esc(p.sku || '')}" placeholder="DOM-SKAN-810">`)}`)}
+   ${fld('Примечание', `<input name="note" value="${esc(p.note || '')}" placeholder="под ключ, срок 8 недель">`)}
+   <p class="form-hint" style="margin:-6px 0 10px">Примечание видно в каталоге и попадает в скачанный прайс-лист. Артикул помогает загрузке из файла: позиция с тем же артикулом обновится, а не добавится второй раз.</p>
    <label class="check-line"><input type="checkbox" name="active" style="width:auto" ${p.active === 0 ? '' : 'checked'}><span>Показывать в продаже <small>(снимите галочку, чтобы убрать в архив)</small></span></label>
    <button class="btn primary w">${id ? 'Сохранить' : 'Добавить в каталог'}</button></form>`);
+  if (!amAdmin()) lockForm($('#modalBody'), 'Прайс-лист меняет администратор. Позицию, которой нет в каталоге, можно добавить прямо в сделку.');
 }
 async function saveProduct(e, id) {
   e.preventDefault(); const b = Object.fromEntries(new FormData(e.target));
   b.price = num(b.price); b.active = b.active ? 1 : 0;
   await api(id ? '/api/products/' + id : '/api/products', { method: id ? 'PATCH' : 'POST', body: JSON.stringify(b) });
-  closeModal(); toast('Товар сохранён'); render(); return false;
+  state.ourPrices = null; // каталог и прайс-лист — одно и то же, кэш цен сбрасываем
+  closeModal(); toast('Позиция сохранена'); render(); return false;
 }
 
 /* ---------- analytics ---------- */
@@ -2043,9 +2070,9 @@ async function competitorsView(v) {
   v.innerHTML = `${viewerNote()}
   <div class="card toolbar">
     <input id="compSearch" style="flex:1;min-width:240px" placeholder="Название или ИНН конкурента — найдём и проверим по открытым источникам" onkeydown="if(event.key==='Enter')findCompetitor(this.value)">
-    ${canEdit() ? `<button class="btn primary" onclick="findCompetitor($('#compSearch').value)">${icon('search', 14)} Найти и проверить</button>
+    ${canEdit() ? `<button class="btn primary" onclick="findCompetitor(document.getElementById('compSearch').value)">${icon('search', 14)} Найти и проверить</button>
     <button class="btn" onclick="openCompetitor()">+ Добавить вручную</button>` : ''}
-    <button class="btn" title="Показать нашу таблицу цен" onclick="openOurPrices()">${icon('excel', 14)} Наш прайс-лист${ours.rows.length ? ` (${ours.rows.length})` : ''}</button>
+    <button class="btn" title="Наш прайс-лист — это раздел «Каталог»: те же позиции и цены" onclick="openOurPrices()">${icon('excel', 14)} Наш прайс-лист${ours.rows.length ? ` (${ours.rows.length})` : ''}</button>
   </div>
   <div class="card">
    <div class="row" style="border:0;flex-wrap:wrap;gap:8px">
@@ -2069,21 +2096,37 @@ async function competitorsView(v) {
   </div>`;
 }
 
-/* ---------- наша таблица цен ---------- */
+/* ---------- наш прайс-лист: это каталог ---------- */
 // Название приводим к одному виду, чтобы «Дом 8×10» и «дом 8x10» считались одной позицией.
 function normItem(s) { return String(s || '').toLowerCase().replace(/[«»"'`]/g, '').replace(/[^a-zа-я0-9]+/gi, ' ').trim(); }
+// Похожесть названий (0..1) — тот же разбор, что на сервере: «Баня каркасная 4×6»
+// и «Баня 4×6» считаются одной позицией, а разные комплектации не склеиваются.
+function nameScore(a, b) {
+  const A = new Set(normItem(a).split(' ').filter(Boolean));
+  const B = new Set(normItem(b).split(' ').filter(Boolean));
+  if (!A.size || !B.size) return 0;
+  let shared = 0;
+  for (const w of A) if (B.has(w)) shared++;
+  if (!shared) return 0;
+  const union = new Set([...A, ...B]).size;
+  const jaccard = shared / union;
+  return shared === Math.min(A.size, B.size) ? Math.max(jaccard, 0.8) : jaccard;
+}
+const MATCH_MIN = 0.6;
 function comparePrices(ours, theirs) {
-  const map = new Map((theirs || []).map(r => [normItem(r.item), r]));
+  const list = theirs || [];
+  const map = new Map(list.map(r => [normItem(r.item), r]));
   return (ours || []).map(o => {
     const k = normItem(o.item);
-    if (!k) return null;
-    const hit = map.get(k) || [...map.entries()].find(([key]) => key && (key.includes(k) || k.includes(key)))?.[1];
+    if (!k || !(Number(o.price) > 0)) return null; // позиция без цены в сравнении не участвует
+    let hit = map.get(k) || null, best = 0;
+    if (!hit) for (const r of list) { const sc = nameScore(o.item, r.item); if (sc >= MATCH_MIN && sc > best) { best = sc; hit = r } }
     return hit ? { item: o.item, ours: Number(o.price) || 0, theirs: Number(hit.price) || 0 } : null;
   }).filter(Boolean);
 }
 function ourPriceRows(rows) {
   return `<tr><th>Позиция</th><th>Цена</th><th>Ед.</th><th>Артикул</th></tr>` + (rows.map(r => `<tr><td><b>${esc(r.item)}</b>${r.note ? `<br><small>${esc(r.note)}</small>` : ''}</td><td>${fmt(r.price)}</td><td>${esc(r.unit || 'шт')}</td><td><code>${esc(r.sku || '—')}</code></td></tr>`).join('')
-    || `<tr><td colspan="4"><div class="empty">Таблица не загружена${amAdmin() ? ' — нажмите «Загрузить нашу таблицу цен»' : ' — её загрузит администратор'}</div></td></tr>`);
+    || `<tr><td colspan="4"><div class="empty">Прайс-лист пуст${amAdmin() ? ' — добавьте позиции в каталоге или загрузите их файлом' : ' — позиции добавит администратор в разделе «Каталог»'}</div></td></tr>`);
 }
 function filterOurPrices(q) {
   const needle = String(q || '').trim().toLowerCase();
@@ -2093,22 +2136,23 @@ function filterOurPrices(q) {
   const c = $('#ourPriceCount');
   if (c) c.textContent = needle ? `Найдено позиций: ${rows.length}` : '';
 }
-// Кнопка «Наш прайс-лист» показывает таблицу: менять её может только администратор.
-// backId — карточка конкурента, из которой открыли таблицу: возвращаем человека назад.
+// Кнопка «Наш прайс-лист» показывает каталог: цены меняет администратор.
+// backId — карточка конкурента, из которой открыли прайс: возвращаем человека назад.
 async function openOurPrices(backId = null) {
   const d = await api('/api/prices?scope=ours').catch(() => ({ rows: [] }));
   const rows = d.rows || [];
   state.ourPrices = rows;
   state.ourPricesBack = backId || null;
   const sum = rows.reduce((a, r) => a + (Number(r.price) || 0), 0);
-  openModal(`<h3>${icon('excel', 18)} Наша таблица цен</h3>
-   <p class="form-hint">По этой таблице CRM сравнивает ваши цены с ценами конкурента во вкладке «Сравнение цен». Позиций: <b>${rows.length}</b>${rows.length ? ` · суммарно на <b>${fmt(sum)}</b>` : ''}.</p>
+  openModal(`<h3>${icon('excel', 18)} Наш прайс-лист</h3>
+   <p class="form-hint">Это ваш <b>каталог</b> — один и тот же список: эти позиции подставляются в сделки, и эти же цены CRM сравнивает с ценами конкурента во вкладке «Сравнение цен». Позиций: <b>${rows.length}</b>${rows.length ? ` · суммарно на <b>${fmt(sum)}</b>` : ''}.</p>
    <div style="display:flex;gap:8px;flex-wrap:wrap;margin:10px 0">
-     <button class="btn sm" onclick="download('/api/prices/export?scope=ours','our-prices.csv')">${icon('download', 13)} Скачать таблицу (CSV)</button>
-     ${amAdmin() ? `<button class="btn sm primary" onclick="openPriceImport(null,'ours')">${icon('upload', 13)} Загрузить нашу таблицу цен</button>` : ''}
+     <button class="btn sm" title="Скачать прайс-лист таблицей CSV" onclick="download('/api/prices/export?scope=ours','price-list.csv')">${icon('download', 13)} Скачать прайс (CSV)</button>
+     ${amAdmin() ? `<button class="btn sm primary" onclick="openPriceImport(null,'ours')">${icon('upload', 13)} Загрузить из файла</button>` : ''}
+     <button class="btn sm" title="Открыть раздел «Каталог» — там прайс и редактируется" onclick="closeModal();go('products')">${icon('products', 13)} Открыть каталог</button>
      ${state.ourPricesBack ? `<button class="btn sm" onclick="openCompetitorCard(${state.ourPricesBack})">${icon('arrowLeft', 13)} Назад к отчёту</button>` : ''}
    </div>
-   ${amAdmin() ? '' : '<p class="form-hint">Обновляет таблицу администратор: Настройки → Конкуренты и источники. Вы видите её для сравнения цен в переговорах.</p>'}
+   ${amAdmin() ? '' : '<p class="form-hint">Цены обновляет администратор в разделе «Каталог». Вам прайс нужен, чтобы сравнить его с ценами конкурента в переговорах.</p>'}
    <input id="ourPriceFilter" placeholder="Поиск по позициям" oninput="filterOurPrices(this.value)" style="margin-bottom:8px">
    <p class="form-hint" id="ourPriceCount" style="margin:0 0 6px"></p>
    <div class="list" style="max-height:50vh"><table class="mini" id="ourPriceTable">${ourPriceRows(rows)}</table></div>`);
@@ -2243,16 +2287,17 @@ function competitorTab(c) {
      <div class="list">${(c.reviews || []).map(r => `<div class="row"><span><b>${esc(r.author || 'Клиент')}</b> (${r.rating} ${icon('star', 12)}) — <small>${esc(r.source || 'карты')}</small><br>${esc(r.text)}</span><button class="btn sm danger" onclick="delReview(${r.id},${c.id})">${icon('close', 13)}</button></div>`).join('') || '<small>Отзывов пока нет</small>'}</div>`;
   }
   if (state.compTab === 'prices') {
-    // сравнение считается по текущим таблицам: загрузили новый прайс — цифры сразу свежие
-    const ours = state.ourPrices || [];
+    // сравнение считается по текущим данным: обновили цену в каталоге — цифры сразу свежие
+    const ours = (state.ourPrices || []).filter(r => Number(r.price) > 0);
     const theirs = c.prices || [];
     const pairs = comparePrices(ours, theirs);
     const diffs = pairs.map(x => (x.theirs - x.ours) / (x.ours || 1) * 100);
     const avg = diffs.length ? Math.round(diffs.reduce((a, b) => a + b, 0) / diffs.length) : 0;
     const weCheaper = diffs.filter(d => d > 0).length;
     const theyCheaper = diffs.filter(d => d < 0).length;
-    return `<div class="row" style="border:0;flex-wrap:wrap;gap:8px"><h4>Сравнение с нашей таблицей цен</h4>
-      <span style="display:flex;gap:6px;flex-wrap:wrap"><button class="btn sm" onclick="openOurPrices(${c.id})">${icon('excel', 13)} Наша таблица (${ours.length})</button>
+    return `<p class="form-hint" style="margin:0 0 8px">Наши цены — это раздел «Каталог»: поправили цену там, и сравнение здесь сразу свежее. Позиции без цены в сравнении не участвуют.</p>
+     <div class="row" style="border:0;flex-wrap:wrap;gap:8px"><h4>Сравнение с нашим прайс-листом</h4>
+      <span style="display:flex;gap:6px;flex-wrap:wrap"><button class="btn sm" onclick="openOurPrices(${c.id})">${icon('excel', 13)} Наш прайс (${ours.length})</button>
       ${canEdit() ? `<button class="btn sm primary" onclick="openPriceImport(${c.id},'theirs')">${icon('upload', 13)} Загрузить прайс конкурента</button>` : ''}</span></div>
      ${pairs.length ? `<div class="grid" style="margin:6px 0 12px">
        <div class="kpi"><span>Сопоставлено позиций</span><b>${pairs.length}</b><small>из ${ours.length} наших и ${theirs.length} конкурента</small></div>
@@ -2264,7 +2309,7 @@ function competitorTab(c) {
         const diff = (x.theirs || 0) - (x.ours || 0);
         const pct = x.ours ? Math.round(diff / x.ours * 100) : 0;
         return `<tr><td><b>${esc(x.item)}</b></td><td>${fmt(x.ours)}</td><td>${fmt(x.theirs)}</td><td><span class="tag ${diff > 0 ? '' : diff < 0 ? 'orange' : 'grey'}">${diff === 0 ? 'одинаково' : (diff > 0 ? `мы дешевле на ${fmt(diff)} (${pct}%)` : `конкурент дешевле на ${fmt(-diff)} (${Math.abs(pct)}%)`)}</span></td></tr>`;
-      }).join('') || `<tr><td colspan="4"><small>${!ours.length ? 'Наша таблица цен не загружена — без неё сравнивать нечего.' : !theirs.length ? 'Прайс конкурента не загружен — загрузите его таблицей или вставьте текстом.' : 'Совпадающих позиций не нашлось: названия в таблицах разные. Сравнение строится по похожим наименованиям.'}</small></td></tr>`}</table>`;
+      }).join('') || `<tr><td colspan="4"><small>${!ours.length ? 'В каталоге нет позиций с ценой — без них сравнивать нечего.' : !theirs.length ? 'Прайс конкурента не загружен — загрузите его таблицей или вставьте текстом.' : 'Совпадающих позиций не нашлось: названия в таблицах разные. Сравнение строится по похожим наименованиям.'}</small></td></tr>`}</table>`;
   }
   if (state.compTab === 'history') {
     return `<div class="list">${(c.history || []).map(h => `<div class="row"><span><b class="risk-value sm" style="--risk:${esc(riskColor(h.level))}">риск ${h.risk}</b> · ${esc(RISK_LABELS[String(h.level || '').toLowerCase()] || h.level || '')}<br><small>${esc(h.verdict || '')}</small></span><small>${esc(dt(h.created_at))}</small></div>`).join('') || '<small>Проверок ещё не было</small>'}</div>`;
@@ -2277,18 +2322,29 @@ function addReview(cid) {
 async function saveReview(e, cid) { e.preventDefault(); const b = Object.fromEntries(new FormData(e.target)); b.competitor_id = cid; b.rating = +b.rating; await api('/api/reviews', { method: 'POST', body: JSON.stringify(b) }); closeModal(); toast('Отзыв добавлен'); openCompetitorCard(cid); return false; }
 async function delReview(rid, cid) { await api('/api/reviews/' + rid, { method: 'DELETE' }); toast('Удалено'); openCompetitorCard(cid); }
 
+// Как перенести файл в прайс-лист. По умолчанию — безопасно: знакомые позиции
+// обновляются, новые добавляются, ничего не пропадает.
+function priceModeField() {
+  return `<label>Что сделать с текущим прайс-листом
+   <select name="mode">
+     <option value="merge">Обновить цены и добавить новые позиции (обычный режим)</option>
+     <option value="replace">Заменить прайс целиком: чего нет в файле — уйдёт в архив</option>
+   </select></label>
+  <p class="form-hint" style="margin:-6px 0 10px">Позиция находится по артикулу, а если его нет — по названию. Ничего не удаляется: архивные позиции остаются в каталоге и возвращаются в продажу одной галочкой.</p>`;
+}
 function openPriceImport(competitorId, scope) {
   const ours = scope === 'ours';
-  openModal(`<h3>${ours ? 'Замена нашей таблицы цен' : 'Загрузка прайса конкурента'} (Excel / CSV)</h3>
+  openModal(`<h3>${ours ? 'Загрузка прайс-листа' : 'Загрузка прайса конкурента'} (Excel / CSV)</h3>
    <p class="form-hint">${ours
-    ? 'Наша таблица цен используется для сравнения во всех отчётах по конкурентам.'
+    ? 'Прайс-лист — это ваш каталог: загруженные цены сразу появятся в сделках и в сравнении с конкурентами.'
     : 'Прайс конкурента нужен для сравнения позиций во вкладке «Сравнение цен».'}</p>
-   ${ours ? `<div class="notice warn" style="margin-bottom:10px">Загрузка <b>полностью заменяет</b> текущую таблицу. Сначала скачайте её, поправьте в Excel и загрузите обратно — так ничего не потеряется.<div style="margin-top:8px"><button type="button" class="btn sm" onclick="download('/api/prices/export?scope=ours','our-prices.csv')">${icon('download', 13)} Скачать текущую таблицу</button></div></div>`
+   ${ours ? `<div class="notice info" style="margin-bottom:10px">Удобнее всего так: скачайте текущий прайс, поправьте цены в Excel и загрузите файл обратно — знакомые позиции обновятся, новые добавятся.<div style="margin-top:8px"><button type="button" class="btn sm" onclick="download('/api/prices/export?scope=ours','price-list.csv')">${icon('download', 13)} Скачать текущий прайс</button></div></div>`
      : `<p class="form-hint">Загрузка заменит предыдущий прайс этого конкурента.</p>`}
    <p><small>Первая строка — заголовки: <code>Наименование;Цена;Ед</code>. Например: <code>Дом 8×10;3850000;шт</code>. Подойдёт файл CSV (обычная таблица) или первый лист Excel; цены — числами. <a href="/examples/prices.csv" download>Скачать пример</a>.</small></p>
    <div class="tabs"><button class="active" onclick="this.parentElement.nextElementSibling.classList.remove('hidden');this.nextElementSibling.classList.remove('active');this.classList.add('active');">Файл .xlsx / .csv</button><button onclick="openPriceTextForm(${competitorId},'${scope}')">Текст / ссылки</button></div>
    <div><form onsubmit="return importPriceFile(event,${competitorId || 'null'},'${scope}')">
      <label>Выберите файл таблицы (.xlsx или .csv)<input type="file" accept=".xlsx,.csv,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet,text/csv" required></label>
+     ${ours ? priceModeField() : ''}
      <button class="btn primary w">Загрузить и разобрать</button></form></div>`);
 }
 
@@ -2301,8 +2357,9 @@ async function importPriceFile(e, competitorId, scope) {
     const base64 = reader.result.split(',')[1];
     try {
       const url = competitorId ? `/api/competitors/${competitorId}/prices` : '/api/prices/ours';
-      await api(url, { method: 'POST', body: JSON.stringify({ base64, filename: file.name, scope }) });
-      closeModal(); toast('Прайс-таблица успешно загружена');
+      const mode = (e.target.querySelector('[name=mode]') || {}).value || 'merge';
+      const out = await api(url, { method: 'POST', body: JSON.stringify({ base64, filename: file.name, scope, mode }) });
+      closeModal(); toast(priceImportText(out));
       afterPriceImport(competitorId);
     } catch (err) { toast(err.message, 'err'); }
   };
@@ -2314,16 +2371,24 @@ function openPriceTextForm(competitorId, scope) {
   openModal(`<h3>Загрузка прайса текстом или по URL</h3><form onsubmit="return importPriceText(event,${competitorId || 'null'},'${scope}')">
    <label>Ссылка на опубликованную таблицу Google Sheets / CSV<input name="url" placeholder="https://docs.google.com/spreadsheets/d/…/export?format=csv"></label>
    <label>Или вставьте строки (Позиция;Цена;Ед)<textarea name="text" rows="6" placeholder="Каркасный дом 8х10;3850000;шт&#10;Баня 4х6;890000;шт"></textarea></label>
+   ${scope === 'ours' ? priceModeField() : ''}
    <button class="btn primary w">Сохранить</button></form>`);
 }
 
 async function importPriceText(e, competitorId, scope) {
-  e.preventDefault(); const { url, text } = Object.fromEntries(new FormData(e.target));
+  e.preventDefault(); const f = Object.fromEntries(new FormData(e.target));
   const endpoint = competitorId ? `/api/competitors/${competitorId}/prices` : '/api/prices/ours';
-  await api(endpoint, { method: 'POST', body: JSON.stringify({ url, text, scope }) });
-  closeModal(); toast('Цены сохранены');
+  const out = await api(endpoint, { method: 'POST', body: JSON.stringify({ url: f.url, text: f.text, scope, mode: f.mode || 'merge' }) });
+  closeModal(); toast(priceImportText(out));
   afterPriceImport(competitorId);
   return false;
+}
+// один понятный ответ вместо «сохранено»: что именно произошло с прайсом
+function priceImportText(out) {
+  if (!out || out.scope !== 'ours') return `Прайс конкурента загружен: ${(out && out.imported) || 0} поз.`;
+  const parts = [`добавлено ${out.added || 0}`, `обновлено ${out.updated || 0}`];
+  if (out.archived) parts.push(`в архив ${out.archived}`);
+  return `Прайс-лист (каталог) обновлён: ${parts.join(', ')}`;
 }
 // Таблица загружена: сбрасываем кэш и возвращаем человека туда, откуда он пришёл.
 function afterPriceImport(competitorId) {
@@ -2446,15 +2511,16 @@ async function settings(v) {
     // источник без ключа работает всегда; с ключом — данные подтягиваются сами
     const readyLabel = src => !src.needs.length ? 'работает без ключа' : (src.configured ? 'ключ задан — данные подтягиваются сами' : 'ключа нет — данные по ссылкам');
     body = `<div class="settings-cols"><div>
-     <div class="card"><h3>Наша таблица цен</h3>
-      <p class="form-hint">По ней CRM сравнивает ваши цены с ценами конкурента во вкладке «Сравнение цен». Позиций: <b>${ours.rows.length}</b>${ours.rows.length ? ` · суммарно на <b>${fmt(sum)}</b>` : ''}.</p>
-      ${ours.rows.length ? `<div class="list" style="max-height:240px"><table class="mini">${ourPriceRows(ours.rows)}</table></div>` : '<p><small>Таблица не загружена — без неё сравнение цен в отчётах не строится.</small></p>'}
+     <div class="card"><h3>Наш прайс-лист (это раздел «Каталог»)</h3>
+      <p class="form-hint">Отдельной таблицы цен больше нет: прайс-лист — это каталог. По нему CRM сравнивает ваши цены с ценами конкурента во вкладке «Сравнение цен». Позиций: <b>${ours.rows.length}</b>${ours.rows.length ? ` · суммарно на <b>${fmt(sum)}</b>` : ''}.</p>
+      ${ours.rows.length ? `<div class="list" style="max-height:240px"><table class="mini">${ourPriceRows(ours.rows)}</table></div>` : '<p><small>Позиций пока нет — без них сравнение цен в отчётах не строится. Добавьте их в каталоге или загрузите файлом.</small></p>'}
       <div style="display:flex;gap:8px;flex-wrap:wrap;margin-top:10px">
-        <button class="btn sm" onclick="openOurPrices()">${icon('table', 13)} Показать всю таблицу</button>
-        <button class="btn sm" onclick="download('/api/prices/export?scope=ours','our-prices.csv')">${icon('download', 13)} Скачать CSV</button>
-        ${isAdmin ? `<button class="btn sm primary" onclick="openPriceImport(null,'ours')">${icon('upload', 13)} Загрузить или заменить</button>` : ''}
+        <button class="btn sm" onclick="go('products')">${icon('products', 13)} Открыть каталог</button>
+        <button class="btn sm" onclick="openOurPrices()">${icon('table', 13)} Показать весь прайс</button>
+        <button class="btn sm" onclick="download('/api/prices/export?scope=ours','price-list.csv')">${icon('download', 13)} Скачать CSV</button>
+        ${isAdmin ? `<button class="btn sm primary" onclick="openPriceImport(null,'ours')">${icon('upload', 13)} Загрузить из файла</button>` : ''}
       </div>
-      <p><small>${isAdmin ? 'Загрузка заменяет таблицу целиком: скачайте CSV, поправьте в Excel и загрузите обратно — так ничего не потеряется.' : 'Менеджеры видят таблицу и сравнение цен, а обновляет её администратор.'}</small></p>
+      <p><small>${isAdmin ? 'Загрузка из файла обновляет цены у знакомых позиций (по артикулу или названию) и добавляет новые. Режим «заменить целиком» лишнее не удаляет, а убирает в архив каталога.' : 'Менеджеры видят прайс и сравнение цен, а обновляет его администратор в разделе «Каталог».'}</small></p>
      </div>
      <div class="card"><h3>Источники проверки</h3>
       <p class="form-hint">Ключи <b>не обязательны</b>. Без них CRM не молчит: в отчёте остаются прямые ссылки на официальные реестры, по которым сотрудник проверяет компанию за минуту. С ключом те же данные подтягиваются сами и попадают в риск-оценку.</p>
@@ -2563,8 +2629,8 @@ async function settings(v) {
         <td style="white-space:nowrap"><button class="btn sm" title="Изменить данные, роль, доступ или выдать новый пароль" onclick="openUser(${x.id})">${icon('edit', 13)} Изменить</button></td></tr>`; }).join('')
         || `<tr><td colspan="8"><div class="empty">${uq ? 'Никого не нашли — измените поиск' : 'Сотрудников пока нет'}</div></td></tr>`}</table></div>
      <div><div class="card"><h3>Права ролей</h3>
-      <p><small><b>Администратор</b> — всё: настройки, команда, интеграции, воронки, свои поля, каталог, резервные копии и наша таблица цен.</small></p>
-      <p><small><b>Менеджер</b> — клиенты, компании, сделки, задачи, заметки, все чаты, каталог, шаблоны сообщений и проверка конкурентов. E-mail коллег ему не показывается.</small></p>
+      <p><small><b>Администратор</b> — всё: настройки, команда, интеграции, воронки, свои поля, каталог (он же прайс-лист), резервные копии.</small></p>
+      <p><small><b>Менеджер</b> — клиенты, компании, сделки, задачи, заметки, все чаты, каталог (смотрит и берёт позиции в сделки), шаблоны сообщений и проверка конкурентов. E-mail коллег ему не показывается.</small></p>
       <p><small><b>Наблюдатель</b> — только просмотр и выгрузки: руководитель или бухгалтер видит цифры, но ничего не меняет.</small></p>
       <hr><p><small><b>Первый вход.</b> После создания сотрудника CRM показывает данные для входа одним окном — скопируйте и передайте их лично. При первом входе человек задаёт свой пароль (от 12 символов), а выданный вами перестаёт работать.</small></p>
       <p><small><b>Уволился сотрудник?</b> Снимите галочку «Сотрудник может входить в CRM» — все его сеансы завершатся сразу. Карточки и переписка останутся в базе; сделки и задачи можно передать другому человеку массовым действием.</small></p></div></div></div>`;
@@ -2596,13 +2662,14 @@ async function settings(v) {
        <div style="display:flex;gap:8px;flex-wrap:wrap"><button class="btn primary sm" onclick="makeBackup()">${icon('plus', 13)} Создать копию сейчас</button>
        <button class="btn sm" onclick="download('/api/export/json','karkas-backup.json')" title="Текстовый файл со всеми данными — для переноса в другую программу">${icon('download', 13)} Скачать все данные</button></div>
        <div id="backupList" style="margin-top:10px">Загрузка…</div>
+       <p class="form-hint">Копии лежат на этом сервере в папке <code>data/backups</code>, плюс кнопка «Скачать все данные» сохраняет файл себе на компьютер. Как положить вторую копию в облако или на другой сервер — коротко описано в файле <code>DEPLOY.md</code> из комплекта.</p>
      </div>
      <div class="card"><h3>Логотип компании</h3>
       <p><small>Загрузка необязательна: по умолчанию используется logo.jpg из комплекта. PNG, JPG, GIF или WebP, до 4 МБ. Логотип показывается на странице входа, в боковой панели, во вкладке браузера и на документах.</small></p>
       <div class="logo-admin">
         <img id="logoPreview" src="/logo.png?ts=${Date.now()}" alt="Логотип" class="logo-admin-img">
         <div class="logo-admin-actions">
-          <button type="button" class="btn primary sm" onclick="$('#logoFile').click()">${icon('upload', 13)} Загрузить логотип</button>
+          <button type="button" class="btn primary sm" onclick="document.getElementById('logoFile').click()">${icon('upload', 13)} Загрузить логотип</button>
           <input type="file" id="logoFile" class="hidden" accept="image/png,image/jpeg,image/gif,image/webp" onchange="uploadLogo(this)">
           <button type="button" class="btn danger sm" id="logoDeleteBtn" ${s.logo && s.logo.custom ? '' : 'disabled'} onclick="deleteLogo()">Удалить логотип</button>
         </div>
@@ -3086,6 +3153,7 @@ function del(table, id, name = '') {
   const what = DEL_LABELS[table] || 'запись';
   askConfirm(`Удалить ${what}${name ? ' «' + name + '»' : ''}? Действие необратимо.`, async () => {
     await api(`/api/${table}/${id}`, { method: 'DELETE' });
+    if (table === 'products') state.ourPrices = null; // прайс-лист = каталог
     closeModal(); toast('Удалено'); render();
   }, { okText: 'Удалить' });
 }
@@ -3162,6 +3230,7 @@ if (si) {
       if (d.deals.length) sections.push(`<h4>Сделки</h4>${d.deals.map(x => `<div onclick="closeSearchResults(true);openDealCard(${x.id})">${esc(x.title)} · <b>${fmt(x.amount)}</b></div>`).join('')}`);
       if (d.companies.length) sections.push(`<h4>Компании</h4>${d.companies.map(c => `<div onclick="closeSearchResults(true);openCompany(${c.id})">${esc(c.name)} · <small>${esc(c.inn || '')}</small></div>`).join('')}`);
       if (d.tasks && d.tasks.length) sections.push(`<h4>Задачи</h4>${d.tasks.map(t => `<div onclick="closeSearchResults(true);openTask(${t.id})">${esc(t.title)} · <small>${esc(t.due ? dueText(t.due) : 'без срока')}</small></div>`).join('')}`);
+      if (d.products && d.products.length) sections.push(`<h4>Каталог и прайс</h4>${d.products.map(pr => `<div onclick="closeSearchResults(true);openProduct(${pr.id})">${esc(pr.name)} · <b>${fmt(pr.price)}</b>${pr.sku ? ` · <small>${esc(pr.sku)}</small>` : ''}</div>`).join('')}`);
       box.innerHTML = sections.join('') || empty;
       box.classList.remove('hidden');
     }, 200);
@@ -3178,7 +3247,7 @@ const PALETTE_ACTIONS = [
     { ico: 'inbox', title: 'Чаты', hint: 'единый инбокс мессенджеров', run: () => go('inbox') },
     { ico: 'contacts', title: 'Контакты', hint: 'база клиентов', run: () => go('contacts') },
     { ico: 'companies', title: 'Компании', hint: 'юридические лица', run: () => go('companies') },
-    { ico: 'products', title: 'Каталог', hint: 'дома, проекты и опции', run: () => go('products') },
+    { ico: 'products', title: 'Каталог', hint: 'он же прайс-лист: дома, проекты и опции', run: () => go('products') },
     { ico: 'analytics', title: 'Аналитика', hint: 'воронка и план продаж', run: () => go('analytics') },
     { ico: 'competitors', title: 'Конкуренты', hint: 'разведка и проверка', run: () => go('competitors') },
     { ico: 'settings', title: 'Настройки', hint: 'интеграции и права', run: () => go('settings') }
@@ -3405,10 +3474,18 @@ function initRealtime() {
   navTimer = setInterval(() => { api('/api/dashboard').then(navCounts).catch(() => {}); }, 30000);
 }
 
-// любая необработанная ошибка запроса видна пользователю, а не только в консоли
+// любая необработанная ошибка видна пользователю, а не только в консоли
+const IGNORED_ERROR = /abort|aborted|timeout|resizeobserver/i;
 window.addEventListener('unhandledrejection', e => {
   const msg = e.reason && e.reason.message;
-  if (msg && !/abort|aborted|timeout/i.test(msg)) toast(msg, 'err');
+  if (msg && !IGNORED_ERROR.test(msg)) toast(msg, 'err');
+});
+// ошибка в обработчике клика (inline onclick) не попадает в unhandledrejection —
+// без этого слушателя человек увидел бы молча неработающую кнопку
+window.addEventListener('error', e => {
+  const msg = (e && (e.message || (e.error && e.error.message))) || '';
+  if (!msg || IGNORED_ERROR.test(msg)) return;
+  toast(msg, 'err');
 });
 
 boot();

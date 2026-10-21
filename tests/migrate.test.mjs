@@ -34,6 +34,7 @@ CREATE TABLE automations(id INTEGER PRIMARY KEY,name TEXT,trigger_type TEXT,trig
 CREATE TABLE conversations(id INTEGER PRIMARY KEY,contact_id INTEGER,title TEXT,channels TEXT DEFAULT '',unread INTEGER DEFAULT 0,last_at TEXT DEFAULT (datetime('now')),created_at TEXT DEFAULT (datetime('now')));
 CREATE TABLE messages(id INTEGER PRIMARY KEY,conversation_id INTEGER,channel TEXT DEFAULT 'whatsapp',direction TEXT DEFAULT 'in',body TEXT,author TEXT,created_at TEXT DEFAULT (datetime('now')));
 CREATE TABLE channels(id INTEGER PRIMARY KEY,provider TEXT,external_id TEXT UNIQUE,name TEXT,transport TEXT,phone TEXT,state TEXT,raw TEXT);
+CREATE TABLE price_rows(id INTEGER PRIMARY KEY,competitor_id INTEGER,scope TEXT DEFAULT 'competitor',item TEXT,price REAL,unit TEXT,sku TEXT,note TEXT,source_name TEXT,updated_at TEXT DEFAULT (datetime('now')));
 `);
 old.exec(`
 INSERT INTO contacts(name,phone,email,source) VALUES('Клиент из старой базы','+7 900 123-45-67','old@mail.ru','avito');
@@ -43,15 +44,22 @@ INSERT INTO messages(conversation_id,direction,body) VALUES(1,'in','Сообще
 INSERT INTO pipelines(name) VALUES('Основная воронка');
 INSERT INTO stages(pipeline_id,code,name,color,sort,kind) VALUES(1,'new','Неразобранное','#f97316',0,'open');
 INSERT INTO settings(key,value) VALUES('COMPANY_NAME','Старая компания');
+INSERT INTO products(name,sku,price,unit,active) VALUES('Дом из старой базы','OLD-1',1000000,'шт',1);
+INSERT INTO price_rows(competitor_id,scope,item,price,unit,sku,note,source_name) VALUES
+  (NULL,'ours','Дом из старой базы',1200000,'шт','OLD-1','под ключ','наш прайс'),
+  (NULL,'ours','Баня из старого прайса',890000,'шт','','','наш прайс'),
+  (7,'competitor','Дом конкурента',1500000,'шт','','','прайс конкурента');
 `);
 const before = {
   contacts: old.prepare('SELECT COUNT(*) n FROM contacts').get().n,
   deals: old.prepare('SELECT COUNT(*) n FROM deals').get().n,
   messages: old.prepare('SELECT COUNT(*) n FROM messages').get().n,
+  products: old.prepare('SELECT COUNT(*) n FROM products').get().n,
+  ourPrices: old.prepare("SELECT COUNT(*) n FROM price_rows WHERE scope='ours'").get().n,
 };
 old.close();
 console.log(`\n=== Миграции базы KarkasCRM (${DATA}) ===`);
-ok('подготовлена база прежней схемы', before.contacts === 1 && before.deals === 1 && before.messages === 1, JSON.stringify(before));
+ok('подготовлена база прежней схемы', before.contacts === 1 && before.deals === 1 && before.messages === 1 && before.ourPrices === 2, JSON.stringify(before));
 
 // ── 2. Открываем её текущим сервером ─────────────────────────────────────────
 const { server, db } = await import('../backend/src/server.js');
@@ -109,6 +117,17 @@ const deals = await (await fetch(`http://127.0.0.1:${PORT}/api/deals`, { headers
 ok('старая сделка читается со всеми новыми полями', deals.deals.length === 1 && deals.deals[0].amount === 777000 && deals.deals[0].pipeline_id === 1, JSON.stringify(deals.deals.map(d => [d.title, d.amount, d.pipeline_id])));
 const conv = await (await fetch(`http://127.0.0.1:${PORT}/api/conversations`, { headers: H })).json();
 ok('старый чат на месте и читается', conv.length === 1 && conv[0].channels === 'whatsapp');
+
+// «наша таблица цен» прошлой версии переехала в каталог: один список вместо двух
+const legacyOur = db.prepare("SELECT COUNT(*) n FROM price_rows WHERE scope='ours'").get().n;
+const legacyComp = db.prepare("SELECT COUNT(*) n FROM price_rows WHERE scope='competitor'").get().n;
+const catalog = await (await fetch(`http://127.0.0.1:${PORT}/api/products`, { headers: H })).json();
+ok('старый прайс перенесён в каталог', legacyOur === 0 && catalog.length === 2, `в прайсе осталось ${legacyOur}, в каталоге ${catalog.length} поз.`);
+ok('позиция с тем же артикулом обновилась, а не задублировалась', catalog.filter(p => p.sku === 'OLD-1').length === 1 && catalog.find(p => p.sku === 'OLD-1').price === 1200000, JSON.stringify(catalog.map(p => [p.name, p.sku, p.price])));
+ok('примечание из старого прайса сохранено', cols('products').includes('note') && catalog.find(p => p.sku === 'OLD-1').note === 'под ключ', String(catalog.find(p => p.sku === 'OLD-1').note));
+ok('прайсы конкурентов не тронуты', legacyComp === 1, 'строк: ' + legacyComp);
+const ourNow = await (await fetch(`http://127.0.0.1:${PORT}/api/prices?scope=ours`, { headers: H })).json();
+ok('наш прайс-лист отдаётся из каталога', ourNow.source === 'catalog' && ourNow.rows.length === 2 && ourNow.rows.every(r => r.product_id), JSON.stringify(ourNow.rows.map(r => [r.item, r.price])));
 
 // ── 5. Повторный старт (миграции идемпотентны) ───────────────────────────────
 const again = new DatabaseSync(join(DATA, 'crm.db'));

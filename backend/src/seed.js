@@ -36,14 +36,16 @@ const dateOnly = (offset = 0) => {
   return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}`;
 };
 
+// Каталог он же прайс-лист: позиции подставляются в сделки, а цены участвуют
+// в сравнении с конкурентами (раздел «Конкуренты» → «Наш прайс-лист»).
 const DEMO_PRODUCTS = [
-  ['Каркасный дом 6×8 «Летний»', 'DOM-68', 1850000, 'шт'],
-  ['Каркасный дом 8×10 «Север»', 'DOM-810', 2950000, 'шт'],
-  ['Каркасный дом 10×12 «Семейный»', 'DOM-1012', 4100000, 'шт'],
-  ['Каркасный дом 12×14 «Простор»', 'DOM-1214', 5600000, 'шт'],
-  ['Баня каркасная 4×6', 'BAN-46', 890000, 'шт'],
-  ['Терраса / веранда к дому', 'TER-01', 145000, 'шт'],
-  ['Монтаж и отделка под ключ', 'MON-01', 250000, 'услуга'],
+  ['Каркасный дом 6×8 «Летний»', 'DOM-68', 1850000, 'шт', 'сезонный проект, срок 6 недель'],
+  ['Каркасный дом 8×10 «Север»', 'DOM-810', 2950000, 'шт', 'под ключ, тёплый контур, сваи'],
+  ['Каркасный дом 10×12 «Семейный»', 'DOM-1012', 4100000, 'шт', ''],
+  ['Каркасный дом 12×14 «Простор»', 'DOM-1214', 5600000, 'шт', ''],
+  ['Баня каркасная 4×6', 'BAN-46', 890000, 'шт', 'с печью и полком'],
+  ['Терраса / веранда к дому', 'TER-01', 145000, 'шт', ''],
+  ['Монтаж и отделка под ключ', 'MON-01', 250000, 'услуга', 'цена за объект'],
 ];
 
 const DEMO_TEMPLATES = [
@@ -55,8 +57,8 @@ const DEMO_TEMPLATES = [
 
 // Начальное заполнение: каталог, личные шаблоны администратора, правило.
 export function seedBase(db, adminId, demo = 0) {
-  const prod = db.prepare('INSERT INTO products(name,sku,price,unit,active,demo) VALUES(?,?,?,?,1,?)');
-  for (const [name, sku, price, unit] of DEMO_PRODUCTS) prod.run(name, sku, price, unit, demo);
+  const prod = db.prepare('INSERT INTO products(name,sku,price,unit,active,note,demo) VALUES(?,?,?,?,1,?,?)');
+  for (const [name, sku, price, unit, note] of DEMO_PRODUCTS) prod.run(name, sku, price, unit, note || '', demo);
   // канал у шаблона больше не используется: куда отправить, выбирается в чате
   const tpl = db.prepare("INSERT INTO templates(name,body,channel,demo,user_id) VALUES(?,?,'any',?,?)");
   for (const [name, body] of DEMO_TEMPLATES) tpl.run(name, body, demo, adminId);
@@ -172,11 +174,10 @@ export function seedDemo(db, adminId, adminName) {
   db.prepare("INSERT INTO reviews(competitor_id,source,rating,text,author,url) VALUES(?,?,?,?,?,?)")
     .run(k1, 'google', 3, 'Смета выросла на 15% в процессе, но дом качественный', 'Анна С.', '');
 
+  // наш прайс-лист отдельно не заполняем: это каталог (seedBase выше),
+  // сравнение цен строится по нему — одной таблицей меньше, расхождений нет
   const qp = 'INSERT INTO price_rows(competitor_id,scope,item,price,unit,sku,note,source_name,demo) VALUES(?,?,?,?,?,?,?,?,?)';
   const ip = db.prepare(qp);
-  ip.run(null, 'ours', 'Каркасный дом 8×10 «Север»', 2950000, 'шт', 'DOM-810', '', 'наш прайс', demo);
-  ip.run(null, 'ours', 'Баня каркасная 4×6', 890000, 'шт', 'BAN-46', '', 'наш прайс', demo);
-  ip.run(null, 'ours', 'Терраса / веранда к дому', 145000, 'шт', 'TER-01', '', 'наш прайс', demo);
   ip.run(k1, 'competitor', 'Каркасный дом 8×10', 3200000, 'шт', '', '', 'прайс конкурента', demo);
   ip.run(k1, 'competitor', 'Баня 4×6', 990000, 'шт', '', '', 'прайс конкурента', demo);
   ip.run(k1, 'competitor', 'Терраса', 180000, 'шт', '', '', 'прайс конкурента', demo);
