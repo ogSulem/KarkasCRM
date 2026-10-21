@@ -2297,7 +2297,7 @@ function competitorTab(c) {
     const theyCheaper = diffs.filter(d => d < 0).length;
     return `<p class="form-hint" style="margin:0 0 8px">Наши цены — это раздел «Каталог»: поправили цену там, и сравнение здесь сразу свежее. Позиции без цены в сравнении не участвуют.</p>
      <div class="row" style="border:0;flex-wrap:wrap;gap:8px"><h4>Сравнение с нашим прайс-листом</h4>
-      <span style="display:flex;gap:6px;flex-wrap:wrap"><button class="btn sm" onclick="openOurPrices(${c.id})">${icon('excel', 13)} Наш прайс (${ours.length})</button>
+      <span style="display:flex;gap:6px;flex-wrap:wrap"><button class="btn sm" title="Наш прайс-лист — это раздел «Каталог»: те же позиции и цены" onclick="openOurPrices(${c.id})">${icon('excel', 13)} Наш прайс-лист (${ours.length})</button>
       ${canEdit() ? `<button class="btn sm primary" onclick="openPriceImport(${c.id},'theirs')">${icon('upload', 13)} Загрузить прайс конкурента</button>` : ''}</span></div>
      ${pairs.length ? `<div class="grid" style="margin:6px 0 12px">
        <div class="kpi"><span>Сопоставлено позиций</span><b>${pairs.length}</b><small>из ${ours.length} наших и ${theirs.length} конкурента</small></div>
