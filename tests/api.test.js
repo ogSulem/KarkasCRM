@@ -427,8 +427,36 @@ test('права: менеджер ведёт клиентов, но не мен
   assert.equal((await asV('/api/contacts')).status, 200, 'наблюдатель читает данные');
   assert.equal((await asV('/api/contacts', { method: 'POST', body: JSON.stringify({ name: 'Нельзя' }) })).status, 403, 'наблюдатель не создаёт записи');
   assert.equal((await asM('/api/prices', { method: 'POST', body: JSON.stringify({ scope: 'ours', text: 'Позиция;100' }) })).status, 403, 'нашу таблицу цен меняет только администратор');
+  assert.equal((await asM('/api/prices/ours', { method: 'POST', body: JSON.stringify({ text: 'Позиция;100' }) })).status, 403, 'наш прайс-лист каталога меняет только администратор');
+  // каталог = прайс-лист компании: позиции и цены в нём меняет администратор,
+  // а менеджер добавляет недостающую позицию прямо в сделку
+  const mgrProd = await asM('/api/products', { method: 'POST', body: JSON.stringify({ name: 'Позиция менеджера', price: 1000 }) });
+  assert.equal(mgrProd.status, 403, 'менеджер не добавляет позиции в прайс-лист');
+  assert.match(String(mgrProd.body.error), /добавить прямо в сделку/, 'отказ объясняет, что делать вместо этого');
+  const anyProd = (await call('/api/products', { method: 'POST', body: JSON.stringify({ name: 'Позиция для проверки прав', price: 1000 }) })).body;
+  assert.equal((await asM('/api/products/' + anyProd.id, { method: 'PATCH', body: JSON.stringify({ price: 1 }) })).status, 403, 'менеджер не меняет цену в прайс-листе');
+  assert.equal((await asM('/api/products')).status, 200, 'менеджер видит прайс-лист');
+  assert.equal((await asM(`/api/deals/${d.body.id}/products`, { method: 'POST', body: JSON.stringify({ name: 'Свободная позиция', price: 5000, qty: 1 }) })).status, 201, 'в сделку менеджер добавляет любую позицию');
+  await call('/api/products/' + anyProd.id, { method: 'DELETE' });
   assert.equal((await asV('/api/deals/' + d.body.id, { method: 'PATCH', body: JSON.stringify({ amount: 1 }) })).status, 403, 'наблюдатель не меняет сделки');
   h = admin; // дальше снова работаем администратором
+});
+
+test('каталог и наш прайс-лист — один список', async () => {
+  const p = (await call('/api/products', { method: 'POST', body: JSON.stringify({ name: 'Дом для прайса 8×8', sku: 'DOM-88', price: 2100000, unit: 'шт', note: '  срок 8 недель  ' }) })).body;
+  assert.equal(p.note, 'срок 8 недель', 'примечание позиции сохранено без лишних пробелов');
+  const ours = (await call('/api/prices?scope=ours')).body;
+  assert.equal(ours.source, 'catalog', 'наш прайс-лист берётся из каталога');
+  const row = ours.rows.find(r => r.product_id === p.id);
+  assert.ok(row && row.price === 2100000 && row.item === 'Дом для прайса 8×8', 'позиция каталога видна в прайсе');
+  // цену поменяли в каталоге — прайс и сравнение с конкурентами видят её сразу
+  await call('/api/products/' + p.id, { method: 'PATCH', body: JSON.stringify({ price: 2250000 }) });
+  assert.equal((await call('/api/prices?scope=ours')).body.rows.find(r => r.product_id === p.id).price, 2250000, 'вторая копия цены не разъезжается');
+  // позиция в архиве: в прайсе не участвует, но не удалена
+  await call('/api/products/' + p.id, { method: 'PATCH', body: JSON.stringify({ active: 0 }) });
+  assert.ok(!(await call('/api/prices?scope=ours')).body.rows.some(r => r.product_id === p.id), 'архивная позиция не в прайсе');
+  assert.ok((await call('/api/prices?scope=ours&all=1')).body.rows.some(r => r.product_id === p.id), 'архив виден, если смотреть все позиции');
+  await call('/api/products/' + p.id, { method: 'DELETE' });
 });
 
 test('карточка сделки показывает переписку клиента', async () => {

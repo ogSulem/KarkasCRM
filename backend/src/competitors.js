@@ -13,6 +13,23 @@ const levelOf = score => LEVELS.find(([max]) => score < max)[1];
 const levelColor = score => LEVELS.find(([max]) => score < max)[2];
 const norm = s => String(s || '').toLowerCase().replace(/[«»"'`]/g, '').replace(/[^a-zа-я0-9]+/gi, ' ').trim();
 
+// Насколько похожи названия позиций (0..1): сравнение цен и загрузка прайса
+// ищут «свою» позицию по названию, если нет артикула. Точное совпадение — 1.
+// «Баня каркасная 4×6» и «Баня 4×6» — одна позиция (все слова короткого названия
+// есть в длинном), а «Дом 6×8 «Летний»» и «Дом 6×8 с террасой» — разные комплектации.
+const wordsOf = s => new Set(norm(s).split(' ').filter(Boolean));
+export function nameScore(a, b) {
+  const A = wordsOf(a), B = wordsOf(b);
+  if (!A.size || !B.size) return 0;
+  let shared = 0;
+  for (const w of A) if (B.has(w)) shared++;
+  if (!shared) return 0;
+  const union = new Set([...A, ...B]).size;
+  const jaccard = shared / union;
+  return shared === Math.min(A.size, B.size) ? Math.max(jaccard, 0.8) : jaccard;
+}
+const MATCH_MIN = 0.6;
+
 export const SOURCE_DEFS = [
   { key: 'rusprofile', name: 'Rusprofile', kind: 'card', needs: [], about: 'Карточка компании: реквизиты, связи, суды, долги, банкротство' },
   { key: 'fns', name: 'ФНС', kind: 'card', needs: ['FNS_API_KEY'], about: 'ЕГРЮЛ/ЕГРИП: статус, руководители, недоимки, налоговые нарушения' },
@@ -40,6 +57,94 @@ export function ensureCompetitorsSchema(db) {
     const cols = db.prepare(`PRAGMA table_info(${t})`).all().map(r => r.name);
     if (!cols.includes(c)) db.exec(`ALTER TABLE ${t} ADD COLUMN ${c} ${d}`);
   }
+  ensureCatalogColumns(db);
+}
+
+/* ───────────────────── каталог = наш прайс-лист ─────────────────────
+   Раньше «наша таблица цен» жила отдельно (price_rows, scope='ours') и по сути
+   дублировала каталог (products): одну и ту же позицию приходилось вести в двух
+   местах, а цена в сделке и цена в сравнении с конкурентом могли разъехаться.
+   Теперь источник один — каталог. price_rows остался только для прайсов конкурентов. */
+export function ensureCatalogColumns(db) {
+  try {
+    const cols = db.prepare('PRAGMA table_info(products)').all().map(r => r.name);
+    if (!cols.length) return; // таблицы ещё нет — её создаёт сервер
+    if (!cols.includes('note')) db.exec("ALTER TABLE products ADD COLUMN note TEXT DEFAULT ''");
+  } catch { /* каталог не нужен самому модулю разведки — не ломаемся */ }
+}
+
+// Позиции каталога в том же виде, в каком интерфейс ждёт «нашу таблицу цен».
+// pricedOnly — для сравнения цен (позиция без цены сравниваться не может).
+export function catalogPrices(db, { pricedOnly = false, includeArchived = false } = {}) {
+  const where = [includeArchived ? '1=1' : 'active=1', pricedOnly ? 'price>0' : '1=1'].join(' AND ');
+  return db.prepare(`SELECT * FROM products WHERE ${where} ORDER BY name`).all()
+    .map(p => ({
+      id: p.id, product_id: p.id, competitor_id: null, scope: 'ours',
+      item: p.name, price: money(p.price), unit: p.unit || 'шт', sku: p.sku || '',
+      note: p.note || '', active: p.active, source_name: 'каталог',
+    }));
+}
+
+/* Загрузка прайса в каталог. Позиция с тем же артикулом или тем же названием
+   обновляется, новая — добавляется; ничего не пропадает.
+   mode='replace' дополнительно убирает в архив то, чего в файле нет (именно в архив,
+   не удаление: позиция могла остаться в прошлых сделках). */
+export function catalogUpsert(db, rows, { mode = 'merge' } = {}) {
+  ensureCatalogColumns(db);
+  const list = db.prepare('SELECT * FROM products').all();
+  const byName = new Map(list.map(p => [norm(p.name), p]));
+  const bySku = new Map(list.filter(p => p.sku).map(p => [norm(p.sku), p]));
+  const hasDemo = db.prepare('PRAGMA table_info(products)').all().some(c => c.name === 'demo');
+  let added = 0, updated = 0, archived = 0;
+  const touched = new Set();
+  db.exec('BEGIN IMMEDIATE');
+  try {
+    const upd = db.prepare('UPDATE products SET name=?,price=?,unit=?,sku=?,note=?,active=1 WHERE id=?');
+    const ins = db.prepare(hasDemo
+      ? 'INSERT INTO products(name,sku,price,unit,active,note,demo) VALUES(?,?,?,?,1,?,?)'
+      : 'INSERT INTO products(name,sku,price,unit,active,note) VALUES(?,?,?,?,1,?)');
+    for (const r of rows) {
+      const item = String(r.item || '').trim().slice(0, 200);
+      if (!item) continue;
+      const sku = String(r.sku || '').trim().slice(0, 80);
+      const key = norm(item), skey = sku ? norm(sku) : '';
+      const hit = (skey && bySku.get(skey)) || byName.get(key) || null;
+      const price = Math.round(money(r.price));
+      const unit = (String(r.unit || (hit && hit.unit) || '').trim().slice(0, 20)) || 'шт';
+      const note = String(r.note || '').trim().slice(0, 300) || (hit && hit.note) || '';
+      if (hit) {
+        upd.run(item, price, unit, sku || hit.sku || '', note, hit.id);
+        touched.add(hit.id); updated++;
+        byName.set(key, hit); if (skey) bySku.set(skey, hit);
+      } else {
+        const id = Number(ins.run(item, sku, price, unit, note, r.demo ? 1 : 0).lastInsertRowid);
+        const row = { id, name: item, sku, unit, note };
+        byName.set(key, row); if (skey) bySku.set(skey, row);
+        touched.add(id); added++;
+      }
+    }
+    if (mode === 'replace') {
+      const arch = db.prepare('UPDATE products SET active=0 WHERE id=?');
+      for (const p of db.prepare('SELECT id FROM products WHERE active=1').all()) {
+        if (!touched.has(p.id)) { arch.run(p.id); archived++ }
+      }
+    }
+    db.exec('COMMIT');
+  } catch (e) { try { db.exec('ROLLBACK') } catch { /* уже откатилось */ } throw e }
+  return { added, updated, archived, total: db.prepare('SELECT COUNT(*) n FROM products WHERE active=1').get().n };
+}
+
+// Перенос «нашей таблицы цен» из базы прошлой версии в каталог. Идемпотентно:
+// запускается при каждом старте, второй раз переносить уже нечего.
+export function migrateOurPricesToCatalog(db) {
+  try {
+    const legacy = db.prepare("SELECT * FROM price_rows WHERE scope='ours'").all();
+    if (!legacy.length) return 0;
+    ensureCatalogColumns(db);
+    catalogUpsert(db, legacy.map(r => ({ item: r.item, price: r.price, unit: r.unit, sku: r.sku, note: r.note, demo: r.demo })), { mode: 'merge' });
+    db.prepare("DELETE FROM price_rows WHERE scope='ours'").run();
+    return legacy.length;
+  } catch { return 0 }
 }
 
 export function createCompetitors(ctx) {
@@ -312,7 +417,15 @@ export function createCompetitors(ctx) {
     let pricing = null;
     if (ourPrices.length && competitorRows.length) {
       const map = new Map(competitorRows.map(r => [norm(r.item), r]));
-      const pairs = ourPrices.map(o => { const c = map.get(norm(o.item)) || [...map.entries()].find(([k]) => k && (k.includes(norm(o.item)) || norm(o.item).includes(k)))?.[1]; return c ? { item: o.item, ours: money(o.price), theirs: money(c.price) } : null }).filter(Boolean);
+      // сначала точное совпадение названия, затем самое похожее из остальных
+      const pair = item => {
+        const exact = map.get(norm(item));
+        if (exact) return exact;
+        let hit = null, best = 0;
+        for (const r of competitorRows) { const sc = nameScore(item, r.item); if (sc >= MATCH_MIN && sc > best) { best = sc; hit = r } }
+        return hit;
+      };
+      const pairs = ourPrices.map(o => { const c = pair(o.item); return c ? { item: o.item, ours: money(o.price), theirs: money(c.price) } : null }).filter(Boolean);
       if (pairs.length) {
         const diffs = pairs.map(p => (p.theirs - p.ours) / (p.ours || 1) * 100);
         const avg = Math.round(diffs.reduce((a, b) => a + b, 0) / diffs.length);
@@ -461,7 +574,8 @@ export function createCompetitors(ctx) {
         }
       } catch (e) { results.push({ source: 'prices', title: 'Таблица конкурента', kind: 'pricing', status: 'error', summary: e.message, data: {}, links: [{ label: 'Открыть таблицу', url: comp.price_url }] }) }
     }
-    const ourPrices = db.prepare("SELECT * FROM price_rows WHERE scope='ours'").all();
+    // «наши цены» — это каталог: позиции без цены в сравнении не участвуют
+    const ourPrices = catalogPrices(db, { pricedOnly: true });
     const report = buildReport(comp, results, { ourPrices, competitorRows });
     // сохранение
     const prev = db.prepare('SELECT * FROM competitor_reports WHERE competitor_id=? ORDER BY id DESC LIMIT 1').get(comp.id);
@@ -489,6 +603,13 @@ export function createCompetitors(ctx) {
     if (b.base64) rows = importBuffer(Buffer.from(String(b.base64).split(',').pop(), 'base64'), b.filename || 'загруженный файл');
     else if (b.csv || b.text) rows = rowsToPrices(parseTable(b.csv || b.text), b.filename || 'вставленная таблица');
     if (!rows.length) return { error: 'Не удалось распознать ни одной строки. Нужны колонки «наименование» и «цена».' };
+    if (scope === 'ours') {
+      // наш прайс-лист = каталог: обновляем цены у знакомых позиций, новые добавляем.
+      // mode='replace' — человек сам попросил заменить прайс целиком: лишнее уходит в архив.
+      const mode = b.mode === 'replace' ? 'replace' : 'merge';
+      const stat = catalogUpsert(db, rows, { mode });
+      return { imported: rows.length, scope, mode, ...stat, rows: catalogPrices(db) };
+    }
     const compId = scope === 'ours' ? null : (defaultCompId ?? (b.competitor_id ? Number(b.competitor_id) : null));
     if (scope === 'competitor' && !compId) return { error: 'Не указан конкурент' };
     // замена таблицы — в транзакции: упало на середине, старый прайс цел
@@ -515,6 +636,20 @@ export function createCompetitors(ctx) {
       history: db.prepare('SELECT id,risk,level,verdict,created_at FROM competitor_reports WHERE competitor_id=? ORDER BY id DESC LIMIT 12').all(id),
     };
   };
+
+  // чем закончилась загрузка прайса: запись в журнал и сигнал интерфейсу обновиться
+  function finishImport(out, compId, user) {
+    if (out.scope === 'ours') {
+      const parts = [`добавлено ${out.added}`, `обновлено ${out.updated}`];
+      if (out.archived) parts.push(`в архив ${out.archived}`);
+      log(`Прайс-лист (каталог) загружен: ${out.imported} позиций — ${parts.join(', ')}`, 'products', null, user.name);
+      broadcast('change', { table: 'products' });
+    } else {
+      log(`Импорт прайса конкурента: ${out.imported} позиций`, 'competitors', compId, user.name);
+      broadcast('change', { table: 'price_rows', id: compId });
+    }
+    return out;
+  }
 
   async function handle(req, res, { p, u, user }) {
     const admin = async () => { if (user.role !== 'admin') { json(res, 403, { error: 'Только для администратора' }); return false } return true };
@@ -589,23 +724,22 @@ export function createCompetitors(ctx) {
         }
         const out = importPriceRows(b, id);
         if (out.error) return json(res, 400, { error: out.error });
-        log(`Импорт прайса (${out.scope}): ${out.imported} позиций`, 'competitors', out.scope === 'ours' ? null : id, user.name); broadcast('change', { table: 'price_rows' });
-        return json(res, 201, out);
+        return json(res, 201, finishImport(out, id, user));
       }
     }
     if (p === '/api/reviews' && req.method === 'POST') { const b = await readBody(req); if (!b.competitor_id) return json(res, 400, { error: 'Не указан конкурент' }); const r = db.prepare('INSERT INTO reviews(competitor_id,source,rating,text,author,url) VALUES(?,?,?,?,?,?)').run(b.competitor_id, b.source || 'вручную', b.rating ?? null, b.text || '', b.author || user.name, b.url || ''); return json(res, 201, { id: r.lastInsertRowid }); }
     const mRev = p.match(/^\/api\/reviews\/(\d+)$/);
     if (mRev && req.method === 'DELETE') { db.prepare('DELETE FROM reviews WHERE id=?').run(mRev[1]); return json(res, 200, { deleted: true }); }
-    if (p === '/api/prices' && req.method === 'POST') {
+    if ((p === '/api/prices' || p === '/api/prices/ours') && req.method === 'POST') {
       const b = await readBody(req);
+      if (p === '/api/prices/ours') b.scope = 'ours';
       if (b.scope === 'ours' && user.role !== 'admin') return json(res, 403, { error: 'Нашу таблицу цен может менять только администратор' });
       if (b.url && !b.base64 && !b.csv && !b.text) {
         try { b.csv = await fetchTable(String(b.url)); } catch (e) { return json(res, 400, { error: e.message }) }
       }
       const out = importPriceRows(b, null);
       if (out.error) return json(res, 400, { error: out.error });
-      log(`Импорт прайса (${out.scope}): ${out.imported} позиций`, 'competitors', null, user.name); broadcast('change', { table: 'price_rows' });
-      return json(res, 201, out);
+      return json(res, 201, finishImport(out, null, user));
     }
     if (p === '/api/prices/export' && req.method === 'GET') {
       // «сгрузить» прайс обратно в таблицу: колонки те же, что при загрузке,
@@ -613,7 +747,7 @@ export function createCompetitors(ctx) {
       const scope = u.searchParams.get('scope') === 'competitor' ? 'competitor' : 'ours';
       const compId = scope === 'competitor' ? Number(u.searchParams.get('competitor') || 0) : null;
       const rows = scope === 'ours'
-        ? db.prepare("SELECT item,price,unit,sku,note FROM price_rows WHERE scope='ours' ORDER BY item").all()
+        ? catalogPrices(db)
         : db.prepare('SELECT item,price,unit,sku,note FROM price_rows WHERE scope=? AND competitor_id=? ORDER BY item').all(scope, compId);
       const q = v => `"${String(v ?? '').replace(/"/g, '""')}"`;
       const csv = ['Наименование;Цена;Ед;Артикул;Примечание', ...rows.map(r => [r.item, r.price, r.unit, r.sku, r.note].map(q).join(';'))].join('\r\n');
@@ -621,17 +755,18 @@ export function createCompetitors(ctx) {
       res.writeHead(200, { 'Content-Type': 'text/csv; charset=utf-8', 'Content-Disposition': `attachment; filename=${name}` });
       return res.end('\uFEFF' + csv);
     }
-    if (p === '/api/prices') {
-      const scope = u.searchParams.get('scope') || 'ours'; const compId = u.searchParams.get('competitor');
+    if (p === '/api/prices' || (p === '/api/prices/ours' && req.method === 'GET')) {
+      const scope = p === '/api/prices/ours' ? 'ours' : (u.searchParams.get('scope') || 'ours');
+      const compId = u.searchParams.get('competitor');
       const rows = scope === 'ours'
-        ? db.prepare("SELECT * FROM price_rows WHERE scope='ours' ORDER BY item").all()
+        ? catalogPrices(db, { includeArchived: u.searchParams.get('all') === '1' })
         : db.prepare('SELECT * FROM price_rows WHERE scope=? AND competitor_id=? ORDER BY item').all(scope, compId || 0);
-      return json(res, 200, { scope, rows, competitor_id: compId ? Number(compId) : null });
+      return json(res, 200, { scope, rows, competitor_id: compId ? Number(compId) : null, source: scope === 'ours' ? 'catalog' : 'price_rows' });
     }
     if ((p === '/api/prices/load' || p === '/api/competitors/prices-url') && req.method === 'POST') {
       if (!await admin()) return;
       const b = await readBody(req);
-      if (b.url) { try { const text = await fetchTable(b.url); const rows = importBuffer(Buffer.from(text), 'URL-таблица'); if (!rows.length) return json(res, 400, { error: 'В таблице не найдено позиций с ценами' }); db.prepare("DELETE FROM price_rows WHERE scope='ours'").run(); const ins = db.prepare('INSERT INTO price_rows(competitor_id,scope,item,price,unit,sku,note,source_name) VALUES(NULL,?,?,?,?,?,?,?)'); rows.forEach(r => ins.run('ours', r.item, r.price, r.unit, r.sku, r.note, 'URL-таблица')); setSetting('OUR_PRICE_URL', b.url); return json(res, 200, { imported: rows.length, rows: db.prepare("SELECT * FROM price_rows WHERE scope='ours'").all() }); } catch (e) { return json(res, 400, { error: e.message }) } }
+      if (b.url) { try { const text = await fetchTable(b.url); const rows = importBuffer(Buffer.from(text), 'URL-таблица'); if (!rows.length) return json(res, 400, { error: 'В таблице не найдено позиций с ценами' }); const stat = catalogUpsert(db, rows.map(r => ({ ...r, note: r.note })), { mode: b.mode === 'merge' ? 'merge' : 'replace' }); setSetting('OUR_PRICE_URL', b.url); return json(res, 200, finishImport({ imported: rows.length, scope: 'ours', mode: b.mode === 'merge' ? 'merge' : 'replace', ...stat, rows: catalogPrices(db) }, null, user)); } catch (e) { return json(res, 400, { error: e.message }) } }
       return json(res, 400, { error: 'Не передан URL таблицы' });
     }
     if (p === '/api/competitors/find' && req.method === 'POST') {

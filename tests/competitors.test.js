@@ -144,6 +144,7 @@ test('цены: Excel-файл конкурента и наша таблица �
   const xlsx = readFileSync(fileURLToPath(new URL('./fixtures/price.xlsx', import.meta.url))).toString('base64');
   const ours = await call(`/api/competitors/${comp.id}/prices`, { method: 'POST', body: JSON.stringify({ base64: xlsx, filename: 'price.xlsx', scope: 'ours' }) });
   assert.equal(ours.body.imported, 5, 'из .xlsx распознано 5 позиций');
+  assert.equal(ours.body.added + ours.body.updated, 5, 'каждая строка файла либо добавлена, либо обновила позицию каталога');
   assert.equal(ours.body.rows[0].scope, 'ours');
   assert.ok(ours.body.rows.some(r => r.item.includes('8×10') && r.price === 3850000), 'название и цена разобраны верно');
   // прайс конкурента — CSV с другими ценами
@@ -188,13 +189,20 @@ test('отзывы добавляются вручную и удаляются',
   assert.ok(!after.body.reviews.find(r => r.id === mine.id));
 });
 
-test('прайс-лист доступен отдельно: наш и конкурента', async () => {
+test('наш прайс-лист и каталог — один список, а прайс конкурента хранится отдельно', async () => {
   const ours = await call('/api/prices?scope=ours');
-  assert.equal(ours.body.rows.length, 5);
+  assert.ok(ours.body.rows.length >= 5, 'в нашем прайсе позиции из загруженного файла');
+  assert.equal(ours.body.source, 'catalog', 'наш прайс берётся из каталога');
+  assert.ok(ours.body.rows.every(r => r.scope === 'ours' && r.product_id), 'каждая строка ссылается на позицию каталога');
+  // каталог и прайс-лист совпадают: вести два списка больше не нужно
+  const catalog = await call('/api/products');
+  const catalogNames = catalog.body.filter(p => p.active).map(p => p.name).sort();
+  assert.deepEqual(ours.body.rows.map(r => r.item).sort(), catalogNames, 'наш прайс = позиции каталога в продаже');
   const list = await call('/api/competitors');
   const target = list.body.find(c => c.inn === INN);
   const theirs = await call('/api/prices?scope=competitor&competitor=' + target.id);
   assert.ok(theirs.body.rows.length >= 1);
+  assert.ok(!theirs.body.rows.some(r => r.product_id), 'прайс конкурента не смешан с каталогом');
 });
 
 test('конкурент редактируется и удаляется', async () => {
@@ -208,17 +216,25 @@ test('конкурент редактируется и удаляется', asyn
   assert.equal((await call('/api/competitors/' + id)).status, 404);
 });
 
-test('наш прайс загружается из настроек, без привязки к конкуренту', async () => {
-  const before = (await call('/api/prices?scope=ours')).body.rows.length;
-  const r = await call('/api/prices', { method: 'POST', body: JSON.stringify({ csv: 'Позиция;Цена\nКаркасный дом 8×10 «Север»;3900000\nБаня 4×6 под ключ;920000\n', filename: 'nash.csv', scope: 'ours' }) });
+test('наш прайс загружается из настроек: знакомые позиции обновляются, новые добавляются', async () => {
+  const before = (await call('/api/prices?scope=ours')).body.rows;
+  const r = await call('/api/prices', { method: 'POST', body: JSON.stringify({ csv: 'Позиция;Цена\nКаркасный дом 8×10 «Север»;3900000\nГараж каркасный 4×6;420000\n', filename: 'nash.csv', scope: 'ours' }) });
   assert.equal(r.status, 201);
   assert.equal(r.body.imported, 2);
   assert.equal(r.body.scope, 'ours');
+  assert.equal(r.body.updated, 1, 'позиция с тем же названием получила новую цену');
+  assert.equal(r.body.added, 1, 'новая позиция добавлена в каталог');
   const after = (await call('/api/prices?scope=ours')).body.rows;
-  assert.equal(after.length, 2, 'таблица заменена (было ' + before + ')');
+  assert.equal(after.length, before.length + 1, 'остальные позиции не потеряны (было ' + before.length + ')');
+  assert.equal(after.find(x => /Гараж/.test(x.item)).price, 420000);
+  assert.equal(after.find(x => /8×10 «Север»/.test(x.item)).price, 3900000, 'цена обновилась');
+  // каталог показывает ту же цену: источник один
+  const catalog = (await call('/api/products')).body;
+  assert.equal(catalog.find(p => /8×10 «Север»/.test(p.name)).price, 3900000, 'цена в каталоге та же, что в прайсе');
   const comp = (await call('/api/competitors')).body.find(c => c.inn === INN);
   const chk = await call(`/api/competitors/${comp.id}/check`, { method: 'POST', body: JSON.stringify({ sources: ['fns'] }) });
   assert.ok(chk.body.report.pricing, 'сравнение цен пересчитано с новой нашей таблицей');
+  assert.equal(chk.body.report.pricing.pairs.find(p => /8×10/.test(p.item)).ours, 3900000, 'в отчёте свежая цена из каталога');
 });
 
 test('чистая установка: в списке только конкуренты, добавленные пользователем', async () => {
@@ -242,9 +258,12 @@ test('прайс можно не только загрузить, но и ска
   const text = await r.text(); // Response.text() сам снимает BOM — как это делает Excel
   assert.match(text, /Наименование;Цена;Ед;Артикул;Примечание/);
   assert.match(text, /Дом 8×10 «Север»/);
-  // скачанный файл загружается обратно без правок
+  // скачанный файл загружается обратно без правок и не плодит дубли
+  const was = (await call('/api/prices?scope=ours')).body.rows.length;
   const again = await call('/api/prices', { method: 'POST', body: JSON.stringify({ csv: text.replace('\uFEFF', ''), scope: 'ours' }) });
-  assert.equal(again.body.imported, 2, 'своя же выгрузка разбирается тем же парсером');
+  assert.equal(again.body.imported, was, 'своя же выгрузка разбирается тем же парсером');
+  assert.equal(again.body.added, 0, 'знакомые позиции не дублируются');
+  assert.equal((await call('/api/prices?scope=ours')).body.rows.length, was, 'число позиций после повторной загрузки то же');
   // прайс конкурента
   const comp = (await call('/api/competitors')).body.find(c => c.inn === INN);
   const cRes = await fetch(base + `/api/prices/export?scope=competitor&competitor=${comp.id}`, { headers: h });
@@ -302,4 +321,40 @@ test('источник без соединения помечается «blocke
   assert.match(r.body.report.verdict, /Данных пока мало/, 'честный вердикт вместо ложных выводов');
   assert.ok(r.body.report.dataQuality.blocked + r.body.report.dataQuality.skipped === 8, 'посчитано качество данных по источникам');
   assert.ok(r.body.report.links.length >= 10, 'ссылки ручной проверки всё равно сформированы');
+});
+
+test('прайс-лист можно заменить целиком: лишнее уходит в архив, а не удаляется', async () => {
+  // маршрут, в который грузит файл сам интерфейс (раньше его не существовало)
+  const direct = await call('/api/prices/ours', { method: 'POST', body: JSON.stringify({ csv: 'Наименование;Цена;Ед\nКаркасный дом 8×10 «Север»;3950000;шт\n', scope: 'ours', mode: 'merge' }) });
+  assert.equal(direct.status, 201, 'загрузка из окна «Загрузить нашу таблицу цен» принимается');
+  assert.equal(direct.body.updated, 1);
+  const before = (await call('/api/prices?scope=ours')).body.rows;
+  assert.ok(before.length > 1, 'до замены в прайсе несколько позиций');
+  const r = await call('/api/prices', { method: 'POST', body: JSON.stringify({ csv: 'Наименование;Цена;Ед;Примечание\nКаркасный дом 8×10 «Север»;3950000;шт;только до конца месяца\n', scope: 'ours', mode: 'replace' }) });
+  assert.equal(r.status, 201);
+  assert.equal(r.body.archived, before.length - 1, 'позиции не из файла отправлены в архив');
+  const active = (await call('/api/prices?scope=ours')).body.rows;
+  assert.equal(active.length, 1, 'в прайсе осталась одна позиция');
+  assert.equal(active[0].note, 'только до конца месяца', 'примечание из файла сохранено');
+  // архив не удаляется: позицию видно в каталоге и можно вернуть в продажу
+  const all = (await call('/api/prices?scope=ours&all=1')).body.rows;
+  assert.ok(all.length >= before.length, 'архивные позиции доступны: ' + all.length + ' из ' + before.length);
+  const catalog = (await call('/api/products')).body;
+  assert.ok(catalog.filter(p => !p.active).length >= before.length - 1, 'в каталоге они помечены как архив');
+  // обычная загрузка возвращает позиции в продажу
+  const back = await call('/api/prices', { method: 'POST', body: JSON.stringify({ csv: 'Наименование;Цена;Ед\nБаня каркасная 4×6;890000;шт\n', scope: 'ours' }) });
+  assert.equal(back.body.updated, 1, 'знакомая позиция найдена по названию');
+  const active2 = (await call('/api/prices?scope=ours')).body.rows;
+  assert.equal(active2.length, 2, 'позиция вернулась в прайс: ' + JSON.stringify(active2.map(x => x.item)));
+});
+
+test('сравнение цен находит позицию с чуть другим названием и не склеивает разные', async () => {
+  const comp = (await call('/api/competitors')).body.find(c => c.inn === INN);
+  await call('/api/prices', { method: 'POST', body: JSON.stringify({ csv: 'Наименование;Цена;Ед\nБаня каркасная 4×6;890000;шт\nКаркасный дом 6×8 «Летний»;1850000;шт\n', scope: 'ours' }) });
+  await call(`/api/competitors/${comp.id}/prices`, { method: 'POST', body: JSON.stringify({ csv: 'Наименование;Цена;Ед\nБаня 4×6;990000;шт\nКаркасный дом 6×8 с террасой;2500000;шт\n', scope: 'competitor' }) });
+  const r = await call(`/api/competitors/${comp.id}/check`, { method: 'POST', body: JSON.stringify({ sources: ['fns'] }) });
+  const pairs = (r.body.report.pricing || {}).pairs || [];
+  assert.ok(pairs.some(p => /Баня/.test(p.item) && p.ours === 890000 && p.theirs === 990000),
+    '«Баня каркасная 4×6» и «Баня 4×6» сопоставлены: ' + JSON.stringify(pairs));
+  assert.ok(!pairs.some(p => /Летний/.test(p.item)), 'разные комплектации одного размера не склеиваются');
 });

@@ -9,7 +9,7 @@ import { gzipSync } from 'node:zlib';
 import { readFileSync, writeFileSync, existsSync, mkdirSync, chmodSync, statSync, readdirSync, unlinkSync, copyFileSync, mkdirSync as mkdir, createReadStream } from 'node:fs';
 import { extname, join, normalize, basename } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { createCompetitors } from './competitors.js';
+import { createCompetitors, migrateOurPricesToCatalog } from './competitors.js';
 import { sendMail } from './smtp.js';
 import { cleanupOrphans, syncDealResponsibleNames, cleanupUploads, dailyMaintenance } from './maintenance.js';
 import { seedBase, seedDemo, demoCounts, cleanDemo } from './seed.js';
@@ -124,6 +124,7 @@ const SCHEMA_COLUMNS = [...SCHEMA,
   ['conversations', 'last_at', 'TEXT'], ['conversations', 'assigned_id', 'INTEGER'], ['conversations', 'title', 'TEXT'], ['conversations', 'channels', "TEXT DEFAULT ''"],
   ['contacts', 'phone_norm', 'TEXT'], ['templates', 'user_id', 'INTEGER'],
   ['products', 'demo', 'INTEGER DEFAULT 0'], ['templates', 'demo', 'INTEGER DEFAULT 0'], ['automations', 'demo', 'INTEGER DEFAULT 0'],
+  ['products', 'note', "TEXT DEFAULT ''"],   // примечание к позиции каталога (= прайс-листа)
   ['companies', 'demo', 'INTEGER DEFAULT 0'], ['notes', 'demo', 'INTEGER DEFAULT 0'],
 ];
 
@@ -177,7 +178,7 @@ CREATE INDEX IF NOT EXISTS idx_activities_entity ON activities(entity_type, enti
 `);
 try { db.exec('CREATE UNIQUE INDEX IF NOT EXISTS idx_msg_ext ON messages(external_id) WHERE external_id IS NOT NULL'); }
 catch (e) { console.error('Не удалось создать уникальный индекс по external_id (в базе есть дубли внешних id):', e.message); }
-const SCHEMA_VERSION = 5;
+const SCHEMA_VERSION = 6;
 
 // Дата в местном часовом поясе (в базе время хранится в UTC, а сроки задач —
 // в местном настенном времени; сравнивать их с UTC-«сегодня» нельзя).
@@ -786,6 +787,13 @@ function validateUser(b, creating = false) {
 
 const competitorsApi = createCompetitors({ db, json, readBody, log, broadcast, getSetting, setSetting });
 
+// «Наш прайс» прошлых версий переезжает в каталог: это один и тот же список
+// (что продаём и по какой цене), вести его в двух местах больше не нужно.
+try {
+  const moved = migrateOurPricesToCatalog(db);
+  if (moved) console.log(`Наша таблица цен перенесена в каталог: ${moved} поз. (прайс-лист и каталог теперь один список)`);
+} catch (e) { console.error('Не удалось перенести нашу таблицу цен в каталог:', e.message) }
+
 
 // начальное заполнение: только в полностью пустой базе, один раз,
 // после того как все таблицы (включая конкурентов) созданы
@@ -1094,7 +1102,7 @@ export const server = http.createServer(async (req, res) => {
       // SQLite сравнивает кириллицу в LIKE с учётом регистра, поэтому фильтруем по строке в JS —
       // так «ирина», «Ирина» и «ИРИНА» находят одного клиента
       const raw = String(u.searchParams.get('q') || '').trim();
-      if (raw.length < 2) return json(res, 200, { contacts: [], deals: [], companies: [], tasks: [] });
+      if (raw.length < 2) return json(res, 200, { contacts: [], deals: [], companies: [], tasks: [], products: [] });
       const needle = raw.toLowerCase();
       // телефон ищется и слитно: «9991234567» находит «+7 999 123-45-67»
       const needleDigits = digits(raw);
@@ -1104,7 +1112,9 @@ export const server = http.createServer(async (req, res) => {
       const deals = db.prepare('SELECT id,title,amount FROM deals ORDER BY id DESC LIMIT 2000').all().filter(d => hit(d.title, d.amount)).slice(0, 8);
       const companies = db.prepare('SELECT id,name,inn FROM companies ORDER BY id DESC LIMIT 1000').all().filter(c => hit(c.name, c.inn)).slice(0, 5);
       const tasks = db.prepare('SELECT id,title,due,done,type FROM tasks ORDER BY id DESC LIMIT 2000').all().filter(t => hit(t.title)).slice(0, 6);
-      return json(res, 200, { contacts, deals, companies, tasks });
+      // каталог он же прайс-лист: позицию можно найти из любого раздела
+      const products = db.prepare('SELECT id,name,sku,price,unit,active FROM products ORDER BY id DESC LIMIT 1000').all().filter(pr => hit(pr.name, pr.sku)).slice(0, 5);
+      return json(res, 200, { contacts, deals, companies, tasks, products });
     }
     if (p === '/api/export/json' || p === '/api/backup') {
       // полная выгрузка содержит пользователей и настройки — только администратор
@@ -1112,7 +1122,7 @@ export const server = http.createServer(async (req, res) => {
       const tables = ['users', 'companies', 'contacts', 'pipelines', 'stages', 'deals', 'tasks', 'notes', 'products', 'templates', 'automations', 'conversations', 'messages', 'channels', 'competitors', 'competitor_checks', 'competitor_reports', 'reviews', 'price_rows']; const out = {}; tables.forEach(t => out[t] = db.prepare(`SELECT * FROM ${t}`).all()); res.writeHead(200, { 'Content-Type': 'application/json', 'Content-Disposition': 'attachment; filename=karkas-backup.json' }); return res.end(JSON.stringify(out, null, 2)); }
 
     // ===== generic CRUD =====
-    const CRUD = { contacts: ['name', 'phone', 'email', 'company', 'company_id', 'position', 'source', 'tags', 'notes', 'responsible_id', 'custom'], companies: ['name', 'inn', 'phone', 'email', 'site', 'notes'], tasks: ['title', 'type', 'due', 'priority', 'done', 'deal_id', 'contact_id', 'responsible_id', 'result', 'repeat'], deals: ['title', 'amount', 'stage', 'pipeline_id', 'contact_id', 'company_id', 'responsible', 'responsible_id', 'priority', 'loss_reason', 'deadline', 'custom'], products: ['name', 'sku', 'price', 'unit', 'active'], templates: ['name', 'body'], automations: ['name', 'trigger_type', 'trigger_value', 'action_type', 'action_value', 'active'], notes: ['entity_type', 'entity_id', 'body', 'author'] };
+    const CRUD = { contacts: ['name', 'phone', 'email', 'company', 'company_id', 'position', 'source', 'tags', 'notes', 'responsible_id', 'custom'], companies: ['name', 'inn', 'phone', 'email', 'site', 'notes'], tasks: ['title', 'type', 'due', 'priority', 'done', 'deal_id', 'contact_id', 'responsible_id', 'result', 'repeat'], deals: ['title', 'amount', 'stage', 'pipeline_id', 'contact_id', 'company_id', 'responsible', 'responsible_id', 'priority', 'loss_reason', 'deadline', 'custom'], products: ['name', 'sku', 'price', 'unit', 'active', 'note'], templates: ['name', 'body'], automations: ['name', 'trigger_type', 'trigger_value', 'action_type', 'action_value', 'active'], notes: ['entity_type', 'entity_id', 'body', 'author'] };
     const mCrud = p.match(/^\/api\/(contacts|companies|tasks|products|templates|automations|notes)(?:\/(\d+))?$/);
     if (mCrud) { const [, table, id] = mCrud; const fields = CRUD[table];
       if (table === 'templates') {
@@ -1136,10 +1146,12 @@ export const server = http.createServer(async (req, res) => {
         }
         return json(res, 405, { error: 'Метод не поддерживается' });
       }
-      // автоматизации и товары удаляет администратор — иначе правила и прайс
-      // может случайно переписать любой менеджер
+      // правила и каталог меняет администратор. Каталог — это прайс-лист компании:
+      // цены в нём не должен переписывать любой менеджер. Позицию, которой в каталоге
+      // нет, менеджер добавляет прямо в сделку — на прайс это не влияет.
       if (req.method !== 'GET' && table === 'automations' && !requireAdmin(user, res)) return;
-      if (req.method === 'DELETE' && table === 'products' && !requireAdmin(user, res)) return;
+      if (req.method !== 'GET' && table === 'products' && user.role !== 'admin')
+        return json(res, 403, { error: 'Каталог и прайс-лист меняет администратор. Позицию, которой нет в каталоге, можно добавить прямо в сделку.' });
       if (req.method === 'GET' && !id) { if (table === 'tasks') return json(res, 200, db.prepare('SELECT t.*,c.name contact_name,d.title deal_title,u.name responsible_name FROM tasks t LEFT JOIN contacts c ON c.id=t.contact_id LEFT JOIN deals d ON d.id=t.deal_id LEFT JOIN users u ON u.id=t.responsible_id ORDER BY done,due,id DESC').all()); if (table === 'notes') return json(res, 200, db.prepare('SELECT * FROM notes WHERE entity_type=? AND entity_id=? ORDER BY id DESC').all(u.searchParams.get('type'), u.searchParams.get('entity'))); return json(res, 200, db.prepare(`SELECT * FROM ${table} ORDER BY id DESC`).all()); }
       if (req.method === 'GET') {
         const row = db.prepare(`SELECT * FROM ${table} WHERE id=?`).get(id);
@@ -1152,6 +1164,7 @@ export const server = http.createServer(async (req, res) => {
         if (b.sku !== undefined) b.sku = String(b.sku).trim().slice(0, 80);
         if (b.unit !== undefined) b.unit = String(b.unit).trim().slice(0, 20) || 'шт';
         if (b.name !== undefined) b.name = String(b.name).trim().slice(0, 200);
+        if (b.note !== undefined) b.note = String(b.note ?? '').trim().slice(0, 300);
         return null;
       };
       if (req.method === 'POST') {

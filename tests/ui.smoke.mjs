@@ -56,10 +56,15 @@ Object.assign(window, {
   sourceLabel, channelLabel, roleLabel, askConfirm, askInput, translit, SOURCE_LABELS, CHANNEL_LABELS, ROLE_LABELS,
   isoDate, todayISO, fmtDayMonth, kindStage, fld, grid2, formLegend, pushToast, notify, captureFocus, restoreFocus, PALETTE_ACTIONS,
   openMenu, closeMenu, contactsMoreMenu, openOurPrices, comparePrices, setBuiltinTab, BUILTIN_FIELDS, amAdmin, canEdit,
-  ourPriceRows, filterOurPrices, toggleAutomation, openAutomation, noteRow, editNote, lockFormsForViewer, AUTO_TRIGGERS, AUTO_ACTIONS
+  ourPriceRows, filterOurPrices, toggleAutomation, openAutomation, noteRow, editNote, lockFormsForViewer, AUTO_TRIGGERS, AUTO_ACTIONS,
+  busyButton, priceImportText
 });`;
-const dom = new JSDOM(htmlClean, { runScripts: 'dangerously', url: BASE + '/', pretendToBeVisual: true, virtualConsole: new VirtualConsole() });
+const pageErrors = [];
+const vConsole = new VirtualConsole();
+vConsole.on('jsdomError', e => pageErrors.push(String((e && e.message) || e)));
+const dom = new JSDOM(htmlClean, { runScripts: 'dangerously', url: BASE + '/', pretendToBeVisual: true, virtualConsole: vConsole });
 const { window } = dom;
+window.addEventListener('error', e => pageErrors.push(String((e && e.message) || e)));
 window.__token = '';
 window.fetch = async (url, opt) => {
   const full = String(url).startsWith('http') ? String(url) : BASE + String(url);
@@ -388,6 +393,28 @@ try {
   window.go('competitors'); await wait(400);
   check('непроверенный конкурент честно помечен, а не «риск 0»', /не проверялся/.test($('#view').innerHTML) && !/риск 0 \(/.test($('#view').innerHTML));
   check('в списке конкурентов есть поиск и наша таблица цен', Boolean($('#compFilter')) && /Наш прайс-лист/.test($('#view').textContent));
+  // регрессия «$$(...).find is not a function»: селектор обязан возвращать массив,
+  // а поиск кнопки по тексту — работать (именно он падал при поиске конкурента)
+  check('селектор $$ возвращает массив, а не NodeList', /const \$\$ = s => Array\.from\(document\.querySelectorAll\(s\)\)/.test(appJsRaw));
+  {
+    pageErrors.length = 0;
+    const probe = window.busyButton(/Наш прайс-лист/, true);
+    check('кнопка находится по тексту и блокируется на время запроса', Boolean(probe) && probe.disabled === true && probe.classList.contains('loading'), pageErrors.join(' | ').slice(0, 100));
+    window.busyButton(/Наш прайс-лист/, false);
+    check('после ответа кнопка снова рабочая', Boolean(probe) && probe.disabled === false);
+  }
+  {
+    const search = $('#compSearch');
+    search.value = 'ООО «Проверка Поиска»';
+    const btn = $$('#view button').find(b => /Найти и проверить/.test(b.textContent));
+    check('в конкурентах есть кнопка «Найти и проверить»', Boolean(btn));
+    pageErrors.length = 0;
+    btn.click();
+    await wait(3000);
+    check('клик по «Найти и проверить» не падает', pageErrors.length === 0, pageErrors.join(' | ').slice(0, 140));
+    check('после поиска открылась карточка найденного конкурента', /Проверка Поиска/.test($('#modalBody').textContent), $('#modalBody').textContent.replace(/\s+/g, ' ').slice(0, 90));
+    window.closeModal(); await wait(150);
+  }
   const id = competitor.id;
   for (const tab of ['report', 'sources', 'debts', 'reviews', 'prices', 'history']) { window.__state.compTab = tab; await window.openCompetitorCard(id); await wait(250); check('конкурент → ' + tab, $('#modalBody').innerHTML.length > 150 && !/class="card err"/.test($('#modalBody').innerHTML)) }
   window.closeModal();
@@ -400,15 +427,44 @@ try {
     const priceBtn = $$('#view button').find(b => /Наш прайс-лист/.test(b.textContent));
     check('кнопка прайс-листа показывает число позиций', Boolean(priceBtn) && /\(2\)/.test(priceBtn.textContent), priceBtn && priceBtn.textContent.trim());
     priceBtn.click(); await wait(400);
-    check('прайс-лист открывается таблицей, а не просьбой загрузить файл', /Наша таблица цен/.test($('#modalBody').textContent) && $$('#ourPriceTable tr').length === 3 && !$('#modalBody input[type=file]'), $('#modalBody').textContent.replace(/\s+/g, ' ').slice(0, 90));
-    check('таблицу цен можно скачать и заменить', /Скачать таблицу/.test($('#modalBody').textContent) && /Загрузить нашу таблицу цен/.test($('#modalBody').textContent));
+    check('прайс-лист открывается таблицей, а не просьбой загрузить файл', /Наш прайс-лист/.test($('#modalBody').textContent) && $$('#ourPriceTable tr').length === 3 && !$('#modalBody input[type=file]'), $('#modalBody').textContent.replace(/\s+/g, ' ').slice(0, 90));
+    check('прайс можно скачать, загрузить и открыть как каталог', /Скачать прайс/.test($('#modalBody').textContent) && /Загрузить из файла/.test($('#modalBody').textContent) && /Открыть каталог/.test($('#modalBody').textContent));
+    check('объяснено, что прайс-лист и каталог — один список', /Это ваш каталог/.test($('#modalBody').textContent) || /это ваш каталог/i.test($('#modalBody').textContent), $('#modalBody').textContent.replace(/\s+/g, ' ').slice(0, 90));
     check('в таблице цен есть поиск по позициям', Boolean($('#ourPriceFilter')));
     window.filterOurPrices('баня'); await wait(60);
     check('поиск по таблице цен работает', $$('#ourPriceTable tr').length === 2 && /Баня/.test($('#ourPriceTable').textContent));
     window.closeModal();
     window.__state.compTab = 'prices'; await window.openCompetitorCard(id); await wait(350);
-    check('сравнение цен считается по текущим таблицам', /мы дешевле на/.test($('#modalBody').textContent) && /Сопоставлено позиций/.test($('#modalBody').textContent), $('#modalBody').textContent.replace(/\s+/g, ' ').slice(0, 120));
+    const fuzzy = window.comparePrices(
+      [{ item: 'Баня каркасная 4×6', price: 890000 }, { item: 'Каркасный дом 6×8 «Летний»', price: 1850000 }, { item: 'Терраса без цены', price: 0 }],
+      [{ item: 'Баня 4×6', price: 990000 }, { item: 'Каркасный дом 6×8 с террасой', price: 2500000 }]
+    );
+    check('сравнение находит позицию с похожим названием и не склеивает комплектации', fuzzy.length === 1 && /Баня/.test(fuzzy[0].item) && fuzzy[0].theirs === 990000, JSON.stringify(fuzzy));
+    check('сравнение цен считается по текущим данным', /мы дешевле на/.test($('#modalBody').textContent) && /Сопоставлено позиций/.test($('#modalBody').textContent), $('#modalBody').textContent.replace(/\s+/g, ' ').slice(0, 120));
+    check('в сравнении сказано, что наши цены берутся из каталога', /Сравнение с нашим прайс-листом/.test($('#modalBody').textContent) && /«Каталог»/.test($('#modalBody').textContent), $('#modalBody').textContent.replace(/\s+/g, ' ').slice(0, 120));
     window.closeModal();
+  }
+
+  // ── каталог = прайс-лист: один список вместо двух ────────────────────────
+  window.go('products'); await wait(450);
+  {
+    const text = $('#view').textContent;
+    check('каталог говорит, что он же прайс-лист', /Каталог и прайс-лист/.test(text) && /один список/.test(text), text.replace(/\s+/g, ' ').slice(0, 120));
+    check('из каталога прайс можно скачать и загрузить файлом', /Скачать прайс/.test(text) && /Загрузить из файла/.test(text));
+    check('загруженный прайс виден в каталоге теми же позициями', $$('#view table tr').length === 3 && /Каркасный дом 8×10/.test(text) && /Баня 4×6/.test(text), $$('#view table tr').length + ' строк');
+    const pSearch = $('#globalSearch');
+    pSearch.value = 'Баня 4×6'; pSearch.dispatchEvent(new window.Event('input', { bubbles: true })); await wait(500);
+    check('общий поиск находит позицию прайс-листа', /Каталог и прайс/.test($('#searchResults').innerHTML) && /Баня/.test($('#searchResults').innerHTML), $('#searchResults').textContent.replace(/\s+/g, ' ').slice(0, 90));
+    window.closeSearchResults(true); await wait(80);
+    await window.openProduct(); await wait(300);
+    check('у позиции каталога есть примечание', Boolean($('#modalBody input[name=note]')));
+    check('примечание необязательное и идёт после цены', !$('#modalBody label.req input[name=note]')
+      && (($('#modalBody input[name=price]').compareDocumentPosition($('#modalBody input[name=note]')) & window.Node.DOCUMENT_POSITION_FOLLOWING) !== 0));
+    window.closeModal(); await wait(120);
+    window.openPriceImport(null, 'ours'); await wait(300);
+    check('при загрузке прайса выбирается режим: обновить или заменить целиком', /Обновить цены и добавить новые/.test($('#modalBody').textContent) && /Заменить прайс целиком/.test($('#modalBody').textContent), $('#modalBody').textContent.replace(/\s+/g, ' ').slice(0, 120));
+    check('объяснено, что позиции ищутся по артикулу и не удаляются', /по артикулу/.test($('#modalBody').textContent) && /в архив/.test($('#modalBody').textContent));
+    window.closeModal(); await wait(120);
   }
 
   // ── дашборд и внимание ───────────────────────────────────────────────────
@@ -507,7 +563,7 @@ try {
     window.go('competitors'); await wait(450);
     await window.openCompetitorCard(id); await wait(350);
     $$('#modalBody .tabs button').find(b => /Сравнение цен/.test(b.textContent)).click(); await wait(450);
-    check('вкладка карточки конкурента переключается кликом', window.__state.compTab === 'prices' && /Сравнение с нашей таблицей цен/.test($('#modalBody').textContent));
+    check('вкладка карточки конкурента переключается кликом', window.__state.compTab === 'prices' && /Сравнение с нашим прайс-листом/.test($('#modalBody').textContent), $('#modalBody').textContent.replace(/\s+/g, ' ').slice(0, 90));
     window.closeModal();
 
     await window.openDealCard(dealId); await wait(400);
@@ -566,8 +622,8 @@ try {
   check('поиск есть в шаблонах', Boolean($('#tplSearch')));
   window.__state.settingsTab = 'competitors'; window.go('settings'); await wait(450);
   {
-    check('наша таблица цен видна в настройках', /Наша таблица цен/.test($('#view').textContent) && $$('#view table.mini tr').length > 2);
-    check('таблицу цен в настройках можно скачать и заменить', /Скачать CSV/.test($('#view').textContent) && /Загрузить или заменить/.test($('#view').textContent));
+    check('наш прайс-лист виден в настройках', /Наш прайс-лист/.test($('#view').textContent) && $$('#view table.mini tr').length > 2);
+    check('прайс в настройках можно скачать, загрузить и открыть каталогом', /Скачать CSV/.test($('#view').textContent) && /Загрузить из файла/.test($('#view').textContent) && /Открыть каталог/.test($('#view').textContent));
     check('объяснено, что ключи источников не обязательны', /не обязательны/.test($('#view').textContent) && /работает без ключа/.test($('#view').textContent));
     check('есть проверка доступности источников', /Проверить доступность источников/.test($('#view').textContent));
   }
@@ -577,6 +633,31 @@ try {
     window.go(view); await wait(400);
     check('поиск в разделе «' + view + '»', Boolean($(sel)), sel);
   }
+  // ввод в каждое поле поиска: именно здесь человек видит «... is not a function»,
+  // если обработчик ссылается на несуществующую функцию
+  for (const [view, sel, text] of [['contacts', '#contactSearch', 'Ирина'], ['companies', '#companySearch', 'Строй'], ['products', '#productSearch', 'Баня'], ['tasks', '#taskSearch', 'Позвонить'], ['pipe', '#dealSearch', 'Дом'], ['inbox', '#convSearch', 'Ирина'], ['competitors', '#compFilter', 'Брус']]) {
+    window.go(view); await wait(420);
+    const input = $(sel);
+    if (!input) { check('поле поиска «' + view + '» принимает ввод', false, 'нет ' + sel); continue }
+    pageErrors.length = 0;
+    input.value = text;
+    input.dispatchEvent(new window.Event('input', { bubbles: true }));
+    await wait(500);
+    check('поиск в «' + view + '» фильтрует список без ошибок', pageErrors.length === 0 && $(sel) && $(sel).value === text, pageErrors.join(' | ').slice(0, 100));
+  }
+  for (const [tab, sel] of [['team', '#teamSearch'], ['templates', '#tplSearch']]) {
+    window.__state.settingsTab = tab; window.go('settings'); await wait(450);
+    const input = $(sel);
+    if (!input) { check('поле поиска «' + tab + '» принимает ввод', false, 'нет ' + sel); continue }
+    pageErrors.length = 0;
+    input.value = 'а';
+    input.dispatchEvent(new window.Event('input', { bubbles: true }));
+    await wait(500);
+    check('поиск в «' + tab + '» фильтрует список без ошибок', pageErrors.length === 0, pageErrors.join(' | ').slice(0, 100));
+  }
+  ['taskQuery', 'dealQuery', 'companyQuery', 'productQuery', 'compQuery', 'teamQuery', 'tplQuery'].forEach(k => { window.__state[k] = '' });
+  window.__state.contactFilter = {};
+  window.__state.settingsTab = 'integrations';
   window.go('dashboard'); await wait(300);
 
   // ── тёмная тема и шрифты ─────────────────────────────────────────────────
@@ -614,7 +695,13 @@ try {
   window.go('competitors'); await wait(400);
   check('менеджер видит прайс-лист и может проверять конкурентов', /Наш прайс-лист/.test($('#view').textContent) && /Найти и проверить/.test($('#view').textContent));
   const mgrOurs = await fetch(BASE + '/api/prices', { method: 'POST', headers: { 'Content-Type': 'application/json', Authorization: 'Bearer ' + mgrToken }, body: JSON.stringify({ scope: 'ours', text: 'Дом;1000000;шт' }) });
-  check('менеджер не может менять нашу таблицу цен (403)', mgrOurs.status === 403);
+  check('менеджер не может менять прайс-лист (403)', mgrOurs.status === 403);
+  window.go('products'); await wait(420);
+  check('менеджер видит прайс-лист без кнопок загрузки и удаления', !/Загрузить из файла/.test($('#view').textContent) && $$('#view .btn.danger').length === 0 && !/\+ Товар \/ проект/.test($('#view').textContent), $('#view').textContent.replace(/\s+/g, ' ').slice(0, 120));
+  check('менеджеру объяснено, где взять позицию без каталога', /Добавьте её прямо в сделку/.test($('#view').textContent));
+  await window.openProduct(); await wait(300);
+  check('форма позиции у менеджера открывается на просмотр', Boolean($('#modalBody form input[name=name]')) && $('#modalBody form input[name=name]').disabled === true && /Прайс-лист меняет администратор/.test($('#modalBody').textContent));
+  window.closeModal(); await wait(120);
 
   window.__state.me = { id: 98, name: 'Наблюдатель', role: 'viewer' };
   window.document.body.classList.add('role-viewer');
@@ -681,6 +768,38 @@ try {
   check('channelLabel переводит каналы', window.channelLabel('email') === 'Почта' && window.channelLabel('whatsapp') === 'WhatsApp' && window.channelLabel('any') === 'Любой канал');
   check('roleLabel переводит роли', window.roleLabel('manager') === 'Менеджер' && window.roleLabel('viewer') === 'Наблюдатель');
   check('транслит кириллицы даёт технический ключ поля', window.translit('Площадь участка') === 'ploschad_uchastka');
+  // ── ни один обработчик в разметке не зовёт несуществующую функцию ─────────
+  // именно так выглядит поломка глазами человека: клик — и ошибка в консоли
+  {
+    const HANDLER_RE = /\son[a-z]+=\\?"([^"]+)"/g;
+    const handlers = [...appJsRaw.matchAll(HANDLER_RE), ...html.matchAll(HANDLER_RE)].map(m => m[1]);
+    const BUILTIN = new Set(['if', 'return', 'typeof', 'new', 'delete', 'void', 'await', 'async', 'function',
+      'document', 'window', 'event', 'this', 'Number', 'String', 'Boolean', 'JSON', 'Math', 'Date', 'Array', 'Object',
+      'parseInt', 'parseFloat', 'isNaN', 'encodeURIComponent', 'decodeURIComponent', 'setTimeout', 'clearTimeout',
+      'setInterval', 'Promise', 'RegExp', 'URL', 'Blob', 'FileReader', 'AbortSignal', 'console', 'location', 'fetch']);
+    const declared = new Set([...appJsRaw.matchAll(/^(?:const|let|var|function|async function|class)\s+([A-Za-z_$][\w$]*)/gm)].map(m => m[1]));
+    const called = new Set();
+    for (const h of handlers) {
+      // имя функции без точки перед ним: вызовы методов (document.getElementById) не наши
+      for (const m of h.matchAll(/(?<![.\w$])([A-Za-z_$][\w$]*)\s*\(/g)) {
+        if (BUILTIN.has(m[1])) continue;
+        called.add(m[1]);
+      }
+    }
+    const missing = [...called].filter(n => typeof window[n] !== 'function' && !declared.has(n));
+    check('все обработчики в разметке вызывают существующие функции', missing.length === 0, missing.length ? 'не найдено: ' + missing.join(', ') : `проверено ${called.size} имён в ${handlers.length} обработчиках`);
+  }
+
+  // технический сбой не должен показываться человеку как «$$(...).find is not a function»
+  $('#toast').replaceChildren();
+  window.toast('$$(...).find is not a function', 'err'); await wait(80);
+  check('технический сбой объяснён по-человечески', /Обновите страницу/.test($('#toast').textContent) && /Действие не выполнено/.test($('#toast').textContent), $('#toast').textContent.replace(/\s+/g, ' ').slice(0, 120));
+  $('#toast').replaceChildren();
+  window.toast('Укажите название конкурента', 'err'); await wait(80);
+  check('обычная ошибка показывается как есть', $('#toast').textContent.includes('Укажите название конкурента') && !/Обновите страницу/.test($('#toast').textContent), $('#toast').textContent.replace(/\s+/g, ' ').slice(0, 80));
+  $('#toast').replaceChildren();
+  check('ошибки в обработчиках кликов тоже видны пользователю', /window\.addEventListener\('error'/.test(appJsRaw));
+
   check('в app.js нет вызовов нативных confirm/prompt', !/\bconfirm\(\s*[`'"]/.test(appJsRaw) && !/\bprompt\(\s*[`'"]/.test(appJsRaw));
 
   // ── модальное окно подтверждения вместо confirm() ────────────────────────
