@@ -615,6 +615,13 @@ try {
   // ── интерфейс реагирует на клики, а не только на прямые вызовы ───────────
   {
     window.go('settings'); await wait(600);
+    // Первая панель .tabs в разделе — вкладки настроек; внутри тела бывают свои
+    // панели (например, справочник встроенных полей), их кнопки сюда не относятся.
+    const settingsTabsBar = $('#view .tabs');
+    const settingsTabs = settingsTabsBar ? Array.from(settingsTabsBar.querySelectorAll('button')).map(b => b.textContent.trim()) : [];
+    check('вкладки настроек идут по пути настройки: каналы → воронка → правила → поля → сообщения → разведка → люди → данные → профиль',
+      settingsTabs.join(' → ') === 'Интеграции и каналы → Воронки и этапы → Автоматизации → Поля карточек → Шаблоны сообщений → Конкуренты и источники → Команда → Данные и компания → Профиль',
+      settingsTabs.join(' → '));
     $$('.tabs button').find(b => /^Команда$/.test(b.textContent.trim())).click(); await wait(500);
     check('вкладка настроек переключается кликом', window.__state.settingsTab === 'team' && /Права ролей/.test($('#view').textContent));
     $$('.tabs button').find(b => /^Профиль$/.test(b.textContent.trim())).click(); await wait(400);
@@ -684,6 +691,8 @@ try {
     window.go('settings'); await wait(450);
     check('в списке правил событие и действие написаны по-человечески', /Появилась новая сделка/.test($('#view').textContent) && /Создать задачу «Позвонить клиенту»/.test($('#view').textContent), $('#view').textContent.replace(/\s+/g, ' ').slice(0, 120));
     check('у правила есть выключатель и кнопки изменения', Boolean($('#view input[type=checkbox]')) && /Изменить/.test($('#view').textContent));
+    check('правила «что CRM делает сама» живут в автоматизациях', /Что CRM делает сама/.test($('#view').textContent) && Boolean($('#view select[name=AUTO_DEAL]')) && Boolean($('#view select[name=AUTO_ASSIGN]')), $('#view').textContent.replace(/\s+/g, ' ').slice(0, 120));
+    check('список своих правил подписан отдельно от постоянных правил', /Свои правила \(/.test($('#view').textContent));
     await window.openAutomation(); await wait(350);
     check('в форме правила этап выбирается из списка воронки', Boolean($('#modalBody select[name=action_type]')) && /Создать задачу/.test($('#modalBody').textContent));
     $('#modalBody select[name=action_type]').value = 'change_stage';
@@ -695,6 +704,7 @@ try {
   {
     check('в разделе данных нет сворачиваемого блока про другой сервер', !$('#view details.settings-more') && !/Копии на другом сервере/.test($('#view').textContent));
     check('короткая подсказка про вторую копию осталась', /DEPLOY\.md/.test($('#view').textContent));
+    check('в данных компании нет автоправил — они во вкладке «Автоматизации»', !$('#view select[name=AUTO_DEAL]') && !$('#view select[name=AUTO_ASSIGN]') && /во вкладке «Автоматизации»/.test($('#view').textContent), $('#view').textContent.replace(/\s+/g, ' ').slice(0, 140));
   }
   window.__state.settingsTab = 'team'; window.go('settings'); await wait(500);
   {
@@ -706,10 +716,11 @@ try {
   check('поиск есть в шаблонах', Boolean($('#tplSearch')));
   window.__state.settingsTab = 'competitors'; window.go('settings'); await wait(450);
   {
-    check('наш прайс-лист виден в настройках', /Наш прайс-лист/.test($('#view').textContent) && $$('#view table.mini tr').length > 2);
-    check('прайс в настройках можно скачать, загрузить и открыть каталогом', /Скачать CSV/.test($('#view').textContent) && /Загрузить из файла/.test($('#view').textContent) && /Открыть каталог/.test($('#view').textContent));
-    check('объяснено, что ключи источников не обязательны', /не обязательны/.test($('#view').textContent) && /работает без ключа/.test($('#view').textContent));
-    check('есть проверка доступности источников', /Проверить доступность источников/.test($('#view').textContent));
+    const st = $('#view').textContent.replace(/\s+/g, ' ');
+    check('в настройках разведки нет второго управления прайсом', !/Скачать CSV/.test(st) && !/Загрузить из файла/.test(st) && !/Показать весь прайс/.test(st), st.slice(0, 140));
+    check('настройки разведки ведут за ценами в раздел «Каталог»', /«Каталог»/.test(st) && /Открыть каталог/.test(st) && Boolean($$('#view button').find(b => /Открыть каталог/.test(b.textContent))));
+    check('объяснено, что ключи источников не обязательны', /не обязательны/.test(st) && /работает без ключа/.test(st));
+    check('есть проверка доступности источников', /Проверить доступность источников/.test(st));
   }
 
   // ── поиск есть в каждом разделе со списком ───────────────────────────────
