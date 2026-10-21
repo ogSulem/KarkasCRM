@@ -326,7 +326,7 @@ test('источник без соединения помечается «blocke
 test('прайс-лист можно заменить целиком: лишнее уходит в архив, а не удаляется', async () => {
   // маршрут, в который грузит файл сам интерфейс (раньше его не существовало)
   const direct = await call('/api/prices/ours', { method: 'POST', body: JSON.stringify({ csv: 'Наименование;Цена;Ед\nКаркасный дом 8×10 «Север»;3950000;шт\n', scope: 'ours', mode: 'merge' }) });
-  assert.equal(direct.status, 201, 'загрузка из окна «Загрузить нашу таблицу цен» принимается');
+  assert.equal(direct.status, 201, 'загрузка нашего прайс-листа (это каталог) принимается');
   assert.equal(direct.body.updated, 1);
   const before = (await call('/api/prices?scope=ours')).body.rows;
   assert.ok(before.length > 1, 'до замены в прайсе несколько позиций');

@@ -426,7 +426,7 @@ test('права: менеджер ведёт клиентов, но не мен
   assert.ok(!(await asM('/api/templates')).body.some(t => t.id === adminTpl.id), 'менеджер не видит чужие шаблоны');
   assert.equal((await asV('/api/contacts')).status, 200, 'наблюдатель читает данные');
   assert.equal((await asV('/api/contacts', { method: 'POST', body: JSON.stringify({ name: 'Нельзя' }) })).status, 403, 'наблюдатель не создаёт записи');
-  assert.equal((await asM('/api/prices', { method: 'POST', body: JSON.stringify({ scope: 'ours', text: 'Позиция;100' }) })).status, 403, 'нашу таблицу цен меняет только администратор');
+  assert.equal((await asM('/api/prices', { method: 'POST', body: JSON.stringify({ scope: 'ours', text: 'Позиция;100' }) })).status, 403, 'прайс-лист (каталог) меняет только администратор');
   assert.equal((await asM('/api/prices/ours', { method: 'POST', body: JSON.stringify({ text: 'Позиция;100' }) })).status, 403, 'наш прайс-лист каталога меняет только администратор');
   // каталог = прайс-лист компании: позиции и цены в нём меняет администратор,
   // а менеджер добавляет недостающую позицию прямо в сделку
