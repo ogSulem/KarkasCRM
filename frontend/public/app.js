@@ -2420,13 +2420,15 @@ async function settings(v) {
   // Адрес для вебхуков: сохранённый публичный адрес, иначе тот, по которому открыта CRM.
   const origin = (s.public_url || location.origin).replace(/\/+$/, '');
   const localOrigin = /^https?:\/\/(localhost|127\.|0\.0\.0\.0|\[::1\]|10\.|192\.168\.)/i.test(origin);
+  // Порядок — по пути настройки: сначала каналы и воронка, затем правила и поля,
+  // потом сообщения и разведка, в конце люди, данные компании и свой профиль.
   const allTabs = {
     integrations: 'Интеграции и каналы',
-    fields: 'Поля карточек',
-    competitors: 'Конкуренты и источники',
     pipelines: 'Воронки и этапы',
     automations: 'Автоматизации',
+    fields: 'Поля карточек',
     templates: 'Шаблоны сообщений',
+    competitors: 'Конкуренты и источники',
     team: 'Команда',
     data: 'Данные и компания',
     profile: 'Профиль'
@@ -2510,8 +2512,9 @@ async function settings(v) {
       <p><small><b>Удаление</b> убирает поле из форм и карточек; ранее введённые значения остаются в базе, но больше не показываются. Если поле нужно снова — создайте его с тем же названием.</small></p></div></div></div>`;
   } else if (state.settingsTab === 'competitors') {
     const cs = await api('/api/competitor-sources');
-    const ours = await api('/api/prices?scope=ours');
-    state.ourPrices = ours.rows || [];
+    // Цены для сравнения берутся из каталога. Здесь — только счётчик и указатель:
+    // управлять прайсом из настроек разведки нелогично, для этого есть раздел «Каталог».
+    const ours = await api('/api/prices?scope=ours').catch(() => ({ rows: [] }));
     // ключ → что он даёт и где взять. Без ключа источник не ломается: остаются ссылки.
     const KEY_FIELDS = [
       ['FNS_API_KEY', 'Ключ api-fns.ru (данные ФНС)', 'api-fns.ru — платный доступ к ЕГРЮЛ. Без ключа: ссылка «ФНС: Прозрачный бизнес» в отчёте'],
@@ -2520,21 +2523,9 @@ async function settings(v) {
       ['TWOGIS_KEY', 'Ключ 2ГИС', 'dev.2gis.ru — рейтинг и отзывы в 2ГИС. Без ключа: ссылка на карточку организации'],
       ['YANDEX_API_KEY', 'Ключ Яндекс Геопоиска', 'developer.tech.yandex.ru — карточка организации на Яндекс Картах. Без ключа: ссылка на карты']
     ];
-    const sum = (ours.rows || []).reduce((a, r) => a + (Number(r.price) || 0), 0);
     // источник без ключа работает всегда; с ключом — данные подтягиваются сами
     const readyLabel = src => !src.needs.length ? 'работает без ключа' : (src.configured ? 'ключ задан — данные подтягиваются сами' : 'ключа нет — данные по ссылкам');
     body = `<div class="settings-cols"><div>
-     <div class="card"><h3>Наш прайс-лист (это раздел «Каталог»)</h3>
-      <p class="form-hint">Отдельной таблицы цен больше нет: прайс-лист — это каталог. По нему CRM сравнивает ваши цены с ценами конкурента во вкладке «Сравнение цен». Позиций: <b>${ours.rows.length}</b>${ours.rows.length ? ` · суммарно на <b>${fmt(sum)}</b>` : ''}.</p>
-      ${ours.rows.length ? `<div class="list" style="max-height:240px"><table class="mini">${ourPriceRows(ours.rows)}</table></div>` : '<p><small>Позиций пока нет — без них сравнение цен в отчётах не строится. Добавьте их в каталоге или загрузите файлом.</small></p>'}
-      <div style="display:flex;gap:8px;flex-wrap:wrap;margin-top:10px">
-        <button class="btn sm" onclick="go('products')">${icon('products', 13)} Открыть каталог</button>
-        <button class="btn sm" onclick="openOurPrices()">${icon('table', 13)} Показать весь прайс</button>
-        <button class="btn sm" onclick="download('/api/prices/export?scope=ours','price-list.csv')">${icon('download', 13)} Скачать CSV</button>
-        ${isAdmin ? `<button class="btn sm primary" onclick="openPriceImport(null,'ours')">${icon('upload', 13)} Загрузить из файла</button>` : ''}
-      </div>
-      <p><small>${isAdmin ? 'Загрузка из файла обновляет цены у знакомых позиций (по артикулу или названию) и добавляет новые. Режим «заменить целиком» лишнее не удаляет, а убирает в архив каталога.' : 'Менеджеры видят прайс и сравнение цен, а обновляет его администратор в разделе «Каталог».'}</small></p>
-     </div>
      <div class="card"><h3>Источники проверки</h3>
       <p class="form-hint">Ключи <b>не обязательны</b>. Без них CRM не молчит: в отчёте остаются прямые ссылки на официальные реестры, по которым сотрудник проверяет компанию за минуту. С ключом те же данные подтягиваются сами и попадают в риск-оценку.</p>
       <table class="mini"><tr><th>Источник</th><th>Что даёт</th><th>Ключ</th><th>Готовность</th></tr>${cs.sources.map(src => `<tr><td><b>${esc(src.name)}</b></td><td><small>${esc(src.about)}</small></td><td>${src.needs.length ? (src.configured ? '<span class="tag">задан</span>' : '<span class="tag grey">не задан</span>') : '<span class="tag grey">не нужен</span>'}</td><td><small>${esc(readyLabel(src))}</small></td></tr>`).join('')}</table>
@@ -2552,7 +2543,9 @@ async function settings(v) {
      <div class="card"><h3>Как работает разведка конкурентов</h3>
       <p><small>CRM опрашивает открытые реестры и карты, собирает долги, суды, банкротство и отзывы, считает риск-оценку от 0 до 100 и подсказывает менеджеру аргументы для переговоров.</small></p>
       <p><small><b>Без ключей</b> доступны: Федресурс (банкротство), Кад.Арбитр (суды), Rusprofile и ссылки на ФНС, ФССП, Яндекс Карты, 2ГИС, Авито и Госзакупки. <b>С ключами</b> добавляются готовые суммы долгов, данные ЕГРЮЛ и рейтинги с карт.</small></p>
-      <p><small>Отзывы и прайс конкурента можно внести вручную прямо в его карточке — сравнение цен и рейтинг появятся в отчёте сразу.</small></p></div>
+      <p><small>Отзывы и прайс конкурента можно внести вручную прямо в его карточке — сравнение цен и рейтинг появятся в отчёте сразу.</small></p>
+      <p><small><b>Наши цены</b> для сравнения берутся из раздела «Каталог» — это один и тот же список: поправили цену там, и сравнение в карточке конкурента сразу свежее. Позиций в каталоге: <b>${ours.rows.length}</b>; в сравнении участвуют только те, у которых указана цена.</small></p>
+      <button class="btn sm" onclick="go('products')">${icon('products', 13)} Открыть каталог</button></div>
      ${isAdmin ? `<div class="card"><h3>Адреса сервисов проверки</h3><p><small>Нужны только техническому специалисту — обычно здесь ничего менять не надо. Если сервис сменил адрес, его можно поправить.</small></p><form onsubmit="return saveCompetitorUrls(event)">${[['FNS_API_URL', 'ФНС API'], ['FSSP_API_URL', 'ФССП API'], ['FEDRESURS_API_URL', 'Федресурс'], ['KAD_API_URL', 'Арбитр'], ['RUSPROFILE_URL', 'Rusprofile'], ['GOOGLE_API_URL', 'Google Places'], ['TWOGIS_API_URL', '2ГИС'], ['YANDEX_API_URL', 'Яндекс Геопоиск']].map(([k, n]) => `<label>${n}<input name="${k}" value="${esc((cs.urls || {})[k] || '')}"></label>`).join('')}<button class="btn">Сохранить адреса</button></form></div>` : ''}
     </div></div>`;
   } else if (state.settingsTab === 'pipelines') {
@@ -2587,14 +2580,23 @@ async function settings(v) {
       : a.action_type === 'change_stage' ? `Перевести сделку на этап «${stageName(a.action_value)}»`
       : a.action_type === 'add_tag' ? `Добавить клиенту тег «${a.action_value}»`
       : a.action_value;
-    body = `<div class="settings-cols"><div class="card">
-     <div class="row" style="border:0"><div><h3>Автоматизации (${rows.length})</h3><small>Простые правила: «когда случилось — сделай». Работают сами, без участия сотрудника.</small></div><button class="btn sm primary" onclick="openAutomation()">+ Правило</button></div>
+    body = `<div class="settings-cols"><div>
+     <div class="card"><h3>Что CRM делает сама</h3>
+      <p class="form-hint">Эти два правила работают всегда — создавать их не нужно. Они касаются обращений из чатов, формы на сайте и вебхуков.</p>
+      <form onsubmit="return saveCompanySettings(event)">
+       <label>Автосоздание сделки при обращении<select name="AUTO_DEAL"><option value="1" ${s.auto_deal === '1' ? 'selected' : ''}>Да — создавать сделку «Неразобранное»</option><option value="0" ${s.auto_deal !== '1' ? 'selected' : ''}>Нет</option></select></label>
+       <p class="form-hint">Когда клиент впервые пишет в чат или оставляет заявку на сайте, CRM сразу создаёт сделку. Так обращение не потеряется, даже если менеджер ещё не открыл чат.</p>
+       <label>Распределять новые обращения между менеджерами<select name="AUTO_ASSIGN"><option value="0" ${s.auto_assign !== '1' ? 'selected' : ''}>Нет — оставлять без ответственного</option><option value="1" ${s.auto_assign === '1' ? 'selected' : ''}>Да — отдавать наименее загруженному менеджеру</option></select></label>
+       <p class="form-hint">CRM выбирает сотрудника с меньшим числом сделок в работе — нагрузка распределяется поровну. Контакты, созданные вручную, остаются за тем, кто их создал: в форме можно сразу выбрать другого ответственного.</p>
+       <button class="btn primary">Сохранить</button></form></div>
+     <div class="card">
+     <div class="row" style="border:0"><div><h3>Свои правила (${rows.length})</h3><small>Простые правила: «когда случилось — сделай». Работают сами, без участия сотрудника.</small></div><button class="btn sm primary" onclick="openAutomation()">+ Правило</button></div>
      <table><tr><th>Правило</th><th>Когда срабатывает</th><th>Что делает</th><th>Вкл.</th><th style="width:210px"></th></tr>
       ${rows.map(a => `<tr><td><b>${esc(a.name)}</b></td><td><small>${esc(whenText(a))}</small></td><td><small>${esc(whatText(a))}</small></td>
        <td><input type="checkbox" style="width:auto" title="${a.active ? 'Правило работает — снимите, чтобы выключить' : 'Правило выключено'}" ${a.active ? 'checked' : ''} onchange="toggleAutomation(${a.id},this)"></td>
        <td style="white-space:nowrap"><button class="btn sm" onclick="openAutomation(${a.id})">${icon('edit', 13)} Изменить</button> <button class="btn sm danger" onclick="del('automations',${a.id})">${icon('trash', 13)} Удалить</button></td></tr>`).join('')
         || `<tr><td colspan="5"><div class="empty">Правил нет. Начните с простого: «Появилась новая сделка → создать задачу «Позвонить клиенту»».</div></td></tr>`}</table></div>
-     <div><div class="card"><h3>Как это работает</h3>
+    </div><div><div class="card"><h3>Как это работает</h3>
       <p><small>Правило проверяется каждый раз, когда происходит событие: создана сделка, клиент написал в чат или сделку перевели на другой этап.</small></p>
       <p><small><b>Создать задачу</b> — дело появляется у ответственного за сделку или клиента, срок сегодня 14:00. Он сразу получает уведомление.</small></p>
       <p><small><b>Перевести на этап</b> — сделка сама переезжает на нужный этап, дата закрытия и аналитика пересчитываются.</small></p>
@@ -2651,10 +2653,7 @@ async function settings(v) {
     const demoRows = Object.values(s.demo || {}).reduce((a, b) => a + b, 0);
     body = `${demoRows ? `<div class="card tint-info"><h3>${icon('sparkles', 16)} Демонстрационные данные</h3><p><small>Сейчас в базе примеры: клиентов ${s.demo?.contacts || 0}, сделок ${s.demo?.deals || 0}, задач ${s.demo?.tasks || 0}, чатов ${s.demo?.conversations || 0}, конкурентов ${s.demo?.competitors || 0}, товаров каталога ${s.demo?.products || 0}, шаблонов ${s.demo?.templates || 0}, правил ${s.demo?.automations || 0}. Их можно редактировать как обычные данные или удалить одной кнопкой — тогда CRM будет полностью чистой.</small></p><button class="btn danger sm" onclick="cleanDemo()">${icon('trash', 13)} Удалить демонстрационные данные</button></div>` : ''}
     <div class="settings-cols"><div><div class="card"><h3>Название компании</h3><form onsubmit="return saveCompanySettings(event)"><div style="display:grid;grid-template-columns:2fr 1fr;gap:12px"><label>Название<input name="COMPANY_NAME" value="${esc(s.company.name)}"></label><label>Валюта<input name="CURRENCY" value="${esc(s.company.currency)}"></label></div>
-     <label>Автосоздание сделки при обращении<select name="AUTO_DEAL"><option value="1" ${s.auto_deal === '1' ? 'selected' : ''}>Да — создавать сделку «Неразобранное»</option><option value="0" ${s.auto_deal !== '1' ? 'selected' : ''}>Нет</option></select></label>
-     <p class="form-hint">Когда клиент впервые пишет в чат или оставляет заявку на сайте, CRM сразу создаёт сделку. Так обращение не потеряется, даже если менеджер ещё не открыл чат.</p>
-     <label>Распределять новые обращения между менеджерами<select name="AUTO_ASSIGN"><option value="0" ${s.auto_assign !== '1' ? 'selected' : ''}>Нет — оставлять без ответственного</option><option value="1" ${s.auto_assign === '1' ? 'selected' : ''}>Да — отдавать наименее загруженному менеджеру</option></select></label>
-     <p class="form-hint">Касается обращений из чатов, сайта и форм. CRM выбирает сотрудника с меньшим числом сделок в работе — нагрузка распределяется поровну. Контакты, созданные вручную, остаются за тем, кто их создал: в форме можно сразу выбрать другого ответственного.</p>
+     <p class="form-hint">Название и валюта попадают в печатные документы (КП, счёт) и во все суммы в CRM. Правила «создавать сделку автоматически» и «распределять обращения между менеджерами» — во вкладке «Автоматизации».</p>
      <button class="btn primary">Сохранить</button></form></div>
      <div class="card"><h3>Реквизиты для КП и счёта</h3><p><small>Попадают в печатные документы сделки (кнопки «КП» и «Счёт»). Префикс номера — начало нумерации, например «КП», «СЧ».</small></p>
       <form onsubmit="return saveCompanySettings(event)">
@@ -2884,7 +2883,7 @@ async function probeSources(btn) {
 }
 async function saveCompetitorKeys(e) { e.preventDefault(); const b = {}; for (const [k, v] of new FormData(e.target)) if (v && !String(v).includes('•')) b[k] = v; await api('/api/competitor-sources', { method: 'PUT', body: JSON.stringify(b) }); toast('Ключи сохранены'); render(); return false; }
 async function saveCompetitorUrls(e) { e.preventDefault(); const b = {}; for (const [k, v] of new FormData(e.target)) if (v) b[k] = v; await api('/api/competitor-sources', { method: 'PUT', body: JSON.stringify(b) }); toast('Адреса сохранены'); render(); return false; }
-async function saveCompanySettings(e) { e.preventDefault(); await api('/api/settings', { method: 'PUT', body: JSON.stringify(Object.fromEntries(new FormData(e.target))) }); toast('Сохранено'); return false; }
+async function saveCompanySettings(e) { e.preventDefault(); await api('/api/settings', { method: 'PUT', body: JSON.stringify(Object.fromEntries(new FormData(e.target))) }); toast('Сохранено'); state.cache.settings = null; render(); return false; }
 function randomSecret() {
   const bytes = crypto.getRandomValues(new Uint8Array(24));
   return Array.from(bytes, b => ('0' + b.toString(16)).slice(-2)).join('');
