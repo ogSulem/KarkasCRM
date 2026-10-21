@@ -426,8 +426,13 @@ test('права: менеджер ведёт клиентов, но не мен
   assert.ok(!(await asM('/api/templates')).body.some(t => t.id === adminTpl.id), 'менеджер не видит чужие шаблоны');
   assert.equal((await asV('/api/contacts')).status, 200, 'наблюдатель читает данные');
   assert.equal((await asV('/api/contacts', { method: 'POST', body: JSON.stringify({ name: 'Нельзя' }) })).status, 403, 'наблюдатель не создаёт записи');
-  assert.equal((await asM('/api/prices', { method: 'POST', body: JSON.stringify({ scope: 'ours', text: 'Позиция;100' }) })).status, 403, 'прайс-лист (каталог) меняет только администратор');
-  assert.equal((await asM('/api/prices/ours', { method: 'POST', body: JSON.stringify({ text: 'Позиция;100' }) })).status, 403, 'наш прайс-лист каталога меняет только администратор');
+  const denied = await asM('/api/prices', { method: 'POST', body: JSON.stringify({ scope: 'ours', text: 'Позиция;100' }) });
+  assert.equal(denied.status, 403, 'прайс-лист (каталог) меняет только администратор');
+  assert.match(denied.body.error, /Прайс-лист меняет только администратор/, 'отказ объясняет, что делать вместо правки прайса');
+  // загрузка прайса доступна по двум путям — текст отказа один и тот же
+  const denied2 = await asM('/api/prices/ours', { method: 'POST', body: JSON.stringify({ csv: 'Наименование;Цена\nПозиция;100\n' }) });
+  assert.equal(denied2.status, 403, '/api/prices/ours закрыт для менеджера');
+  assert.equal(denied2.body.error, denied.body.error, 'оба пути загрузки прайса дают одинаковый текст отказа');
   // каталог = прайс-лист компании: позиции и цены в нём меняет администратор,
   // а менеджер добавляет недостающую позицию прямо в сделку
   const mgrProd = await asM('/api/products', { method: 'POST', body: JSON.stringify({ name: 'Позиция менеджера', price: 1000 }) });

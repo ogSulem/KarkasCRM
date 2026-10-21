@@ -775,6 +775,10 @@ const ADMIN_ONLY = [
   /^\/api\/backups(\/.*)?$/, /^\/api\/integrations(\/.*)?$/, /^\/api\/prices\/ours(\/.*)?$/,
   /^\/api\/demo\/cleanup$/,
 ];
+// Отказ по правам понятнее, если сказать, что именно закрыто и что делать вместо этого.
+const ADMIN_ONLY_HINT = [
+  [/^\/api\/prices\/ours(\/.*)?$/, 'Прайс-лист меняет только администратор. Позицию, которой нет в каталоге, можно добавить прямо в сделку.'],
+];
 function requireAdmin(user, res) { if (user.role !== 'admin') { json(res, 403, { error: 'Только для администратора' }); return false; } return true; }
 
 function validateUser(b, creating = false) {
@@ -985,7 +989,10 @@ export const server = http.createServer(async (req, res) => {
     });
     if (user && p.startsWith('/api/') && user.role === 'viewer' && req.method !== 'GET' && p !== '/api/me/password') return json(res, 403, { error: 'Роль «Наблюдатель» — только просмотр' });
     // настройки, команда, воронки, шаблоны, автоматизации, ключи и обслуживание — только администратор
-    if (user && user.role !== 'admin' && req.method !== 'GET' && ADMIN_ONLY.some(re => re.test(p))) return json(res, 403, { error: 'Это может менять только администратор (роль в Настройки → Команда)' });
+    if (user && user.role !== 'admin' && req.method !== 'GET' && ADMIN_ONLY.some(re => re.test(p))) {
+      const hint = ADMIN_ONLY_HINT.find(([re]) => re.test(p));
+      return json(res, 403, { error: hint ? hint[1] : 'Это может менять только администратор (роль в Настройки → Команда)' });
+    }
 
     // ===== dashboard / analytics =====
     if (p === '/api/dashboard') {
