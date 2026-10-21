@@ -66,11 +66,15 @@ const dom = new JSDOM(htmlClean, { runScripts: 'dangerously', url: BASE + '/', p
 const { window } = dom;
 window.addEventListener('error', e => pageErrors.push(String((e && e.message) || e)));
 window.__token = '';
+let inflight = 0; // сколько запросов приложения ещё не завершилось
 window.fetch = async (url, opt) => {
   const full = String(url).startsWith('http') ? String(url) : BASE + String(url);
-  const r = await fetch(full, opt);
-  if (r.status === 401 && window.__token) { const o = { ...opt, headers: { ...((opt || {}).headers || {}), Authorization: 'Bearer ' + window.__token } }; return fetch(full, o) }
-  return r;
+  inflight++;
+  try {
+    const r = await fetch(full, opt);
+    if (r.status === 401 && window.__token) { const o = { ...opt, headers: { ...((opt || {}).headers || {}), Authorization: 'Bearer ' + window.__token } }; return await fetch(full, o) }
+    return r;
+  } finally { inflight-- }
 };
 window.EventSource = class { addEventListener() {} close() {} };
 // Нативные confirm/prompt в продукте запрещены: любое обращение к ним — провал теста.
@@ -84,7 +88,31 @@ const $ = s => window.document.querySelector(s);
 const $$ = s => [...window.document.querySelectorAll(s)];
 const checks = [];
 const check = (name, cond, extra = '') => checks.push({ name, ok: !!cond, extra });
-const wait = ms => sleep(ms);
+// Пауза в тесте — не «подождать 450 мс на глаз», а «дождаться, пока экран
+// действительно дорисовал»: сначала не меньше запрошенного времени (его хватает
+// дебаунсу поиска), затем пока не закончатся запросы к серверу и разметка
+// перестанет меняться. Фиксированные паузы на медленной машине не успевают,
+// и проверки падают случайным образом — так CI мигал на ровном месте.
+// Тосты в подпись не входят: они живут своей жизнью и закрываются по таймеру.
+const screenSig = () => {
+  const d = window.document;
+  const len = sel => { const el = d.querySelector(sel); return el ? el.innerHTML.length : -1 };
+  const cls = sel => { const el = d.querySelector(sel); return el ? el.className : '' };
+  return `${len('#view')}|${len('#modalBody')}|${len('#nav')}|${len('#searchResults')}|${cls('#app')}|${cls('#login')}|${cls('#modal')}`;
+};
+async function settle(min = 0, cap = 6000) {
+  const started = Date.now();
+  if (min) await sleep(min);
+  let last = screenSig(), stableSince = Date.now();
+  while (Date.now() - started < cap) {
+    await sleep(30);
+    const now = screenSig();
+    if (inflight > 0 || now !== last) { last = now; stableSince = Date.now(); continue }
+    if (Date.now() - stableSince >= 90) return true;
+  }
+  return false;
+}
+const wait = (ms = 0) => settle(ms, Math.max(5000, ms * 6));
 const hasEmojis = text => /[\u{10000}-\u{10ffff}\u{2600}-\u{27bf}\u{2300}-\u{23ff}\u{2b50}-\u{2b55}]/u.test(text);
 const authH = () => ({ 'Content-Type': 'application/json', Authorization: 'Bearer ' + window.__token });
 const apiPost = async (p, body) => (await fetch(BASE + p, { method: 'POST', headers: authH(), body: JSON.stringify(body) })).json();
@@ -192,6 +220,48 @@ try {
       const builtin = $$('#builtinFields tr').slice(1).map(r => r.children[0].textContent.trim());
       check('встроенные поля карточек показаны в настройках', builtin.length >= 6 && builtin.includes('Имя клиента') && builtin.includes('Заметки'), builtin.join(', '));
       check('для встроенных полей объяснено, где их менять', /Меняются в карточке клиента/.test($('#view').textContent) && /Удалить встроенное поле нельзя/.test($('#view').textContent));
+
+      // Справочник выше пишется руками, и он уже однажды разошёлся с формами
+      // («Исполнитель» вместо «Ответственный», «Название» вместо «Что сделать»,
+      // пропавшие «Повтор задачи» и «Результат») — то есть подсказка врала.
+      // Поэтому сверяем его не с исходником, а с тем, что реально видно в окне:
+      // открыли форму → собрали подписи полей → сравнили со справочником.
+      const shortName = v => String(v || '').replace(/\s*\([^)]*\)\s*$/, '').trim();
+      const formFields = async open => {
+        await open(); await wait(400);
+        const box = $('#modalBody');
+        const fields = Array.from(box.querySelectorAll('label'))
+          .filter(l => !l.querySelector('[name^="cf_"]'))   // свои поля — не встроенные
+          .map(l => ({ name: shortName(l.childNodes[0] && l.childNodes[0].textContent), req: l.classList.contains('req') }))
+          // «Клиент» и «Сделка» в задаче подписаны не label'ом, а короткой шапкой
+          .concat(Array.from(box.querySelectorAll('.task-link-cap')).map(e => ({ name: shortName(e.textContent), req: false })));
+        window.closeModal();
+        return fields.filter(f => f.name);
+      };
+      const openers = {
+        contacts: () => window.openContact(),
+        deals: () => { window.__state.dealTab = 'details'; return window.openDealCard(window.__state.deals[0].id) },
+        companies: () => window.openCompany(),
+        tasks: () => window.openTask(),
+      };
+      for (const key of Object.keys(window.BUILTIN_FIELDS)) {
+        const set = window.BUILTIN_FIELDS[key];
+        const real = await formFields(openers[key]);
+        const names = real.map(f => f.name);
+        const listed = set.rows.map(r => shortName(r[0]));
+        const notInForm = listed.filter(x => !names.includes(x));
+        const notListed = names.filter(x => !listed.includes(x));
+        check('справочник полей «' + set.title + '» = настоящая форма', !notInForm.length && !notListed.length,
+          notInForm.length || notListed.length
+            ? 'в справочнике лишнее: ' + notInForm.join(', ') + '; не описано: ' + notListed.join(', ')
+            : names.length + ' полей, порядок и состав совпадают');
+        // «Обязательное» = звёздочка в форме: без неё поле сохранится пустым
+        const wrongReq = set.rows.filter(r => {
+          const f = real.find(x => x.name === shortName(r[0]));
+          return f && f.req !== (r[1] === 'да');
+        }).map(r => r[0] + ' (' + r[1] + ')');
+        check('в справочнике «' + set.title + '» обязательность совпадает со звёздочкой', !wrongReq.length, wrongReq.join(', '));
+      }
       const dealsTab = $$('.tabs button').find(b => /Сделки/.test(b.textContent));
       dealsTab.click(); await wait(500);
       check('справочник полей переключается между разделами', window.__state.builtinTab === 'deals' && $$('#builtinFields tr').slice(1).some(r => /Название сделки/.test(r.textContent)));
@@ -418,6 +488,20 @@ try {
   const id = competitor.id;
   for (const tab of ['report', 'sources', 'debts', 'reviews', 'prices', 'history']) { window.__state.compTab = tab; await window.openCompetitorCard(id); await wait(250); check('конкурент → ' + tab, $('#modalBody').innerHTML.length > 150 && !/class="card err"/.test($('#modalBody').innerHTML)) }
   window.closeModal();
+  // «Ссылка на прайс»: сервер умел подтягивать таблицу конкурента по адресу,
+  // но поля в форме не было — функция оставалась недостижимой из интерфейса.
+  await window.openCompetitor(); await wait(350);
+  check('в форме конкурента есть поле «Ссылка на прайс»', Boolean($('#modalBody [name="price_url"]')) && /Ссылка на прайс/.test($('#modalBody').textContent));
+  check('подсказка объясняет, зачем конкуренту ссылка на прайс', /сама подтянет|при каждой проверке/i.test($('#modalBody').textContent), $('#modalBody').textContent.replace(/\s+/g, ' ').slice(0, 120));
+  window.closeModal(); await wait(150);
+  // Ссылки для ручной проверки приходят с сервера (их там четырнадцать: ФНС, ФССП,
+  // Федресурс, арбитраж, Росстат, карты, отзывы), а не зашиты в интерфейс парой штук.
+  {
+    const html = window.reportLinks({ links: [{ label: 'Росстат', url: 'https://example.gov/a' }, { label: 'ФССП', url: 'https://example.gov/b' }] }, { name: 'ООО Тест', inn: '7700111222' });
+    check('в отчёт попадают ссылки из ответа сервера, а не две зашитые', /Росстат/.test(html) && /ФССП/.test(html) && /target="_blank"/.test(html) && /rel="noopener"/.test(html));
+    const fallback = window.reportLinks({}, { name: 'ООО Тест', inn: '7700111222' });
+    check('без готового отчёта остаются хотя бы поисковые ссылки', /rusprofile\.ru\/search/.test(fallback) && /7700111222/.test(fallback));
+  }
   // наша таблица цен: загружена — значит кнопка показывает её, а не просит файл
   await fetch(BASE + '/api/prices', { method: 'POST', headers: authH(), body: JSON.stringify({ scope: 'ours', text: 'Каркасный дом 8×10;2950000;шт\nБаня 4×6;890000;шт' }) });
   await fetch(BASE + '/api/competitors/' + id + '/prices', { method: 'POST', headers: authH(), body: JSON.stringify({ scope: 'competitor', text: 'Каркасный дом 8×10;3200000;шт' }) });

@@ -10,14 +10,51 @@ node --check backend/src/server.js
 node --check backend/src/competitors.js
 node --check backend/src/smtp.js
 node --check frontend/public/app.js
+node --check tests/routes.test.mjs
 
-echo "▶ 2/4 Интеграционные тесты (API, уведомления, гигиена базы, конкуренты, миграции, S3)"
+echo "▶ 2/4 Интеграционные тесты (API, уведомления, гигиена базы, конкуренты, маршруты, миграции, S3)"
 node --experimental-sqlite --test tests/api.test.js tests/competitors.test.js tests/notifications.test.mjs tests/db-hygiene.test.mjs
+node --test tests/routes.test.mjs
 node --experimental-sqlite tests/migrate.test.mjs
 node --experimental-sqlite tests/seed.test.mjs
 node --test tests/backup-s3.test.mjs
 
-echo "▶ 3/4 Проверка docker-compose и Caddyfile"
+echo "▶ 3/4 Проверка docker-compose, Caddyfile и CI"
+# Ошибка в YAML воркфлоу не выглядит как ошибка: прогон падает за 0 секунд
+# с подписью «workflow file issue», а проверки в pull request просто не
+# появляются. Проверяем файл до пуша.
+python3 << 'WFCHECK'
+import re, sys
+path = '.github/workflows/tests.yml'
+src = open(path, encoding='utf-8').read()
+parsed = False
+try:
+    import yaml
+    yaml.safe_load(src)
+    parsed = True
+except ImportError:
+    pass
+except Exception as e:
+    print('  ❌ YAML воркфлоу не разобран:', str(e).splitlines()[0]); sys.exit(1)
+# Незакавыченное значение с «: » внутри парсер читает как второй ключ —
+# именно так ломается имя шага вида «- name: Маршруты API: …».
+bad = []
+for i, line in enumerate(src.splitlines(), 1):
+    m = re.match(r'^\s*-?\s*(name|run|if|uses|shell):\s+(.+)$', line)
+    if not m:
+        continue
+    val = m.group(2).strip()
+    if val[:1] in ('"', "'", '|', '>'):
+        continue
+    if ': ' in val or val.endswith(':'):
+        bad.append('строка %d: %s' % (i, val[:60]))
+if bad:
+    print('  ❌ воркфлоу: значение с «: » без кавычек — ' + '; '.join(bad)); sys.exit(1)
+if not re.search(r'^\s*-\s*uses:\s*actions/checkout', src, re.M):
+    print('  ❌ воркфлоу: нет шага actions/checkout'); sys.exit(1)
+print('  ✅ воркфлоу CI разбирается' + (' (проверено парсером YAML)' if parsed else ' (кавычки, «: » и checkout проверены)'))
+WFCHECK
+
 if python3 -c 'import yaml' 2>/dev/null; then
   python3 << 'PY'
 import yaml, sys

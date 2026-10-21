@@ -658,14 +658,14 @@ export function createCompetitors(ctx) {
       if (req.method === 'GET') return json(res, 200, {
         sources: SOURCE_DEFS.map(s => ({ ...s, configured: s.needs.every(k => !!getSetting(k)), url: srcUrl({ rusprofile: 'RUSPROFILE_URL', fns: 'FNS_API_URL', fedresurs: 'FEDRESURS_API_URL', fssp: 'FSSP_API_URL', kad: 'KAD_API_URL', google: 'GOOGLE_API_URL', '2gis': 'TWOGIS_API_URL', yandex: 'YANDEX_API_URL' }[s.key]) })),
         keys: { FNS_API_KEY: !!getSetting('FNS_API_KEY'), FSSP_TOKEN: !!getSetting('FSSP_TOKEN'), GOOGLE_PLACES_KEY: !!getSetting('GOOGLE_PLACES_KEY'), TWOGIS_KEY: !!getSetting('TWOGIS_KEY'), YANDEX_API_KEY: !!getSetting('YANDEX_API_KEY') },
-        ourPriceUrl: getSetting('OUR_PRICE_URL'), timeout: getSetting('COMPETITOR_TIMEOUT_MS', '12000'),
+        timeout: getSetting('COMPETITOR_TIMEOUT_MS', '12000'),
         urls: Object.fromEntries(Object.keys(SOURCE_URL_DEFAULTS).map(k => [k, srcUrl(k)])),
       });
       if (req.method === 'PUT') {
       if (!await admin()) return;
       const b = await readBody(req);
       // только известные ключи: адреса источников, ключи и таймаут
-      const allowed = [...Object.keys(SOURCE_URL_DEFAULTS), 'FNS_API_KEY', 'FSSP_TOKEN', 'GOOGLE_PLACES_KEY', 'TWOGIS_KEY', 'YANDEX_API_KEY', 'OUR_PRICE_URL', 'COMPETITOR_TIMEOUT_MS'];
+      const allowed = [...Object.keys(SOURCE_URL_DEFAULTS), 'FNS_API_KEY', 'FSSP_TOKEN', 'GOOGLE_PLACES_KEY', 'TWOGIS_KEY', 'YANDEX_API_KEY', 'COMPETITOR_TIMEOUT_MS'];
       for (const k of allowed) if (b[k] !== undefined && !String(b[k]).includes('•')) setSetting(k, String(b[k]).slice(0, 512));
       return json(res, 200, { saved: true });
     }
@@ -690,7 +690,6 @@ export function createCompetitors(ctx) {
       }));
       return json(res, 200, { results, ms: Date.now() - started, probe: probe.name });
     }
-    if (p === '/api/competitor-links') { const q = { name: u.searchParams.get('name') || '', inn: u.searchParams.get('inn') || '', ogrn: u.searchParams.get('ogrn') || '' }; return json(res, 200, { links: linksFor(q) }); }
     if (p === '/api/competitors') {
       if (req.method === 'GET') {
         const list = db.prepare('SELECT * FROM competitors ORDER BY id DESC').all();
@@ -762,12 +761,6 @@ export function createCompetitors(ctx) {
         ? catalogPrices(db, { includeArchived: u.searchParams.get('all') === '1' })
         : db.prepare('SELECT * FROM price_rows WHERE scope=? AND competitor_id=? ORDER BY item').all(scope, compId || 0);
       return json(res, 200, { scope, rows, competitor_id: compId ? Number(compId) : null, source: scope === 'ours' ? 'catalog' : 'price_rows' });
-    }
-    if ((p === '/api/prices/load' || p === '/api/competitors/prices-url') && req.method === 'POST') {
-      if (!await admin()) return;
-      const b = await readBody(req);
-      if (b.url) { try { const text = await fetchTable(b.url); const rows = importBuffer(Buffer.from(text), 'URL-таблица'); if (!rows.length) return json(res, 400, { error: 'В таблице не найдено позиций с ценами' }); const stat = catalogUpsert(db, rows.map(r => ({ ...r, note: r.note })), { mode: b.mode === 'merge' ? 'merge' : 'replace' }); setSetting('OUR_PRICE_URL', b.url); return json(res, 200, finishImport({ imported: rows.length, scope: 'ours', mode: b.mode === 'merge' ? 'merge' : 'replace', ...stat, rows: catalogPrices(db) }, null, user)); } catch (e) { return json(res, 400, { error: e.message }) } }
-      return json(res, 400, { error: 'Не передан URL таблицы' });
     }
     if (p === '/api/competitors/find' && req.method === 'POST') {
       // «Пишем название конкурента» — ищем и сразу проверяем.

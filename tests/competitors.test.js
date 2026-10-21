@@ -358,3 +358,36 @@ test('сравнение цен находит позицию с чуть дру
     '«Баня каркасная 4×6» и «Баня 4×6» сопоставлены: ' + JSON.stringify(pairs));
   assert.ok(!pairs.some(p => /Летний/.test(p.item)), 'разные комплектации одного размера не склеиваются');
 });
+
+test('ссылка на прайс: CRM сама подтягивает таблицу конкурента при каждой проверке', async () => {
+  await mock('pricetable', (req, r) => {
+    r.writeHead(200, { 'Content-Type': 'text/csv; charset=utf-8' });
+    r.end('Наименование;Цена;Ед\nКаркасный дом 8×10 «Север»;4300000;шт\nБаня 4×6 под ключ;920000;шт\n');
+  });
+  const comp = (await call('/api/competitors')).body.find(c => c.inn === INN);
+  const addr = url('pricetable') + '/price.csv';
+  const patched = await call(`/api/competitors/${comp.id}`, { method: 'PATCH', body: JSON.stringify({ price_url: addr }) });
+  assert.equal(patched.status, 200);
+  assert.equal(patched.body.price_url, addr, 'ссылка сохранена в карточке конкурента');
+  const r = await call(`/api/competitors/${comp.id}/check`, { method: 'POST', body: JSON.stringify({ sources: ['fns'] }) });
+  const pulled = r.body.results.find(x => x.source === 'prices');
+  assert.ok(pulled && pulled.status === 'ok', 'таблица по ссылке подтянута: ' + JSON.stringify(pulled));
+  assert.match(pulled.summary, /Загружено позиций: 2/);
+  const rows = await call(`/api/prices?scope=competitor&competitor=${comp.id}`);
+  assert.equal(rows.body.rows.length, 2, 'подтянутые позиции лежат отдельно от нашего прайса');
+  assert.ok(rows.body.rows.some(x => /8×10/.test(x.item) && x.price === 4300000));
+  assert.ok(r.body.report.pricing.pairs.some(x => x.theirs === 4300000), 'подтянутая цена сразу попала в сравнение');
+});
+
+test('убранные адреса не отвечают, а мёртвая настройка не отдаётся', async () => {
+  // Эти три адреса никто не вызывал: ни интерфейс, ни тесты. Держать их — значит
+  // держать дверь, которая выглядит рабочей, но ведёт в никуда.
+  for (const p of ['/api/competitor-links?inn=' + INN, '/api/competitors/prices-url']) {
+    assert.equal((await call(p)).status, 404, p + ' больше не обслуживается');
+  }
+  assert.equal((await call('/api/prices/load', { method: 'POST', body: JSON.stringify({ url: 'https://example.com/p.csv' }) })).status, 404,
+    'загрузка нашего прайса по адресу убрана: прайс-лист = каталог');
+  const s = await call('/api/competitor-sources');
+  assert.ok(!('ourPriceUrl' in s.body), 'настройка OUR_PRICE_URL больше не отдаётся');
+  assert.ok(!Object.keys(s.body).some(k => /ourprice/i.test(k)), 'в настройках источников нет мёртвых ключей');
+});
