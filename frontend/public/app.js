@@ -975,7 +975,6 @@ async function dashboard(v) {
    <div class="card"><div class="row" style="border:0"><h3>Мои задачи</h3><button class="btn sm" onclick="go('tasks')">Все задачи</button></div>
     <div class="list">${myTasksBlock()}</div></div>
    <div class="card"><h3>Последние события компании</h3>
-    <p class="form-hint" style="margin:-2px 0 8px">Короткая лента: что недавно меняли коллеги. Всё важное по вашим клиентам — в «Моих задачах» выше.</p>
     <div class="list feed">${d.activities.map(a => `<div class="row"><span>• ${esc(a.text)}<br><small>${esc(dt(a.created_at))}${a.user_name ? ' · ' + esc(a.user_name) : ''}</small></span></div>`).join('') || '<small>Пока пусто</small>'}</div></div>
   </div></div>`;
 }
@@ -2053,7 +2052,6 @@ async function competitorsView(v) {
      <h3>Конкуренты на контроле (${shown.length}${shown.length !== list.length ? ` из ${list.length}` : ''})</h3>
      <input id="compFilter" style="max-width:250px" placeholder="Поиск по списку: название, ИНН, город" value="${esc(state.compQuery || '')}" oninput="liveSearch('compList',()=>setCompQuery(this.value))">
      ${state.compQuery ? `<button class="btn sm ghost" onclick="clearCompQuery()">Сбросить</button>` : ''}
-     <small style="margin-left:auto">ФНС · ФССП · Суды · Банкротство · Отзывы · Сравнение цен</small></div>
    <table><tr><th>Конкурент</th><th>ИНН</th><th>Город / сайт</th><th>Риск</th><th>Проверка</th><th>Цены</th><th></th></tr>
     ${shown.map(c => `<tr>
      <td><a href="#" onclick="openCompetitorCard(${c.id});return false"><b>${esc(c.name)}</b></a></td>
