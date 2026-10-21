@@ -110,6 +110,7 @@ const SCHEMA = [
 const SCHEMA_COLUMNS = [...SCHEMA,
   ['users', 'must_change_password', 'INTEGER NOT NULL DEFAULT 0'],
   ['users', 'session_version', 'INTEGER NOT NULL DEFAULT 0'],
+  ['users', 'last_login', 'TEXT'],
   ['contacts', 'company_id', 'INTEGER'], ['contacts', 'position', 'TEXT'], ['contacts', 'responsible_id', 'INTEGER'],
   ['contacts', 'tags', "TEXT DEFAULT ''"], ['contacts', 'notes', "TEXT DEFAULT ''"], ['contacts', 'source', "TEXT DEFAULT 'manual'"],
   ['deals', 'pipeline_id', 'INTEGER DEFAULT 1'], ['deals', 'priority', "TEXT DEFAULT 'normal'"], ['deals', 'loss_reason', 'TEXT'],
@@ -363,17 +364,72 @@ export function broadcastTo(userId, ev, data) {
 }
 
 // ---------- automations ----------
+// Автоматизации: событие → одно действие. Правило проверяется при сохранении,
+// поэтому во время работы с клиентом ничего не ломается из-за опечатки.
+const AUTOMATION_TRIGGERS = ['deal_created', 'message_in', 'stage_changed'];
+const AUTOMATION_ACTIONS = ['create_task', 'change_stage', 'add_tag'];
+function validateAutomation(b, current = {}) {
+  const merged = { ...current, ...b };
+  const name = String(merged.name || '').trim();
+  if (!name) return 'Укажите название правила — по нему вы найдёте его в списке';
+  if (!AUTOMATION_TRIGGERS.includes(merged.trigger_type)) return 'Выберите событие, на которое срабатывает правило';
+  if (!AUTOMATION_ACTIONS.includes(merged.action_type)) return 'Выберите, что должно произойти';
+  const value = String(merged.action_value || '').trim();
+  if (!value) return merged.action_type === 'change_stage' ? 'Выберите этап, на который переводить сделку' : merged.action_type === 'add_tag' ? 'Укажите тег, который нужно добавить' : 'Напишите текст задачи, которую нужно создать';
+  if (merged.action_type === 'change_stage' && !db.prepare('SELECT 1 x FROM stages WHERE code=?').get(value)) return 'Такого этапа нет — обновите страницу и выберите этап из списка';
+  const tv = String(merged.trigger_value || '').trim();
+  if (merged.trigger_type === 'stage_changed' && tv && !db.prepare('SELECT 1 x FROM stages WHERE code=?').get(tv)) return 'Этап-условие не найден — выберите этап из списка';
+  b.name = name.slice(0, 120);
+  b.action_value = value.slice(0, 300);
+  b.trigger_value = tv.slice(0, 120);
+  if (b.active !== undefined) b.active = b.active ? 1 : 0;
+  return null;
+}
+// Ключевое слово в сообщении ищем по основе и поддерживаем список через запятую:
+// «смета» находит и «смету», и «сметы», а «цена, смета» срабатывает на любое из слов.
+function keywordHit(text, rule) {
+  const haystack = String(text || '').toLowerCase();
+  return String(rule || '').split(/[,;]/).map(w => w.trim().toLowerCase()).filter(Boolean)
+    .some(w => haystack.includes(w) || (w.length >= 5 && haystack.includes(w.slice(0, -1))));
+}
 function runAutomations(trigger, ctx = {}) {
-  for (const a of db.prepare('SELECT * FROM automations WHERE active=1 AND trigger_type=?').all(trigger)) {
-    if (a.trigger_value && ctx.stage && a.trigger_value !== ctx.stage) continue;
+  for (const a of db.prepare('SELECT * FROM automations WHERE active=1 AND trigger_type=? ORDER BY id').all(trigger)) {
     try {
-      if (a.action_type === 'create_task' && (ctx.contact_id || ctx.deal_id)) {
-        const owner = (ctx.deal_id && db.prepare('SELECT responsible_id FROM deals WHERE id=?').get(ctx.deal_id)?.responsible_id) || (ctx.contact_id && db.prepare('SELECT responsible_id FROM contacts WHERE id=?').get(ctx.contact_id)?.responsible_id) || null;
-        db.prepare('INSERT INTO tasks(title,due,contact_id,deal_id,responsible_id) VALUES(?,?,?,?,?)').run(a.action_value || a.name, normalizeDue('сегодня'), ctx.contact_id || null, ctx.deal_id || null, owner);
+      // условие правила: конкретный этап или ключевое слово в сообщении
+      if (a.trigger_value) {
+        if (trigger === 'stage_changed' && a.trigger_value !== ctx.stage) continue;
+        if (trigger === 'message_in' && !keywordHit(ctx.text, a.trigger_value)) continue;
       }
-      if (a.action_type === 'change_stage' && ctx.deal_id && a.action_value) db.prepare('UPDATE deals SET stage=? WHERE id=?').run(a.action_value, ctx.deal_id);
-      if (a.action_type === 'add_tag' && ctx.contact_id && a.action_value) { const c = db.prepare('SELECT tags FROM contacts WHERE id=?').get(ctx.contact_id); const tags = [...new Set([...(c?.tags || '').split(',').filter(Boolean), a.action_value])].join(','); db.prepare('UPDATE contacts SET tags=? WHERE id=?').run(tags, ctx.contact_id); }
-      log(`Автоматизация «${a.name}» сработала`);
+      if (a.action_type === 'create_task') {
+        if (!ctx.contact_id && !ctx.deal_id) continue;
+        const owner = (ctx.deal_id && db.prepare('SELECT responsible_id FROM deals WHERE id=?').get(ctx.deal_id)?.responsible_id)
+          || (ctx.contact_id && db.prepare('SELECT responsible_id FROM contacts WHERE id=?').get(ctx.contact_id)?.responsible_id) || null;
+        const r = db.prepare('INSERT INTO tasks(title,due,contact_id,deal_id,responsible_id) VALUES(?,?,?,?,?)')
+          .run(a.action_value || a.name, normalizeDue('сегодня'), ctx.contact_id || null, ctx.deal_id || null, owner);
+        log(`Автоматизация «${a.name}»: создана задача`, 'tasks', Number(r.lastInsertRowid));
+        if (owner && Number(owner) !== Number(ctx.actor_id)) broadcastTo(owner, 'notify', { type: 'task_assigned', id: Number(r.lastInsertRowid), title: String(a.action_value || a.name), due: normalizeDue('сегодня') });
+        broadcast('change', { table: 'tasks' });
+      }
+      if (a.action_type === 'change_stage' && ctx.deal_id && a.action_value) {
+        const d = db.prepare('SELECT * FROM deals WHERE id=?').get(ctx.deal_id);
+        if (!d || d.stage === a.action_value) continue;
+        // этап должен принадлежать воронке сделки: иначе карточка исчезнет из доски
+        const st = getStages(Number(d.pipeline_id) || 1).find(x => x.code === a.action_value);
+        if (!st) { console.warn(`Автоматизация «${a.name}»: этап ${a.action_value} не найден в воронке сделки`); continue; }
+        const closed = ['won', 'lost'].includes(st.code) ? ",closed_at=datetime('now')" : ',closed_at=NULL';
+        db.prepare(`UPDATE deals SET stage=?,updated_at=datetime('now')${closed} WHERE id=?`).run(st.code, d.id);
+        log(`Автоматизация «${a.name}»: сделка «${d.title}» → этап «${st.name}»`, 'deals', d.id);
+        broadcast('change', { table: 'deals' });
+      }
+      if (a.action_type === 'add_tag' && ctx.contact_id && a.action_value) {
+        const c = db.prepare('SELECT tags FROM contacts WHERE id=?').get(ctx.contact_id);
+        if (!c) continue;
+        const tags = [...new Set([...(c.tags || '').split(',').map(x => x.trim()).filter(Boolean), a.action_value])].join(',');
+        if (tags === (c.tags || '')) continue;
+        db.prepare('UPDATE contacts SET tags=? WHERE id=?').run(tags, ctx.contact_id);
+        log(`Автоматизация «${a.name}»: клиенту добавлен тег «${a.action_value}»`, 'contacts', ctx.contact_id);
+        broadcast('change', { table: 'contacts' });
+      }
     } catch (e) { console.error('automation', e); }
   }
 }
@@ -440,7 +496,7 @@ export function upsertIncoming({ channel = 'whatsapp', chatType = '', phone = ''
   db.prepare("UPDATE conversations SET channels=?,channel_id=COALESCE(NULLIF(?,''),channel_id),external_chat_id=COALESCE(NULLIF(?,''),external_chat_id),chat_type=COALESCE(NULLIF(?,''),chat_type),unread=unread+1,last_at=datetime('now') WHERE id=?").run(channels, channelId, String(chatId || ''), chatType, conv.id);
   if (!dealId) dealId = ensureDeal(contact); // клиент вернулся, а открытой сделки нет — заводим новое обращение
   const openDeal = db.prepare("SELECT id FROM deals WHERE contact_id=? AND stage NOT IN ('won','lost') ORDER BY id DESC").get(contact.id);
-  runAutomations('message_in', { contact_id: contact.id, deal_id: dealId || openDeal?.id });
+  runAutomations('message_in', { contact_id: contact.id, deal_id: dealId || openDeal?.id, text: body });
   // в событии есть имя и превью: интерфейс показывает понятное уведомление
   broadcast('message', { conversation_id: conv.id, title: contact.name || conv.title || 'Клиент', preview: String(body || '').slice(0, 90), direction: 'in' });
   return conv;
@@ -878,6 +934,8 @@ export const server = http.createServer(async (req, res) => {
       // успешный вход обнуляет счётчики неудач — опечатка в пароле не блокирует офис
       RL.delete('login:' + ip);
       if (emailKey) RL.delete('login-acc:' + emailKey);
+      // администратору видно, когда сотрудник заходил последний раз
+      try { db.prepare("UPDATE users SET last_login=datetime('now','localtime') WHERE id=?").run(user.id); } catch {}
       const token = sign({ id: user.id, email: user.email, name: user.name, role: user.role });
       res.setHeader('Set-Cookie', sessionCookie(req, token));
       return json(res, 200, { token, user: { id: user.id, name: user.name, email: user.email, role: user.role, must_change_password: user.must_change_password } }); }
@@ -967,7 +1025,13 @@ export const server = http.createServer(async (req, res) => {
       const target = Number(getSetting('SALES_TARGET', '0')) || 0;
       const plan = { target, fact: monthRow.s, month, deals: monthRow.n, percent: target ? Math.round(monthRow.s / target * 100) : null };
       const forecast = db.prepare("SELECT COALESCE(SUM(amount),0) s FROM deals WHERE stage NOT IN ('won','lost')").get().s;
+      // выручка по месяцам: считаем месяц закрытия, а не месяц создания сделки
+      const byMonth = db.prepare(`SELECT substr(COALESCE(closed_at,updated_at,created_at,''),1,7) ym,
+          COUNT(*) n, COALESCE(SUM(amount),0) s
+        FROM deals WHERE stage='won' AND COALESCE(closed_at,updated_at,created_at,'') <> ''
+        GROUP BY ym ORDER BY ym DESC LIMIT 6`).all().reverse();
       return json(res, 200, {
+        byMonth,
         plan,
         conversion: wonCount + lostCount ? Math.round(wonCount / (wonCount + lostCount) * 100) : 0,
         avgCheck: wonCount ? Math.round(wonSum / wonCount) : 0,
@@ -1098,6 +1162,7 @@ export const server = http.createServer(async (req, res) => {
         const required = { contacts: 'name', companies: 'name', products: 'name', tasks: 'title', automations: 'name', templates: 'name' }[table];
         if (required && !String(b[required] || '').trim()) return json(res, 400, { error: required === 'name' ? 'Укажите название' : 'Укажите название задачи' });
         if (table === 'notes' && !String(b.body || '').trim()) return json(res, 400, { error: 'Заметка не может быть пустой' });
+        if (table === 'automations') { const err = validateAutomation(b); if (err) return json(res, 400, { error: err }); }
         if (table === 'notes') {
           const et = String(b.entity_type || '');
           if (!['contacts', 'deals', 'companies'].includes(et)) return json(res, 400, { error: 'Заметку можно привязать только к клиенту, сделке или компании' });
@@ -1133,6 +1198,11 @@ export const server = http.createServer(async (req, res) => {
       if (req.method === 'PATCH' && id) {
         const b = await readBody(req);
         if (table === 'products') { const err = normalizeProduct(b); if (err) return json(res, 400, { error: err }); }
+        if (table === 'automations') {
+          const cur = db.prepare('SELECT * FROM automations WHERE id=?').get(id);
+          if (!cur) return json(res, 404, { error: 'Правило не найдено — обновите страницу' });
+          const err = validateAutomation(b, cur); if (err) return json(res, 400, { error: err });
+        }
         if (table === 'tasks' && b.due !== undefined) {
           const norm = b.due ? normalizeDue(String(b.due)) : '';
           if (b.due && !norm) return json(res, 400, { error: 'Не поняли срок. Укажите дату как 25.10.2026 14:00 или «завтра 10:00».' });
@@ -1374,7 +1444,7 @@ export const server = http.createServer(async (req, res) => {
       // Список нужен всем для выбора ответственного, но e-mail сотрудников —
       // только администратору: остальным достаточно имени и роли.
       if (req.method === 'GET') return json(res, 200, user.role === 'admin'
-        ? db.prepare('SELECT id,name,email,role,active FROM users ORDER BY id').all()
+        ? db.prepare('SELECT id,name,email,role,active,last_login,must_change_password FROM users ORDER BY id').all()
         : db.prepare('SELECT id,name,role,active FROM users ORDER BY id').all());
       if (req.method === 'POST') {
         if (!requireAdmin(user, res)) return;

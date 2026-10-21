@@ -54,7 +54,9 @@ Object.assign(window, {
   toggleUserMenu, closeUserMenu, toggleTaskSelect, ICON_PATHS, msgHtml, channelOptions,
   uploadChatFile, uploadLogo, deleteLogo, checkHealth, refreshLogo,
   sourceLabel, channelLabel, roleLabel, askConfirm, askInput, translit, SOURCE_LABELS, CHANNEL_LABELS, ROLE_LABELS,
-  isoDate, todayISO, fmtDayMonth, kindStage, fld, grid2, formLegend, pushToast, notify, captureFocus, restoreFocus, PALETTE_ACTIONS
+  isoDate, todayISO, fmtDayMonth, kindStage, fld, grid2, formLegend, pushToast, notify, captureFocus, restoreFocus, PALETTE_ACTIONS,
+  openMenu, closeMenu, contactsMoreMenu, openOurPrices, comparePrices, setBuiltinTab, BUILTIN_FIELDS, amAdmin, canEdit,
+  ourPriceRows, filterOurPrices, toggleAutomation, openAutomation, noteRow, editNote, lockFormsForViewer, AUTO_TRIGGERS, AUTO_ACTIONS
 });`;
 const dom = new JSDOM(htmlClean, { runScripts: 'dangerously', url: BASE + '/', pretendToBeVisual: true, virtualConsole: new VirtualConsole() });
 const { window } = dom;
@@ -175,17 +177,24 @@ try {
     window.__state.meta = await (await fetch(BASE + '/api/meta', { headers: authH() })).json();
     window.__state.settingsTab = 'fields'; window.go('settings'); await wait(400);
     {
-      const rows = $$('#view table tr').slice(1).map(r => [...r.children].map(td => td.textContent.trim()));
+      const rows = $$('#cfFields tr').slice(1).map(r => [...r.children].map(td => td.textContent.trim()));
       const reqRow = rows.find(r => /Площадь участка/.test(r[0]));
       const optRow = rows.find(r => /Тип фундамента/.test(r[0]));
       check('в таблице полей видно, что обязательное идёт сверху', Boolean(reqRow) && /Да/.test(reqRow[3]) && /сначала/i.test(reqRow[3]) && /звёздочк/i.test(reqRow[3]), reqRow && reqRow[3]);
       check('в таблице полей видно, что необязательное идёт ниже', Boolean(optRow) && /Нет/.test(optRow[3]) && /ниже/i.test(optRow[3]), optRow && optRow[3]);
       check('объяснение для неспециалиста есть', /подписано жирным и звёздочкой/i.test($('#view').textContent));
-      check('у каждого поля есть понятная кнопка «Изменить»', $$('#view table tr').slice(1).every(r => /Изменить/.test(r.textContent)));
+      check('у каждого своего поля есть понятная кнопка «Изменить»', $$('#cfFields tr').slice(1).every(r => /Изменить/.test(r.textContent)));
+      const builtin = $$('#builtinFields tr').slice(1).map(r => r.children[0].textContent.trim());
+      check('встроенные поля карточек показаны в настройках', builtin.length >= 6 && builtin.includes('Имя клиента') && builtin.includes('Заметки'), builtin.join(', '));
+      check('для встроенных полей объяснено, где их менять', /Меняются в карточке клиента/.test($('#view').textContent) && /Удалить встроенное поле нельзя/.test($('#view').textContent));
+      const dealsTab = $$('.tabs button').find(b => /Сделки/.test(b.textContent));
+      dealsTab.click(); await wait(500);
+      check('справочник полей переключается между разделами', window.__state.builtinTab === 'deals' && $$('#builtinFields tr').slice(1).some(r => /Название сделки/.test(r.textContent)));
+      $$('.tabs button').find(b => /Контакты/.test(b.textContent)).click(); await wait(500);
     }
     // редактирование уже существующего поля: кнопка в строке таблицы
     {
-      const row = $$('#view table tr').find(r => /Тип фундамента/.test(r.textContent));
+      const row = $$('#cfFields tr').find(r => /Тип фундамента/.test(r.textContent));
       const btn = row && [...row.querySelectorAll('button')].find(b => /Изменить/.test(b.textContent));
       check('у существующего поля есть кнопка «Изменить»', Boolean(btn));
       if (btn) {
@@ -327,6 +336,17 @@ try {
   window.toggleTaskSelect(); await wait(450);
   check('режим мультивыбора показывает чекбоксы', $$('#view .taskrow input[type=checkbox]').length > 0, $$('#view .taskrow').length + ' строк задач');
   window.toggleTaskSelect(); await wait(300);
+  check('в задачах есть поиск по названию и клиенту', Boolean($('#taskSearch')) && /Поиск по задачам/.test($('#taskSearch').placeholder));
+  check('кнопка «Задача» в списке одна — в правом углу', $$('#view .row > button.btn.primary').length === 1);
+  window.__state.taskQuery = 'такой задачи точно нет'; window.go('tasks'); await wait(450);
+  {
+    const empty = $('#view .empty-state');
+    check('пустой список задач объясняет, что делать', Boolean(empty) && /измените условия поиска|кнопка «Задача»/.test(empty.textContent), empty && empty.textContent.slice(0, 60));
+    check('в середине пустого списка нет второй кнопки создания', Boolean(empty) && empty.querySelectorAll('button').length === 0);
+    check('кнопка создания в углу остаётся при пустом списке', $$('#view .row > button.btn.primary').length === 1);
+  }
+  window.__state.taskQuery = ''; window.go('tasks'); await wait(350);
+  check('в шапке остаются кнопки быстрого создания', $$('.head-actions .head-create').length === 3);
 
   // ── поиск: чистый поиск отдельно от палитры команд ────────────────────────
   const si = $('#globalSearch'); si.value = 'Ирине'; si.dispatchEvent(new window.Event('input', { bubbles: true })); await wait(500);
@@ -353,13 +373,43 @@ try {
   window.toggleSel('contacts', window.__state.contacts[0].id); await wait(300);
   check('панель массовых действий', /class="bulkbar"/.test($('#view').innerHTML) && /Выбрано: 1/.test($('#view').innerHTML));
   window.clearSel('contacts'); await wait(200);
+  {
+    const moreBtn = $$('#view button').find(b => /Ещё/.test(b.textContent));
+    check('в контактах есть меню «Ещё»', Boolean(moreBtn));
+    moreBtn.click(); await wait(120);
+    const menu = $('#popMenu');
+    check('меню «Ещё» крепится к странице и не прячется за таблицей', Boolean(menu) && menu.parentElement === window.document.body && cssText.includes('.dropdown-pop.menu-fixed{position:fixed'));
+    check('в меню понятные пункты: дубли, выгрузка, загрузка', $$('#popMenu button').length === 3 && /Найти дубли клиентов/.test(menu.textContent) && /Выгрузить в CSV/.test(menu.textContent) && /Загрузить список из CSV/.test(menu.textContent), menu && menu.textContent.replace(/\s+/g, ' ').slice(0, 90));
+    window.closeMenu(); await wait(60);
+    check('меню закрывается', !$('#popMenu'));
+  }
 
   // ── конкуренты ───────────────────────────────────────────────────────────
   window.go('competitors'); await wait(400);
-  check('список конкурентов показывает риск', /риск \d+/.test($('#view').innerHTML));
+  check('непроверенный конкурент честно помечен, а не «риск 0»', /не проверялся/.test($('#view').innerHTML) && !/риск 0 \(/.test($('#view').innerHTML));
+  check('в списке конкурентов есть поиск и наша таблица цен', Boolean($('#compFilter')) && /Наш прайс-лист/.test($('#view').textContent));
   const id = competitor.id;
   for (const tab of ['report', 'sources', 'debts', 'reviews', 'prices', 'history']) { window.__state.compTab = tab; await window.openCompetitorCard(id); await wait(250); check('конкурент → ' + tab, $('#modalBody').innerHTML.length > 150 && !/class="card err"/.test($('#modalBody').innerHTML)) }
   window.closeModal();
+  // наша таблица цен: загружена — значит кнопка показывает её, а не просит файл
+  await fetch(BASE + '/api/prices', { method: 'POST', headers: authH(), body: JSON.stringify({ scope: 'ours', text: 'Каркасный дом 8×10;2950000;шт\nБаня 4×6;890000;шт' }) });
+  await fetch(BASE + '/api/competitors/' + id + '/prices', { method: 'POST', headers: authH(), body: JSON.stringify({ scope: 'competitor', text: 'Каркасный дом 8×10;3200000;шт' }) });
+  window.__state.ourPrices = null;
+  window.go('competitors'); await wait(450);
+  {
+    const priceBtn = $$('#view button').find(b => /Наш прайс-лист/.test(b.textContent));
+    check('кнопка прайс-листа показывает число позиций', Boolean(priceBtn) && /\(2\)/.test(priceBtn.textContent), priceBtn && priceBtn.textContent.trim());
+    priceBtn.click(); await wait(400);
+    check('прайс-лист открывается таблицей, а не просьбой загрузить файл', /Наша таблица цен/.test($('#modalBody').textContent) && $$('#ourPriceTable tr').length === 3 && !$('#modalBody input[type=file]'), $('#modalBody').textContent.replace(/\s+/g, ' ').slice(0, 90));
+    check('таблицу цен можно скачать и заменить', /Скачать таблицу/.test($('#modalBody').textContent) && /Загрузить нашу таблицу цен/.test($('#modalBody').textContent));
+    check('в таблице цен есть поиск по позициям', Boolean($('#ourPriceFilter')));
+    window.filterOurPrices('баня'); await wait(60);
+    check('поиск по таблице цен работает', $$('#ourPriceTable tr').length === 2 && /Баня/.test($('#ourPriceTable').textContent));
+    window.closeModal();
+    window.__state.compTab = 'prices'; await window.openCompetitorCard(id); await wait(350);
+    check('сравнение цен считается по текущим таблицам', /мы дешевле на/.test($('#modalBody').textContent) && /Сопоставлено позиций/.test($('#modalBody').textContent), $('#modalBody').textContent.replace(/\s+/g, ' ').slice(0, 120));
+    window.closeModal();
+  }
 
   // ── дашборд и внимание ───────────────────────────────────────────────────
   window.go('dashboard'); await wait(350);
@@ -367,6 +417,12 @@ try {
   check('дашборд показывает состояние дел без лишнего шума', /Требует внимания|Всё под контролем/.test($('#view').innerHTML));
   check('карточки внимания: сегодня, просрочено, чаты', $('#view .attn-card.today') && $('#view .attn-card.warn') && $('#view .attn-card.chat'));
   check('дашборд содержит кликабельные KPI', $$('#view .clickable-card, #view .kpi[onclick]').length >= 4);
+  {
+    const dash = $('#view').innerHTML;
+    check('на рабочем столе «Мои задачи» стоят выше ленты событий', dash.indexOf('Мои задачи') > -1 && dash.indexOf('Мои задачи') < dash.indexOf('Последние события компании'));
+    check('блока «Быстрые действия» на рабочем столе нет', !/Быстрые действия/.test(dash));
+    check('лента событий объясняет, зачем она', /что недавно меняли коллеги/.test($('#view').textContent));
+  }
 
   // ── тема и меню пользователя ─────────────────────────────────────────────
   const themeBefore = window.document.documentElement.dataset.theme;
@@ -416,6 +472,123 @@ try {
   const jsHead = await fetch(BASE + '/app.js');
   check('скрипты не кэшируются (no-store)', (jsHead.headers.get('cache-control') || '').includes('no-store'));
 
+  // ── интерфейс реагирует на клики, а не только на прямые вызовы ───────────
+  {
+    window.go('settings'); await wait(600);
+    $$('.tabs button').find(b => /^Команда$/.test(b.textContent.trim())).click(); await wait(500);
+    check('вкладка настроек переключается кликом', window.__state.settingsTab === 'team' && /Права ролей/.test($('#view').textContent));
+    $$('.tabs button').find(b => /^Профиль$/.test(b.textContent.trim())).click(); await wait(400);
+    check('в профиле есть тема и смена пароля', window.__state.settingsTab === 'profile' && /Тема оформления/.test($('#view').textContent) && Boolean($('#view form [name=new_password]')));
+
+    window.go('tasks'); await wait(450);
+    $$('#view .tabs button').find(b => /Неделя/.test(b.textContent)).click(); await wait(450);
+    check('переключатель «Неделя» показывает календарь', window.__state.taskView === 'week' && Boolean($('#view .calendar')));
+    $$('#view .tabs button').find(b => /Список/.test(b.textContent)).click(); await wait(450);
+    $$('#view .tabs button').find(b => /^Все \(/.test(b.textContent.trim())).click(); await wait(450);
+    check('переключатель «Все» показывает задачи команды', window.__state.taskScope === 'all');
+
+    window.go('pipe'); await wait(450);
+    $$('#view .tabs button').find(b => /^Мои \(/.test(b.textContent.trim())).click(); await wait(450);
+    check('фильтр «Мои» на доске сделок работает кликом', window.__state.dealScope === 'mine');
+    $$('#view .tabs button').find(b => /^Все сделки$/.test(b.textContent.trim())).click(); await wait(450);
+
+    window.go('contacts'); await wait(450);
+    const src = $$('#view select').find(x => /Все источники/.test(x.textContent));
+    src.value = 'site'; src.dispatchEvent(new window.Event('change', { bubbles: true })); await wait(450);
+    check('фильтр источника в контактах применяется кликом', window.__state.contactFilter.source === 'site');
+    $$('#view button').find(b => /Сбросить/.test(b.textContent)).click(); await wait(400);
+    check('фильтр контактов сбрасывается', !window.__state.contactFilter.source);
+
+    window.go('inbox'); await wait(450);
+    const convRow = $('#convList .conv');
+    convRow.click(); await wait(400);
+    check('клик по диалогу открывает его', window.__state.conv !== null && Boolean($('#chatMsgs')));
+
+    window.go('competitors'); await wait(450);
+    await window.openCompetitorCard(id); await wait(350);
+    $$('#modalBody .tabs button').find(b => /Сравнение цен/.test(b.textContent)).click(); await wait(450);
+    check('вкладка карточки конкурента переключается кликом', window.__state.compTab === 'prices' && /Сравнение с нашей таблицей цен/.test($('#modalBody').textContent));
+    window.closeModal();
+
+    await window.openDealCard(dealId); await wait(400);
+    $$('#modalBody .tabs button').find(b => /^Заметки/.test(b.textContent.trim())).click(); await wait(450);
+    check('вкладка карточки сделки переключается кликом', window.__state.dealTab === 'notes' && /Новая заметка/.test($('#modalBody').textContent));
+    await apiPost('/api/notes', { entity_type: 'deals', entity_id: dealId, body: 'Заметка для проверки' });
+    await window.openDealCard(dealId); await wait(500);
+    check('заметку можно изменить, а не только удалить', /Заметка для проверки/.test($('#modalBody').textContent) && /Изменить/.test($('#modalBody').textContent));
+    $$('#modalBody button').find(b => /Изменить/.test(b.textContent)).click(); await wait(450);
+    check('«Изменить» открывает текст заметки для правки', $('#modalBody textarea[name=body]')?.value === 'Заметка для проверки');
+    window.closeModal();
+  }
+
+  // ── настройки: воронки, автоматизации, данные, команда ───────────────────
+  window.__state.settingsTab = 'pipelines'; window.go('settings'); await wait(450);
+  {
+    const card = $('#view .pipe-card');
+    check('воронка показана карточкой с этапами и числом сделок', Boolean(card) && /этапов · сделок:/.test(card.textContent));
+    const actions = card && card.querySelector('.pipe-actions');
+    check('кнопки управления воронкой — справа в карточке', Boolean(actions) && Boolean(actions.querySelector('button')) &&
+      (card.querySelector('.pipe-main').compareDocumentPosition(actions) & window.Node.DOCUMENT_POSITION_FOLLOWING) > 0);
+    check('кнопка справа подписана «Редактировать»', /Редактировать/.test(actions.textContent));
+    check('тип этапа виден в карточке воронки', /успех|отказ/.test(card.textContent));
+  }
+  window.__state.settingsTab = 'automations'; window.go('settings'); await wait(450);
+  {
+    const bad = await fetch(BASE + '/api/automations', { method: 'POST', headers: authH(), body: JSON.stringify({ name: 'Плохое правило', trigger_type: 'deal_created', action_type: 'change_stage', action_value: 'этапа-нет' }) });
+    const badBody = await bad.json();
+    check('правило с несуществующим этапом не сохраняется', bad.status === 400 && /Такого этапа нет/.test(badBody.error || ''), badBody.error);
+    const empty = await fetch(BASE + '/api/automations', { method: 'POST', headers: authH(), body: JSON.stringify({ name: 'Без значения', trigger_type: 'deal_created', action_type: 'create_task' }) });
+    check('правило без значения действия отклоняется с понятным текстом', empty.status === 400 && /Напишите текст задачи/.test((await empty.json()).error || ''));
+    const ok = await fetch(BASE + '/api/automations', { method: 'POST', headers: authH(), body: JSON.stringify({ name: 'Новый лид — позвонить', trigger_type: 'deal_created', action_type: 'create_task', action_value: 'Позвонить клиенту', active: 1 }) });
+    check('понятное правило сохраняется', ok.status === 201);
+    window.go('settings'); await wait(450);
+    check('в списке правил событие и действие написаны по-человечески', /Появилась новая сделка/.test($('#view').textContent) && /Создать задачу «Позвонить клиенту»/.test($('#view').textContent), $('#view').textContent.replace(/\s+/g, ' ').slice(0, 120));
+    check('у правила есть выключатель и кнопки изменения', Boolean($('#view input[type=checkbox]')) && /Изменить/.test($('#view').textContent));
+    await window.openAutomation(); await wait(350);
+    check('в форме правила этап выбирается из списка воронки', Boolean($('#modalBody select[name=action_type]')) && /Создать задачу/.test($('#modalBody').textContent));
+    $('#modalBody select[name=action_type]').value = 'change_stage';
+    $('#modalBody select[name=action_type]').dispatchEvent(new window.Event('change', { bubbles: true })); await wait(80);
+    check('при выборе «перевести на этап» появляется список этапов', Boolean($('#autoActionValue select[name=action_value]')) && $$('#autoActionValue option').length >= 2);
+    window.closeModal();
+  }
+  window.__state.settingsTab = 'data'; window.go('settings'); await wait(450);
+  {
+    check('в разделе данных нет сворачиваемого блока про другой сервер', !$('#view details.settings-more') && !/Копии на другом сервере/.test($('#view').textContent));
+    check('короткая подсказка про вторую копию осталась', /DEPLOY\.md/.test($('#view').textContent));
+  }
+  window.__state.settingsTab = 'team'; window.go('settings'); await wait(500);
+  {
+    check('в команде виден последний вход сотрудника', /Последний вход/.test($('#view').textContent) && !/ещё не входил/.test($('#view').textContent), $('#view').textContent.replace(/\s+/g, ' ').slice(0, 80));
+    check('в команде есть поиск по людям', Boolean($('#teamSearch')));
+    check('права ролей объяснены простыми словами', /Наблюдатель/.test($('#view').textContent) && /Первый вход/.test($('#view').textContent));
+  }
+  window.__state.settingsTab = 'templates'; window.go('settings'); await wait(400);
+  check('поиск есть в шаблонах', Boolean($('#tplSearch')));
+  window.__state.settingsTab = 'competitors'; window.go('settings'); await wait(450);
+  {
+    check('наша таблица цен видна в настройках', /Наша таблица цен/.test($('#view').textContent) && $$('#view table.mini tr').length > 2);
+    check('таблицу цен в настройках можно скачать и заменить', /Скачать CSV/.test($('#view').textContent) && /Загрузить или заменить/.test($('#view').textContent));
+    check('объяснено, что ключи источников не обязательны', /не обязательны/.test($('#view').textContent) && /работает без ключа/.test($('#view').textContent));
+    check('есть проверка доступности источников', /Проверить доступность источников/.test($('#view').textContent));
+  }
+
+  // ── поиск есть в каждом разделе со списком ───────────────────────────────
+  for (const [view, sel] of Object.entries({ contacts: '#contactSearch', companies: '#companySearch', products: '#productSearch', tasks: '#taskSearch', pipe: '#dealSearch', inbox: '#convSearch', competitors: '#compFilter' })) {
+    window.go(view); await wait(400);
+    check('поиск в разделе «' + view + '»', Boolean($(sel)), sel);
+  }
+  window.go('dashboard'); await wait(300);
+
+  // ── тёмная тема и шрифты ─────────────────────────────────────────────────
+  {
+    const sizes = [...cssText.matchAll(/font-size:(\d+(?:\.\d+)?)px/g)].map(m => +m[1]);
+    check('мелкого шрифта не осталось: всё не меньше 11.5px', sizes.length > 20 && Math.min(...sizes) >= 11.5, 'минимум ' + Math.min(...sizes) + 'px из ' + sizes.length);
+    check('гарнитура задана переменной и не меняется от темы', cssText.includes('--font-ui') && cssText.includes('font:14px/1.55 var(--font-ui)') && !/data-theme=dark[^{]*\{[^}]*font-family/.test(cssText));
+    check('в тёмной теме докрашены каналы, приоритеты и цветные плашки',
+      ['html[data-theme=dark] .chan{', 'html[data-theme=dark] .prio.high{', 'html[data-theme=dark] .card.tint-info{', 'html[data-theme=dark] pre.code-block{'].every(x => cssText.includes(x)));
+    check('в интерфейсе не осталось разноцветных inline-плашек', !/background:#f0fdf4|background:#fff7ed|background:#fffbeb/.test(appJsRaw));
+  }
+
   // ── роли ─────────────────────────────────────────────────────────────────
   await apiPost('/api/users', { name: 'Менеджер Тест', email: 'mgr_ui@example.com', password: 'password123', role: 'manager' });
   const mgrLogin = await (await fetch(BASE + '/api/auth/login', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ email: 'mgr_ui@example.com', password: 'password123' }) })).json();
@@ -438,7 +611,24 @@ try {
   window.go('settings'); await wait(350);
   const mSet = $('#view').innerHTML;
   check('менеджер видит только доступные вкладки настроек', /Мой профиль/.test(mSet) && !/Интеграции и каналы/.test(mSet) && !/>Команда</.test(mSet) && !/>Воронки и этапы</.test(mSet));
-  window.__state.me = admin; window.__state.settingsTab = 'integrations';
+  window.go('competitors'); await wait(400);
+  check('менеджер видит прайс-лист и может проверять конкурентов', /Наш прайс-лист/.test($('#view').textContent) && /Найти и проверить/.test($('#view').textContent));
+  const mgrOurs = await fetch(BASE + '/api/prices', { method: 'POST', headers: { 'Content-Type': 'application/json', Authorization: 'Bearer ' + mgrToken }, body: JSON.stringify({ scope: 'ours', text: 'Дом;1000000;шт' }) });
+  check('менеджер не может менять нашу таблицу цен (403)', mgrOurs.status === 403);
+
+  window.__state.me = { id: 98, name: 'Наблюдатель', role: 'viewer' };
+  window.document.body.classList.add('role-viewer');
+  window.go('contacts'); await wait(450);
+  check('наблюдателю объяснено, что он только читает', /Режим просмотра/.test($('#view').textContent));
+  check('наблюдатель не видит кнопок создания и удаления клиентов', !/Новый контакт/.test($('#view').innerHTML) && $$('#view .btn.danger').length === 0);
+  window.go('tasks'); await wait(450);
+  check('наблюдатель видит задачи без кнопок изменения', /Задач:/.test($('#view').textContent) && $$('#view .taskrow .btn').length === 0);
+  window.go('inbox'); await wait(450);
+  check('наблюдатель читает чаты без поля отправки', !$('#msgText') && /Режим просмотра/.test($('#view').textContent));
+  check('в шапке наблюдателя кнопки создания скрыты', cssText.includes('body.role-viewer .head-create{display:none}') && cssText.includes('body.role-viewer .head-readonly{display:inline-block}'));
+  window.closeModal();
+  window.__state.me = admin; window.document.body.classList.remove('role-viewer');
+  window.__state.settingsTab = 'integrations';
 
   // ── форма для сайта, скелетоны ───────────────────────────────────────────
   const code = window.siteFormCode();
