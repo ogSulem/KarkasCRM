@@ -716,8 +716,8 @@ export function createCompetitors(ctx) {
       if (action === 'reviews' && req.method === 'POST') { const b = await readBody(req); const r = db.prepare('INSERT INTO reviews(competitor_id,source,rating,text,author,url) VALUES(?,?,?,?,?,?)').run(id, b.source || 'вручную', b.rating ?? null, b.text || '', b.author || user.name, b.url || ''); return json(res, 201, { id: r.lastInsertRowid }); }
       if (action === 'prices' && req.method === 'POST') {
         const b = await readBody(req);
-        // «наша таблица цен» — общий справочник: менять его может только администратор
-        if (b.scope === 'ours' && user.role !== 'admin') return json(res, 403, { error: 'Нашу таблицу цен может менять только администратор' });
+        // наш прайс-лист — это каталог: общий справочник, меняет его только администратор
+        if (b.scope === 'ours' && user.role !== 'admin') return json(res, 403, { error: 'Прайс-лист меняет только администратор. Позицию, которой нет в каталоге, можно добавить прямо в сделку.' });
         // «Текст / ссылки»: подтягиваем таблицу по URL или разбираем вставленный текст
         if (b.url && !b.base64 && !b.csv && !b.text) {
           try { b.csv = await fetchTable(String(b.url)); } catch (e) { return json(res, 400, { error: e.message }) }
@@ -733,7 +733,7 @@ export function createCompetitors(ctx) {
     if ((p === '/api/prices' || p === '/api/prices/ours') && req.method === 'POST') {
       const b = await readBody(req);
       if (p === '/api/prices/ours') b.scope = 'ours';
-      if (b.scope === 'ours' && user.role !== 'admin') return json(res, 403, { error: 'Нашу таблицу цен может менять только администратор' });
+      if (b.scope === 'ours' && user.role !== 'admin') return json(res, 403, { error: 'Прайс-лист меняет только администратор. Позицию, которой нет в каталоге, можно добавить прямо в сделку.' });
       if (b.url && !b.base64 && !b.csv && !b.text) {
         try { b.csv = await fetchTable(String(b.url)); } catch (e) { return json(res, 400, { error: e.message }) }
       }
