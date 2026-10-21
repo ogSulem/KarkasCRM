@@ -38,7 +38,7 @@ jobs:
       - name: Интеграционные тесты (API и конкуренты)
         run: node --experimental-sqlite --test tests/api.test.js tests/competitors.test.js
 
-      - name: Маршруты API: интерфейс не ходит в никуда
+      - name: Маршруты API — интерфейс не ходит в никуда
         run: node --test tests/routes.test.mjs
 
       - name: Тест миграций базы данных
