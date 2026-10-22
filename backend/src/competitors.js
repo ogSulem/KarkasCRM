@@ -30,13 +30,16 @@ export function nameScore(a, b) {
 }
 const MATCH_MIN = 0.6;
 
+// about — честное описание источника: что он действительно отдаёт и нужен ли ключ.
+// manual: true — автоматически данные не получить (нет API или сайт закрыт),
+// источник даёт только ссылку на официальную страницу ручной проверки.
 export const SOURCE_DEFS = [
-  { key: 'rusprofile', name: 'Rusprofile', kind: 'card', needs: [], about: 'Карточка компании: реквизиты, связи, суды, долги, банкротство' },
-  { key: 'fns', name: 'ФНС', kind: 'card', needs: ['FNS_API_KEY'], about: 'ЕГРЮЛ/ЕГРИП: статус, руководители, недоимки, налоговые нарушения' },
-  { key: 'fedresurs', name: 'Федресурс (ЕФРСБ)', kind: 'debts', needs: [], about: 'Реестр банкротств: сведения о процедурах' },
-  { key: 'fssp', name: 'ФССП (приставы)', kind: 'debts', needs: ['FSSP_TOKEN'], about: 'Исполнительные производства и суммы долгов' },
-  { key: 'kad', name: 'Суды (kad.arbitr.ru)', kind: 'courts', needs: [], about: 'Арбитражные дела с участием компании' },
-  { key: 'google', name: 'Google Карты', kind: 'reviews', needs: ['GOOGLE_PLACES_KEY'], about: 'Рейтинг и отзывы клиентов' },
+  { key: 'rusprofile', name: 'Rusprofile', kind: 'card', needs: [], manual: true, about: 'Карточка компании: реквизиты, связи, суды, долги. Публичного API нет, сайт закрыт от роботов — проверка по ссылке' },
+  { key: 'fns', name: 'ФНС (api-fns.ru)', kind: 'card', needs: ['FNS_API_KEY'], about: 'ЕГРЮЛ/ЕГРИП: статус, адрес, руководитель, учредители, ОКВЭД, численность' },
+  { key: 'fedresurs', name: 'Федресурс (ЕФРСБ)', kind: 'debts', needs: [], about: 'Реестр банкротств: сведения о процедурах. Сайт обычно запрещает автоматический доступ — тогда проверка по ссылке' },
+  { key: 'fssp', name: 'ФССП (приставы)', kind: 'debts', needs: [], manual: true, about: 'Долги у приставов. Официальный API ФССП закрыт с марта 2022 года — только ссылка на банк данных' },
+  { key: 'kad', name: 'Суды (kad.arbitr.ru)', kind: 'courts', needs: [], about: 'Арбитражные дела с участием компании: номер, дата, суд, роль' },
+  { key: 'google', name: 'Google Карты', kind: 'reviews', needs: ['GOOGLE_PLACES_KEY'], about: 'Рейтинг и отзывы клиентов (Places API)' },
   { key: '2gis', name: '2ГИС', kind: 'reviews', needs: ['TWOGIS_KEY'], about: 'Рейтинг и количество отзывов' },
   { key: 'yandex', name: 'Яндекс Карты', kind: 'reviews', needs: ['YANDEX_API_KEY'], about: 'Карточка организации, адрес, телефоны' },
 ];
@@ -155,13 +158,16 @@ export function createCompetitors(ctx) {
     RUSPROFILE_URL: 'https://www.rusprofile.ru',
     FNS_API_URL: 'https://api-fns.ru/api',
     FEDRESURS_API_URL: 'https://bankrot.fedresurs.ru',
-    FSSP_API_URL: 'https://api-ip.fssprus.ru/api/v1.0',
     KAD_API_URL: 'https://kad.arbitr.ru',
-    GOOGLE_API_URL: 'https://maps.googleapis.com/maps/api',
+    // Places API (New): старая версия (maps.googleapis.com/maps/api/place/...)
+    // с октября 2026 не включается в новых проектах Google Cloud.
+    GOOGLE_API_URL: 'https://places.googleapis.com/v1',
     TWOGIS_API_URL: 'https://catalog.api.2gis.ru/3.0',
     YANDEX_API_URL: 'https://search-maps.yandex.ru/v1',
   };
   const srcUrl = k => getSetting(k, SOURCE_URL_DEFAULTS[k]).replace(/\/$/, '');
+  // какой адрес настройки относится к какому источнику (у ФССП адреса нет: API закрыт)
+  const URL_OF = { rusprofile: 'RUSPROFILE_URL', fns: 'FNS_API_URL', fedresurs: 'FEDRESURS_API_URL', kad: 'KAD_API_URL', google: 'GOOGLE_API_URL', '2gis': 'TWOGIS_API_URL', yandex: 'YANDEX_API_URL' };
 
   // ─────────────────────────── helpers ───────────────────────────
   // SSRF-защита: пользовательские ссылки (прайс конкурента, « наша таблица по URL»)
@@ -215,25 +221,31 @@ export function createCompetitors(ctx) {
   }
   const blockedHint = 'сайт не отдал данные автоматически — проверьте по ссылке ниже';
   // нет соединения / блокировка антиботом / превышен лимит — во всех случаях данные берём по ссылке
-  const failStatus = res => (res.status === 0 || res.status === 403 || res.status === 429 || res.status === 401 ? 'blocked' : 'error');
-  const failText = res => res.status === 0 ? `Источник недоступен (${res.error || 'нет соединения'}). ${blockedHint}` : `HTTP ${res.status}. ${blockedHint}`;
+  const failStatus = res => ([0, 401, 403, 410, 429].includes(res.status) ? 'blocked' : 'error');
+  const failText = res => res.status === 0 ? `Источник недоступен (${res.error || 'нет соединения'}). ${blockedHint}`
+    : res.status === 410 ? `HTTP 410 — источник закрыт навсегда и данные больше не отдаёт. ${blockedHint}`
+    : `HTTP ${res.status}. ${blockedHint}`;
 
-  // прямые ссылки ручной проверки: работают всегда, без ключей и API
+  // Прямые ссылки ручной проверки: работают всегда, без ключей и API.
+  // Форматы адресов сверены с самими сервисами:
+  //  • Rusprofile: карточка ИП — это /ip/<ОГРНИП> (номер и есть адрес страницы),
+  //    а у юрлица в /id/ стоит внутренний номер сайта, а не ОГРН — поэтому
+  //    юрлицо открываем через поиск, иначе ссылка приводит на «404».
+  //  • kad.arbitr.ru: картотека не принимает параметр поиска в адресе,
+  //    ИНН сотрудник вводит в форму сам — об этом сказано в названии ссылки.
   function linksFor({ name = '', inn = '', ogrn = '' } = {}) {
     const q = encodeURIComponent(inn || ogrn || name || '');
     const id = ogrn || inn;
-    const byId = digits(ogrn) || digits(inn);
-    const prof = ogrn && String(ogrn).length === 15 ? `ip/${digits(ogrn)}` : ogrn && String(ogrn).length === 13 ? `id/${digits(ogrn)}` : `search?query=${q}`;
+    const rp = 'https://www.rusprofile.ru';
+    const isIp = digits(ogrn).length === 15;
     return [
-      { label: 'Rusprofile: карточка', url: `https://www.rusprofile.ru/${prof}` },
-      { label: 'Rusprofile: связи и аффилированность', url: byId ? `https://www.rusprofile.ru/connections/${byId}` : `https://www.rusprofile.ru/search?query=${q}&tab=connections` },
-      { label: 'Rusprofile: суды и долги', url: `https://www.rusprofile.ru/search/advanced?query=${q}` },
-      { label: 'Rusprofile: поиск по названию', url: `https://www.rusprofile.ru/search?query=${encodeURIComponent(name || id)}` },
+      { label: 'Rusprofile: карточка', url: isIp ? `${rp}/ip/${digits(ogrn)}` : `${rp}/search?query=${q}` },
+      { label: 'Rusprofile: поиск по названию', url: `${rp}/search?query=${encodeURIComponent(name || id)}` },
       { label: 'ФНС: Прозрачный бизнес', url: `https://pb.nalog.ru/search.html?mode=search-ul&queryAll=${q}` },
-      { label: 'ФНС: бухотчётность', url: `https://bo.nalog.gov.ru/search?allFieldsMatch=false&query=${q}` },
+      { label: 'ФНС: бухотчётность (ГИР БО)', url: `https://bo.nalog.gov.ru/search?allFieldsMatch=false&query=${q}` },
       { label: 'ФССП: банк исполнительных производств', url: 'https://fssp.gov.ru/iss/ip' },
       { label: 'Федресурс: реестр банкротств', url: `https://bankrot.fedresurs.ru/DebtorsSearch.aspx?searchString=${q}` },
-      { label: 'Суды: kad.arbitr.ru', url: `https://kad.arbitr.ru/?query=${q}` },
+      { label: 'Суды: картотека kad.arbitr.ru (ИНН вводится в форму)', url: 'https://kad.arbitr.ru/' },
       { label: 'Яндекс Карты: отзывы', url: `https://yandex.ru/maps/?text=${encodeURIComponent(name || inn)}` },
       { label: '2ГИС: отзывы', url: `https://2gis.ru/search/${encodeURIComponent(name || inn)}` },
       { label: 'Авито: предложения конкурента', url: `https://www.avito.ru/all?q=${encodeURIComponent(name || inn)}` },
@@ -272,19 +284,36 @@ export function createCompetitors(ctx) {
     const res = await http(`${base}/egr?req=${encodeURIComponent(q)}&key=${encodeURIComponent(key)}`);
     if (!res.ok || !res.data) return { ...out, status: failStatus(res), summary: res.data?.error || failText(res), data: {} };
     const item = (res.data.items || [])[0] || res.data;
-    const ul = item['ЮЛ'] || item['ИП'] || item;
-    const g = (...keys) => { for (const k of keys) if (ul[k] !== undefined && ul[k] !== null && ul[k] !== '') return ul[k]; return '' };
+    const ul = item['ЮЛ'] || item['ИП'] || item['НР'] || item;
+    // Ответ api-fns.ru вложенный: адрес, руководитель, ОКВЭД и численность лежат
+    // в собственных объектах (Адрес.АдресПолн, Руководитель.ФИОПолн, ОснВидДеят.Код,
+    // ОткрСведения.КолРаб). Плоские ключи оставлены запасным путём — разные методы
+    // сервиса отдают данные по-разному, а пустая карточка хуже любой из версий.
+    const at = (...path) => { let v = ul; for (const k of path) { if (v === null || typeof v !== 'object') return undefined; v = v[k] } return v };
+    const first = (...vals) => { for (const v of vals) if (v !== undefined && v !== null && v !== '') return v; return '' };
+    const foundersRaw = first(at('Учредители'), at('Учред'), at('УчредителиФЛ'), at('УчредителиЮЛ'), []);
     const card = {
-      name: g('НаимСокрЮЛ', 'НаимПолнЮЛ', 'ФИОПолн'),
-      fullName: g('НаимПолнЮЛ'),
-      inn: String(g('ИНН') || digits(inn)), ogrn: String(g('ОГРН', 'ОГРНИП') || ''), kpp: String(g('КПП') || ''),
-      status: g('Статус'), regDate: g('ДатаРег'), region: g('Регион'), address: g('АдресПолн', 'АдресРФ'),
-      okved: g('ОКВЭД', 'ОсновнойВидДеят'), employees: g('КолРаб', 'ССЧР'), capital: g('УстКап'),
-      director: (ul['Руководитель'] && (ul['Руководитель']['ФИО'] || ul['Руководитель']['Наим'])) || '',
-      founders: (ul['Учред'] || ul['Учредители'] || []).map(x => x['ФИО'] || x['Наим']).filter(Boolean).slice(0, 5),
-      arrears: money(ul['Недоимка'] || ul['СумНедоим'] || ul['НедоимкаСум'] || 0),
-      offenses: ul['НалогПравонарушения'] || ul['Правонарушения'] || [],
-      invalid: g('СвДост', 'СведНедостоверн'),
+      name: first(at('НаимСокрЮЛ'), at('НаимПолнЮЛ'), at('ФИОПолн')),
+      fullName: first(at('НаимПолнЮЛ'), at('ФИОПолн')),
+      inn: String(first(at('ИНН'), at('ИННФЛ')) || digits(inn)),
+      ogrn: String(first(at('ОГРН'), at('ОГРНИП')) || ''),
+      kpp: String(first(at('КПП')) || ''),
+      status: first(at('Статус')),
+      regDate: first(at('ДатаРег'), at('ДатаОГРН')),
+      region: first(at('Регион'), at('Адрес', 'Регион')),
+      address: first(at('Адрес', 'АдресПолн'), at('АдресРФ', 'АдресПолн'), at('АдресПолн'), at('АдресРФ')),
+      okved: first(at('ОснВидДеят', 'Код'), at('ОКВЭД'), at('ОсновнойВидДеят')),
+      okvedText: first(at('ОснВидДеят', 'Текст')),
+      employees: first(at('ОткрСведения', 'КолРаб'), at('КолРаб'), at('ССЧР')),
+      capital: first(at('УстКап'), at('УставныйКапитал')),
+      director: first(at('Руководитель', 'ФИОПолн'), at('Руководитель', 'ФИО'), at('Руководитель', 'Наим'), at('Руководители', 0, 'ФИОПолн')),
+      founders: (Array.isArray(foundersRaw) ? foundersRaw : []).map(x => first(
+        x && x['ФИОПолн'], x && x['ФИО'], x && x['Наим'], x && x['НаимЮЛ'],
+        x && [x['Фамилия'], x['Имя'], x['Отчество']].filter(Boolean).join(' '),
+      )).filter(Boolean).slice(0, 5),
+      arrears: money(first(at('Недоимка'), at('СумНедоим'), at('НедоимкаСум'), at('Финансы', 'Недоимка'), 0)),
+      offenses: first(at('НалогПравонарушения'), at('Правонарушения'), []),
+      invalid: first(at('СвНедостоверн'), at('СведНедостоверн'), at('СвДост'), at('Недостоверность')),
     };
     const flags = [];
     if (/недейств|прекращ|ликвидац/i.test(String(card.status))) flags.push('статус: ' + card.status);
@@ -304,38 +333,78 @@ export function createCompetitors(ctx) {
     return { ...out, status: 'ok', summary: cases.length ? `Найден в реестре банкротств: ${cases.length} дел(о)` : 'В реестре банкротств не найден — плюс к надёжности', data: { cases } };
   }
 
+  // Долги у судебных приставов. Официальный API банка данных ФССП
+  // (api-ip.fssp.gov.ru) отключён 10 марта 2022 года «в целях предотвращения
+  // кибератак» и, по ответу службы, восстанавливаться не будет: любой запрос
+  // возвращает 410 Gone, а токен получить негде. Держать поле для токена —
+  // значит обещать недоступное, поэтому источник честно работает как ссылка
+  // на публичный банк данных: без запроса, без таймаута и без ложных нулей.
   async function srcFssp({ name, inn }) {
-    const token = getSetting('FSSP_TOKEN');
     const out = { source: 'fssp', title: 'ФССП (долги)', links: linksFor({ name, inn }) };
-    if (!token) return { ...out, status: 'skipped', summary: 'Не задан токен api-ip.fssprus.ru — суммы долгов доступны по ссылке ФССП', data: { productions: [] } };
-    const base = srcUrl('FSSP_API_URL');
-    const qs = `token=${encodeURIComponent(token)}&region=-1${digits(inn) ? `&inn=${digits(inn)}` : `&name=${encodeURIComponent(name)}`}`;
-    const task = await http(`${base}/search/legal?${qs}`);
-    const taskId = task.data?.response?.task;
-    if (!taskId) return { ...out, status: 'error', summary: task.data?.response?.message || `HTTP ${task.status}`, data: { productions: [] } };
-    let result = null;
-    for (let i = 0; i < 5; i++) {
-      const r = await http(`${base}/result/legal?token=${encodeURIComponent(token)}&task=${taskId}`);
-      if (r.data?.response?.status === 1 || (r.data?.response?.result || []).length) { result = r.data.response.result; break }
-      await new Promise(r2 => setTimeout(r2, 1200));
-    }
-    if (!result) return { ...out, status: 'blocked', summary: 'ФССП не вернул результат (лимит или капча) — проверьте по ссылке', data: { productions: [] } };
-    const productions = (result[0]?.result || []).map(x => ({ number: x.exe_production || x.ip_number || '', subject: x.subject || x.details || '', sum: money(x.bail_sum || x.sum || 0), bailiff: x.bailiff || '', department: x.department || '', date: x.date || x.ip_end || '' }));
-    const total = productions.reduce((a, x) => a + x.sum, 0);
-    return { ...out, status: 'ok', summary: productions.length ? `${productions.length} исполнительных производств на ${total.toLocaleString('ru-RU')} ₽` : 'Исполнительных производств не найдено — чисто', data: { productions, total } };
+    return {
+      ...out, status: 'skipped',
+      summary: 'Официальный API ФССП закрыт с марта 2022 года — суммы долгов смотрите по ссылке «ФССП: банк исполнительных производств»',
+      data: { productions: [], total: null, manual: true },
+    };
   }
 
-  async function srcKad({ name, inn }) {
+  async function srcKad({ name, inn, ogrn }) {
     const out = { source: 'kad', title: 'Арбитражные суды', links: linksFor({ name, inn }) };
+    // Контракт kad.arbitr.ru/Kad/SearchInstances: сторона задаётся одной строкой
+    // Sides[].Name — туда можно передать наименование, ИНН или ОГРН (отдельного
+    // поля Inn в запросе нет), Type -1 означает «любая сторона». Даты приходят
+    // в привычном ISO только с заголовком x-date-format: iso.
+    const side = digits(inn) || digits(ogrn) || String(name || '').trim();
+    if (!side) return { ...out, status: 'skipped', summary: 'Не заполнены ни ИНН, ни ОГРН, ни название — искать в картотеке нечего', data: { cases: [], total: 0 } };
     const res = await http(`${srcUrl('KAD_API_URL')}/Kad/SearchInstances`, {
-      method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Requested-With': 'XMLHttpRequest', Accept: 'application/json' },
-      body: JSON.stringify({ Page: 1, Count: 25, Courts: [], DateFrom: null, DateTo: null, Sides: [{ Name: digits(inn) ? null : name, Type: null, Inn: digits(inn) || null }], Judges: [], CaseNumbers: [], WithVKSInstances: false }),
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'X-Requested-With': 'XMLHttpRequest', 'x-date-format': 'iso' },
+      body: JSON.stringify({ Sides: [{ Name: side, Type: -1, ExactMatch: false }], Page: 1, Count: 25, Courts: [], Judges: [], CaseNumbers: [], WithVKSInstances: false }),
     });
-    if (!res.ok || !res.data) return { ...out, status: failStatus(res), summary: failText(res), data: { cases: [], total: 0 } };
-    const items = res.data?.Result?.Items || res.data?.items || [];
-    const total = res.data?.Result?.Count ?? items.length;
-    const cases = items.slice(0, 25).map(x => ({ number: x.CaseNumber || '', date: x.FilingDate || x.RegistrationDate || '', type: x.CaseType || '', url: x.CaseId ? `https://kad.arbitr.ru/Card/${x.CaseId}` : '', sum: money(x.CaseSum || 0), role: (x.Sides || []).some(s => digits(s.Inn) === digits(inn) && s.SideType === 1) ? 'ответчик' : 'участник' }));
+    if (!res.ok || !res.data) {
+      // Картотека иногда отвечает HTML-страницей вместо JSON — из неё берём хотя бы число дел.
+      const htmlTotal = Number((String(res.text || '').match(/documentsTotalCount[^>]*value="(\d+)"/) || [])[1]) || 0;
+      if (htmlTotal > 0) return { ...out, status: 'ok', summary: `Найдено дел: ${htmlTotal} (картотека отдала страницу вместо списка — подробности по ссылке)`, data: { cases: [], total: htmlTotal } };
+      return { ...out, status: failStatus(res), summary: failText(res), data: { cases: [], total: 0 } };
+    }
+    if (res.data.Success === false) return { ...out, status: 'error', summary: res.data.Message || 'Картотека отклонила запрос', data: { cases: [], total: 0 } };
+    const result = res.data.Result || {};
+    const items = result.Items || res.data.items || [];
+    const total = Number(result.TotalCount ?? result.Count ?? items.length) || items.length;
+    const me = digits(inn) || digits(ogrn);
+    // Роль берём из списков сторон ответа: Plaintiffs / Respondents .Participants[].Inn
+    const roleOf = x => {
+      const has = s2 => (s2 && Array.isArray(s2.Participants) ? s2.Participants : []).some(p => me && digits(p && p.Inn) === me);
+      return has(x.Respondents) ? 'ответчик' : has(x.Plaintiffs) ? 'истец' : 'участник';
+    };
+    const cases = items.slice(0, 25).map(x => ({
+      number: x.CaseNumber || '',
+      date: String(x.Date || x.FilingDate || x.RegistrationDate || '').slice(0, 10),
+      type: x.CaseType || '',
+      court: x.CourtName || '',
+      judge: x.Judge || '',
+      url: x.CaseId ? `https://kad.arbitr.ru/Card/${x.CaseId}` : '',
+      role: roleOf(x),
+    }));
     return { ...out, status: 'ok', summary: total ? `Найдено дел: ${total}` : 'Арбитражных дел не найдено', data: { cases, total } };
+  }
+
+  // Google Карты. С октября 2026 старая версия Places API
+  // (maps.googleapis.com/maps/api/place/...) не включается в новых проектах
+  // Google Cloud, поэтому по умолчанию используется Places API (New): один
+  // POST-запрос возвращает и карточку, и до пяти отзывов — второй запрос
+  // за деталями больше не нужен. Старый путь сохранён для проектов, где он
+  // уже включён: он выбирается по адресу, заданному в настройках.
+  const GOOGLE_FIELDS = 'places.displayName,places.formattedAddress,places.nationalPhoneNumber,places.rating,places.userRatingCount,places.googleMapsUri,places.reviews.author.displayName,places.reviews.rating,places.reviews.text.text,places.reviews.relativePublishTimeDescription';
+
+  async function srcGoogleLegacy(out, q, key, base) {
+    const s = await http(`${base}/place/textsearch/json?query=${encodeURIComponent(q)}&language=ru&key=${encodeURIComponent(key)}`);
+    const hit = s.data?.results?.[0];
+    if (!hit) return { ...out, status: s.ok ? 'ok' : failStatus(s), summary: s.data?.error_message || s.data?.status || (s.ok ? 'Организация не найдена на Google Картах' : failText(s)), data: {} };
+    const det = await http(`${base}/place/details/json?place_id=${hit.place_id}&fields=rating,user_ratings_total,reviews,formatted_address,formatted_phone_number,url&language=ru&key=${encodeURIComponent(key)}`);
+    const r = det.data?.result || hit;
+    const reviews = (r.reviews || []).map(x => ({ author: x.author_name, rating: x.rating, text: x.text, url: x.author_url, created_at: x.relative_time_description }));
+    return { ...out, status: 'ok', summary: `Рейтинг ${r.rating ?? '—'}${r.user_ratings_total ? ` · ${r.user_ratings_total} отзывов` : ''}${r.formatted_address ? ' · ' + r.formatted_address : ''}`, data: { card: { name: hit.name, address: r.formatted_address, phone: r.formatted_phone_number, url: r.url, rating: r.rating ?? null, count: r.user_ratings_total ?? 0 }, reviews } };
   }
 
   async function srcGoogle({ name, city }) {
@@ -343,20 +412,28 @@ export function createCompetitors(ctx) {
     const out = { source: 'google', title: 'Google Карты', links: linksFor({ name }) };
     if (!key) return { ...out, status: 'skipped', summary: 'Не задан ключ Google Places API — отзывы по ссылке', data: {} };
     const base = srcUrl('GOOGLE_API_URL');
-    const s = await http(`${base}/place/textsearch/json?query=${encodeURIComponent([name, city].filter(Boolean).join(' '))}&language=ru&key=${encodeURIComponent(key)}`);
-    const hit = s.data?.results?.[0];
-    if (!hit) return { ...out, status: s.ok ? 'ok' : 'error', summary: s.data?.error_message || s.data?.status || 'Организация не найдена на Google Картах', data: {} };
-    const det = await http(`${base}/place/details/json?place_id=${hit.place_id}&fields=rating,user_ratings_total,reviews,formatted_address,formatted_phone_number,url&language=ru&key=${encodeURIComponent(key)}`);
-    const r = det.data?.result || hit;
-    const reviews = (r.reviews || []).map(x => ({ author: x.author_name, rating: x.rating, text: x.text, url: x.author_url, created_at: x.relative_time_description }));
-    return { ...out, status: 'ok', summary: `Рейтинг ${r.rating ?? '—'}${r.user_ratings_total ? ` · ${r.user_ratings_total} отзывов` : ''}${r.formatted_address ? ' · ' + r.formatted_address : ''}`, data: { card: { name: hit.name, address: r.formatted_address, phone: r.formatted_phone_number, url: r.url, rating: r.rating ?? null, count: r.user_ratings_total ?? 0 }, reviews } };
+    const q = [name, city].filter(Boolean).join(' ');
+    if (/maps\.googleapis\.com/.test(base) || /\/maps\/api\/?$/.test(base)) return srcGoogleLegacy(out, q, key, base);
+    const r = await http(`${base}/places:searchText`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'X-Goog-Api-Key': key, 'X-Goog-FieldMask': GOOGLE_FIELDS },
+      body: JSON.stringify({ textQuery: q, languageCode: 'ru', maxResultCount: 5 }),
+    });
+    const hit = r.data?.places?.[0];
+    if (!hit) {
+      return { ...out, status: r.ok ? 'ok' : failStatus(r), summary: r.data?.error?.message || (r.ok ? 'Организация не найдена на Google Картах' : failText(r)), data: {} };
+    }
+    const reviews = (hit.reviews || []).map(x => ({ author: x.author?.displayName, rating: x.rating, text: x.text?.text, url: hit.googleMapsUri, created_at: x.relativePublishTimeDescription }));
+    return { ...out, status: 'ok', summary: `Рейтинг ${hit.rating ?? '—'}${hit.userRatingCount ? ` · ${hit.userRatingCount} отзывов` : ''}${hit.formattedAddress ? ' · ' + hit.formattedAddress : ''}`, data: { card: { name: hit.displayName?.text || name, address: hit.formattedAddress, phone: hit.nationalPhoneNumber, url: hit.googleMapsUri, rating: hit.rating ?? null, count: hit.userRatingCount ?? 0 }, reviews } };
   }
 
   async function src2gis({ name, city }) {
     const key = getSetting('TWOGIS_KEY');
     const out = { source: '2gis', title: '2ГИС', links: linksFor({ name }) };
     if (!key) return { ...out, status: 'skipped', summary: 'Не задан ключ 2GIS API — рейтинг по ссылке', data: {} };
-    const res = await http(`${srcUrl('TWOGIS_API_URL')}/items?q=${encodeURIComponent([name, city].filter(Boolean).join(' '))}&fields=items.reviews,items.address,items.contact_groups&key=${encodeURIComponent(key)}`);
+    // type=branch — искать только организации (филиалы), а не улицы и дома.
+    // Город остаётся в тексте запроса: без геоограничения 2ГИС требует указывать его в q.
+    const res = await http(`${srcUrl('TWOGIS_API_URL')}/items?q=${encodeURIComponent([name, city].filter(Boolean).join(' '))}&type=branch&locale=ru_RU&fields=items.reviews,items.address,items.contact_groups&key=${encodeURIComponent(key)}`);
     const item = res.data?.result?.items?.[0];
     if (!item) return { ...out, status: res.ok ? 'ok' : 'error', summary: res.data?.meta?.error?.message || 'Организация не найдена в 2ГИС', data: {} };
     const rv = item.reviews || {};
@@ -381,7 +458,6 @@ export function createCompetitors(ctx) {
     const by = k => results.find(r => r.source === k)?.data || {};
     const fnsCard = by('fns').card || {};
     const rusCard = by('rusprofile').card || {};
-    const fssp = by('fssp');
     const kad = by('kad');
     const fed = by('fedresurs');
     const g = by('google').card, t = by('2gis').card, y = by('yandex').card;
@@ -391,10 +467,9 @@ export function createCompetitors(ctx) {
     const status = String(fnsCard.status || rusCard.status || '');
     if (/недейств|прекращ|ликвидац|банкрот/i.test(status)) add('risk', `Статус компании: ${status}`, 30, 'fns');
     if ((fed.cases || []).length) add('risk', `Есть записи в реестре банкротств: ${(fed.cases || []).length}`, 40, 'fedresurs');
-    const debtTotal = fssp.total || 0;
-    if (debtTotal >= 1_000_000) add('risk', `Долги по исполнительным производствам: ${debtTotal.toLocaleString('ru-RU')} ₽`, 25, 'fssp');
-    else if (debtTotal > 0) add('risk', `Исполнительные производства на ${debtTotal.toLocaleString('ru-RU')} ₽`, 12, 'fssp');
-    else if ((fssp.productions || []).length === 0 && results.find(r => r.source === 'fssp')?.status === 'ok') add('plus', 'Исполнительных производств нет', -6, 'fssp');
+    // Долги у приставов в риск-оценке не участвуют: официальный API ФССП закрыт
+    // с марта 2022 года, данных нет. Придумывать фактор «долгов нет» по пустому
+    // ответу нельзя — менеджер принял бы это за проверенную надёжность.
     if (money(fnsCard.arrears) > 0) add('risk', `Налоговая недоимка: ${money(fnsCard.arrears).toLocaleString('ru-RU')} ₽`, 18, 'fns');
     if (fnsCard.invalid) add('risk', 'В ЕГРЮЛ внесена запись о недостоверных сведениях', 15, 'fns');
     const courts = kad.total || 0;
@@ -440,12 +515,12 @@ export function createCompetitors(ctx) {
     let score = clamp(factors.filter(f => f.type !== 'info').reduce((a, f) => a + f.weight, 0) + 20, 0, 100);
     const riskFactors = factors.filter(f => f.type === 'risk');
     const verdicts = [];
-    if (!hasAnyData) verdicts.push('Данных пока мало: ни один источник не отдал информацию автоматически. Задайте ключи в Настройках (ФНС, ФССП, Google, 2ГИС) или внесите сведения вручную — отзывы и прайс можно добавить прямо в карточке');
+    if (!hasAnyData) verdicts.push('Данных пока мало: ни один источник не отдал информацию автоматически. Задайте ключи в Настройках (ФНС, Google, 2ГИС, Яндекс) или внесите сведения вручную — отзывы и прайс можно добавить прямо в карточке');
     if (score >= 75) verdicts.push('Слабый конкурент: вероятны сложности с исполнением и гарантиями');
     else if (score >= 50) verdicts.push('Конкурент с заметными рисками — акцентируйте надёжность и договор');
     else if (score >= 25) verdicts.push('Относительно стабильный конкурент — конкурируйте сервисом и ценой');
     else verdicts.push('Аккуратный конкурент: ищите отличия в скорости, материалах и гарантии');
-    if (riskFactors.some(f => f.source === 'fssp' || f.source === 'fedresurs')) verdicts.push('Есть долги/процедуры банкротства — клиенту это важно знать при выборе подрядчика');
+    if (riskFactors.some(f => f.source === 'fedresurs')) verdicts.push('Есть записи в реестре банкротств — клиенту это важно знать при выборе подрядчика');
     if (avgRating !== null && avgRating < 4) verdicts.push('Низкие оценки на картах — показывайте отзывы наших клиентов');
     if (pricing?.avgDiff >= 5) verdicts.push(`Наши цены ниже на ${pricing.avgDiff}% по сопоставимым позициям — сравнение в пользу нас`);
 
@@ -656,8 +731,8 @@ export function createCompetitors(ctx) {
     // список источников и их статус
     if (p === '/api/competitor-sources') {
       if (req.method === 'GET') return json(res, 200, {
-        sources: SOURCE_DEFS.map(s => ({ ...s, configured: s.needs.every(k => !!getSetting(k)), url: srcUrl({ rusprofile: 'RUSPROFILE_URL', fns: 'FNS_API_URL', fedresurs: 'FEDRESURS_API_URL', fssp: 'FSSP_API_URL', kad: 'KAD_API_URL', google: 'GOOGLE_API_URL', '2gis': 'TWOGIS_API_URL', yandex: 'YANDEX_API_URL' }[s.key]) })),
-        keys: { FNS_API_KEY: !!getSetting('FNS_API_KEY'), FSSP_TOKEN: !!getSetting('FSSP_TOKEN'), GOOGLE_PLACES_KEY: !!getSetting('GOOGLE_PLACES_KEY'), TWOGIS_KEY: !!getSetting('TWOGIS_KEY'), YANDEX_API_KEY: !!getSetting('YANDEX_API_KEY') },
+        sources: SOURCE_DEFS.map(s => ({ ...s, configured: s.needs.every(k => !!getSetting(k)), url: URL_OF[s.key] ? srcUrl(URL_OF[s.key]) : '' })),
+        keys: { FNS_API_KEY: !!getSetting('FNS_API_KEY'), GOOGLE_PLACES_KEY: !!getSetting('GOOGLE_PLACES_KEY'), TWOGIS_KEY: !!getSetting('TWOGIS_KEY'), YANDEX_API_KEY: !!getSetting('YANDEX_API_KEY') },
         timeout: getSetting('COMPETITOR_TIMEOUT_MS', '12000'),
         urls: Object.fromEntries(Object.keys(SOURCE_URL_DEFAULTS).map(k => [k, srcUrl(k)])),
       });
@@ -665,7 +740,7 @@ export function createCompetitors(ctx) {
       if (!await admin()) return;
       const b = await readBody(req);
       // только известные ключи: адреса источников, ключи и таймаут
-      const allowed = [...Object.keys(SOURCE_URL_DEFAULTS), 'FNS_API_KEY', 'FSSP_TOKEN', 'GOOGLE_PLACES_KEY', 'TWOGIS_KEY', 'YANDEX_API_KEY', 'COMPETITOR_TIMEOUT_MS'];
+      const allowed = [...Object.keys(SOURCE_URL_DEFAULTS), 'FNS_API_KEY', 'GOOGLE_PLACES_KEY', 'TWOGIS_KEY', 'YANDEX_API_KEY', 'COMPETITOR_TIMEOUT_MS'];
       for (const k of allowed) if (b[k] !== undefined && !String(b[k]).includes('•')) setSetting(k, String(b[k]).slice(0, 512));
       return json(res, 200, { saved: true });
     }

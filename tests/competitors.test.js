@@ -32,20 +32,26 @@ const jsonReply = (r, obj, code = 200) => { r.writeHead(code, { 'Content-Type': 
 before(async () => {
   await mock('fns', (req, r, b) => {
     if (!/key=test-fns-key/.test(req.url)) return jsonReply(r, { error: 'bad key' }, 403);
-    jsonReply(r, { items: [{ 'ЮЛ': { ИНН: INN, ОГРН: OGRN, НаимСокрЮЛ: 'ООО «Конкурент»', НаимПолнЮЛ: 'ОБЩЕСТВО С ОГРАНИЧЕННОЙ ОТВЕТСТВЕННОСТЬЮ «КОНКУРЕНТ»', ДатаРег: '2015-04-02', Статус: 'Действующая', Регион: 'Москва', АдресПолн: 'г. Москва, ул. Стройная, 1', Руководитель: { ФИО: 'Иванов Иван Иванович' }, Учред: [{ ФИО: 'Иванов Иван Иванович' }], Недоимка: 145000, КолРаб: 24 } }] });
+    // форма ответа api-fns.ru/api/egr: адрес, руководитель, ОКВЭД и численность
+    // лежат во вложенных объектах — заглушка повторяет именно реальную структуру
+    jsonReply(r, { items: [{ 'ЮЛ': { ИНН: INN, ОГРН: OGRN, КПП: '770001001', НаимСокрЮЛ: 'ООО «Конкурент»', НаимПолнЮЛ: 'ОБЩЕСТВО С ОГРАНИЧЕННОЙ ОТВЕТСТВЕННОСТЬЮ «КОНКУРЕНТ»', ДатаРег: '2015-04-02', Статус: 'Действующая', Регион: 'Москва', Адрес: { АдресПолн: 'г. Москва, ул. Стройная, 1' }, Руководитель: { ФИОПолн: 'Иванов Иван Иванович', Должность: 'ГЕНЕРАЛЬНЫЙ ДИРЕКТОР' }, ОснВидДеят: { Код: '41.20', Текст: 'Строительство жилых и нежилых зданий' }, ОткрСведения: { КолРаб: 24 }, Учредители: [{ Фамилия: 'Иванов', Имя: 'Иван', Отчество: 'Иванович', ДоляУставКап: 10000 }], Недоимка: 145000 } }] });
   });
   await mock('fedresurs', (req, r) => jsonReply(r, { pageData: [{ name: 'ООО «Конкурент»', inn: INN, ogrn: OGRN, caseNumber: 'А40-123/2024', isActive: true, date: '2024-06-01' }] }));
-  await mock('fssp', (req, r) => {
-    if (/\/search\/legal/.test(req.url)) return jsonReply(r, { response: { task: 'task-1' } });
-    jsonReply(r, { response: { status: 1, result: [{ result: [{ exe_production: '12345/24/77001-ИП', subject: 'Взыскание задолженности по договору', bail_sum: 2500000, bailiff: 'Сидоров С.С.', department: 'ОСП по Москве' }] }] } });
-  });
-  await mock('kad', (req, r, b) => jsonReply(r, { Result: { Count: 7, Items: [{ CaseNumber: 'А40-555/2023', FilingDate: '2023-08-01', CaseId: 'case-1', Sides: [{ Inn: INN, SideType: 1 }] }, { CaseNumber: 'А40-777/2022', FilingDate: '2022-02-02', CaseId: 'case-2', Sides: [] }] } }));
+  // форма ответа kad.arbitr.ru/Kad/SearchInstances: TotalCount, Date, стороны —
+  // в Plaintiffs/Respondents .Participants (полей Count, FilingDate и Sides там нет)
+  await mock('kad', (req, r, b) => jsonReply(r, { Result: { Page: 1, PageSize: 25, PagesCount: 1, TotalCount: 7, Items: [
+    { CaseId: 'case-1', CaseNumber: 'А40-555/2023', CaseType: 'А', CourtName: 'АС города Москвы', Judge: 'Иванова И.И.', Date: '2023-08-01T00:00:00', Plaintiffs: { Count: 1, Participants: [{ Name: 'ООО «Поставщик»', Inn: '7700000009' }] }, Respondents: { Count: 1, Participants: [{ Name: 'ООО «Конкурент»', Inn: INN }] } },
+    { CaseId: 'case-2', CaseNumber: 'А40-777/2022', CaseType: 'Г', CourtName: 'АС города Москвы', Date: '2022-02-02T00:00:00', Plaintiffs: { Count: 1, Participants: [{ Name: 'ООО «Конкурент»', Inn: INN }] }, Respondents: { Count: 1, Participants: [{ Name: 'ООО «Заказчик»', Inn: '7700000008' }] } },
+  ] }, Message: '', Success: true }));
   await mock('rusprofile', (req, r) => {
     if (/blocked/.test(req.url)) { r.writeHead(403); return r.end('captcha') }
     r.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
     r.end(`<html><head><title>ООО «Конкурент» — Москва — ИНН ${INN}</title></head><body><span itemprop="name">ООО «Конкурент»</span><span itemprop="address">г. Москва, ул. Стройная, 1</span>ИНН ${INN} ОГРН ${OGRN} Действующая организация <a href="/id/${OGRN}">карточка</a> 12 арбитражных дел</body></html>`);
   });
+  // Places API (New): карточка и отзывы приходят одним ответом на POST places:searchText.
+  // Legacy-ветка оставлена — её проверяем отдельным тестом.
   await mock('google', (req, r) => {
+    if (/places:searchText/.test(req.url)) return jsonReply(r, { places: [{ displayName: { text: 'Конкурент' }, formattedAddress: 'Москва, Стройная 1', nationalPhoneNumber: '+7 495 000-00-00', googleMapsUri: 'https://maps.google.com/p1', rating: 3.2, userRatingCount: 41, reviews: [{ author: { displayName: 'Пётр' }, rating: 1, text: { text: 'Сорвали сроки, дом поставили на месяц позже' }, relativePublishTimeDescription: 'месяц назад' }, { author: { displayName: 'Ольга' }, rating: 5, text: { text: 'Всё ок' }, relativePublishTimeDescription: 'год назад' }] }] });
     if (/textsearch/.test(req.url)) return jsonReply(r, { results: [{ place_id: 'p1', name: 'Конкурент', rating: 3.2, user_ratings_total: 41 }] });
     jsonReply(r, { result: { rating: 3.2, user_ratings_total: 41, formatted_address: 'Москва, Стройная 1', url: 'https://maps.google.com/p1', reviews: [{ author_name: 'Пётр', rating: 1, text: 'Сорвали сроки, дом поставили на месяц позже', relative_time_description: 'месяц назад' }, { author_name: 'Ольга', rating: 5, text: 'Всё ок', relative_time_description: 'год назад' }] } });
   });
@@ -60,13 +66,18 @@ const url = n => `http://127.0.0.1:${mocks[n].port}`;
 
 test('настройка источников: ключи и адреса, статус «настроен»', async () => {
   const r = await call('/api/competitor-sources', { method: 'PUT', body: JSON.stringify({
-    FNS_API_KEY: 'test-fns-key', FSSP_TOKEN: 'test-fssp-token', GOOGLE_PLACES_KEY: 'test-google-key', TWOGIS_KEY: 'test-2gis-key', YANDEX_API_KEY: 'test-yandex-key',
-    FNS_API_URL: url('fns'), FEDRESURS_API_URL: url('fedresurs'), FSSP_API_URL: url('fssp'), KAD_API_URL: url('kad'), RUSPROFILE_URL: url('rusprofile'), GOOGLE_API_URL: url('google'), TWOGIS_API_URL: url('2gis'), YANDEX_API_URL: url('yandex'),
+    FNS_API_KEY: 'test-fns-key', GOOGLE_PLACES_KEY: 'test-google-key', TWOGIS_KEY: 'test-2gis-key', YANDEX_API_KEY: 'test-yandex-key',
+    FNS_API_URL: url('fns'), FEDRESURS_API_URL: url('fedresurs'), KAD_API_URL: url('kad'), RUSPROFILE_URL: url('rusprofile'), GOOGLE_API_URL: url('google'), TWOGIS_API_URL: url('2gis'), YANDEX_API_URL: url('yandex'),
   }) });
   assert.equal(r.body.saved, true);
   const s = await call('/api/competitor-sources');
   assert.ok(s.body.sources.find(x => x.key === 'fns').configured, 'ФНС настроена по ключу');
-  assert.ok(s.body.keys.FSSP_TOKEN && s.body.keys.GOOGLE_PLACES_KEY, 'ключи сохранены');
+  assert.ok(s.body.keys.GOOGLE_PLACES_KEY, 'ключи сохранены');
+  assert.ok(!('FSSP_TOKEN' in s.body.keys), 'токена ФССП в настройках нет: официальный API закрыт с 2022 года');
+  assert.ok(!('FSSP_API_URL' in s.body.urls), 'адреса ФССП в настройках нет');
+  const fsspDef = s.body.sources.find(x => x.key === 'fssp');
+  assert.equal(fsspDef.needs.length, 0, 'ФССП больше не требует ключ');
+  assert.match(fsspDef.about, /закрыт/, 'в описании источника честно сказано, что API закрыт');
 });
 
 test('«Пишем название конкурента» → полная проверка: долги, суды, банкротство, отзывы', async () => {
@@ -75,17 +86,31 @@ test('«Пишем название конкурента» → полная пр
   assert.equal(r.body.created, true, 'конкурент создан из названия');
   const rep = r.body.report, results = r.body.results;
   const by = k => results.find(x => x.source === k);
-  assert.equal(by('fns').status, 'ok'); assert.equal(by('fns').data.card.director, 'Иванов Иван Иванович');
+  assert.equal(by('fns').status, 'ok');
+  const fnsCard = by('fns').data.card;
+  assert.equal(fnsCard.director, 'Иванов Иван Иванович', 'руководитель взят из вложенного Руководитель.ФИОПолн');
+  assert.equal(fnsCard.address, 'г. Москва, ул. Стройная, 1', 'адрес взят из вложенного Адрес.АдресПолн');
+  assert.equal(fnsCard.okved, '41.20', 'ОКВЭД взят из ОснВидДеят.Код');
+  assert.equal(fnsCard.employees, 24, 'численность взята из ОткрСведения.КолРаб');
+  assert.equal(fnsCard.founders[0], 'Иванов Иван Иванович', 'учредитель собран из Фамилия/Имя/Отчество');
   assert.equal(by('fedresurs').status, 'ok'); assert.match(by('fedresurs').summary, /реестре банкротств/);
-  assert.equal(by('fssp').status, 'ok');
-  assert.equal(by('fssp').data.total, 2500000, 'сумма долгов по ФССП');
-  assert.equal(by('kad').data.total, 7, 'число арбитражных дел');
+  assert.equal(by('fssp').status, 'skipped', 'официальный API ФССП закрыт — запрос не уходит вовсе');
+  assert.equal(by('fssp').data.total, null, 'прочерк вместо нуля: ноль читался бы как «долгов нет»');
+  assert.equal(by('kad').data.total, 7, 'число дел взято из TotalCount, а не из длины страницы');
+  assert.equal(by('kad').data.cases[0].role, 'ответчик', 'роль определена по Respondents.Participants');
+  assert.equal(by('kad').data.cases[1].role, 'истец', 'роль определена по Plaintiffs.Participants');
+  assert.equal(by('kad').data.cases[0].date, '2023-08-01', 'дата взята из поля Date');
+  assert.equal(by('kad').data.cases[0].court, 'АС города Москвы', 'суд и судья отдаются менеджеру');
+  // запрос в картотеку соответствует документированному контракту kad.arbitr.ru
+  const kadCall = calls.filter(c => c.name === 'kad').pop();
+  assert.equal(kadCall.method, 'POST');
+  assert.deepEqual(JSON.parse(kadCall.body).Sides, [{ Name: INN, Type: -1, ExactMatch: false }], 'сторона задаётся строкой Name (ИНН), Type -1 = любая сторона');
   assert.equal(by('rusprofile').status, 'ok'); assert.equal(by('rusprofile').data.card.status, 'действующая');
   assert.equal(by('google').status, 'ok'); assert.equal(by('2gis').status, 'ok'); assert.equal(by('yandex').status, 'ok');
   // риск-скор и факторы
   assert.ok(rep.risk >= 60, 'высокий риск из-за долгов и банкротства: ' + rep.risk);
   assert.equal(rep.level, 'высокий');
-  assert.ok(rep.factors.some(f => f.source === 'fssp' && /Долги/.test(f.text)));
+  assert.ok(!rep.factors.some(f => f.source === 'fssp'), 'фактора про долги нет: данные ФССП недоступны, выдумывать их нельзя');
   assert.ok(rep.factors.some(f => f.source === 'fedresurs'));
   assert.ok(rep.factors.some(f => f.source === 'fns' && /недоимка/i.test(f.text)));
   assert.ok(rep.factors.some(f => f.source === 'reviews' && /Слабая репутация/.test(f.text)));
@@ -95,9 +120,11 @@ test('«Пишем название конкурента» → полная пр
   const full = await call('/api/competitors/' + r.body.competitor.id);
   assert.equal(full.body.reviews.filter(x => x.source === 'google').length, 2, 'отзывы с Google сохранены');
   assert.equal(full.body.reviews[0].source, 'google');
-  // ссылки ручной проверки, включая пример пользователя /connections/<id>
+  // ссылки ручной проверки ведут только на существующие адреса
   const links = rep.links.map(x => x.url);
-  assert.ok(links.some(u => u.endsWith('/' + OGRN) || u.endsWith('/' + INN)), 'ссылка на связи Rusprofile по ИНН/ОГРН');
+  assert.ok(links.some(u => u.includes(INN)), 'в ссылках ручной проверки есть ИНН конкурента');
+  assert.ok(!links.some(u => /rusprofile\.ru\/(connections|search\/advanced)/.test(u)), 'нет адресов Rusprofile, которых не существует');
+  assert.ok(!links.some(u => /rusprofile\.ru\/id\/\d{13}/.test(u)), 'карточка юрлица не собирается из ОГРН: в /id/ у Rusprofile внутренний номер');
   assert.equal(rep.found.ogrn, OGRN, 'ОГРН подтянут из ФНС в отчёт');
   assert.equal(rep.found.director, 'Иванов Иван Иванович');
   assert.ok(links.some(u => u.startsWith('https://pb.nalog.ru')), 'ссылка на ФНС');
@@ -125,16 +152,33 @@ test('повторная проверка показывает изменени�
 });
 
 test('без ключей источники честно помечаются «skipped»', async () => {
-  const r = await call('/api/competitors/find', { method: 'POST', body: JSON.stringify({ name: 'ИП Без Канала', inn: '770000000999', sources: ['fssp', 'google'] }) });
-  const results = r.body.results;
-  // ключи были заданы ранее для других тестов — проверяем, что при пустых значениях статус skipped
-  await call('/api/competitor-sources', { method: 'PUT', body: JSON.stringify({ FSSP_TOKEN: '', GOOGLE_PLACES_KEY: '' }) });
+  // ключи были заданы ранее для других тестов — проверяем поведение при пустых значениях
+  await call('/api/competitor-sources', { method: 'PUT', body: JSON.stringify({ GOOGLE_PLACES_KEY: '' }) });
   const r2 = await call('/api/competitors/find', { method: 'POST', body: JSON.stringify({ name: 'ИП Без Канала 2', inn: '770000000998', sources: ['fssp', 'google'] }) });
   const s = r2.body.results.find(x => x.source === 'fssp');
   assert.equal(s.status, 'skipped');
-  assert.match(s.summary, /токен|ключ/i);
+  assert.match(s.summary, /API ФССП закрыт/, 'честно сказано, что официального API больше нет');
+  assert.equal(s.data.total, null, 'прочерк вместо нуля — ноль читался бы как «долгов нет»');
   assert.ok(s.links.some(l => /fssp\.gov\.ru/.test(l.url)), 'ссылка для ручной проверки есть');
-  assert.ok(results.every(x => ['ok', 'skipped', 'error', 'blocked'].includes(x.status)));
+  const ggl = r2.body.results.find(x => x.source === 'google');
+  assert.equal(ggl.status, 'skipped');
+  assert.match(ggl.summary, /Не задан ключ/);
+  assert.ok(r2.body.results.every(x => ['ok', 'skipped', 'error', 'blocked'].includes(x.status)));
+});
+
+test('Google: старый Places API работает, если адрес указан на maps.googleapis.com', async () => {
+  // С октября 2026 Legacy не включается в новых проектах, но в старых продолжает
+  // работать — запасной путь выбирается по адресу и остаётся проверенным.
+  await call('/api/competitor-sources', { method: 'PUT', body: JSON.stringify({ GOOGLE_PLACES_KEY: 'test-google-key', GOOGLE_API_URL: url('google') + '/maps/api' }) });
+  const r = await call('/api/competitors/find', { method: 'POST', body: JSON.stringify({ name: 'ООО «Конкурент»', inn: INN, sources: ['google'] }) });
+  const g = r.body.results.find(x => x.source === 'google');
+  assert.equal(g.status, 'ok');
+  assert.equal(g.data.card.rating, 3.2, 'рейтинг разобран из legacy-ответа');
+  assert.equal(g.data.reviews.length, 2, 'отзывы подтянуты вторым запросом details');
+  const used = calls.filter(c => c.name === 'google').slice(-2).map(c => c.url);
+  assert.ok(used.some(u => u.includes('/place/textsearch/json')), 'использован старый эндпоинт textsearch');
+  // возвращаем современный адрес: следующие проверки идут через Places API (New)
+  await call('/api/competitor-sources', { method: 'PUT', body: JSON.stringify({ GOOGLE_API_URL: url('google') }) });
 });
 
 test('цены: Excel-файл конкурента и наша таблица → сравнение в отчёте', async () => {
@@ -288,9 +332,9 @@ test('поиск конкурента понимает поле query из ин�
 test('диагностика источников: видно, кто отвечает, а кто просит ключ', async () => {
   await call('/api/competitor-sources', { method: 'PUT', body: JSON.stringify({
     RUSPROFILE_URL: url('rusprofile'), FEDRESURS_API_URL: url('fedresurs'), KAD_API_URL: url('kad'),
-    FNS_API_URL: url('fns'), FSSP_API_URL: url('fssp'), GOOGLE_API_URL: url('google'),
+    FNS_API_URL: url('fns'), GOOGLE_API_URL: url('google'),
     TWOGIS_API_URL: url('2gis'), YANDEX_API_URL: url('yandex'), COMPETITOR_TIMEOUT_MS: '5000',
-    FNS_API_KEY: 'test-fns-key', FSSP_TOKEN: 'test-fssp-token', GOOGLE_PLACES_KEY: 'test-google-key',
+    FNS_API_KEY: 'test-fns-key', GOOGLE_PLACES_KEY: 'test-google-key',
     TWOGIS_KEY: 'test-2gis-key', YANDEX_API_KEY: 'test-yandex-key',
   }) });
   const r = await call('/api/competitor-sources/check', { method: 'POST' });
@@ -312,7 +356,7 @@ test('диагностика источников: видно, кто отвеч
 });
 
 test('источник без соединения помечается «blocked», а отчёт честно сообщает о нехватке данных', async () => {
-  await call('/api/competitor-sources', { method: 'PUT', body: JSON.stringify({ RUSPROFILE_URL: 'http://127.0.0.1:9', FEDRESURS_API_URL: 'http://127.0.0.1:9', KAD_API_URL: 'http://127.0.0.1:9', COMPETITOR_TIMEOUT_MS: '1500', FNS_API_KEY: '', FSSP_TOKEN: '', GOOGLE_PLACES_KEY: '', TWOGIS_KEY: '', YANDEX_API_KEY: '' }) });
+  await call('/api/competitor-sources', { method: 'PUT', body: JSON.stringify({ RUSPROFILE_URL: 'http://127.0.0.1:9', FEDRESURS_API_URL: 'http://127.0.0.1:9', KAD_API_URL: 'http://127.0.0.1:9', COMPETITOR_TIMEOUT_MS: '1500', FNS_API_KEY: '', GOOGLE_PLACES_KEY: '', TWOGIS_KEY: '', YANDEX_API_KEY: '' }) });
   const r = await call('/api/competitors/find', { method: 'POST', body: JSON.stringify({ name: 'ООО Без Связи', inn: '6600000000' }) });
   const st = r.body.results.map(x => x.status);
   assert.ok(st.includes('blocked'), 'недоступные сайты помечены blocked: ' + JSON.stringify(st));

@@ -487,6 +487,21 @@ try {
   }
   const id = competitor.id;
   for (const tab of ['report', 'sources', 'debts', 'reviews', 'prices', 'history']) { window.__state.compTab = tab; await window.openCompetitorCard(id); await wait(250); check('конкурент → ' + tab, $('#modalBody').innerHTML.length > 150 && !/class="card err"/.test($('#modalBody').innerHTML)) }
+  // Крестик закрытия висит в правом верхнем углу окна, а кнопки «Проверить сейчас»
+  // и «Загрузить прайс» стоят в том же первом ряду справа: без запаса они наезжали
+  // на крестик, и окно нельзя было закрыть мышью. Проверяем и разметку, и CSS.
+  {
+    window.__state.compTab = 'report'; await window.openCompetitorCard(id); await wait(300);
+    const head = $('#modalBody .modal-head');
+    const headCss = (cssText.match(/\.modal-head\{[^}]*\}/) || [''])[0];
+    check('шапка карточки конкурента — общий класс, а не разовые инлайн-стили', Boolean(head) && !head.getAttribute('style'));
+    check('у шапки зарезервировано место под крестик', /padding-right:3[0-9]px/.test(headCss), headCss);
+    check('шапка чуть опущена ниже крестика', /margin:6px 0/.test(headCss), headCss);
+    check('в шапке остались кнопки проверки и загрузки прайса', /Проверить сейчас/.test(head.textContent) && /Загрузить прайс/.test(head.textContent));
+    window.closeModal(); await wait(150);
+  }
+  check('шапка контакта тоже не заходит под крестик', /padding-right:3[0-9]px/.test((cssText.match(/\.contact-head\{[^}]*\}/) || [''])[0]));
+  check('первый текстовый ряд окна не налезает на крестик', cssText.includes('#modalBody>h3:first-child,#modalBody>p:first-child{padding-right:34px}'));
   window.closeModal();
   // «Ссылка на прайс»: сервер умел подтягивать таблицу конкурента по адресу,
   // но поля в форме не было — функция оставалась недостижимой из интерфейса.
@@ -494,8 +509,8 @@ try {
   check('в форме конкурента есть поле «Ссылка на прайс»', Boolean($('#modalBody [name="price_url"]')) && /Ссылка на прайс/.test($('#modalBody').textContent));
   check('подсказка объясняет, зачем конкуренту ссылка на прайс', /сама подтянет|при каждой проверке/i.test($('#modalBody').textContent), $('#modalBody').textContent.replace(/\s+/g, ' ').slice(0, 120));
   window.closeModal(); await wait(150);
-  // Ссылки для ручной проверки приходят с сервера (их там четырнадцать: ФНС, ФССП,
-  // Федресурс, арбитраж, Росстат, карты, отзывы), а не зашиты в интерфейс парой штук.
+  // Ссылки для ручной проверки приходят с сервера (ФНС, ГИР БО, ФССП, Федресурс,
+  // арбитраж, карты, отзывы, Авито, Госзакупки), а не зашиты в интерфейс парой штук.
   {
     const html = window.reportLinks({ links: [{ label: 'Росстат', url: 'https://example.gov/a' }, { label: 'ФССП', url: 'https://example.gov/b' }] }, { name: 'ООО Тест', inn: '7700111222' });
     check('в отчёт попадают ссылки из ответа сервера, а не две зашитые', /Росстат/.test(html) && /ФССП/.test(html) && /target="_blank"/.test(html) && /rel="noopener"/.test(html));
@@ -720,6 +735,10 @@ try {
     check('в настройках разведки нет второго управления прайсом', !/Скачать CSV/.test(st) && !/Загрузить из файла/.test(st) && !/Показать весь прайс/.test(st), st.slice(0, 140));
     check('настройки разведки ведут за ценами в раздел «Каталог»', /«Каталог»/.test(st) && /Открыть каталог/.test(st) && Boolean($$('#view button').find(b => /Открыть каталог/.test(b.textContent))));
     check('объяснено, что ключи источников не обязательны', /не обязательны/.test(st) && /работает без ключа/.test(st));
+    check('честно сказано, что официального API ФССП больше нет', /API ФССП закрыт/.test(st) && /банк исполнительных производств/.test(st));
+    check('в настройках нет мёртвого поля токена ФССП', !/Токен ФССП/.test(st) && !/FSSP_TOKEN/.test($('#view').innerHTML));
+    check('источники без рабочего API помечены как ручные', /данные по ссылке вручную/.test(st));
+    check('для Google указан действующий Places API (New)', /Places API \(New\)/.test(st));
     check('есть проверка доступности источников', /Проверить доступность источников/.test(st));
   }
 

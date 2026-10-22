@@ -285,6 +285,10 @@ const dt = s => {
   const m = raw.match(/^(\d{4})-(\d{2})-(\d{2})[ T](\d{2}):(\d{2})(?::(\d{2}))?$/);
   const d = m ? new Date(`${m[1]}-${m[2]}-${m[3]}T${m[4]}:${m[5]}:${m[6] || '00'}Z`) : (/Z|[+-]\d{2}:?\d{2}$/.test(raw) ? new Date(raw) : null);
   if (d && !isNaN(d)) return dtFmt(d);
+  // Дата без времени (например «2023-08-01» из картотеки судов) — тоже дд.мм.гггг:
+  // часы и минуты здесь смысла не имеют, а формат во всём интерфейсе один.
+  const dOnly = raw.match(/^(\d{4})-(\d{2})-(\d{2})$/);
+  if (dOnly) return `${dOnly[3]}.${dOnly[2]}.${dOnly[1]}`;
   return raw.replace('T', ' ').slice(0, 16);
 };
 // Даты в привычном формате СНГ: 31.12.2026 (а не 2026-12-31).
@@ -1182,8 +1186,8 @@ async function openDealCard(id) {
   const openTasks = (d.tasks || []).filter(t => !t.done).length;
   const nextTask = (d.tasks || []).filter(t => !t.done && t.due).sort((a, b) => String(a.due).localeCompare(String(b.due)))[0];
   openModal(`
-   <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px;gap:10px;flex-wrap:wrap">
-     <div><h3 style="margin:0">${esc(deal.title)}</h3><small>${esc(deal.contact_name || 'Без контакта')} · ${fmt(deal.amount)} · <span class="tag">${esc(stageLabel(deal.stage) || deal.stage)}</span></small></div>
+   <div class="modal-head">
+     <div><h3>${esc(deal.title)}</h3><small>${esc(deal.contact_name || 'Без контакта')} · ${fmt(deal.amount)} · <span class="tag">${esc(stageLabel(deal.stage) || deal.stage)}</span></small></div>
      <div style="display:flex;gap:6px">
        <button class="btn sm" onclick="printDoc(${deal.id},'quote')" title="Коммерческое предложение">${icon('print', 13)} КП</button>
        <button class="btn sm" onclick="printDoc(${deal.id},'invoice')" title="Счёт на оплату">${icon('fileText', 13)} Счёт</button>
@@ -2227,8 +2231,8 @@ async function openCompetitorCard(id) {
   if (!state.ourPrices) state.ourPrices = (await api('/api/prices?scope=ours').catch(() => ({ rows: [] }))).rows || [];
   state.compTab = state.compTab || 'report';
   openModal(`
-   <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px">
-     <div><h3 style="margin:0">${esc(c.name)}</h3><small>ИНН: ${esc(c.inn || '—')} · ${esc(c.city || '')}</small></div>
+   <div class="modal-head">
+     <div><h3>${esc(c.name)}</h3><small>ИНН: ${esc(c.inn || '—')} · ${esc(c.city || '')}</small></div>
      <div style="display:flex;gap:6px;flex-wrap:wrap">
        ${canEdit() ? `<button class="btn sm primary" onclick="checkCompetitor(${c.id})">${icon('refresh', 13)} Проверить сейчас</button>
        <button class="btn sm" onclick="openPriceImport(${c.id},'theirs')">${icon('excel', 13)} Загрузить прайс</button>` : ''}
@@ -2263,11 +2267,18 @@ function competitorTab(c) {
   const g = key => checks.find(s => s.source === key) || {};
   if (state.compTab === 'report') {
     const color = rep.color || riskColor(rep.level);
+    // «0 ₽» и «0 дел» читались бы как «долгов и судов нет». Если источник не
+    // ответил, показываем прочерк и причину — иначе менеджер сделает вывод
+    // из пустоты, а это прямой риск потерять деньги на ненадёжном конкуренте.
+    const fsspChk = g('fssp'), kadChk = g('kad');
+    const debtsTotal = (fsspChk.data || {}).total;
+    const debtsKnown = fsspChk.status === 'ok' && debtsTotal != null;
+    const kadKnown = kadChk.status === 'ok';
     return `
      <div class="grid" style="margin-bottom:12px">
        <div class="kpi"><span>Риск-оценка</span><b class="risk-value" style="--risk:${esc(color)}">${rep.risk ?? '—'} / 100</b><small>${esc(RISK_LABELS[String(rep.level || '').toLowerCase()] || rep.level || 'проверок не было')}</small></div>
-       <div class="kpi"><span>Исполнительные производства</span><b>${fmt((g('fssp').data || {}).total || 0)}</b><small>по базе ФССП</small></div>
-       <div class="kpi"><span>Арбитражные дела</span><b>${Number((g('kad').data || {}).total || 0)} дел</b><small>Кад.Арбитр</small></div>
+       <div class="kpi"><span>Исполнительные производства</span><b>${debtsKnown ? fmt(debtsTotal) : '—'}</b><small>${debtsKnown ? 'по базе ФССП' : 'API ФССП закрыт — по ссылке'}</small></div>
+       <div class="kpi"><span>Арбитражные дела</span><b>${kadKnown ? Number((kadChk.data || {}).total || 0) + ' дел' : '—'}</b><small>${kadKnown ? 'Кад.Арбитр' : 'картотека не ответила'}</small></div>
        <div class="kpi"><span>Средний рейтинг</span><b>${(rep.reviews && rep.reviews.avgRating) ? rep.reviews.avgRating + ' ' + icon('star', 12) : '—'}</b><small>карты и отзывы</small></div>
      </div>
      <div class="card" style="box-shadow:none;border-color:var(--line)">
@@ -2283,16 +2294,22 @@ function competitorTab(c) {
      ${checks.map(s => `<tr><td><b>${esc(s.title || s.source)}</b></td><td><span class="tag ${s.status === 'ok' ? '' : 'orange'}">${esc(s.status)}</span></td><td><small>${esc(s.summary || '—')}</small></td><td><small>${esc(dt(s.checked_at))}</small></td></tr>`).join('') || '<tr><td colspan="4"><small>Источники ещё не опрашивались</small></td></tr>'}</table>`;
   }
   if (state.compTab === 'debts') {
-    const fssp = g('fssp').data || {};
-    const kad = g('kad').data || {};
+    // Важно не путать «проверили — чисто» и «проверить не удалось»: первое
+    // успокаивает, второе — повод открыть ссылку и посмотреть руками.
+    const fsspChk = g('fssp'), fssp = fsspChk.data || {};
+    const kadChk = g('kad'), kad = kadChk.data || {};
+    const fsspLink = (fsspChk.links || []).find(l => /fssp\.gov\.ru/.test(l.url));
     return `<div class="cols"><div>
      <h4>ФССП (долги у судебных приставов)</h4>
-     <p>Общая сумма долгов: <b>${fmt(fssp.total || 0)}</b></p>
-     <div class="list">${(fssp.productions || []).map(d => `<div class="row"><span>${esc(d.number || 'Исполнительное производство')}<br><small>${fmt(d.sum || 0)} · ${esc(d.subject || '')}</small></span></div>`).join('') || '<small>Долгов у приставов не найдено</small>'}</div>
+     ${fsspChk.status === 'ok' ? `<p>Общая сумма долгов: <b>${fmt(fssp.total || 0)}</b></p>
+     <div class="list">${(fssp.productions || []).map(d => `<div class="row"><span>${esc(d.number || 'Исполнительное производство')}<br><small>${fmt(d.sum || 0)} · ${esc(d.subject || '')}</small></span></div>`).join('') || '<small>Долгов у приставов не найдено</small>'}</div>`
+      : `<p><small>${esc(fsspChk.summary || 'Официальный API ФССП закрыт с марта 2022 года — суммы долгов смотрятся вручную по ссылке на банк данных.')}</small></p>
+     ${fsspLink ? `<a class="btn sm" href="${esc(fsspLink.url)}" target="_blank" rel="noopener">${icon('search', 13)} Открыть банк данных ФССП</a>` : ''}`}
     </div><div>
      <h4>Арбитражные суды (Кад.Арбитр)</h4>
-     <p>Всего дел: <b>${kad.total || 0}</b></p>
-     <div class="list">${(kad.cases || []).map(x => `<div class="row"><span>Дело № ${esc(x.number)}<br><small>${esc(x.role || 'Участник')} · ${fmt(x.sum || 0)} · ${esc(x.type || '')}</small></span></div>`).join('') || '<small>Судебных споров не найдено</small>'}</div>
+     ${kadChk.status === 'ok' ? `<p>Всего дел: <b>${kad.total || 0}</b></p>
+     <div class="list">${(kad.cases || []).map(x => `<div class="row"><span>Дело № ${esc(x.number)}<br><small>${esc(x.role || 'участник')}${x.type ? ' · ' + esc(x.type) : ''}${x.court ? ' · ' + esc(x.court) : ''}${x.date ? ' · ' + esc(dt(x.date)) : ''}</small></span>${x.url ? `<a class="btn sm" href="${esc(x.url)}" target="_blank" rel="noopener">${icon('fileText', 13)} Карточка дела</a>` : ''}</div>`).join('') || '<small>Судебных споров не найдено</small>'}</div>`
+      : `<p><small>${esc(kadChk.summary || 'Картотека не ответила — проверьте по ссылке ниже.')}</small></p>`}
     </div></div>`;
   }
   if (state.compTab === 'reviews') {
@@ -2517,14 +2534,16 @@ async function settings(v) {
     const ours = await api('/api/prices?scope=ours').catch(() => ({ rows: [] }));
     // ключ → что он даёт и где взять. Без ключа источник не ломается: остаются ссылки.
     const KEY_FIELDS = [
-      ['FNS_API_KEY', 'Ключ api-fns.ru (данные ФНС)', 'api-fns.ru — платный доступ к ЕГРЮЛ. Без ключа: ссылка «ФНС: Прозрачный бизнес» в отчёте'],
-      ['FSSP_TOKEN', 'Токен ФССП (долги у приставов)', 'api-ip.fssprus.ru — платный доступ к банку данных. Без токена: ссылка на fssp.gov.ru, суммы смотрятся вручную'],
-      ['GOOGLE_PLACES_KEY', 'Ключ Google Places', 'console.cloud.google.com — рейтинг и отзывы на Google Картах. Без ключа: ссылка на поиск отзывов'],
-      ['TWOGIS_KEY', 'Ключ 2ГИС', 'dev.2gis.ru — рейтинг и отзывы в 2ГИС. Без ключа: ссылка на карточку организации'],
-      ['YANDEX_API_KEY', 'Ключ Яндекс Геопоиска', 'developer.tech.yandex.ru — карточка организации на Яндекс Картах. Без ключа: ссылка на карты']
+      ['FNS_API_KEY', 'Ключ api-fns.ru (данные ФНС)', 'api-fns.ru — платный доступ к ЕГРЮЛ/ЕГРИП: статус, адрес, руководитель, учредители, ОКВЭД. Без ключа: ссылки «ФНС: Прозрачный бизнес» и «ФНС: бухотчётность» в отчёте'],
+      ['GOOGLE_PLACES_KEY', 'Ключ Google Places', 'console.cloud.google.com → включите «Places API (New)». Старая версия API с октября 2026 не подключается в новых проектах. Без ключа: ссылка на поиск отзывов'],
+      ['TWOGIS_KEY', 'Ключ 2ГИС', 'dev.2gis.ru — рейтинг и отзывы в 2ГИС. Отзывы отдаются только ключу с расширенным доступом. Без ключа: ссылка на карточку организации'],
+      ['YANDEX_API_KEY', 'Ключ Яндекс Геопоиска', 'developer.tech.yandex.ru — карточка организации на Яндекс Картах (API платный). Без ключа: ссылка на карты']
     ];
-    // источник без ключа работает всегда; с ключом — данные подтягиваются сами
-    const readyLabel = src => !src.needs.length ? 'работает без ключа' : (src.configured ? 'ключ задан — данные подтягиваются сами' : 'ключа нет — данные по ссылкам');
+    // источник без ключа работает сам; с ключом — данные подтягиваются;
+    // manual — работающего API нет вовсе, и обещать «работает без ключа» нельзя
+    const readyLabel = src => src.manual ? 'данные по ссылке вручную'
+      : !src.needs.length ? 'работает без ключа'
+      : (src.configured ? 'ключ задан — данные подтягиваются сами' : 'ключа нет — данные по ссылкам');
     body = `<div class="settings-cols"><div>
      <div class="card"><h3>Источники проверки</h3>
       <p class="form-hint">Ключи <b>не обязательны</b>. Без них CRM не молчит: в отчёте остаются прямые ссылки на официальные реестры, по которым сотрудник проверяет компанию за минуту. С ключом те же данные подтягиваются сами и попадают в риск-оценку.</p>
@@ -2542,11 +2561,12 @@ async function settings(v) {
     </div><div>
      <div class="card"><h3>Как работает разведка конкурентов</h3>
       <p><small>CRM опрашивает открытые реестры и карты, собирает долги, суды, банкротство и отзывы, считает риск-оценку от 0 до 100 и подсказывает менеджеру аргументы для переговоров.</small></p>
-      <p><small><b>Без ключей</b> доступны: Федресурс (банкротство), Кад.Арбитр (суды), Rusprofile и ссылки на ФНС, ФССП, Яндекс Карты, 2ГИС, Авито и Госзакупки. <b>С ключами</b> добавляются готовые суммы долгов, данные ЕГРЮЛ и рейтинги с карт.</small></p>
+      <p><small><b>Без ключей</b> CRM сама опрашивает картотеку арбитражных судов (Кад.Арбитр) и пробует Федресурс (банкротство) и Rusprofile. Эти два сайта часто закрываются от автоматических запросов — тогда в отчёте остаются прямые ссылки на официальные реестры: ФНС, ГИР БО, Федресурс, Госзакупки, Яндекс Карты, 2ГИС и Авито. <b>С ключами</b> добавляются данные ЕГРЮЛ (api-fns.ru) и рейтинги с карт (Google, 2ГИС, Яндекс).</small></p>
+      <p><small><b>Долги у приставов автоматически не подтягиваются.</b> Официальный API ФССП закрыт с марта 2022 года и, по ответу службы, восстанавливаться не будет. В отчёте есть ссылка на банк исполнительных производств: сотрудник открывает её и вводит ИНН — это занимает минуту. CRM в этом случае показывает прочерк, а не «0 ₽», чтобы ноль нельзя было принять за отсутствие долгов.</small></p>
       <p><small>Отзывы и прайс конкурента можно внести вручную прямо в его карточке — сравнение цен и рейтинг появятся в отчёте сразу.</small></p>
       <p><small><b>Наши цены</b> для сравнения берутся из раздела «Каталог» — это один и тот же список: поправили цену там, и сравнение в карточке конкурента сразу свежее. Позиций в каталоге: <b>${ours.rows.length}</b>; в сравнении участвуют только те, у которых указана цена.</small></p>
       <button class="btn sm" onclick="go('products')">${icon('products', 13)} Открыть каталог</button></div>
-     ${isAdmin ? `<div class="card"><h3>Адреса сервисов проверки</h3><p><small>Нужны только техническому специалисту — обычно здесь ничего менять не надо. Если сервис сменил адрес, его можно поправить.</small></p><form onsubmit="return saveCompetitorUrls(event)">${[['FNS_API_URL', 'ФНС API'], ['FSSP_API_URL', 'ФССП API'], ['FEDRESURS_API_URL', 'Федресурс'], ['KAD_API_URL', 'Арбитр'], ['RUSPROFILE_URL', 'Rusprofile'], ['GOOGLE_API_URL', 'Google Places'], ['TWOGIS_API_URL', '2ГИС'], ['YANDEX_API_URL', 'Яндекс Геопоиск']].map(([k, n]) => `<label>${n}<input name="${k}" value="${esc((cs.urls || {})[k] || '')}"></label>`).join('')}<button class="btn">Сохранить адреса</button></form></div>` : ''}
+     ${isAdmin ? `<div class="card"><h3>Адреса сервисов проверки</h3><p><small>Нужны только техническому специалисту — обычно здесь ничего менять не надо. Если сервис сменил адрес, его можно поправить.</small></p><form onsubmit="return saveCompetitorUrls(event)">${[['FNS_API_URL', 'ФНС API'], ['FEDRESURS_API_URL', 'Федресурс'], ['KAD_API_URL', 'Арбитр'], ['RUSPROFILE_URL', 'Rusprofile'], ['GOOGLE_API_URL', 'Google Places'], ['TWOGIS_API_URL', '2ГИС'], ['YANDEX_API_URL', 'Яндекс Геопоиск']].map(([k, n]) => `<label>${n}<input name="${k}" value="${esc((cs.urls || {})[k] || '')}"></label>`).join('')}<button class="btn">Сохранить адреса</button></form></div>` : ''}
     </div></div>`;
   } else if (state.settingsTab === 'pipelines') {
     const pl = await api('/api/pipelines');
