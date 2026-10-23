@@ -281,6 +281,16 @@ test('отправка сообщения клиенту через Wazzup (ск
     // отправка с выбором другого типа канала (как в интерфейсе: Telegram-канал Wazzup)
     await call(`/api/conversations/${conv.id}/messages`, { method: 'POST', body: JSON.stringify({ body: 'Ответ в Telegram', chat_type: 'telegram' }) });
     assert.equal(globalThis.__wz.body.chatType, 'telegram', 'тип канала берётся из интерфейса');
+    // Каналы за пределами «WhatsApp/Telegram/Instagram/Viber» — Авито, MAX, Циан,
+    // ВКонтакте, WABA. Раньше неизвестный тип молча заменялся на whatsapp: ответ
+    // клиенту с Авито уходил в WhatsApp и выглядел как доставленный.
+    for (const t of ['avito', 'max', 'cian', 'vk', 'wapi', 'tgapi', 'maxbot']) {
+      await call(`/api/conversations/${conv.id}/messages`, { method: 'POST', body: JSON.stringify({ body: 'Ответ', chat_type: t }) });
+      assert.equal(globalThis.__wz.body.chatType, t, `транспорт ${t} передаётся в Wazzup без подмены`);
+    }
+    const bogus = await call(`/api/conversations/${conv.id}/messages`, { method: 'POST', body: JSON.stringify({ body: 'Ответ', chat_type: 'одноклассники' }) });
+    assert.equal(bogus.body.message.status, 'error', 'неизвестный канал не отправляется молча');
+    assert.match(bogus.body.send.mode, /одноклассники/, 'в ошибке назван канал, который не поддержан');
     assert.ok(globalThis.__wz.body.chatId.length > 0, 'для Telegram используется идентификатор чата из вебхука');
     assert.equal(sent.body.message.status, 'sent');
   } finally { mock.close(); }

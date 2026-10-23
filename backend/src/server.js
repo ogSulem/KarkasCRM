@@ -471,7 +471,10 @@ export function upsertIncoming({ channel = 'whatsapp', chatType = '', phone = ''
   // ограничиваем длину: вебхук — доверенный, но не бесконечный источник
   const cap = (s, n) => String(s ?? '').slice(0, n);
   name = cap(name, 120); body = cap(body, 100000); subject = cap(subject, 200); author = cap(author, 120);
-  const ph = phone || (['whatsapp', 'viber'].includes(chatType || channel) ? chatId : '');
+  // В этих каналах адресат — номер телефона; в остальных (Авито, Циан, MAX,
+  // Telegram, Instagram, ВК) chatId номером не является, и писать его в телефон
+  // контакта нельзя: карточка склеилась бы с чужим клиентом.
+  const ph = phone || (['whatsapp', 'wapi', 'whatsgroup', 'viber'].includes(String(chatType || channel).toLowerCase()) ? chatId : '');
   // быстрый поиск по нормализованному телефону (индекс), раньше — полный скан
   let contact = null;
   const phNorm = digits(ph);
@@ -513,8 +516,12 @@ async function wazzupFetch(path, opt = {}) {
   return data;
 }
 const isUuid = s => /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(String(s || ''));
-const WZ_TYPES = ['whatsapp', 'viber', 'telegram', 'instagram', 'whatsgroup'];
-const normChatType = t => WZ_TYPES.includes(String(t || '').toLowerCase()) ? String(t).toLowerCase() : 'whatsapp';
+// Транспорты Wazzup (wazzup24.ru/help/api/channels): whatsapp и wapi (WhatsApp
+// Business API), tgapi (личный Telegram) и telegram (Telegram-бот), instagram,
+// viber, avito, max и maxbot, cian, vk, whatsgroup (групповой чат WhatsApp).
+const WZ_TYPES = ['whatsapp', 'wapi', 'whatsgroup', 'tgapi', 'telegram', 'instagram',
+  'viber', 'avito', 'max', 'maxbot', 'cian', 'vk'];
+const normChatType = t => { const v = String(t || '').trim().toLowerCase(); return WZ_TYPES.includes(v) ? v : ''; };
 // понятные ошибки вместо «Wazzup API 401»
 function wazzupError(e, status) {
   const m = String(e?.message || e || '');
@@ -528,7 +535,15 @@ export async function sendViaWazzup(conv, text, user, chatTypeOverride = '', fil
   // Wazzup принимает только id канала в формате uuid — иначе отвечаем каналом по умолчанию из настроек
   const channelId = (isUuid(conv.channel_id) ? conv.channel_id : '') || getSetting('WAZZUP_CHANNEL_ID');
   if (!channelId) throw new Error('Не выбран канал Wazzup. Настройки → Интеграции → «Проверить и синхронизировать каналы», затем выберите канал по умолчанию.');
-  const chatType = normChatType(chatTypeOverride || conv.chat_type);
+  // Пустой тип бывает у беседы, созданной вручную, — там годится канал по
+  // умолчанию. Неизвестный тип подменять на whatsapp нельзя: ответ ушёл бы
+  // клиенту не в тот мессенджер, и выглядело бы это как delivered.
+  const rawType = String(chatTypeOverride || conv.chat_type || '').trim().toLowerCase();
+  const chatType = normChatType(rawType);
+  if (!chatType) {
+    if (!rawType) throw new Error('Не выбран канал отправки');
+    throw new Error(`Канал «${rawType}» не поддерживается. Wazzup работает с: ${WZ_TYPES.join(', ')}`);
+  }
   // адресат — id чата из вебхука или номер телефона клиента
   const chatId = conv.external_chat_id || digits(conv.phone);
   if (!chatId) throw new Error('Нет адресата: у клиента не заполнен телефон или не пришло ни одного сообщения из этого канала.');
@@ -889,7 +904,8 @@ export const server = http.createServer(async (req, res) => {
       if (secret && u.searchParams.get('secret') !== secret && req.headers['x-webhook-secret'] !== secret) return json(res, 403, { error: 'Неверный секрет вебхука' });
       const b = await readBody(req);
       const msg = (b.message && typeof b.message === 'object') ? b.message : b;
-      const channel = ['whatsapp', 'telegram', 'instagram', 'viber', 'email'].includes(b.channel) ? b.channel : 'site';
+      const chIn = String(b.channel || '').trim().toLowerCase();
+      const channel = (WZ_TYPES.includes(chIn) || chIn === 'email') ? chIn : 'site';
       const name = String((msg.from && msg.from.first_name) || b.name || '').slice(0, 120);
       upsertIncoming({ channel, chatType: b.chatType || channel, phone: String(b.phone || (msg.chat && msg.chat.id) || ''), chatId: String(b.chatId || ''), name, body: String(msg.text || b.body || ''), external_id: msg.message_id ? `${channel}-${msg.message_id}` : (b.external_id || null) });
       return json(res, 200, { received: true });
@@ -977,7 +993,7 @@ export const server = http.createServer(async (req, res) => {
       version: VERSION, schema: SCHEMA_VERSION, user,
       company: { name: getSetting('COMPANY_NAME', 'Моя компания'), currency: getSetting('CURRENCY', '₽') },
       taskTypes: [{ id: 'call', name: 'Звонок' }, { id: 'meeting', name: 'Встреча' }, { id: 'message', name: 'Сообщение' }, { id: 'email', name: 'Письмо' }, { id: 'other', name: 'Другое' }],
-      sources: ['manual', 'wazzup-whatsapp', 'wazzup-telegram', 'wazzup-instagram', 'wazzup-viber', 'whatsapp', 'telegram', 'email', 'site', 'avito', 'import'],
+      sources: ['manual', 'import', 'site', 'email', ...WZ_TYPES, ...WZ_TYPES.map(t => 'wazzup-' + t)],
       customFields: getCustomFields(),
       features: { email: !!getSetting('SMTP_HOST'), wazzup: !!getSetting('WAZZUP_API_KEY') },
       salesTarget: Number(getSetting('SALES_TARGET', '0')) || 0,

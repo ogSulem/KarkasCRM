@@ -159,7 +159,14 @@ tr:hover td{background:#fafcfb}
 .conv b{display:flex;justify-content:space-between;font-size:14px}
 .conv p{margin:2px 0;color:var(--muted);font-size:13px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 .chan{background:#f1f5f9;color:#475569;border-radius:6px;padding:1px 6px;font-size:11.5px;text-transform:capitalize}
-.chan.whatsapp{background:#dcfce7;color:#166534}.chan.telegram{background:#e0f2fe;color:#075985}.chan.instagram{background:#fce7f3;color:#9d174d}.chan.viber{background:#ede9fe;color:#5b21b6}
+.chan.whatsapp,.chan.wapi,.chan.whatsgroup{background:#dcfce7;color:#166534}
+.chan.telegram,.chan.tgapi{background:#e0f2fe;color:#075985}
+.chan.instagram{background:#fce7f3;color:#9d174d}
+.chan.viber{background:#ede9fe;color:#5b21b6}
+.chan.avito{background:#e0f7f2;color:#0f766e}
+.chan.max,.chan.maxbot{background:#ffe9e0;color:#b45309}
+.chan.cian{background:#e3edff;color:#1d4ed8}
+.chan.vk{background:#e6ebf7;color:#3b5998}
 .convs{display:flex;flex-direction:column;overflow:hidden!important}
 .convs>div:first-child{position:sticky;top:0;background:var(--card);z-index:2}
 #convList{overflow:auto;flex:1;min-height:0}
@@ -582,10 +589,14 @@ body.role-viewer .head-readonly{display:inline-block}
 .viewer-lock{margin:10px 0 0}
 /* тёмная тема: докрашиваем то, что осталось со светлыми цветами по умолчанию */
 html[data-theme=dark] .chan{background:#1c262c;color:#c3ced6}
-html[data-theme=dark] .chan.whatsapp{background:#123326;color:#86efac}
-html[data-theme=dark] .chan.telegram{background:#0f2c3d;color:#7dd3fc}
+html[data-theme=dark] .chan.whatsapp,html[data-theme=dark] .chan.wapi,html[data-theme=dark] .chan.whatsgroup{background:#123326;color:#86efac}
+html[data-theme=dark] .chan.telegram,html[data-theme=dark] .chan.tgapi{background:#0f2c3d;color:#7dd3fc}
 html[data-theme=dark] .chan.instagram{background:#33152a;color:#f9a8d4}
 html[data-theme=dark] .chan.viber{background:#241a3d;color:#c4b5fd}
+html[data-theme=dark] .chan.avito{background:#0f332c;color:#5eead4}
+html[data-theme=dark] .chan.max,html[data-theme=dark] .chan.maxbot{background:#3a2415;color:#fdba74}
+html[data-theme=dark] .chan.cian{background:#152a4d;color:#93c5fd}
+html[data-theme=dark] .chan.vk{background:#1d2740;color:#a8bce8}
 html[data-theme=dark] .prio.high{background:#3b1418;color:#fca5a5}
 html[data-theme=dark] .prio.low{background:#1c262c;color:#c3ced6}
 html[data-theme=dark] .logo-admin-img{background:#fff}

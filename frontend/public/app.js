@@ -116,26 +116,23 @@ function icon(name, size = 16, className = '') {
 }
 
 // Внутренние коды источников и каналов — только в данных, пользователю показываем русские названия.
+// Транспорты Wazzup (wazzup24.ru/help/api/channels): список закрытый, но шире,
+// чем «WhatsApp, Telegram, Instagram, Viber» — туда входят Авито, MAX, Циан и ВКонтакте.
+const WZ_TRANSPORTS = {
+  whatsapp: 'WhatsApp', wapi: 'WhatsApp Business API', whatsgroup: 'Группа WhatsApp',
+  tgapi: 'Telegram', telegram: 'Telegram-бот', instagram: 'Instagram', viber: 'Viber',
+  avito: 'Авито', max: 'MAX', maxbot: 'MAX-бот', cian: 'Циан', vk: 'ВКонтакте'
+};
 const SOURCE_LABELS = {
-  manual: 'Вручную',
-  'wazzup-whatsapp': 'WhatsApp (Wazzup)',
-  'wazzup-telegram': 'Telegram (Wazzup)',
-  'wazzup-instagram': 'Instagram (Wazzup)',
-  'wazzup-viber': 'Viber (Wazzup)',
-  whatsapp: 'WhatsApp',
-  telegram: 'Telegram',
-  instagram: 'Instagram',
-  viber: 'Viber',
-  email: 'Почта',
-  site: 'Сайт',
-  avito: 'Авито',
-  import: 'Импорт из CSV'
+  manual: 'Вручную', import: 'Импорт из CSV', site: 'Сайт', email: 'Почта',
+  ...WZ_TRANSPORTS,
+  ...Object.fromEntries(Object.entries(WZ_TRANSPORTS).map(([k, v]) => ['wazzup-' + k, v + ' (Wazzup)']))
 };
 const sourceLabel = s => SOURCE_LABELS[s] || (s ? String(s) : 'Вручную');
 const sourceOptions = selected => Object.entries(SOURCE_LABELS).map(([code, name]) =>
   `<option value="${code}" ${code === (selected || 'manual') ? 'selected' : ''}>${name}</option>`).join('');
 
-const CHANNEL_LABELS = { whatsapp: 'WhatsApp', telegram: 'Telegram', instagram: 'Instagram', viber: 'Viber', email: 'Почта', any: 'Любой канал' };
+const CHANNEL_LABELS = { ...WZ_TRANSPORTS, email: 'Почта', any: 'Любой канал' };
 const channelLabel = c => CHANNEL_LABELS[c] || c || '';
 // бейджи каналов клиента: «WhatsApp · Telegram» — одна строка для списков
 const chan = c => (c || 'whatsapp').split(',').map(x => x.trim()).filter(Boolean).map(x => `<span class="chan ${x}">${esc(channelLabel(x))}</span>`).join(' ');
@@ -1359,16 +1356,28 @@ function msgHtml(m) {
   const badge = failed ? ' <span class="msg-fail" title="Не доставлено — проверьте подключение канала">не доставлено</span>' : '';
   return `<div class="msg ${own ? 'out' : ''}"><div>${attachmentHtml(m)}${body}</div><small>${esc(channelLabel(m.channel) || m.channel)} · ${esc(dt(m.created_at))}${!failed && m.status ? ' · ' + esc(statusLabel(m.status)) : ''}${badge}</small></div>`;
 }
-// Каналы отправки: сначала подключённые у этого клиента, затем все доступные.
+// Каналы отправки: сначала те, в которых этот клиент уже писал, затем реально
+// подключённые в Wazzup. Зашитый список показывал заказчику WhatsApp, которого
+// у него нет, и прятал Авито с MAX, которые есть. Почты здесь нет намеренно:
+// письмо отправляется отдельной кнопкой в шапке чата, а не через мессенджер.
 function channelOptions(conv) {
-  const known = ['whatsapp', 'telegram', 'instagram', 'viber', 'email'];
-  const fromConv = String(conv?.channels || '').split(',').map(x => x.trim()).filter(Boolean);
-  const list = [...new Set([...fromConv, ...known])];
-  return list.map(c => `<option value="${esc(c)}">${esc(channelLabel(c))}</option>`).join('');
+  // Почту исключаем: письмо отправляется отдельной кнопкой в шапке чата, а сервер
+  // на channel='email' отвечает ошибкой. Пункт, который всегда падает, не нужен.
+  const fromConv = String(conv?.channels || '').split(',').map(x => x.trim()).filter(x => x && x !== 'email');
+  const connected = (state.channels || [])
+    .filter(c => String(c.state || '').toLowerCase() !== 'disabled')
+    .map(c => String(c.transport || '').trim().toLowerCase()).filter(Boolean);
+  const list = [...new Set([...fromConv, ...connected])];
+  // каналы ещё не синхронизированы — берём тип этой беседы, иначе нечего выбрать
+  if (!list.length) list.push(String(conv?.chat_type || '').trim().toLowerCase() || 'whatsapp');
+  return list.map(c => `<option value="${esc(c)}" ${c === String(conv?.chat_type || '').toLowerCase() ? 'selected' : ''}>${esc(channelLabel(c))}</option>`).join('');
 }
 async function inbox(v) {
   const convs = await api('/api/conversations');
   state.cache.convs = convs;
+  // подключённые каналы нужны списку «Куда отправить»: без них там только те
+  // каналы, в которых клиент уже писал, а новые не предложить
+  if (!state.channels.length) state.channels = await api('/api/channels').catch(() => []);
   const cur = convs.find(c => c.id === state.conv) || convs[0];
   if (cur) state.conv = cur.id;
   const msgs = cur ? await api(`/api/conversations/${cur.id}/messages`) : [];
@@ -1567,7 +1576,7 @@ async function contacts(v) {
   <div class="card toolbar">
    <input id="contactSearch" style="max-width:220px" placeholder="Поиск по имени, тел, почте" value="${esc(f.q)}" oninput="liveSearch('contacts',()=>setContactQuery(this.value))">
    <select style="width:auto" onchange="setContactFilter('owner',this.value)"><option value="">Все ответственные</option>${__team.map(u => `<option value="${u.id}" ${f.owner == u.id ? 'selected' : ''}>${esc(u.name)}</option>`).join('')}</select>
-   <select style="width:auto" onchange="setContactFilter('source',this.value)"><option value="">Все источники</option>${['manual', 'wazzup-whatsapp', 'wazzup-telegram', 'wazzup-instagram', 'wazzup-viber', 'site', 'avito', 'email', 'import'].map(s => `<option value="${s}" ${f.source === s ? 'selected' : ''}>${sourceLabel(s)}</option>`).join('')}</select>
+   <select style="width:auto" onchange="setContactFilter('source',this.value)"><option value="">Все источники</option>${(state.meta?.sources || Object.keys(SOURCE_LABELS)).map(s => `<option value="${esc(s)}" ${f.source === s ? 'selected' : ''}>${esc(sourceLabel(s))}</option>`).join('')}</select>
    ${tagsAll.length ? `<select style="width:auto" onchange="setContactFilter('tag',this.value)"><option value="">Все теги</option>${tagsAll.map(t => `<option value="${esc(t)}" ${f.tag === t ? 'selected' : ''}>${esc(t)}</option>`).join('')}</select>` : ''}
    ${(f.q || f.owner || f.source || f.tag) ? `<button class="btn sm ghost" onclick="resetContactFilter()">Сбросить</button>` : ''}
    <span class="tag grey" style="margin-left:auto">показано ${Math.min(filtered.length, state.contactLimit || 50)} из ${filtered.length}${filtered.length !== list.length ? ` (всего в базе ${list.length})` : ''}</span>
@@ -2250,6 +2259,55 @@ async function openCompetitorCard(id) {
    <div id="compTabBody">${competitorTab(c)}</div>`);
 }
 
+// Отзывов здесь нет намеренно: для них есть своя вкладка «Отзывы» с автором и
+// оценкой. Держать два места для одного смысла — значит расходиться в данных.
+const FINDING_KINDS = ['долги', 'суды', 'связи', 'прочее'];
+
+// Банк данных ФССП, «Связи» на Rusprofile и отзывы на Авито автоматически не
+// отдаются: API закрыт, сайт закрыт от роботов, данные за платным доступом.
+// Поэтому то, что менеджер посмотрел сам, записывается сюда и попадает в отчёт
+// и в оценку риска — иначе проверка испаряется вместе с закрытой вкладкой.
+function findingsBlock(c) {
+  const finds = c.findings || [];
+  return `<hr><div class="row" style="border:0"><h4>Найдено вручную (${finds.length})</h4></div>
+   <p class="form-hint">Откройте реестр по ссылке выше и запишите, что увидели: сумма долга, число дел, связанные организации. Запись попадает в отчёт и учитывается в оценке риска.</p>
+   <div class="list">${finds.map(f => `<div class="row"><span><b>${esc(f.kind || 'прочее')}</b>${f.title ? ': ' + esc(f.title) : ''}
+      ${f.amount ? `<br><small>${f.kind === 'суды' ? esc(String(Math.round(f.amount))) + ' дел' : esc(fmt(f.amount))}</small>` : ''}
+      ${f.note ? `<br><small>${esc(f.note)}</small>` : ''}
+      <br><small>${esc(f.author || '')} · ${esc(dt(f.created_at))}${f.source_url ? ` · <a href="${esc(f.source_url)}" target="_blank" rel="noopener">источник</a>` : ''}</small></span>
+      ${canEdit() ? `<button class="btn sm ghost" onclick="deleteFinding(${f.id},${c.id})">Удалить</button>` : ''}</div>`).join('') || '<small>Записей пока нет</small>'}</div>
+   ${canEdit() ? `<form onsubmit="return saveFinding(event,${c.id})" style="margin-top:10px">
+     <div style="display:grid;grid-template-columns:auto 1fr auto auto;gap:8px;align-items:end">
+      <label>Что нашли<select name="kind">${FINDING_KINDS.map(k => `<option value="${k}">${k}</option>`).join('')}</select></label>
+      <label>Описание<input name="title" placeholder="3 исполнительных производства, долг по договору поставки" required maxlength="200"></label>
+      <label>Сумма или число<input name="amount" type="number" min="0" step="1" placeholder="450000"></label>
+      <button class="btn primary">Записать</button>
+     </div>
+     <label>Ссылка на источник (необязательно)<input name="source_url" placeholder="https://fssp.gov.ru/iss/ip"></label>
+    </form>` : ''}`;
+}
+
+async function saveFinding(e, cid) {
+  e.preventDefault();
+  const b = Object.fromEntries(new FormData(e.target));
+  try {
+    await api(`/api/competitors/${cid}/findings`, { method: 'POST', body: JSON.stringify(b) });
+    toast('Находка записана — пересчитайте отчёт, чтобы она попала в оценку риска');
+    openCompetitorCard(cid);   // карточка перечитывается с сервера вместе с находками
+  } catch (err) { toast(err.message, 'err'); }
+  return false;
+}
+
+function deleteFinding(fid, cid) {
+  askConfirm('Удалить запись о находке? Она перестанет учитываться в оценке риска.', async () => {
+    try {
+      await api(`/api/competitors/${cid}/findings/${fid}`, { method: 'DELETE' });
+      toast('Запись удалена');
+      openCompetitorCard(cid);
+    } catch (err) { toast(err.message, 'err'); }
+  });
+}
+
 // Ссылки на реестры берём из отчёта: их уже собрал сервер по ИНН, ОГРН и названию.
 // Держать два зашитых адреса в разметке — значит показывать меньше, чем CRM знает.
 function reportLinks(rep, c) {
@@ -2293,8 +2351,8 @@ function competitorTab(c) {
      ${checks.map(s => `<tr><td><b>${esc(s.title || s.source)}</b></td><td><span class="tag ${s.status === 'ok' ? '' : 'orange'}">${esc(s.status)}</span></td><td><small>${esc(s.summary || '—')}</small></td><td><small>${esc(dt(s.checked_at))}</small></td></tr>`).join('') || '<tr><td colspan="4"><small>Источники ещё не опрашивались</small></td></tr>'}</table>`;
   }
   if (state.compTab === 'debts') {
-    // Важно не путать «проверили — чисто» и «проверить не удалось»: первое
-    // успокаивает, второе — повод открыть ссылку и посмотреть руками.
+    // «Проверили — чисто» и «проверить не удалось» показываем по-разному:
+    // во втором случае прочерк, причина и ссылка на официальный реестр.
     const fsspChk = g('fssp'), fssp = fsspChk.data || {};
     const kadChk = g('kad'), kad = kadChk.data || {};
     const fsspLink = (fsspChk.links || []).find(l => /fssp\.gov\.ru/.test(l.url));
@@ -2309,7 +2367,8 @@ function competitorTab(c) {
      ${kadChk.status === 'ok' ? `<p>Всего дел: <b>${kad.total || 0}</b></p>
      <div class="list">${(kad.cases || []).map(x => `<div class="row"><span>Дело № ${esc(x.number)}<br><small>${esc(x.role || 'участник')}${x.type ? ' · ' + esc(x.type) : ''}${x.court ? ' · ' + esc(x.court) : ''}${x.date ? ' · ' + esc(dt(x.date)) : ''}</small></span>${x.url ? `<a class="btn sm" href="${esc(x.url)}" target="_blank" rel="noopener">${icon('fileText', 13)} Карточка дела</a>` : ''}</div>`).join('') || '<small>Судебных споров не найдено</small>'}</div>`
       : `<p><small>${esc(kadChk.summary || 'Картотека не ответила — проверьте по ссылке ниже.')}</small></p>`}
-    </div></div>`;
+    </div></div>
+    ${findingsBlock(c)}`;
   }
   if (state.compTab === 'reviews') {
     return `<div class="row" style="border:0"><h4>Отзывы клиентов (${(c.reviews || []).length})</h4><button class="btn sm" onclick="addReview(${c.id})">+ Добавить отзыв</button></div>
@@ -2466,7 +2525,7 @@ async function settings(v) {
       ${localOrigin ? `<div class="notice warn" style="margin-top:12px"><b>Сейчас открыт локальный адрес</b><br><small>${esc(origin)} виден только на этом компьютере. Wazzup и формы с сайта не смогут сюда достучаться — укажите публичный адрес выше (например, https://crm.вашдомен.ру) или откройте CRM по домену.</small></div>` : ''}
      </div>
      <div class="card"><h3>Мессенджеры через Wazzup</h3>
-      <p><small>Один ключ Wazzup объединяет <b>WhatsApp, Telegram, Instagram и Viber</b> в одном разделе «Чаты» — отдельно подключать каждый мессенджер не нужно. Ключ берётся в личном кабинете Wazzup: раздел «Интеграция с CRM» → API. Это длинная строка, которая работает как пароль к вашему аккаунту Wazzup, — храните её в секрете.</small></p>
+      <p><small>Один ключ Wazzup объединяет все подключённые у вас каналы в одном разделе «Чаты»: WhatsApp и WhatsApp Business, Telegram (личный и бот), Instagram, Viber, Авито, MAX, Циан и ВКонтакте. Отдельно подключать каждый мессенджер в CRM не нужно — состав списка зависит от того, какие каналы оплачены и добавлены в вашем кабинете Wazzup. Ключ берётся в личном кабинете Wazzup: раздел «Интеграция с CRM» → API. Это длинная строка, которая работает как пароль к вашему аккаунту Wazzup, — храните её в секрете.</small></p>
       <p>Статус: <b class="${s.wazzup.configured ? 'green' : ''}">${s.wazzup.configured ? 'подключено' : 'не подключено'}</b></p>
       <label>Ключ доступа Wazzup<input id="wzKey" placeholder="${esc(s.wazzup.api_key || 'вставьте ключ из личного кабинета Wazzup')}"></label>
       <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px"><label>Куда отправлять ответы по умолчанию<select id="wzChannel"><option value="">— выберите канал —</option>${chans.map(c => `<option value="${esc(c.external_id)}" ${c.external_id === s.wazzup.channel_id ? 'selected' : ''}>${esc(c.name || c.phone || c.transport || c.external_id)}</option>`).join('')}</select></label>

@@ -373,8 +373,22 @@ try {
   check('выбор канала подписан «Куда отправить»', /Куда отправить/.test($('.composer-sub').textContent));
   check('в композере ровно три действия: файл, поле, отправка', $$('.composer-row:first-child > *').length === 4);
   check('есть быстрый переход к настройке шаблонов', Boolean($('.tmpl-settings')));
-  const opts = window.channelOptions({ channels: 'whatsapp,telegram' });
-  check('channelOptions сначала показывает каналы клиента', opts.indexOf('whatsapp') < opts.indexOf('email'));
+  // Список «Куда отправить» строится из того, что у заказчика реально подключено.
+  // Зашитый перечень показывал WhatsApp тому, у кого только Авито и MAX, и прятал
+  // сами Авито с MAX — ответ ушёл бы не в тот мессенджер.
+  const opts = window.channelOptions({ channels: 'avito,max' });
+  check('в списке отправки есть каналы этого клиента', opts.includes('avito') && opts.includes('max'));
+  check('каналы подписаны по-русски, а не кодом', /Авито/.test(opts) && /MAX/.test(opts));
+  check('почты в списке мессенджеров нет: письмо уходит отдельной кнопкой', !opts.includes('email'));
+  check('неподключённый WhatsApp не предлагается', !opts.includes('whatsapp'));
+  window.__state.channels = [{ transport: 'cian', state: 'active' }, { transport: 'vk', state: 'disabled' }];
+  const opts2 = window.channelOptions({ channels: 'avito' });
+  check('подключённый в Wazzup канал предлагается в чате', opts2.includes('cian'));
+  check('отключённый канал не предлагается', !opts2.includes('vk'));
+  check('каналы клиента идут раньше остальных подключённых', opts2.indexOf('avito') < opts2.indexOf('cian'));
+  window.__state.channels = [];
+  const opts3 = window.channelOptions({ channels: '', chat_type: 'max' });
+  check('без синхронизации каналов предлагается тип этой беседы', opts3.includes('max'));
   const imgMsg = window.msgHtml({ direction: 'out', body: '', content_uri: '/uploads/x.png', content_type: 'image/png', content_name: 'x.png', channel: 'whatsapp', created_at: '2026-01-01 10:00' });
   check('msgHtml рисует изображение-вложение картинкой', imgMsg.includes('chat-attach img') && imgMsg.includes('<img'));
   const fileMsg = window.msgHtml({ direction: 'in', body: 'Документ', content_uri: '/uploads/a.pdf', content_type: 'application/pdf', content_name: 'смета.pdf', channel: 'whatsapp', created_at: '2026-01-01 10:00' });
@@ -502,6 +516,23 @@ try {
   }
   check('шапка контакта тоже не заходит под крестик', /padding-right:3[0-9]px/.test((cssText.match(/\.contact-head\{[^}]*\}/) || [''])[0]));
   check('первый текстовый ряд окна не налезает на крестик', cssText.includes('#modalBody>h3:first-child,#modalBody>p:first-child{padding-right:34px}'));
+  // Долги у приставов и «Связи» Rusprofile автоматически не отдаются: API ФССП
+  // закрыт, сайт Rusprofile закрыт от роботов. Поэтому то, что менеджер посмотрел
+  // сам, можно записать — иначе проверка испаряется вместе с закрытой вкладкой.
+  {
+    const html = window.findingsBlock({ id: 7, findings: [
+      { id: 3, kind: 'долги', title: '3 исполнительных производства', amount: 450000, author: 'Администратор', created_at: '2026-10-01 10:00', source_url: 'https://fssp.gov.ru/iss/ip' },
+      { id: 4, kind: 'связи', title: 'Общий учредитель', note: 'с ООО «Ромашка»', author: 'Администратор', created_at: '2026-10-02 11:00' },
+    ] });
+    check('на вкладке долгов есть блок ручных находок', /Найдено вручную/.test(html));
+    check('записанная сумма долга видна в блоке', /450/.test(html) && /3 исполнительных производства/.test(html));
+    check('у находки видны автор, дата и ссылка на источник', /Администратор/.test(html) && /fssp\.gov\.ru/.test(html));
+    check('форма записи предлагает виды находок', /name="kind"/.test(html) && /долги/.test(html) && /связи/.test(html));
+    check('в форме есть сумма и описание', /name="amount"/.test(html) && /name="title"/.test(html));
+    check('находку можно удалить', /deleteFinding\(3,7\)/.test(html));
+    const emptyHtml = window.findingsBlock({ id: 8, findings: [] });
+    check('без записей блок объясняет, что делать', /Записей пока нет/.test(emptyHtml) && /откройте реестр|Откройте реестр/i.test(emptyHtml));
+  }
   window.closeModal();
   // «Ссылка на прайс»: сервер умел подтягивать таблицу конкурента по адресу,
   // но поля в форме не было — функция оставалась недостижимой из интерфейса.
