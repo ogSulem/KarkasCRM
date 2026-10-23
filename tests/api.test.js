@@ -1,5 +1,10 @@
 import { test, before, after } from 'node:test';
 import assert from 'node:assert';
+import { readFileSync } from 'node:fs';
+
+// Версия берётся из файла VERSION, а не вписывается в тест: иначе каждое её
+// повышение требовало бы правки проверок, которые должны быть от него свободны.
+const VERSION = readFileSync(new URL('../VERSION', import.meta.url), 'utf8').trim();
 process.env.DATA_DIR = '/tmp/karkas-test-' + Date.now();
 process.env.PORT = '18099';
 process.env.SEED_MODE = 'off'; // детерминированная чистая база для тестов
@@ -395,7 +400,11 @@ test('дубли контактов: поиск и объединение кар
 
 test('состояние системы: health, версия, резервные копии', async () => {
   const health = (await call('/api/health')).body;
-  assert.equal(health.version, '1.0.0', 'health сообщает версию из файла VERSION');
+  assert.equal(health.version, VERSION, 'health сообщает версию из файла VERSION');
+  // Единый источник версии — файл VERSION, но поле version есть и в package.json.
+  // Никто его не читает, поэтому расхождение не ломает работу и накапливается тихо.
+  const pkg = JSON.parse(readFileSync(new URL('../package.json', import.meta.url), 'utf8'));
+  assert.equal(pkg.version, health.version, 'версия в package.json не расходится с файлом VERSION');
   assert.ok(health.uptimeSec >= 0, 'health отдаёт аптайм');
   assert.ok(health.counts.contacts > 0 && health.counts.deals > 0, 'health отдаёт счётчики записей');
   const made = await call('/api/backups', { method: 'POST' });

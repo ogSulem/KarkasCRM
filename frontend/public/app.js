@@ -315,6 +315,9 @@ const dueText = s => dateText(s);
 // вчерашний день до 03:00, из-за чего «сегодня» и неделя съезжали на сутки.
 const isoDate = (d = new Date()) => `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
 const todayISO = () => isoDate();
+// Локальный месяц YYYY-MM — по той же причине: toISOString() в Москве отдаёт
+// прошлый месяц до 03:00, и заголовок плана продаж показывал не тот месяц.
+const isoMonth = (d = new Date()) => isoDate(d).slice(0, 7);
 function fmtDayMonth(iso) {
   const m = String(iso || '').match(/^(\d{4})-(\d{2})-(\d{2})/);
   if (!m) return iso || '';
@@ -2054,8 +2057,8 @@ async function analytics(v) {
       return `<p style="display:flex;justify-content:space-between;margin:8px 0 2px"><span>${esc(monthText(m.ym))}</span><b>${fmt(m.s)}</b></p><div class="bar"><i style="width:${Math.round((m.s || 0) / maxM * 100)}%"></i></div><p class="form-hint" style="margin:-8px 0 10px">сделок: ${m.n}</p>`;
     }).join('') : '<p><small>Успешных сделок пока нет — как только первая закроется, здесь появится её месяц.</small></p>'}</div>
    <div class="card"><h3>Сделки по источникам</h3><table><tr><th>Источник</th><th>Сделок</th><th>Сумма</th></tr>${a.bySource.map(x => `<tr><td>${esc(sourceLabel(x.name))}</td><td>${x.count}</td><td><b>${fmt(x.sum)}</b></td></tr>`).join('') || '<tr><td colspan="3"><small>Пока нет сделок</small></td></tr>'}</table></div>
-   <div class="card"><h3>План продаж — ${esc(monthShort(plan.month || new Date().toISOString().slice(0, 7)))}</h3>
-    <p><small>План — цель на <b>${esc(monthText(plan.month || new Date().toISOString().slice(0, 7)))}</b>, факт — сумма успешных сделок, закрытых за этот же месяц. Они стоят рядом, чтобы сразу видеть, сколько осталось продать до конца месяца: план минус факт. План не мешает работе — это ориентир для команды.</small></p>
+   <div class="card"><h3>План продаж — ${esc(monthShort(plan.month || isoMonth()))}</h3>
+    <p><small>План — цель на <b>${esc(monthText(plan.month || isoMonth()))}</b>, факт — сумма успешных сделок, закрытых за этот же месяц. Они стоят рядом, чтобы сразу видеть, сколько осталось продать до конца месяца: план минус факт. План не мешает работе — это ориентир для команды.</small></p>
     ${(state.me && state.me.role) === 'admin' ? `<form onsubmit="return setSalesPlan(event)"><div style="display:flex;gap:10px;align-items:flex-end"><label style="margin:0;flex:1">Целевая выручка на месяц (${CUR()})<input name="target" type="number" value="${plan.target || ''}" placeholder="3000000"></label><button class="btn primary">Сохранить цель</button></div></form>` : `<p><small>Цель на месяц задаёт администратор. Текущая цель: <b>${plan.target ? fmt(plan.target) : 'не задана'}</b>.</small></p>`}</div>
   </div><div>
    <div class="card"><h3>Результаты по менеджерам</h3><table><tr><th>Менеджер</th><th>Сделок</th><th>Сумма</th></tr>${a.byManager.map(x => `<tr><td>${esc(x.name)}</td><td>${x.count}</td><td><b>${fmt(x.sum)}</b></td></tr>`).join('') || '<tr><td colspan="3"><small>Нет данных</small></td></tr>'}</table></div>
@@ -2745,7 +2748,7 @@ async function settings(v) {
        <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px"><label>Банк<input name="COMPANY_BANK" value="${esc((s.requisites || {}).bank || '')}" placeholder="ООО «Банк», БИК 044525225"></label>
        <label>Расчётный счёт<input name="COMPANY_ACCOUNT" value="${esc((s.requisites || {}).account || '')}" placeholder="40702810…"></label></div>
        <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px"><label>Корр. счёт<input name="COMPANY_CORR" value="${esc((s.requisites || {}).corr || '')}"></label>
-       <label>Начало номера документов<input name="DOC_PREFIX" value="${esc((s.requisites || {}).doc_prefix || '')}" placeholder="К-"></label></div>
+       <label>Начало номера документов<input name="DOC_PREFIX" value="${esc((s.requisites || {}).doc_prefix || '')}" placeholder="КП"></label></div>
        <button class="btn primary">Сохранить реквизиты</button></form></div>
     </div><div>
      <div class="card"><h3>Резервные копии базы</h3>

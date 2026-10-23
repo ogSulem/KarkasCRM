@@ -7,6 +7,12 @@
 // Если что-то не так — скрипт завершается с кодом 1 и печатает, что именно сломалось.
 
 import { execFileSync } from 'node:child_process';
+import { readFileSync } from 'node:fs';
+import { fileURLToPath } from 'node:url';
+import { dirname, join } from 'node:path';
+
+// Ожидаемая версия — из файла VERSION в репозитории: образ собирается из него же.
+const VERSION = readFileSync(join(dirname(fileURLToPath(import.meta.url)), '..', 'VERSION'), 'utf8').trim();
 
 const BASE = process.env.SMOKE_URL || 'http://127.0.0.1:8080';
 const EMAIL = process.env.ADMIN_EMAIL || 'admin@example.com';
@@ -57,7 +63,7 @@ const PNG = Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAIAAAACCAYAAABytg0kAAAAFElEQVR
 
   const anon = (await api('/api/health')).body;
   ok('публичный health не раскрывает счётчики клиентов', anon.counts === undefined && anon.backups === undefined);
-  ok('версия продукта читается из файла VERSION в образе', anon.version === '1.0.0', String(anon.version));
+  ok('версия продукта читается из файла VERSION в образе', anon.version === VERSION, `${anon.version} != ${VERSION}`);
 
   let token = await login();
   const adminHealth = (await api('/api/health', {}, token)).body;
