@@ -550,12 +550,48 @@ async function wazzupFetch(path, opt = {}) {
   return data;
 }
 const isUuid = s => /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(String(s || ''));
-// Транспорты Wazzup (wazzup24.ru/help/api/channels): whatsapp и wapi (WhatsApp
-// Business API), tgapi (личный Telegram) и telegram (Telegram-бот), instagram,
-// viber, avito, max и maxbot, cian, vk, whatsgroup (групповой чат WhatsApp).
-const WZ_TYPES = ['whatsapp', 'wapi', 'whatsgroup', 'tgapi', 'telegram', 'instagram',
+// Wazzup различает ТРАНСПОРТ канала и ТИП ЧАТА — это два разных закрытых списка
+// (wazzup24.ru/help/api-ru/rabota-s-kanalami и .../otpravka-soobshhenij).
+// Транспорт приходит в GET /channels и описывает подключённый аккаунт; тип чата
+// используется в POST /message и в вебхуках. Смешивать их нельзя: в типах чата нет
+// wapi, tgapi, maxbot и циана, зато есть групповые чаты telegroup и maxgroup —
+// без них в группу Telegram и MAX ответить невозможно.
+const WZ_TRANSPORTS = ['whatsapp', 'wapi', 'whatsgroup', 'tgapi', 'telegram', 'instagram',
   'viber', 'avito', 'max', 'maxbot', 'cian', 'vk'];
-const normChatType = t => { const v = String(t || '').trim().toLowerCase(); return WZ_TYPES.includes(v) ? v : ''; };
+const WZ_CHAT_TYPES = ['whatsapp', 'whatsgroup', 'viber', 'instagram', 'telegram',
+  'telegroup', 'vk', 'avito', 'max', 'maxgroup'];
+// всё, что может встретиться в наших данных: источник контакта, канал беседы
+const WZ_ALL = [...new Set([...WZ_TRANSPORTS, ...WZ_CHAT_TYPES])];
+// Состояния канала, при которых сообщения не ходят (wazzup24.ru/help/api-ru/rabota-s-kanalami).
+// Неизвестное или отсутствующее состояние считаем рабочим: новый статус у вендора
+// не должен прятать каналы заказчика.
+const WZ_DEAD_STATES = ['disabled', 'notEnoughMoney', 'blocked', 'unauthorized', 'qridle',
+  'openelsewhere', 'foreignphone', 'waitForPassword', 'onModeration', 'rejected', 'phoneUnavailable'];
+const wzUsable = ch => !WZ_DEAD_STATES.includes(String(ch?.state || ''));
+// Типы сообщений Wazzup без текста и файла (wazzup24.ru/help/api-ru/webhooks-2).
+// Без подписи такое событие терялось: клиент промахнулся звонком или прислал
+// визитку, а в CRM не оставалось никакого следа.
+const WZ_TYPE_BODY = {
+  missing_call: '[пропущенный звонок]', vcard: '[визитка контакта]', geo: '[геометка]',
+  wapi_template: '[шаблон WhatsApp]', unsupported: '[сообщение, которое не открывается]',
+  system: '[служебное сообщение]', unknown: '[сообщение без текста]',
+  image: '[изображение]', audio: '[голосовое сообщение]', video: '[видео]', document: '[документ]'
+};
+// Канал входящего сообщения. Тип чата сохраняем как есть; если вендор прислал
+// транспорт без соответствующего типа чата (так бывает у Циана), канал всё равно
+// называем его именем: обращение видно в его канале, а не в обезличенном «сайте».
+// Отправить туда нельзя — нормализация типа чата такое значение не пропустит.
+const normChatType = t => { const v = String(t || '').trim().toLowerCase(); return WZ_CHAT_TYPES.includes(v) ? v : ''; };
+const wzChannel = t => {
+  const v = String(t || '').trim().toLowerCase();
+  return normChatType(v) || (WZ_TRANSPORTS.includes(v) ? v : 'site');
+};
+// что писать в историю, если у сообщения нет ни текста, ни файла
+const wzBody = m => m.text || (m.contentUri ? '[вложение: ' + (m.type || 'файл') + ']' : (WZ_TYPE_BODY[m.type] || ''));
+// GET /channels отдаёт ГОЛЫЙ МАССИВ (wazzup24.ru/help/api-ru/rabota-s-kanalami),
+// обёртка {channels:[…]} встречается только в партнёрском API. Чтение ответа как
+// объекта давало пустой список при рабочем ключе: «синхронизировано: 0».
+const wzChannels = data => (Array.isArray(data) ? data : (data?.channels || data?.data || []));
 // понятные ошибки вместо «Wazzup API 401»
 function wazzupError(e, status) {
   const m = String(e?.message || e || '');
@@ -576,21 +612,34 @@ export async function sendViaWazzup(conv, text, user, chatTypeOverride = '', fil
   const chatType = normChatType(rawType);
   if (!chatType) {
     if (!rawType) throw new Error('Не выбран канал отправки');
-    throw new Error(`Канал «${rawType}» не поддерживается. Wazzup работает с: ${WZ_TYPES.join(', ')}`);
+    throw new Error(`Тип чата «${rawType}» не поддерживается. Wazzup принимает chatType из списка: ${WZ_CHAT_TYPES.join(', ')}`);
   }
   // адресат — id чата из вебхука или номер телефона клиента
   const chatId = conv.external_chat_id || digits(conv.phone);
   if (!chatId) throw new Error('Нет адресата: у клиента не заполнен телефон или не пришло ни одного сообщения из этого канала.');
-  const payload = {
-    channelId, chatType, chatId,
-    crmMessageId: 'karkas-' + Date.now().toString(36) + '-' + randomBytes(4).toString('hex'),
-    crmUserId: String(user?.id || ''),
+  if (!text && !file?.contentUri) throw new Error('Пустое сообщение: Wazzup требует текст или ссылку на файл');
+  const base = { channelId, chatType, chatId };
+  // идентификатор менеджера в нашей CRM: Wazzup вернёт его в вебхуке, и видно,
+  // кто отправил сообщение. Пустое значение не передаём.
+  if (user?.id) base.crmUserId = String(user.id);
+  // crmMessageId защищает от повторной доставки при повторе запроса; у каждого
+  // обращения к Wazzup он свой.
+  const newId = () => 'karkas-' + Date.now().toString(36) + '-' + randomBytes(4).toString('hex');
+  const post = async body => {
+    try { return await wazzupFetch('/message', { method: 'POST', body: JSON.stringify(body) }); }
+    catch (e) { throw new Error(wazzupError(e, e.status)); }
   };
-  if (file?.contentUri) { payload.contentUri = file.contentUri; if (text) payload.text = text }
-  else payload.text = text || '';
-  let data;
-  try { data = await wazzupFetch('/message', { method: 'POST', body: JSON.stringify(payload) }); }
-  catch (e) { throw new Error(wazzupError(e, e.status)); }
+  if (file?.contentUri) {
+    // Wazzup запрещает передавать text и contentUri одним запросом, поэтому
+    // вложение и подпись к нему уходят двумя сообщениями — как сделал бы человек.
+    const sent = await post({ ...base, contentUri: file.contentUri, crmMessageId: newId() });
+    if (text) {
+      try { await post({ ...base, text, crmMessageId: newId() }); }
+      catch (e) { throw new Error(e.message + ' Вложение клиенту ушло, подпись — нет: отправьте текст отдельным сообщением.'); }
+    }
+    return { delivered: true, mode: 'wazzup', id: sent.messageId || sent.id };
+  }
+  const data = await post({ ...base, text, crmMessageId: newId() });
   return { delivered: true, mode: 'wazzup', id: data.messageId || data.id };
 }
 // Wazzup объединяет WhatsApp, Telegram, Instagram и Viber в одном ключе —
@@ -920,7 +969,10 @@ export const server = http.createServer(async (req, res) => {
       const b = await readBody(req);
       const legacy = b.messages || [];
       const modern = (b.data || []).concat(!b.data && (b.message_id || b.messageId) ? [b] : []).map(m => ({
-        messageId: m.message_id || m.messageId, channelId: m.channel_id || m.channelId, chatType: m.recipient?.chat_type || m.sender?.chat_type || m.chatType || 'whatsapp',
+        messageId: m.message_id || m.messageId, channelId: m.channel_id || m.channelId,
+        // тип чата берём только из данных: подставлять 'whatsapp' вместо отсутствующего
+        // нельзя, ответ ушёл бы клиенту не в тот мессенджер, а выглядело бы как доставка
+        chatType: m.recipient?.chat_type || m.sender?.chat_type || m.chatType || '',
         chatId: m.recipient?.chat_id || m.sender?.chat_id || m.chatId, isEcho: (m.direction === 'outbound') || m.isEcho,
         text: m.text, type: m.attachment ? 'file' : 'text', contentUri: m.attachment?.url || m.contentUri, status: m.direction === 'inbound' ? 'inbound' : (m.status || 'sent'),
         authorName: m.sender?.name, contact: { name: m.sender?.name || m.recipient?.name, phone: m.sender?.phone || m.recipient?.phone }
@@ -928,7 +980,7 @@ export const server = http.createServer(async (req, res) => {
       for (const m of legacy.concat(modern)) {
         if (m.status && m.status !== 'inbound') { db.prepare('UPDATE messages SET status=? WHERE external_id=?').run(m.status, m.messageId); continue; }
         if (m.isEcho) continue;
-        upsertIncoming({ channel: m.chatType || 'whatsapp', chatType: m.chatType, phone: m.contact?.phone || '', chatId: m.chatId || '', name: m.contact?.name || m.authorName || '', body: m.text || (m.contentUri ? '[вложение: ' + (m.type || 'файл') + ']' : ''), contentUri: m.contentUri || '', external_id: m.messageId, channelId: m.channelId, author: m.authorName || '' });
+        upsertIncoming({ channel: wzChannel(m.chatType), chatType: normChatType(m.chatType), phone: m.contact?.phone || '', chatId: m.chatId || '', name: m.contact?.name || m.authorName || '', body: wzBody(m), contentUri: m.contentUri || '', external_id: m.messageId, channelId: m.channelId, author: m.authorName || '' });
       }
       for (const s of b.statuses || []) db.prepare('UPDATE messages SET status=? WHERE external_id=?').run(s.status, s.messageId);
       for (const cu of b.channelsUpdates || []) db.prepare('INSERT INTO channels(provider,external_id,state) VALUES(?,?,?) ON CONFLICT(external_id) DO UPDATE SET state=excluded.state').run('wazzup', cu.channelId, cu.state);
@@ -942,7 +994,7 @@ export const server = http.createServer(async (req, res) => {
       const b = await readBody(req);
       const msg = (b.message && typeof b.message === 'object') ? b.message : b;
       const chIn = String(b.channel || '').trim().toLowerCase();
-      const channel = (WZ_TYPES.includes(chIn) || chIn === 'email') ? chIn : 'site';
+      const channel = (WZ_ALL.includes(chIn) || chIn === 'email') ? chIn : 'site';
       const name = String((msg.from && msg.from.first_name) || b.name || '').slice(0, 120);
       upsertIncoming({ channel, chatType: b.chatType || channel, phone: String(b.phone || (msg.chat && msg.chat.id) || ''), chatId: String(b.chatId || ''), name, body: String(msg.text || b.body || ''), external_id: msg.message_id ? `${channel}-${msg.message_id}` : (b.external_id || null) });
       return json(res, 200, { received: true });
@@ -1030,7 +1082,7 @@ export const server = http.createServer(async (req, res) => {
       version: VERSION, schema: SCHEMA_VERSION, user,
       company: { name: getSetting('COMPANY_NAME', 'Моя компания'), currency: getSetting('CURRENCY', '₽') },
       taskTypes: [{ id: 'call', name: 'Звонок' }, { id: 'meeting', name: 'Встреча' }, { id: 'message', name: 'Сообщение' }, { id: 'email', name: 'Письмо' }, { id: 'other', name: 'Другое' }],
-      sources: ['manual', 'import', 'site', 'email', ...WZ_TYPES, ...WZ_TYPES.map(t => 'wazzup-' + t)],
+      sources: ['manual', 'import', 'site', 'email', ...WZ_ALL, ...WZ_ALL.map(t => 'wazzup-' + t)],
       customFields: getCustomFields(),
       features: { email: !!getSetting('SMTP_HOST'), wazzup: !!getSetting('WAZZUP_API_KEY') },
       salesTarget: Number(getSetting('SALES_TARGET', '0')) || 0,
@@ -1747,9 +1799,15 @@ export const server = http.createServer(async (req, res) => {
 
     // ===== channels & integrations (all configurable from UI) =====
     if (p === '/api/channels') return json(res, 200, db.prepare('SELECT * FROM channels ORDER BY id DESC').all());
-    if (p === '/api/integrations/wazzup/test' && req.method === 'POST') { try { const data = await wazzupFetch('/channels'); const list = data.channels || data.data || data || []; return json(res, 200, { ok: true, channels: list }); } catch (e) { return json(res, 400, { ok: false, error: e.message }); } }
-    if (p === '/api/integrations/wazzup/sync' && req.method === 'POST') { try { const data = await wazzupFetch('/channels'); const list = data.channels || data.data || []; for (const ch of list) db.prepare('INSERT INTO channels(provider,external_id,name,transport,phone,state,raw) VALUES(?,?,?,?,?,?,?) ON CONFLICT(external_id) DO UPDATE SET name=excluded.name,transport=excluded.transport,phone=excluded.phone,state=excluded.state').run('wazzup', ch.channelId || ch.id, ch.name || ch.plainId || '', ch.transport || ch.type || '', ch.plainId || ch.phone || '', ch.state || '', JSON.stringify(ch)); if (list[0] && !getSetting('WAZZUP_CHANNEL_ID')) setSetting('WAZZUP_CHANNEL_ID', list[0].channelId || list[0].id); return json(res, 200, { synced: list.length, channels: db.prepare("SELECT * FROM channels WHERE provider='wazzup'").all() }); } catch (e) { return json(res, 400, { error: e.message }); } }
-    if (p === '/api/integrations/wazzup/webhook' && req.method === 'POST') { const b = await readBody(req); const hookUrl = String(b.url || '').trim(); if (!/^https?:\/\//i.test(hookUrl) || hookUrl.length > 2048) return json(res, 400, { error: 'Укажите корректный адрес вебхука (http/https)' }); try { await wazzupFetch('/webhooks', { method: 'PATCH', body: JSON.stringify({ webhooksUri: hookUrl }) }); setSetting('WAZZUP_WEBHOOK_URL', hookUrl); return json(res, 200, { saved: true }); } catch (e) { return json(res, 400, { error: e.message + ' — можно указать вебхук вручную в кабинете Wazzup' }); } }
+    if (p === '/api/integrations/wazzup/test' && req.method === 'POST') { try { const list = wzChannels(await wazzupFetch('/channels')); return json(res, 200, { ok: true, channels: list }); } catch (e) { return json(res, 400, { ok: false, error: e.message }); } }
+    // Каналом по умолчанию становится рабочий: первым вендор может вернуть
+    // отключённый или заблокированный, и ответы молча не уходили бы вовсе.
+    if (p === '/api/integrations/wazzup/sync' && req.method === 'POST') { try { const list = wzChannels(await wazzupFetch('/channels')); for (const ch of list) db.prepare('INSERT INTO channels(provider,external_id,name,transport,phone,state,raw) VALUES(?,?,?,?,?,?,?) ON CONFLICT(external_id) DO UPDATE SET name=excluded.name,transport=excluded.transport,phone=excluded.phone,state=excluded.state').run('wazzup', ch.channelId || ch.id, ch.name || ch.plainId || '', ch.transport || ch.type || '', ch.plainId || ch.phone || '', ch.state || '', JSON.stringify(ch));
+      const usable = list.find(wzUsable) || list[0]; if (usable && !getSetting('WAZZUP_CHANNEL_ID')) setSetting('WAZZUP_CHANNEL_ID', usable.channelId || usable.id); return json(res, 200, { synced: list.length, channels: db.prepare("SELECT * FROM channels WHERE provider='wazzup'").all() }); } catch (e) { return json(res, 400, { error: e.message }); } }
+    // Подписки обязательны: без них вендор не присылает события вовсе. Включаем
+    // только те, которые наш обработчик разбирает. Лимит адреса — 200 символов,
+    // как у вендора: длинный адрес он отклоняет, незачем отправлять отказной запрос.
+    if (p === '/api/integrations/wazzup/webhook' && req.method === 'POST') { const b = await readBody(req); const hookUrl = String(b.url || '').trim(); if (!/^https?:\/\//i.test(hookUrl) || hookUrl.length > 200) return json(res, 400, { error: 'Укажите корректный адрес вебхука: http/https, не длиннее 200 символов' }); try { await wazzupFetch('/webhooks', { method: 'PATCH', body: JSON.stringify({ webhooksUri: hookUrl, subscriptions: { messagesAndStatuses: true, channelsUpdates: true } }) }); setSetting('WAZZUP_WEBHOOK_URL', hookUrl); return json(res, 200, { saved: true }); } catch (e) { return json(res, 400, { error: e.message + ' — можно указать вебхук вручную в кабинете Wazzup' }); } }
     if (p === '/api/integrations/email/test' && req.method === 'POST') {
       if (!requireAdmin(user, res)) return;
       const rl = rateLimit('mailtest', 10, 60000); if (!rl.ok) return json(res, 429, { error: 'Слишком часто — подождите минуту' });

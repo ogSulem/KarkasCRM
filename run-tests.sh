@@ -14,14 +14,18 @@ node --check tests/routes.test.mjs
 node --check tests/timezone.test.js
 node --check tests/install-args.test.mjs
 node --check tests/update-mode.test.mjs
+node --check tests/wazzup-contract.test.mjs
 # Скрипты установки и сопровождения. Ни один тест кода их не запускает, поэтому
 # опечатка в install.sh доходит до сервера пользователя: скрипт просто не стартует.
 for sh in install.sh run-local.sh run-tests.sh scripts/update.sh scripts/pack.sh deploy/start-caddy.sh; do
   bash -n "$sh" || { echo "  ОШИБКА: синтаксис $sh"; exit 1; }
 done
 
-echo "[2/4] Интеграционные тесты (API, конкуренты, уведомления, гигиена базы, маршруты, часовой пояс, установщик, обновление, миграции, S3)"
+echo "[2/4] Интеграционные тесты (API, конкуренты, уведомления, гигиена базы, контракт Wazzup, маршруты, часовой пояс, установщик, обновление, миграции, S3)"
 node --experimental-sqlite --test tests/api.test.js tests/competitors.test.js tests/notifications.test.mjs tests/db-hygiene.test.mjs
+# Контракт Wazzup сверяется с документацией вендора на подставном API: расхождение
+# здесь выглядит как «синхронизировано: 0» или как недоставленное сообщение.
+node --experimental-sqlite --test tests/wazzup-contract.test.mjs
 node --test tests/routes.test.mjs
 # Часовой пояс задан явно: в UTC модификатор localtime совпадает с UTC и сдвиг
 # на три часа между отметками в базе и местным месяцем выручки не увидеть.

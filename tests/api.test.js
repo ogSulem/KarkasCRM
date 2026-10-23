@@ -255,7 +255,10 @@ test('отправка сообщения клиенту через Wazzup (ск
   const mock = (await import('node:http')).createServer(async (req, res) => {
     let b = ''; for await (const ch of req) b += ch;
     const okAuth = req.headers.authorization === 'Bearer test-api-key-123456';
-    if (req.url === '/channels') { res.writeHead(200, { 'Content-Type': 'application/json' }); return res.end(JSON.stringify({ channels: [{ channelId: 'e0629e11-0f67-4567-92a9-2237e91ec1b9', name: 'WhatsApp Продажи', transport: 'whatsapp', state: 'active', plainId: '79991112233' }] })); }
+    // GET /channels отдаёт ГОЛЫЙ МАССИВ без поля name — ровно как в документации
+    // (wazzup24.ru/help/api-ru/rabota-s-kanalami). Обёртка {channels:[…]} была нашей
+    // догадкой, из-за неё синхронизация всегда находила ноль каналов.
+    if (req.url === '/channels') { res.writeHead(200, { 'Content-Type': 'application/json' }); return res.end(JSON.stringify([{ channelId: 'e0629e11-0f67-4567-92a9-2237e91ec1b9', transport: 'whatsapp', plainId: '79991112233', state: 'active' }])); }
     if (req.url === '/message' && req.method === 'POST') {
       globalThis.__wz = { auth: okAuth, body: JSON.parse(b) };
       res.writeHead(200, { 'Content-Type': 'application/json' }); return res.end(JSON.stringify({ messageId: 'wz-out-1' }));
@@ -267,11 +270,19 @@ test('отправка сообщения клиенту через Wazzup (ск
   try {
     await call('/api/settings', { method: 'PUT', body: JSON.stringify({ WAZZUP_API_URL: 'http://127.0.0.1:18155', WAZZUP_CHANNEL_ID: 'e0629e11-0f67-4567-92a9-2237e91ec1b9', MESSENGER_PROVIDER: 'wazzup' }) });
     const sync = await call('/api/integrations/wazzup/sync', { method: 'POST' });
-    assert.equal(sync.body.synced, 1, 'каналы Wazzup синхронизированы');
+    assert.equal(sync.body.synced, 1, 'каналы Wazzup синхронизированы из голого массива');
     const chans = (await call('/api/channels')).body;
-    assert.equal(chans[0].name, 'WhatsApp Продажи');
+    assert.equal(chans[0].transport, 'whatsapp', 'транспорт канала сохранён');
+    assert.equal(chans[0].state, 'active', 'состояние канала сохранено');
+    assert.equal(chans[0].phone, '79991112233', 'plainId сохранён как номер');
+    assert.equal(chans[0].name, '79991112233', 'поля name в API Wazzup нет — название берём из plainId');
     await call('/api/integrations/wazzup/webhook', { method: 'POST', body: JSON.stringify({ url: 'https://crm.example.com/webhooks/wazzup' }) });
     assert.equal(globalThis.__wzHook.webhooksUri, 'https://crm.example.com/webhooks/wazzup', 'вебхук зарегистрирован в Wazzup');
+    // без подписок Wazzup не присылает события вовсе
+    assert.equal(globalThis.__wzHook.subscriptions.messagesAndStatuses, true, 'подписка на сообщения и статусы включена');
+    assert.equal(globalThis.__wzHook.subscriptions.channelsUpdates, true, 'подписка на изменения каналов включена');
+    const longUrl = await call('/api/integrations/wazzup/webhook', { method: 'POST', body: JSON.stringify({ url: 'https://crm.example.com/webhooks/wazzup?' + 'a'.repeat(220) }) });
+    assert.equal(longUrl.status, 400, 'адрес длиннее 200 символов Wazzup не принимает — не отправляем заведомо отказной запрос');
     const conv = (await call('/api/conversations')).body.find(c => (c.phone || '').includes('79115550101'));
     assert.ok(conv, 'нашлась беседа с клиентом Wazzup');
     const sent = await call(`/api/conversations/${conv.id}/messages`, { method: 'POST', body: JSON.stringify({ body: 'Здравствуйте! Отправляю расчёт.', channel: 'whatsapp' }) });
@@ -289,9 +300,16 @@ test('отправка сообщения клиенту через Wazzup (ск
     // Каналы за пределами «WhatsApp/Telegram/Instagram/Viber» — Авито, MAX, Циан,
     // ВКонтакте, WABA. Раньше неизвестный тип молча заменялся на whatsapp: ответ
     // клиенту с Авито уходил в WhatsApp и выглядел как доставленный.
-    for (const t of ['avito', 'max', 'cian', 'vk', 'wapi', 'tgapi', 'maxbot']) {
+    // Тип чата и транспорт канала у Wazzup — РАЗНЫЕ списки. В типах чата есть
+    // групповые telegroup и maxgroup, а wapi, tgapi, maxbot и cian отсутствуют.
+    for (const t of ['avito', 'max', 'vk', 'whatsgroup', 'telegroup', 'maxgroup']) {
       await call(`/api/conversations/${conv.id}/messages`, { method: 'POST', body: JSON.stringify({ body: 'Ответ', chat_type: t }) });
-      assert.equal(globalThis.__wz.body.chatType, t, `транспорт ${t} передаётся в Wazzup без подмены`);
+      assert.equal(globalThis.__wz.body.chatType, t, `тип чата ${t} передаётся в Wazzup без подмены`);
+    }
+    for (const t of ['wapi', 'tgapi', 'maxbot', 'cian']) {
+      const r = await call(`/api/conversations/${conv.id}/messages`, { method: 'POST', body: JSON.stringify({ body: 'Ответ', chat_type: t }) });
+      assert.equal(r.body.message.status, 'error', `транспорт ${t} не выдаётся за тип чата`);
+      assert.match(r.body.send.mode, /chatType/, 'ошибка называет список допустимых типов чата');
     }
     const bogus = await call(`/api/conversations/${conv.id}/messages`, { method: 'POST', body: JSON.stringify({ body: 'Ответ', chat_type: 'одноклассники' }) });
     assert.equal(bogus.body.message.status, 'error', 'неизвестный канал не отправляется молча');
@@ -509,14 +527,22 @@ test('Wazzup: отправка файла по ссылке и понятные 
     assert.equal(file.status, 201);
     const sentFile = globalThis.__wzFiles.find(x => x.contentUri);
     assert.equal(sentFile.contentUri, 'https://disk.yandex.ru/i/smeta.pdf', 'файл уходит ссылкой contentUri');
-    assert.equal(sentFile.text, 'Смета во вложении', 'подпись к файлу передаётся');
+    // «Одновременно передавать и text, и contentUri нельзя» — поэтому подпись
+    // уходит вторым сообщением, а не в том же запросе.
+    assert.ok(!sentFile.text, 'в запросе с файлом нет текста: Wazzup такое не принимает');
+    const caption = globalThis.__wzFiles.find(x => x.text === 'Смета во вложении');
+    assert.ok(caption && !caption.contentUri, 'подпись к файлу отправлена отдельным сообщением');
+    assert.notEqual(sentFile.crmMessageId, caption.crmMessageId, 'у каждого запроса свой crmMessageId');
+    assert.equal(sentFile.crmUserId, caption.crmUserId, 'менеджер один и тот же в обоих сообщениях');
     assert.equal(sentFile.chatType, 'whatsapp', 'тип канала из интерфейса');
     assert.ok(/^\d+$/.test(sentFile.chatId), 'для WhatsApp адресат — только цифры телефона, как требует Wazzup');
     assert.equal(file.body.message.content_uri, 'https://disk.yandex.ru/i/smeta.pdf', 'ссылка на файл сохраняется в истории чата');
     await call(`/api/conversations/${conv.id}/messages`, { method: 'POST', body: JSON.stringify({ body: 'Ещё одно сообщение', chat_type: 'whatsapp' }) });
     const ids = globalThis.__wzFiles.map(x => x.crmMessageId);
-    assert.equal(ids.length, 2, 'два исходящих ушли в Wazzup');
-    assert.notEqual(ids[0], ids[1], 'у каждого сообщения уникальный crmMessageId (Wazzup не склеит дубли)');
+    // вложение и подпись к нему — два запроса, плюс одно обычное сообщение
+    assert.equal(ids.length, 3, 'в Wazzup ушли файл, подпись к нему и отдельное сообщение');
+    assert.equal(new Set(ids).size, ids.length, 'у каждого запроса уникальный crmMessageId (Wazzup не склеит дубли)');
+    assert.ok(globalThis.__wzFiles.every(x => !(x.text && x.contentUri)), 'ни один запрос не содержит text и contentUri одновременно');
   } finally { mock.close(); }
 });
 

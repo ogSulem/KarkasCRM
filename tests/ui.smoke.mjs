@@ -59,7 +59,9 @@ Object.assign(window, {
   isoDate, todayISO, fmtDayMonth, kindStage, fld, grid2, formLegend, pushToast, notify, captureFocus, restoreFocus, PALETTE_ACTIONS,
   openMenu, closeMenu, contactsMoreMenu, openOurPrices, comparePrices, setBuiltinTab, BUILTIN_FIELDS, amAdmin, canEdit,
   ourPriceRows, filterOurPrices, toggleAutomation, openAutomation, noteRow, editNote, lockFormsForViewer, AUTO_TRIGGERS, AUTO_ACTIONS,
-  busyButton, priceImportText
+  busyButton, priceImportText,
+  punyDecodeLabel, humanOrigin, wazzupHookUrl, wzAlive, wzState, wzTitle, closeConv,
+  WZ_TRANSPORT_TO_CHAT, WZ_DEAD_STATES, WZ_CHAT_SET, WZ_TRANSPORTS, WZ_STATE_LABELS, wzTransportLabel
 });`;
 const pageErrors = [];
 const vConsole = new VirtualConsole();
@@ -383,14 +385,35 @@ try {
   check('каналы подписаны по-русски, а не кодом', /Авито/.test(opts) && /MAX/.test(opts));
   check('почты в списке мессенджеров нет: письмо уходит отдельной кнопкой', !opts.includes('email'));
   check('неподключённый WhatsApp не предлагается', !opts.includes('whatsapp'));
-  window.__state.channels = [{ transport: 'cian', state: 'active' }, { transport: 'vk', state: 'disabled' }];
+  // Транспорт канала и тип чата у Wazzup — разные списки. Отправляем мы по типу
+  // чата, поэтому WhatsApp Business API (wapi) превращается в whatsapp, а личный
+  // Telegram (tgapi) — в telegram. Раньше в список попадал сам транспорт, и
+  // Wazzup отвечал отказом на каждый такой ответ.
+  window.__state.channels = [
+    { transport: 'wapi', state: 'active' }, { transport: 'tgapi', state: 'active' },
+    { transport: 'vk', state: 'disabled' }, { transport: 'cian', state: 'active' },
+    { transport: 'maxbot', state: 'notEnoughMoney' }];
   const opts2 = window.channelOptions({ channels: 'avito' });
-  check('подключённый в Wazzup канал предлагается в чате', opts2.includes('cian'));
+  check('транспорт канала переводится в тип чата, которым Wazzup отправляет', opts2.includes('whatsapp') && opts2.includes('telegram'), opts2);
   check('отключённый канал не предлагается', !opts2.includes('vk'));
-  check('каналы клиента идут раньше остальных подключённых', opts2.indexOf('avito') < opts2.indexOf('cian'));
+  check('канал с пустым балансом не предлагается', !opts2.includes('>MAX<'));
+  check('у Циана нет типа чата — пункт, который всегда падает, не предлагается', !opts2.includes('cian'));
+  check('каналы клиента идут раньше остальных подключённых', opts2.indexOf('avito') < opts2.indexOf('whatsapp'));
   window.__state.channels = [];
   const opts3 = window.channelOptions({ channels: '', chat_type: 'max' });
   check('без синхронизации каналов предлагается тип этой беседы', opts3.includes('max'));
+  const optsGrp = window.channelOptions({ channels: 'telegroup,maxgroup' });
+  check('в групповой чат Telegram и MAX можно ответить', optsGrp.includes('telegroup') && optsGrp.includes('maxgroup') && /Группа Telegram/.test(optsGrp) && /Группа MAX/.test(optsGrp), optsGrp);
+  const optsDead = window.channelOptions({ channels: 'cian', chat_type: 'cian' });
+  check('когда отвечать некуда, сказано прямо, а не предложением, которое всегда падает', optsDead.includes('disabled') && optsDead.includes('недоступны'), optsDead);
+  // состояния канала называются по-русски, а не кодом вендора
+  check('состояния канала переведены', window.wzState('active')[0] === 'работает' && window.wzState('notEnoughMoney')[0] === 'не хватает средств на балансе' && window.wzState('qridle')[0] === 'нужно отсканировать QR-код');
+  check('неизвестное состояние показывается как есть и не прячет канал', window.wzState('somethingNew')[0] === 'somethingNew' && window.wzAlive({ state: 'somethingNew' }) === true);
+  check('ноль каналов объясняет, что делать дальше', /нет ни одного канала/.test(appJsRaw) && /ни один сейчас не работает/.test(appJsRaw));
+  check('нерабочие состояния канала распознаются', ['disabled', 'blocked', 'unauthorized', 'openelsewhere', 'foreignphone', 'waitForPassword', 'onModeration', 'rejected', 'phoneUnavailable', 'notEnoughMoney', 'qridle'].every(st => !window.wzAlive({ state: st })) && window.wzAlive({ state: 'active' }));
+  check('название канала собирается из мессенджера и номера', window.wzTitle({ transport: 'whatsapp', phone: '79991112233' }) === 'WhatsApp · 79991112233');
+  // в списке каналов важно, бот это или личный аккаунт; в типе чата — уже нет
+  check('список каналов различает бота и личный Telegram, а тип чата один', window.wzTransportLabel('telegram') === 'Telegram-бот' && window.wzTransportLabel('tgapi') === 'Telegram' && window.channelLabel('telegram') === 'Telegram');
   const imgMsg = window.msgHtml({ direction: 'out', body: '', content_uri: '/uploads/x.png', content_type: 'image/png', content_name: 'x.png', channel: 'whatsapp', created_at: '2026-01-01 10:00' });
   check('msgHtml рисует изображение-вложение картинкой', imgMsg.includes('chat-attach img') && imgMsg.includes('<img'));
   const fileMsg = window.msgHtml({ direction: 'in', body: 'Документ', content_uri: '/uploads/a.pdf', content_type: 'application/pdf', content_name: 'смета.pdf', channel: 'whatsapp', created_at: '2026-01-01 10:00' });
@@ -864,6 +887,21 @@ try {
   window.__state.me = admin; window.document.body.classList.remove('role-viewer');
   window.__state.settingsTab = 'integrations';
 
+  // ── телефон: список диалогов и чат показываются по отдельности ───────────
+  // на узком экране оба блока сразу не помещаются, поэтому работает кнопка «Назад»
+  window.go('inbox'); await wait(450);
+  check('в шапке чата есть возврат к списку: на телефоне виден, на десктопе скрыт',
+    Boolean($('.chat-back')) && cssText.includes('.chat-back{display:none') && /max-width:900px[\s\S]{0,1200}\.chat-back\{display:inline-flex/.test(cssText));
+  {
+    const convs = window.__state.cache.convs || [];
+    if (convs.length) {
+      window.closeConv(); await wait(350);
+      check('по кнопке «Назад» открывается список диалогов', window.__state.listOnly === true && Boolean($('.inbox.list-only')));
+      window.openConv(convs[0].id); await wait(350);
+      check('выбранный диалог снова открывает чат', window.__state.listOnly === false && !$('.inbox.list-only'));
+    } else check('для проверки возврата к списку нужен хотя бы один диалог', false, 'диалогов нет');
+  }
+
   // ── форма для сайта, скелетоны ───────────────────────────────────────────
   const code = window.siteFormCode();
   check('код формы для сайта ссылается на вебхук', /webhooks\/generic/.test(code) && /sendToKarkas/.test(code));
@@ -975,12 +1013,64 @@ try {
   check('источник контакта отображается русским названием', contactsHtml.includes('Авито') && !/>avito</.test(contactsHtml));
   check('в фильтре и форме контакта нет сырых кодов источников', !/value="manual"[^>]*>manual</.test(contactsHtml));
 
+  // Широкие таблицы обёрнуты в прокручиваемый блок: без обёртки на телефоне
+  // страница уезжает вбок целиком, вместе с меню и шапкой.
+  for (const [view, tab, title] of [['contacts', null, 'Контакты'], ['companies', null, 'Компании'], ['products', null, 'Каталог'], ['competitors', null, 'Конкуренты'], ['settings', 'team', 'Команда']]) {
+    window.go(view, tab); await wait(350);
+    check(`в разделе «${title}» широкая таблица лежит внутри прокручиваемого блока`, Boolean($('#view .tbl-scroll > table')));
+  }
+
   // ── вкладка интеграций: человеческие формулировки ────────────────────────
   window.go('settings', 'integrations');
   for (let i = 0; i < 60 && !$('#view').textContent.includes('это называется вебхук'); i++) await wait(100);
   const integText = $('#view').textContent;
   check('интеграции: вместо «Локальный режим» — «не подключено»', !integText.includes('Локальный режим') && integText.includes('не подключено'));
   check('интеграции: термин webhook объяснён по-русски', integText.includes('(это называется вебхук)') && integText.includes('Адрес, по которому Wazzup присылает сообщения'), integText.slice(0, 120));
+
+  // ── адрес вебхука Wazzup: один для показа и для регистрации ──────────────
+  // Wazzup делает проверочный запрос сразу при регистрации. Если показать человеку
+  // адрес с кодом защиты, а зарегистрировать без него, проверка отвечает 403 и
+  // вебхук не ставится — сообщения просто не приходят.
+  check('адрес вебхука содержит код защиты и сохранённый публичный адрес',
+    window.wazzupHookUrl({ public_url: 'https://crm.example.com/', wazzup: { webhook_secret: 'код 1' } }) === 'https://crm.example.com/webhooks/wazzup?secret=%D0%BA%D0%BE%D0%B4%201',
+    window.wazzupHookUrl({ public_url: 'https://crm.example.com/', wazzup: { webhook_secret: 'код 1' } }));
+  check('без кода защиты адрес вебхука остаётся чистым', window.wazzupHookUrl({ public_url: 'https://crm.example.com', wazzup: {} }) === 'https://crm.example.com/webhooks/wazzup');
+  check('регистрация отправляет Wazzup тот же адрес, что показан человеку',
+    /async function registerWazzupWebhook[\s\S]{0,1400}wazzupHookUrl\(st\)/.test(appJsRaw) && !/registerWazzupWebhook\(\)[^\n]{0,80}location\.origin/.test(appJsRaw));
+  check('регистрация не уходит в Wazzup с несохранённым кодом защиты', /Сначала нажмите «Сохранить»/.test(appJsRaw));
+
+  // ── кириллический домен: человеку читаемый адрес, машине — валидный ──────
+  {
+    const { domainToUnicode, domainToASCII } = await import('node:url');
+    const cases = ['crm.xn--80aaamzedb7cml.xn--p1ai', 'xn--80akhbyknj4f.xn--p1ai', 'xn--mnchen-3ya.de', 'example.com', 'localhost'];
+    const decoded = cases.map(c => c.split('.').map(window.punyDecodeLabel).join('.'));
+    const refs = cases.map(c => domainToUnicode(c));
+    check('декодер punycode совпадает с эталонной реализацией', decoded.every((d, i) => d === refs[i]), decoded.join(' | ') + ' ↔ ' + refs.join(' | '));
+    check('продовый домен расшифровывается в читаемый', decoded[0] === 'crm.каркастайги.рф', decoded[0]);
+    check('кириллический домен проходит туда и обратно', ['каркастайги', 'дом8х10', 'ёлка', 'тест-1', 'участки'].every(w => {
+      const ascii = domainToASCII(w + '.рф');
+      return ascii.split('.').map(window.punyDecodeLabel).join('.') === w + '.рф';
+    }));
+    check('человекочитаемый адрес сохраняет схему и порт', window.humanOrigin('https://crm.xn--80aaamzedb7cml.xn--p1ai') === 'https://crm.каркастайги.рф' && window.humanOrigin('http://localhost:8080') === 'http://localhost:8080');
+    check('испорченный punycode не подменяется выдуманным адресом', window.humanOrigin('https://xn---abc') === 'https://xn---abc');
+    check('машинный адрес вебхука остаётся в punycode: иначе Wazzup его не примет',
+      window.wazzupHookUrl({ public_url: 'https://crm.xn--80aaamzedb7cml.xn--p1ai', wazzup: {} }).includes('xn--80aaamzedb7cml'));
+    // расшифровка нужна только там, где адрес читает человек. Вебхук и код для
+    // сайта уходят машинам: им нужен валидный домен, а не красивые буквы.
+    check('код формы для сайта и адрес вебхука не расшифровываются',
+      !/function siteFormCode[\s\S]{0,800}humanOrigin/.test(appJsRaw) && !/function wazzupHookUrl[\s\S]{0,400}humanOrigin/.test(appJsRaw));
+    check('человекочитаемый адрес применяется только в данных для входа', (appJsRaw.match(/humanOrigin\(/g) || []).length === 2, String((appJsRaw.match(/humanOrigin\(/g) || []).length));
+  }
+
+  // ── телефонная вёрстка: ничто не уезжает за край экрана ──────────────────
+  check('в продукте не осталось сворачиваемых блоков', !/<details/i.test(appJsRaw + html) && !/<details/i.test($('#view').innerHTML));
+  check('широкие таблицы прокручиваются сами, а не сдвигают страницу', cssText.includes('.tbl-scroll{overflow-x:auto') && (appJsRaw.match(/class="tbl-scroll"/g) || []).length >= 5);
+  check('колонка с кнопками занимает столько места, сколько нужно кнопкам', !/<th style="width:210px"/.test(appJsRaw) && cssText.includes('.act{width:1%'));
+  check('длинные почта, ссылка или ИНН не растягивают таблицу', cssText.includes('th,td{overflow-wrap:break-word}'));
+  check('на телефоне список диалогов и чат не толкаются на одном экране', cssText.includes('.inbox .convs{display:none}') && cssText.includes('.inbox.list-only .chat{display:none}'));
+  check('цели для касания на телефоне не меньше 40px, шрифт не мельчает', /\.tabs button\{padding:9px 13px;font-size:13\.5px;min-height:40px\}/.test(cssText));
+  check('низ страницы не прячется под системную полосу телефона', cssText.includes('env(safe-area-inset-bottom') && html.includes('viewport-fit=cover'));
+  check('редактор воронок раскладывается на телефоне в две строки', /\.stages-editor \.st\{grid-template-columns:22px 1fr 40px/.test(cssText));
 
   // ── в продукте нет упоминаний нейросетей и ИИ-помощников ─────────────────
   check('в интерфейсе и коде нет упоминаний нейросетей',
@@ -1005,6 +1095,7 @@ try {
   const temporary = createdForm.elements.password.value;
   await window.saveUser({ preventDefault() {}, target: createdForm }, null);
   check('после создания показаны данные для входа', $('#createdCredentials')?.value.includes(temporary) && $('#createdCredentials')?.value.includes('onboard-ui@example.com'));
+  check('адрес в данных для входа стоит вторым и читаемый', /^КаркасCRM — данные для входа\nАдрес: /.test($('#createdCredentials').value) && !/xn--/.test($('#createdCredentials').value), ($('#createdCredentials').value || '').split('\n')[1]);
   await window.copyCreatedCredentials();
   check('копирование даёт результат или понятную инструкцию', Boolean($('#copyCredentialsStatus')?.textContent));
   window.closeModal();
