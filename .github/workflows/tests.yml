@@ -34,6 +34,7 @@ jobs:
           node --check tests/timezone.test.js
           node --check tests/install-args.test.mjs
           node --check tests/update-mode.test.mjs
+          node --check tests/wazzup-contract.test.mjs
           node --check tests/ui.smoke.mjs
           node --check tests/migrate.test.mjs
           node --check tests/routes.test.mjs
@@ -41,6 +42,11 @@ jobs:
 
       - name: Интеграционные тесты (API и конкуренты)
         run: node --experimental-sqlite --test tests/api.test.js tests/competitors.test.js
+
+      # Мок отвечает так, как описано в документации Wazzup: каналы голым массивом,
+      # при регистрации вебхука приходит проверочный POST и требуется ответ 200.
+      - name: Контракт Wazzup — сверка с документацией вендора
+        run: node --experimental-sqlite --test tests/wazzup-contract.test.mjs
 
       - name: Маршруты API — интерфейс не ходит в никуда
         run: node --test tests/routes.test.mjs

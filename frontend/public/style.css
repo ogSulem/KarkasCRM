@@ -113,6 +113,14 @@ label input,label select,label textarea{margin-top:4px;font-weight:400}
 table{width:100%;border-collapse:collapse;font-size:14px}
 th{text-align:left;color:var(--muted);font-size:12px;text-transform:uppercase;letter-spacing:.03em;padding:8px 10px;border-bottom:1px solid var(--line)}
 td{padding:10px;border-bottom:1px solid #f1f5f9;vertical-align:middle}
+/* длинный e-mail, ссылка или ИНН не должны растягивать таблицу шире экрана */
+th,td{overflow-wrap:break-word}
+/* колонка с кнопками занимает ровно столько места, сколько нужно кнопкам */
+.act{width:1%;white-space:nowrap}
+/* широкая таблица прокручивается внутри своей обёртки: страница остаётся на месте,
+   а колонки не сжимаются до нечитаемых. На узком экране это клиенты, компании,
+   конкуренты, сотрудники и каталог — там от шести до восьми колонок */
+.tbl-scroll{overflow-x:auto;-webkit-overflow-scrolling:touch}
 tr:hover td{background:#fafcfb}
 .tag{display:inline-block;background:var(--green-l);color:#166534;border-radius:999px;padding:2px 9px;font-size:12.5px;margin:1px 3px 1px 0}
 .tag.orange{background:var(--orange-l);color:#9a3412}
@@ -173,6 +181,7 @@ tr:hover td{background:#fafcfb}
 .chat{display:flex;flex-direction:column}
 .palette-list .p-item .p-ico{display:inline-flex;align-items:center;color:var(--muted);flex-shrink:0}
 .chat-head{padding:10px 14px;border-bottom:1px solid var(--line);display:flex;justify-content:space-between;align-items:center;gap:8px}
+.chat-back{display:none;flex:none}
 .msgs{flex:1;overflow:auto;padding:14px;background:#f8faf9;display:flex;flex-direction:column;gap:8px}
 .msg{max-width:78%;padding:9px 12px;border-radius:13px;background:#fff;border:1px solid var(--line);box-shadow:0 1px 2px rgba(15,23,42,.04);font-size:14px;align-self:flex-start}
 .msg.out{align-self:flex-end;background:linear-gradient(135deg,var(--green),#15803d);color:#fff;border-color:transparent}
@@ -291,14 +300,22 @@ code{background:#eef2f7}
   nav button{white-space:nowrap;padding:8px 10px}
   nav button .pill{margin-left:6px}
   main{padding:12px 12px 60px}
+  /* у телефонов с вырезом низ страницы не должен прятаться под системную полосу */
+  main{padding-bottom:calc(60px + env(safe-area-inset-bottom,0px))}
   header h2{font-size:19px}
   .head-actions{width:100%}
   .head-actions .searchbox{flex:1}
   .searchbox input{width:100%}
   .head-actions .btn{flex:0 0 auto}
   .inbox{grid-template-columns:1fr;height:auto}
-  #convList{max-height:230px}
-  .chat{height:calc(100vh - 300px);min-height:380px}
+  /* список диалогов и чат показываем по отдельности: вместе они на телефон не
+     помещаются, а кнопка «Назад» в шапке чата возвращает к списку */
+  .inbox .convs{display:none}
+  .inbox.list-only .convs{display:flex}
+  .inbox.list-only .chat{display:none}
+  .inbox.list-only #convList{max-height:none}
+  .chat{height:calc(100vh - 190px);height:calc(100dvh - 190px);min-height:360px}
+  .chat-back{display:inline-flex;align-items:center;justify-content:center}
   .col{min-width:230px;max-width:230px;max-height:none}
   .modal-card{padding:16px;border-radius:14px}
   .settings-cols{grid-template-columns:1fr}
@@ -313,9 +330,16 @@ code{background:#eef2f7}
   .row{flex-wrap:wrap}
   .head-actions{gap:6px}
   .btn{padding:8px 11px}
-  .tabs button{padding:6px 11px;font-size:13px}
+  /* по кнопкам попадают пальцем: цель не меньше 40px по высоте, шрифт не мельчает */
+  .tabs button{padding:9px 13px;font-size:13.5px;min-height:40px}
+  nav button{min-height:40px}
   .composer-select{min-width:0;max-width:46%}
   .chat-attach.img img{max-width:170px;max-height:170px}
+  .modal{padding:8px}
+  /* редактор воронок: пять колонок на телефоне не помещаются, раскладываем в две строки */
+  .stages-editor .st{grid-template-columns:22px 1fr 40px;row-gap:8px}
+  .stages-editor .st select{grid-column:2}
+  .stages-editor .st>button:last-child{grid-column:3;grid-row:2}
 }
 @media(prefers-reduced-motion:reduce){*{transition:none!important;animation:none!important}}
 

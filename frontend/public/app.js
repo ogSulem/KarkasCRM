@@ -121,8 +121,40 @@ function icon(name, size = 16, className = '') {
 const WZ_TRANSPORTS = {
   whatsapp: 'WhatsApp', wapi: 'WhatsApp Business API', whatsgroup: 'Группа WhatsApp',
   tgapi: 'Telegram', telegram: 'Telegram-бот', instagram: 'Instagram', viber: 'Viber',
-  avito: 'Авито', max: 'MAX', maxbot: 'MAX-бот', cian: 'Циан', vk: 'ВКонтакте'
+  avito: 'Авито', max: 'MAX', maxbot: 'MAX-бот', cian: 'Циан', vk: 'ВКонтакте',
+  // групповые чаты — это типы чата, а не транспорты, но в списках и бейджах
+  // они встречаются так же часто
+  telegroup: 'Группа Telegram', maxgroup: 'Группа MAX'
 };
+// Транспорт канала Wazzup и тип чата — разные списки. Отправляем мы по типу чата,
+// поэтому транспорт переводим в него: WhatsApp Business API (wapi) пишет в чат типа
+// whatsapp, личный Telegram (tgapi) и Telegram-бот — в telegram, MAX-бот — в max.
+// У Циана своего типа чата в API нет — отправлять туда нельзя, и в списке его нет.
+const WZ_TRANSPORT_TO_CHAT = {
+  whatsapp: 'whatsapp', wapi: 'whatsapp', whatsgroup: 'whatsgroup', tgapi: 'telegram',
+  telegram: 'telegram', instagram: 'instagram', viber: 'viber', avito: 'avito',
+  max: 'max', maxbot: 'max', vk: 'vk'
+};
+// Всё, чем Wazzup умеет отправлять. Групповые чаты приходят из вебхуков,
+// транспорта с таким именем нет — поэтому добавлены отдельно.
+const WZ_CHAT_SET = new Set([...Object.values(WZ_TRANSPORT_TO_CHAT), 'telegroup', 'maxgroup']);
+// Состояния канала, при которых сообщения не ходят
+// (wazzup24.ru/help/api-ru/rabota-s-kanalami). Неизвестное или отсутствующее
+// состояние считаем рабочим: иначе новый статус у вендора спрятал бы все каналы.
+const WZ_DEAD_STATES = ['disabled', 'notEnoughMoney', 'blocked', 'unauthorized', 'qridle',
+  'openelsewhere', 'foreignphone', 'waitForPassword', 'onModeration', 'rejected', 'phoneUnavailable'];
+const wzAlive = c => !WZ_DEAD_STATES.includes(String(c && c.state || ''));
+// состояния канала по-русски: [подпись, класс бейджа]
+const WZ_STATE_LABELS = {
+  active: ['работает', ''], init: ['подключается', 'grey'],
+  disabled: ['отключён в кабинете Wazzup', 'grey'], onModeration: ['на модерации', 'grey'],
+  phoneUnavailable: ['телефон недоступен', 'orange'], qridle: ['нужно отсканировать QR-код', 'orange'],
+  openelsewhere: ['занят другим аккаунтом Wazzup', 'orange'], notEnoughMoney: ['не хватает средств на балансе', 'orange'],
+  foreignphone: ['QR отсканирован другим номером', 'orange'], unauthorized: ['нужно подключить заново', 'orange'],
+  waitForPassword: ['ждёт код двухфакторной защиты', 'orange'], blocked: ['заблокирован', 'orange'],
+  rejected: ['отклонён модерацией', 'orange']
+};
+const wzState = s => WZ_STATE_LABELS[s] || (s ? [s, 'grey'] : ['состояние не указано', 'grey']);
 const SOURCE_LABELS = {
   manual: 'Вручную', import: 'Импорт из CSV', site: 'Сайт', email: 'Почта',
   ...WZ_TRANSPORTS,
@@ -132,13 +164,70 @@ const sourceLabel = s => SOURCE_LABELS[s] || (s ? String(s) : 'Вручную');
 const sourceOptions = selected => Object.entries(SOURCE_LABELS).map(([code, name]) =>
   `<option value="${code}" ${code === (selected || 'manual') ? 'selected' : ''}>${name}</option>`).join('');
 
-const CHANNEL_LABELS = { ...WZ_TRANSPORTS, email: 'Почта', any: 'Любой канал' };
+// Подписи типов чата. Как тип чата telegram покрывает и личный аккаунт, и бота,
+// поэтому здесь нейтральное «Telegram»; различие важно в списке подключённых
+// каналов — там подпись берётся из транспортов (wzTransportLabel).
+const CHANNEL_LABELS = { ...WZ_TRANSPORTS, telegram: 'Telegram', email: 'Почта', any: 'Любой канал' };
 const channelLabel = c => CHANNEL_LABELS[c] || c || '';
+const wzTransportLabel = t => WZ_TRANSPORTS[String(t || '').trim().toLowerCase()] || channelLabel(t);
+// название канала для списка в настройках: «WhatsApp · 79991112233»
+const wzTitle = c => [wzTransportLabel(c.transport), c.name || c.phone || c.external_id].filter(Boolean).join(' · ');
 // бейджи каналов клиента: «WhatsApp · Telegram» — одна строка для списков
 const chan = c => (c || 'whatsapp').split(',').map(x => x.trim()).filter(Boolean).map(x => `<span class="chan ${x}">${esc(channelLabel(x))}</span>`).join(' ');
 
 const ROLE_LABELS = { admin: 'Администратор', manager: 'Менеджер', viewer: 'Наблюдатель' };
 const roleLabel = r => ROLE_LABELS[r] || r;
+
+// Браузер хранит кириллический домен в машиночитаемом виде: вместо
+// «crm.каркастайги.рф» — «crm.xn--80aaamzedb7cml.xn--p1ai». В адресе вебхука и в
+// коде для сайта так и должно остаться, а вот читать и набирать его вручную будет
+// человек, поэтому в текстах для людей расшифровываем обратно (RFC 3492).
+function punyDecodeLabel(label) {
+  if (!/^xn--/i.test(label)) return label;
+  const input = label.slice(4);
+  const BASE = 36, TMIN = 1, TMAX = 26, SKEW = 38, DAMP = 700;
+  const digit = c => (c >= 48 && c <= 57) ? c - 48 + 26 : (c >= 65 && c <= 90) ? c - 65 : (c >= 97 && c <= 122) ? c - 97 : BASE;
+  const adapt = (delta, points, first) => {
+    delta = first ? Math.floor(delta / DAMP) : delta >> 1;
+    delta += Math.floor(delta / points);
+    let k = 0;
+    while (delta > ((BASE - TMIN) * TMAX) >> 1) { delta = Math.floor(delta / (BASE - TMIN)); k += BASE; }
+    return k + Math.floor(((BASE - TMIN + 1) * delta) / (delta + SKEW));
+  };
+  let n = 128, i = 0, bias = 72;
+  const out = [];
+  const sep = input.lastIndexOf('-');
+  let pos = 0;
+  if (sep >= 0) { for (let k = 0; k < sep; k++) out.push(input.charCodeAt(k)); pos = sep + 1; }
+  while (pos < input.length) {
+    const oldi = i; let w = 1;
+    for (let k = BASE; ; k += BASE) {
+      if (pos >= input.length) return label;
+      const d = digit(input.charCodeAt(pos++));
+      if (d >= BASE) return label;
+      i += d * w;
+      const t = k <= bias ? TMIN : (k >= bias + TMAX ? TMAX : k - bias);
+      if (d < t) break;
+      w *= (BASE - t);
+    }
+    bias = adapt(i - oldi, out.length + 1, oldi === 0);
+    n += Math.floor(i / (out.length + 1));
+    i %= (out.length + 1);
+    out.splice(i, 0, n);
+    i++;
+  }
+  // Если расшифровка дала символы, которых в домене быть не может (управляющие,
+  // пробел, невидимые C1), значит строка испорчена — оставляем её как есть.
+  // Показать человеку неверный адрес дороже, чем машиночитаемый.
+  if (!out.length || out.some(c => c < 0x21 || (c >= 0x7f && c <= 0x9f) || c > 0x10ffff)) return label;
+  return String.fromCharCode(...out);
+}
+// адрес для показа человеку; машинные адреса (вебхук, код формы) не трогаем
+function humanOrigin(origin) {
+  const m = /^(https?:\/\/)([^/?#\s]+)(.*)$/i.exec(String(origin || '').trim());
+  if (!m) return String(origin || '');
+  return m[1] + m[2].split('.').map(punyDecodeLabel).join('.') + m[3];
+}
 
 
 function normalizeDue(raw) {
@@ -264,7 +353,7 @@ applyTheme();
 
 let token = '';
 const state = {
-  view: 'dashboard', settingsTab: 'integrations', pipeline: 1, conv: null,
+  view: 'dashboard', settingsTab: 'integrations', pipeline: 1, conv: null, listOnly: false,
   deals: [], stages: [], pipelines: [], contacts: [], companies: [], channels: [],
   cache: {}, dealTab: 'details', meta: null, dupes: null, me: null, users: [],
   taskScope: 'mine', taskFilter: '', dealScope: 'all', taskView: 'list', taskSelectMode: false, sel: {}
@@ -838,7 +927,11 @@ function setCompQuery(value) { state.compQuery = value; render(); }
 function clearCompQuery() { state.compQuery = ''; render(); }
 function setTeamQuery(value) { state.teamQuery = value; render(); }
 function setTplQuery(value) { state.tplQuery = value; render(); }
-function openConv(id) { state.conv = id; go('inbox'); }
+function openConv(id) { state.conv = id; state.listOnly = false; go('inbox'); }
+// На телефоне список диалогов и чат не помещаются на одном экране, поэтому
+// показываем что-то одно: кнопка «Назад» возвращает к списку. На широком экране
+// кнопка скрыта, там оба блока видны всегда.
+function closeConv() { state.conv = null; state.listOnly = true; render(); }
 
 // Очередь отрисовки: если пользователь быстро переключает разделы, ответ старого
 // запроса не должен перетереть новый экран. Каждый вызов видит актуальный state.view.
@@ -1366,13 +1459,20 @@ function msgHtml(m) {
 function channelOptions(conv) {
   // Почту исключаем: письмо отправляется отдельной кнопкой в шапке чата, а сервер
   // на channel='email' отвечает ошибкой. Пункт, который всегда падает, не нужен.
-  const fromConv = String(conv?.channels || '').split(',').map(x => x.trim()).filter(x => x && x !== 'email');
+  // По той же причине не предлагаем значения, которыми Wazzup не отправляет:
+  // транспорт канала (wapi, tgapi, cian) типом чата не является.
+  const fromConv = String(conv?.channels || '').split(',').map(x => x.trim()).filter(x => WZ_CHAT_SET.has(x));
   const connected = (state.channels || [])
-    .filter(c => String(c.state || '').toLowerCase() !== 'disabled')
-    .map(c => String(c.transport || '').trim().toLowerCase()).filter(Boolean);
+    .filter(wzAlive)
+    .map(c => WZ_TRANSPORT_TO_CHAT[String(c.transport || '').trim().toLowerCase()])
+    .filter(Boolean);
   const list = [...new Set([...fromConv, ...connected])];
-  // каналы ещё не синхронизированы — берём тип этой беседы, иначе нечего выбрать
-  if (!list.length) list.push(String(conv?.chat_type || '').trim().toLowerCase() || 'whatsapp');
+  if (!list.length) {
+    // каналы ещё не синхронизированы — берём тип этой беседы, иначе нечего выбрать
+    const own = String(conv?.chat_type || '').trim().toLowerCase();
+    if (WZ_CHAT_SET.has(own)) list.push(own);
+    else return '<option value="" disabled selected>Ответы в этот канал недоступны</option>';
+  }
   return list.map(c => `<option value="${esc(c)}" ${c === String(conv?.chat_type || '').toLowerCase() ? 'selected' : ''}>${esc(channelLabel(c))}</option>`).join('');
 }
 async function inbox(v) {
@@ -1381,18 +1481,18 @@ async function inbox(v) {
   // подключённые каналы нужны списку «Куда отправить»: без них там только те
   // каналы, в которых клиент уже писал, а новые не предложить
   if (!state.channels.length) state.channels = await api('/api/channels').catch(() => []);
-  const cur = convs.find(c => c.id === state.conv) || convs[0];
-  if (cur) state.conv = cur.id;
+  const cur = state.listOnly ? null : (convs.find(c => c.id === state.conv) || convs[0]);
+  if (cur) { state.conv = cur.id; state.listOnly = false; }
   const msgs = cur ? await api(`/api/conversations/${cur.id}/messages`) : [];
   const templates = (state.cache.templates = state.cache.templates || await api('/api/templates'));
 
-  v.innerHTML = `<div class="inbox">
+  v.innerHTML = `<div class="inbox${cur ? '' : ' list-only'}">
    <div class="convs"><div style="padding:10px;border-bottom:1px solid var(--line)"><input id="convSearch" placeholder="Поиск диалогов" oninput="filterConvs(this.value)"></div>
    <div id="convList">${convs.map(c => `<div class="conv ${c.id === (cur || {}).id ? 'active' : ''}" onclick="openConv(${c.id})">
     <b><span>${esc(c.title)}</span>${c.unread ? `<span class="badge">${c.unread}</span>` : ''}</b>
     <p>${esc(c.last_body || '—')}</p><small>${chan(c.channels)} · ${esc(dt(c.last_at))}</small></div>`).join('') || '<div class="empty">Чатов пока нет</div>'}</div></div>
    <div class="chat">${cur ? `
-    <div class="chat-head"><div><b>${esc(cur.title)}</b> <small>${esc(cur.phone || '')}</small></div>
+    <div class="chat-head"><button type="button" class="btn sm chat-back" onclick="closeConv()" aria-label="К списку диалогов">${icon('arrowLeft', 14)}</button><div><b>${esc(cur.title)}</b> <small>${esc(cur.phone || '')}</small></div>
       <div style="display:flex;gap:6px">
         <button class="btn sm" onclick="attachContact(${cur.contact_id})">${icon('contact', 13)} Карточка клиента</button>
         ${canEdit() ? `<button class="btn sm" onclick="openEmailComposer(${cur.id})">${icon('email', 13)} Письмо</button>` : ''}
@@ -1585,12 +1685,12 @@ async function contacts(v) {
    <span class="tag grey" style="margin-left:auto">показано ${Math.min(filtered.length, state.contactLimit || 50)} из ${filtered.length}${filtered.length !== list.length ? ` (всего в базе ${list.length})` : ''}</span>
    <button class="btn sm" onclick="openMenu(event, contactsMoreMenu())" title="Дубли, экспорт и импорт">${icon('more', 13)} Ещё</button>
    ${canEdit() ? `<button class="btn sm primary" onclick="openContact()">${icon('plus', 13)} Новый контакт</button>` : ''}</div>
-  <div class="card"><table><tr><th class="sel"></th><th>Клиент</th><th>Телефон / E-mail</th><th>Компания</th><th>Источник</th><th>Теги</th><th>Ответственный</th><th></th></tr>
+  <div class="card"><div class="tbl-scroll"><table><tr><th class="sel"></th><th>Клиент</th><th>Телефон / E-mail</th><th>Компания</th><th>Источник</th><th>Теги</th><th>Ответственный</th><th></th></tr>
    ${filtered.slice(0, state.contactLimit || 50).map(c => `<tr class="${selSet('contacts').has(c.id) ? 'selected' : ''}"><td class="sel">${canEdit() ? `<input type="checkbox" title="Выбрать для массового действия" ${selSet('contacts').has(c.id) ? 'checked' : ''} onchange="toggleSel('contacts',${c.id})">` : ''}</td>
     <td><a href="#" onclick="openContactCard(${c.id});return false"><b>${esc(c.name)}</b></a></td><td>${esc(c.phone || '—')}<br><small>${esc(c.email || '')}</small></td><td>${esc(c.company || '—')}</td><td><span class="tag grey">${esc(sourceLabel(c.source))}</span></td>
     <td>${(c.tags || '').split(',').filter(Boolean).map(t => `<span class="tag">${esc(t.trim())}</span>`).join('')}</td>
     <td><small>${esc(__team.find(u => u.id === c.responsible_id)?.name || '—')}</small></td>
-    <td style="white-space:nowrap"><button class="btn sm" onclick="openContactCard(${c.id})">Карточка</button>${canEdit() ? ` <button class="btn sm" onclick="openDeal(${c.id})">+ Сделка</button> <button class="btn sm danger" title="Удалить контакт" onclick="del('contacts',${c.id})">${icon('close', 13)}</button>` : ''}</td></tr>`).join('') || '<tr><td colspan="8"><div class="empty">Контактов не найдено</div></td></tr>'}</table>
+    <td style="white-space:nowrap"><button class="btn sm" onclick="openContactCard(${c.id})">Карточка</button>${canEdit() ? ` <button class="btn sm" onclick="openDeal(${c.id})">+ Сделка</button> <button class="btn sm danger" title="Удалить контакт" onclick="del('contacts',${c.id})">${icon('close', 13)}</button>` : ''}</td></tr>`).join('') || '<tr><td colspan="8"><div class="empty">Контактов не найдено</div></td></tr>'}</table></div>
    ${filtered.length > (state.contactLimit || 50) ? `<div style="text-align:center;margin-top:10px"><button class="btn" onclick="showMoreContacts()">Показать ещё 50</button></div>` : ''}</div>`;
 }
 
@@ -1787,8 +1887,8 @@ async function companies(v) {
   v.innerHTML = `${viewerNote()}<div class="card"><div class="row" style="border:0;flex-wrap:wrap;gap:8px"><h3>Компании (${shown.length}${shown.length !== rows.length ? ` из ${rows.length}` : ''})</h3>
    <input id="companySearch" style="max-width:240px" placeholder="Поиск: название, ИНН, телефон, почта" value="${esc(state.companyQuery || '')}" oninput="liveSearch('companies',()=>setCompanyQuery(this.value))">
    ${canEdit() ? `<button class="btn sm primary" style="margin-left:auto" onclick="openCompany()">+ Компания</button>` : ''}</div>
-  <table><tr><th>Компания</th><th>ИНН</th><th>Телефон</th><th>E-mail</th><th>Сайт</th><th></th></tr>
-   ${shown.slice(0, state.companyLimit || 100).map(c => `<tr><td><b>${esc(c.name)}</b></td><td>${esc(c.inn || '—')}</td><td>${esc(c.phone || '—')}</td><td>${esc(c.email || '—')}</td><td>${siteHref(c.site) ? `<a href="${esc(siteHref(c.site))}" target="_blank" rel="noopener">${esc(c.site)}</a>` : '—'}</td><td style="white-space:nowrap">${canEdit() ? `<button class="btn sm" title="Открыть карточку компании" onclick="openCompany(${c.id})">${icon('edit', 13)} Изменить</button> <button class="btn sm danger" title="Удалить компанию" onclick="del('companies',${c.id})">${icon('close', 13)}</button>` : `<button class="btn sm" onclick="openCompany(${c.id})">Открыть</button>`}</td></tr>`).join('') || '<tr><td colspan="6"><div class="empty">Компаний не найдено — измените поиск или добавьте компанию</div></td></tr>'}</table>
+  <div class="tbl-scroll"><table><tr><th>Компания</th><th>ИНН</th><th>Телефон</th><th>E-mail</th><th>Сайт</th><th></th></tr>
+   ${shown.slice(0, state.companyLimit || 100).map(c => `<tr><td><b>${esc(c.name)}</b></td><td>${esc(c.inn || '—')}</td><td>${esc(c.phone || '—')}</td><td>${esc(c.email || '—')}</td><td>${siteHref(c.site) ? `<a href="${esc(siteHref(c.site))}" target="_blank" rel="noopener">${esc(c.site)}</a>` : '—'}</td><td style="white-space:nowrap">${canEdit() ? `<button class="btn sm" title="Открыть карточку компании" onclick="openCompany(${c.id})">${icon('edit', 13)} Изменить</button> <button class="btn sm danger" title="Удалить компанию" onclick="del('companies',${c.id})">${icon('close', 13)}</button>` : `<button class="btn sm" onclick="openCompany(${c.id})">Открыть</button>`}</td></tr>`).join('') || '<tr><td colspan="6"><div class="empty">Компаний не найдено — измените поиск или добавьте компанию</div></td></tr>'}</table></div>
    ${shown.length > (state.companyLimit || 100) ? `<div style="text-align:center;margin-top:10px"><button class="btn" onclick="showMoreCompanies()">Показать ещё</button></div>` : ''}</div>`;
 }
 async function openCompany(id) {
@@ -2011,8 +2111,8 @@ async function products(v) {
    ${amAdmin() ? `<button class="btn sm primary" style="margin-left:auto" onclick="openProduct()">+ Товар / проект</button>` : ''}</div>
   <p class="form-hint" style="margin:-2px 0 10px">Это <b>один список</b>: отсюда позиции берутся в сделки, и эти же цены CRM сравнивает с ценами конкурентов (раздел «Конкуренты» → «Наш прайс-лист»). В продаже: <b>${onSale.length}</b>${archived ? ` · в архиве: ${archived}` : ''}${noPrice ? ` · без цены: ${noPrice} — в сравнении они не участвуют` : ''}.</p>
   ${amAdmin() ? '' : '<p class="form-hint" style="margin:-6px 0 10px">Прайс-лист меняет администратор. Нужной позиции нет? Добавьте её прямо в сделку — сумма пересчитается, а общий прайс останется неизменным.</p>'}
-  <table><tr><th>Артикул</th><th>Название</th><th>Цена</th><th>Ед.</th><th>В продаже</th><th></th></tr>
-   ${shown.map(p => `<tr><td><code>${esc(p.sku || '—')}</code></td><td><b>${esc(p.name)}</b>${p.note ? `<br><small>${esc(p.note)}</small>` : ''}</td><td>${Number(p.price) > 0 ? fmt(p.price) : '<span class="tag grey">цена не указана</span>'}</td><td>${esc(p.unit || 'шт')}</td><td>${p.active ? 'Да' : '<span class="tag grey">Архив</span>'}</td><td style="white-space:nowrap">${amAdmin() ? `<button class="btn sm" title="Изменить позицию" onclick="openProduct(${p.id})">${icon('edit', 13)} Изменить</button> <button class="btn sm danger" title="Удалить из каталога" onclick="del('products',${p.id})">${icon('close', 13)}</button>` : `<button class="btn sm" title="Посмотреть позицию" onclick="openProduct(${p.id})">Открыть</button>`}</td></tr>`).join('') || '<tr><td colspan="6"><div class="empty">Ничего не найдено — измените фильтр или добавьте позицию</div></td></tr>'}</table></div>`;
+  <div class="tbl-scroll"><table><tr><th>Артикул</th><th>Название</th><th>Цена</th><th>Ед.</th><th>В продаже</th><th></th></tr>
+   ${shown.map(p => `<tr><td><code>${esc(p.sku || '—')}</code></td><td><b>${esc(p.name)}</b>${p.note ? `<br><small>${esc(p.note)}</small>` : ''}</td><td>${Number(p.price) > 0 ? fmt(p.price) : '<span class="tag grey">цена не указана</span>'}</td><td>${esc(p.unit || 'шт')}</td><td>${p.active ? 'Да' : '<span class="tag grey">Архив</span>'}</td><td style="white-space:nowrap">${amAdmin() ? `<button class="btn sm" title="Изменить позицию" onclick="openProduct(${p.id})">${icon('edit', 13)} Изменить</button> <button class="btn sm danger" title="Удалить из каталога" onclick="del('products',${p.id})">${icon('close', 13)}</button>` : `<button class="btn sm" title="Посмотреть позицию" onclick="openProduct(${p.id})">Открыть</button>`}</td></tr>`).join('') || '<tr><td colspan="6"><div class="empty">Ничего не найдено — измените фильтр или добавьте позицию</div></td></tr>'}</table></div></div>`;
 }
 async function openProduct(id) {
   const p = id ? await api('/api/products/' + id) : {};
@@ -2095,7 +2195,7 @@ async function competitorsView(v) {
      <h3>Конкуренты на контроле (${shown.length}${shown.length !== list.length ? ` из ${list.length}` : ''})</h3>
      <input id="compFilter" style="max-width:250px" placeholder="Поиск по списку: название, ИНН, город" value="${esc(state.compQuery || '')}" oninput="liveSearch('compList',()=>setCompQuery(this.value))">
      ${state.compQuery ? `<button class="btn sm ghost" onclick="clearCompQuery()">Сбросить</button>` : ''}
-   <table><tr><th>Конкурент</th><th>ИНН</th><th>Город / сайт</th><th>Риск</th><th>Проверка</th><th>Цены</th><th></th></tr>
+   <div class="tbl-scroll"><table><tr><th>Конкурент</th><th>ИНН</th><th>Город / сайт</th><th>Риск</th><th>Проверка</th><th>Цены</th><th></th></tr>
     ${shown.map(c => `<tr>
      <td><a href="#" onclick="openCompetitorCard(${c.id});return false"><b>${esc(c.name)}</b></a></td>
      <td><code>${esc(c.inn || '—')}</code></td><td>${esc(c.city || '—')}<br><small>${siteHref(c.website) ? `<a href="${esc(siteHref(c.website))}" target="_blank" rel="noopener">${esc(c.website)}</a>` : ''}</small></td>
@@ -2108,7 +2208,7 @@ async function competitorsView(v) {
        <button class="btn sm" title="Изменить карточку конкурента" onclick="openCompetitor(${c.id})">${icon('edit', 13)}</button>
        <button class="btn sm danger" title="Удалить конкурента" onclick="delCompetitor(${c.id})">${icon('close', 13)}</button>` : ''}
      </td></tr>`).join('') || `<tr><td colspan="7"><div class="empty">${q ? 'Ничего не найдено — измените поиск' : 'Конкурентов пока нет — введите название выше'}</div></td></tr>`}
-   </table>
+   </table></div>
   </div>`;
 }
 
@@ -2531,7 +2631,7 @@ async function settings(v) {
       <p><small>Один ключ Wazzup объединяет все подключённые у вас каналы в одном разделе «Чаты»: WhatsApp и WhatsApp Business, Telegram (личный и бот), Instagram, Viber, Авито, MAX, Циан и ВКонтакте. Отдельно подключать каждый мессенджер в CRM не нужно — состав списка зависит от того, какие каналы оплачены и добавлены в вашем кабинете Wazzup. Ключ берётся в личном кабинете Wazzup: раздел «Интеграция с CRM» → API. Это длинная строка, которая работает как пароль к вашему аккаунту Wazzup, — храните её в секрете.</small></p>
       <p>Статус: <b class="${s.wazzup.configured ? 'green' : ''}">${s.wazzup.configured ? 'подключено' : 'не подключено'}</b></p>
       <label>Ключ доступа Wazzup<input id="wzKey" placeholder="${esc(s.wazzup.api_key || 'вставьте ключ из личного кабинета Wazzup')}"></label>
-      <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px"><label>Куда отправлять ответы по умолчанию<select id="wzChannel"><option value="">— выберите канал —</option>${chans.map(c => `<option value="${esc(c.external_id)}" ${c.external_id === s.wazzup.channel_id ? 'selected' : ''}>${esc(c.name || c.phone || c.transport || c.external_id)}</option>`).join('')}</select></label>
+      <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px"><label>Куда отправлять ответы по умолчанию<select id="wzChannel"><option value="">— выберите канал —</option>${chans.map(c => `<option value="${esc(c.external_id)}" ${c.external_id === s.wazzup.channel_id ? 'selected' : ''}>${esc(wzTitle(c))}${wzAlive(c) ? '' : ' — не работает'}</option>`).join('')}</select></label>
       <label>Код защиты адреса (необязательно)<input id="wzSecret" value="${esc(s.wazzup.webhook_secret || '')}" placeholder="придумайте длинный код"></label></div>
       <p class="form-hint">Код защиты подставляется в адрес ниже. С ним никто посторонний не сможет присылать в CRM поддельные сообщения.</p>
       <label>Адрес сервера Wazzup<input id="wzUrl" value="${esc(s.wazzup.api_url)}"></label>
@@ -2539,17 +2639,20 @@ async function settings(v) {
       <div style="display:flex;gap:8px;flex-wrap:wrap"><button class="btn primary" onclick="saveWazzup()">Сохранить</button><button class="btn" onclick="testWazzup()">${icon('sync', 13)} Проверить и синхронизировать каналы</button></div>
       <hr><p><b>Адрес, по которому Wazzup присылает сообщения</b></p>
       <p><small>Это «входная дверь» для сообщений: когда клиент пишет в WhatsApp или Telegram, Wazzup передаёт сообщение на этот адрес, и оно появляется в «Чатах». Вставьте адрес в личном кабинете Wazzup (раздел с адресами уведомлений) или нажмите кнопку ниже — CRM зарегистрирует его сама.</small></p>
-      ${hookLine(origin + '/webhooks/wazzup' + (s.wazzup.webhook_secret ? '?secret=' + encodeURIComponent(s.wazzup.webhook_secret) : ''))}
+      ${hookLine(wazzupHookUrl(s))}
       <p><small>${s.wazzup.webhook_secret ? 'Секрет в адресе — пароль от этой двери: без него чужие люди не смогут присылать поддельные сообщения.' : 'Секрет не задан: адрес примет сообщение от любого, кто его узнает. Для работы в интернете лучше задать секрет выше.'}</small></p>
       <div style="display:flex;gap:8px;flex-wrap:wrap"><button class="btn sm" onclick="registerWazzupWebhook()">${icon('sync', 13)} Зарегистрировать адрес автоматически</button></div>
-      <hr><h3>Подключённые каналы (${chans.length})</h3>${chans.map(c => `<div class="row"><span>${esc(c.name || c.transport || c.external_id)}<br><small>${esc(channelLabel(c.transport))} ${esc(c.phone || '')} · статус: ${esc(c.state === 'active' ? 'активен' : (c.state || 'неизвестно'))}</small></span><span class="tag ${c.state === 'active' ? '' : 'grey'}">${esc(c.state === 'active' ? 'активен' : (c.state || 'неизвестно'))}</span></div>`).join('') || '<small>Каналы появятся после сохранения ключа и синхронизации.</small>'}</div>
+      <hr><h3>Подключённые каналы (${chans.length})</h3>${chans.map(c => { const [label, cls] = wzState(c.state);
+        return `<div class="row"><span><b>${esc(wzTransportLabel(c.transport) || 'Канал')}</b><br><small>${esc(c.name || c.phone || c.external_id)}</small></span><span class="tag ${cls}">${esc(label)}</span></div>` }).join('')
+        || '<small>Каналы появятся после сохранения ключа и синхронизации.</small>'}
+      ${chans.length && !chans.some(wzAlive) ? '<p class="form-hint">Ни один канал пока не работает — сообщения не отправятся. Причина указана справа от канала: её устраняют в личном кабинете Wazzup.</p>' : ''}</div>
 
      <div class="card"><h3>Заявки с сайта и из других сервисов</h3>
       <p><small>Готовая форма для сайта и «входная дверь» для любых заявок: имя, телефон и вопрос попадают в CRM, а она сама создаёт клиента, чат и сделку. Код формы копируется кнопкой ниже и вставляется на страницу сайта. Сюда же можно направить заявки с Авито, лендинга или своего бота — если сервис умеет отправлять данные на адрес (это называется вебхук).</small></p>
       ${hookLine(origin + '/webhooks/generic' + (s.webhook?.secret ? '?secret=' + encodeURIComponent(s.webhook.secret) : ''))}
-      <details style="margin:4px 0 10px"><summary><small>Пример запроса</small></summary><pre class="code-block">curl -X POST '${esc(origin)}/webhooks/generic${s.webhook?.secret ? '?secret=' + esc(s.webhook.secret) : ''}' \
+      <p style="margin:6px 0 2px"><small>Пример запроса</small></p><pre class="code-block">curl -X POST '${esc(origin)}/webhooks/generic${s.webhook?.secret ? '?secret=' + esc(s.webhook.secret) : ''}' \
   -H 'Content-Type: application/json' \
-  -d '{"channel":"site","name":"Иван","phone":"+7 999 123-45-67","body":"Нужен дом 8×10"}'</pre></details>
+  -d '{"channel":"site","name":"Иван","phone":"+7 999 123-45-67","body":"Нужен дом 8×10"}'</pre>
       <label>Код защиты (чтобы чужие не присылали заявки)
         <div style="display:flex;gap:8px"><input id="whSecret" value="${esc(s.webhook?.secret || '')}" placeholder="пусто — принимать любые заявки"><button type="button" class="btn sm" style="white-space:nowrap" onclick="genWebhookSecret()">Сгенерировать</button></div>
       </label>
@@ -2579,7 +2682,7 @@ async function settings(v) {
     const cf = await api('/api/custom-fields');
     const rows = cf.fields;
     body = `<div class="settings-cols"><div class="card"><div class="row" style="border:0"><div><h3>Свои поля для контактов и сделок</h3><small>Дополнительные строки в карточке: площадь участка, тип фундамента, дата замера — что удобно именно вам. Название, обязательность и варианты списка меняются кнопкой «Изменить».</small></div><button class="btn sm primary" onclick="editField(-1)">${icon('plus', 13)} Добавить поле</button></div>
-     <table id="cfFields"><tr><th>Название</th><th>Раздел</th><th>Тип</th><th>Обязательное</th><th style="width:210px"></th></tr>${rows.map((f, i) => `<tr><td><b>${esc(f.label)}</b></td><td>${({ contacts: 'Контакты', deals: 'Сделки', both: 'Контакты и сделки' })[f.entity] || esc(f.entity)}</td><td>${({ text: 'Текст', number: 'Число', date: 'Дата', select: 'Список', phone: 'Телефон', email: 'E-mail' })[f.type] || esc(f.type)}${f.options && f.options.length ? '<br><small>' + f.options.map(esc).join(', ') + '</small>' : ''}</td><td>${f.required ? '<b>Да</b><br><small>сначала, со звёздочкой</small>' : 'Нет<br><small>ниже, можно позже</small>'}</td><td style="white-space:nowrap"><button class="btn sm" onclick="editField(${i})">${icon('edit', 13)} Изменить</button> <button class="btn sm danger" onclick="delField(${i})">${icon('trash', 13)} Удалить</button></td></tr>`).join('') || '<tr><td colspan="5"><div class="empty">Своих полей пока нет</div></td></tr>'}</table>
+     <table id="cfFields"><tr><th>Название</th><th>Раздел</th><th>Тип</th><th>Обязательное</th><th class="act"></th></tr>${rows.map((f, i) => `<tr><td><b>${esc(f.label)}</b></td><td>${({ contacts: 'Контакты', deals: 'Сделки', both: 'Контакты и сделки' })[f.entity] || esc(f.entity)}</td><td>${({ text: 'Текст', number: 'Число', date: 'Дата', select: 'Список', phone: 'Телефон', email: 'E-mail' })[f.type] || esc(f.type)}${f.options && f.options.length ? '<br><small>' + f.options.map(esc).join(', ') + '</small>' : ''}</td><td>${f.required ? '<b>Да</b><br><small>сначала, со звёздочкой</small>' : 'Нет<br><small>ниже, можно позже</small>'}</td><td style="white-space:nowrap"><button class="btn sm" onclick="editField(${i})">${icon('edit', 13)} Изменить</button> <button class="btn sm danger" onclick="delField(${i})">${icon('trash', 13)} Удалить</button></td></tr>`).join('') || '<tr><td colspan="5"><div class="empty">Своих полей пока нет</div></td></tr>'}</table>
      <p><small>Например: «Площадь участка», «Тип фундамента», «Дата замера». Новое поле сразу появляется в форме создания и в карточке клиента или сделки, а его значения попадают в выгрузку контактов в CSV.</small></p></div>
      <div>${builtinFieldsCard()}
       <div class="card"><h3>Как работают свои поля</h3>
@@ -2672,7 +2775,7 @@ async function settings(v) {
        <button class="btn primary">Сохранить</button></form></div>
      <div class="card">
      <div class="row" style="border:0"><div><h3>Свои правила (${rows.length})</h3><small>Простые правила: «когда случилось — сделай». Работают сами, без участия сотрудника.</small></div><button class="btn sm primary" onclick="openAutomation()">+ Правило</button></div>
-     <table><tr><th>Правило</th><th>Когда срабатывает</th><th>Что делает</th><th>Вкл.</th><th style="width:210px"></th></tr>
+     <table><tr><th>Правило</th><th>Когда срабатывает</th><th>Что делает</th><th>Вкл.</th><th class="act"></th></tr>
       ${rows.map(a => `<tr><td><b>${esc(a.name)}</b></td><td><small>${esc(whenText(a))}</small></td><td><small>${esc(whatText(a))}</small></td>
        <td><input type="checkbox" style="width:auto" title="${a.active ? 'Правило работает — снимите, чтобы выключить' : 'Правило выключено'}" ${a.active ? 'checked' : ''} onchange="toggleAutomation(${a.id},this)"></td>
        <td style="white-space:nowrap"><button class="btn sm" onclick="openAutomation(${a.id})">${icon('edit', 13)} Изменить</button> <button class="btn sm danger" onclick="del('automations',${a.id})">${icon('trash', 13)} Удалить</button></td></tr>`).join('')
@@ -2715,7 +2818,7 @@ async function settings(v) {
      <div class="row" style="border:0;flex-wrap:wrap;gap:8px"><div><h3>Команда (${rows.length})</h3><small>Доступ в CRM выдаёт администратор: e-mail — это логин, пароль сотрудник меняет при первом входе.</small></div>
       <input id="teamSearch" style="max-width:220px;margin-left:auto" placeholder="Поиск: имя, e-mail, роль" value="${esc(state.teamQuery || '')}" oninput="liveSearch('team',()=>setTeamQuery(this.value))">
       <button class="btn sm primary" onclick="openUser()">+ Пользователь</button></div>
-     <table><tr><th>Сотрудник</th><th>E-mail (логин)</th><th>Роль</th><th>Сделки в работе</th><th>Задачи</th><th>Последний вход</th><th>Доступ</th><th></th></tr>
+     <div class="tbl-scroll"><table><tr><th>Сотрудник</th><th>E-mail (логин)</th><th>Роль</th><th>Сделки в работе</th><th>Задачи</th><th>Последний вход</th><th>Доступ</th><th></th></tr>
       ${shown.map(x => { const st = stat(x.id); return `<tr>
         <td><b>${esc(x.name)}</b>${x.must_change_password ? '<br><small>работает по временному паролю</small>' : ''}</td>
         <td>${esc(x.email || '—')}</td><td>${esc(roleLabel(x.role))}</td>
@@ -2723,7 +2826,7 @@ async function settings(v) {
         <td><small>${esc(x.last_login ? dt(x.last_login) : 'ещё не входил')}</small></td>
         <td>${x.active ? '<span class="tag">разрешён</span>' : '<span class="tag grey">отключён</span>'}</td>
         <td style="white-space:nowrap"><button class="btn sm" title="Изменить данные, роль, доступ или выдать новый пароль" onclick="openUser(${x.id})">${icon('edit', 13)} Изменить</button></td></tr>`; }).join('')
-        || `<tr><td colspan="8"><div class="empty">${uq ? 'Никого не нашли — измените поиск' : 'Сотрудников пока нет'}</div></td></tr>`}</table></div>
+        || `<tr><td colspan="8"><div class="empty">${uq ? 'Никого не нашли — измените поиск' : 'Сотрудников пока нет'}</div></td></tr>`}</table></div></div>
      <div><div class="card"><h3>Права ролей</h3>
       <p><small><b>Администратор</b> — всё: настройки, команда, интеграции, воронки, свои поля, каталог (он же прайс-лист), резервные копии.</small></p>
       <p><small><b>Менеджер</b> — клиенты, компании, сделки, задачи, заметки, все чаты, каталог (смотрит и берёт позиции в сделки), шаблоны сообщений и проверка конкурентов. E-mail коллег ему не показывается.</small></p>
@@ -2936,10 +3039,43 @@ async function testEmail(form) {
 async function testWazzup() {
   const r = await api('/api/integrations/wazzup/test', { method: 'POST' }).catch(e => ({ ok: false, error: e.message }));
   if (!r.ok) return toast(r.error);
-  const n = (r.channels || []).length; const sync = await api('/api/integrations/wazzup/sync', { method: 'POST' }).catch(e => ({ error: e.message }));
-  toast(sync.error ? sync.error : `Каналов найдено и сохранено: ${sync.synced ?? n}`); state.channels = []; render();
+  const sync = await api('/api/integrations/wazzup/sync', { method: 'POST' }).catch(e => ({ error: e.message }));
+  state.channels = [];
+  if (sync.error) { toast(sync.error); return render(); }
+  // ноль каналов — не повод гадать: объясняем, что делать дальше
+  const list = sync.channels || [];
+  const working = list.filter(wzAlive).length;
+  if (!list.length) toast('Ключ подошёл, но в кабинете Wazzup нет ни одного канала. Подключите мессенджер у вендора и повторите синхронизацию.');
+  else if (!working) toast(`Каналов найдено: ${list.length}, но ни один сейчас не работает. Причина написана в списке ниже — её устраняют в кабинете Wazzup.`);
+  else toast(`Каналов найдено и сохранено: ${list.length}, из них работают: ${working}`);
+  render();
 }
-async function registerWazzupWebhook() { const url = location.origin + '/webhooks/wazzup'; try { await api('/api/integrations/wazzup/webhook', { method: 'POST', body: JSON.stringify({ url }) }); toast('Вебхук зарегистрирован'); } catch (e) { toast(e.message, 'err'); } }
+// Адрес вебхука Wazzup — один и для показа, и для регистрации. Раньше регистрация
+// отправляла адрес без кода защиты и без сохранённого публичного адреса: Wazzup
+// делал проверочный запрос, получал 403 и отказывался регистрировать вебхук.
+function wazzupHookUrl(s) {
+  const st = s || state.cache.settings || {};
+  const origin = String(st.public_url || location.origin).replace(/\/+$/, '');
+  const secret = (st.wazzup && st.wazzup.webhook_secret) || '';
+  return origin + '/webhooks/wazzup' + (secret ? '?secret=' + encodeURIComponent(secret) : '');
+}
+async function registerWazzupWebhook() {
+  const st = state.cache.settings || {};
+  const saved = String((st.wazzup && st.wazzup.webhook_secret) || '');
+  const typed = $('#wzSecret') ? $('#wzSecret').value.trim() : saved;
+  const savedUrl = String(st.public_url || '');
+  const typedUrl = $('#publicUrl') ? $('#publicUrl').value.trim() : savedUrl;
+  // регистрация отправляет адрес в Wazzup, а принимает его CRM по сохранённым
+  // настройкам: если код защиты или адрес изменили и не сохранили, Wazzup получит
+  // адрес, на который CRM ответит отказом, и регистрация не пройдёт
+  if (typed !== saved || typedUrl !== savedUrl) {
+    toast('Сначала нажмите «Сохранить»: Wazzup проверяет адрес сразу, а CRM принимает его по сохранённым настройкам', 'err');
+    return;
+  }
+  const url = wazzupHookUrl(st);
+  try { await api('/api/integrations/wazzup/webhook', { method: 'POST', body: JSON.stringify({ url }) }); toast('Вебхук зарегистрирован'); }
+  catch (e) { toast(e.message, 'err'); }
+}
 // Диагностика источников: один запрос — видно, кто отвечает, а кто просит ключ.
 const PROBE_STATUS = { ok: ['отвечает', ''], skipped: ['нужен ключ', 'grey'], blocked: ['закрыт от автоматических запросов', 'orange'], error: ['не ответил', 'orange'] };
 async function probeSources(btn) {
@@ -3129,7 +3265,7 @@ async function saveUser(e, id) {
     await api(id ? '/api/users/' + id : '/api/users', { method: id ? 'PATCH' : 'POST', body: JSON.stringify(b) });
     closeModal();
     if (b.password) {
-      const credentials = `КаркасCRM — данные для входа\nАдрес: ${location.origin}\nИмя: ${b.name}\nE-mail: ${b.email}\nВременный пароль: ${b.password}\n\nПри первом входе задайте личный пароль (не менее 12 символов). Не передавайте эти данные другим людям.`;
+      const credentials = `КаркасCRM — данные для входа\nАдрес: ${humanOrigin((state.cache.settings && state.cache.settings.public_url) || location.origin)}\nИмя: ${b.name}\nE-mail: ${b.email}\nВременный пароль: ${b.password}\n\nПри первом входе задайте личный пароль (не менее 12 символов). Не передавайте эти данные другим людям.`;
       openModal(`<h3>${id ? 'Пароль обновлён' : 'Пользователь создан'}</h3><p>Передайте данные сотруднику по защищённому каналу. После закрытия окна пароль повторно не показывается.</p>${!b.active ? '<p class="err">Вход отключён. Разрешите вход в карточке сотрудника.</p>' : ''}<label>Данные для входа<textarea id="createdCredentials" rows="9" readonly>${esc(credentials)}</textarea></label><button type="button" class="btn primary w" onclick="copyCreatedCredentials()">Скопировать данные</button><p id="copyCredentialsStatus" role="status"></p>`);
     } else toast('Пользователь сохранён');
     render();
@@ -3547,7 +3683,7 @@ function connectSSE() {
         title: 'Новое сообщение', kind: 'message',
         text: `${d.title || 'Клиент'}${d.preview ? ': ' + d.preview : ''}`,
         actionLabel: 'Открыть чат',
-        onAction: () => { state.conv = d.conversation_id; go('inbox'); },
+        onAction: () => { state.conv = d.conversation_id; state.listOnly = false; go('inbox'); },
       });
     }
     if (state.view === 'inbox') refreshInbox();
