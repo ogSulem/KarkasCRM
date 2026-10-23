@@ -354,7 +354,7 @@ export function createCompetitors(ctx) {
     if (!res.ok) return { ...out, status: failStatus(res), summary: failText(res), data: {} };
     const d = res.data || {};
     const list = d.pageData || d.items || d.data || (Array.isArray(d) ? d : []);
-    const cases = list.map(x => ({ name: x.name || x.Name || x.fullName || '', inn: x.inn || x.Inn || '', ogrn: x.ogrn || x.Ogrn || '', case: x.caseNumber || x.CaseNumber || '', status: x.legalCaseStatus || x.isActive === true ? 'в производстве' : (x.isActive === false ? 'завершено' : ''), date: x.date || x.Date || '' })).filter(x => x.name || x.inn);
+    const cases = list.map(x => ({ name: x.name || x.Name || x.fullName || '', inn: x.inn || x.Inn || '', ogrn: x.ogrn || x.Ogrn || '', case: x.caseNumber || x.CaseNumber || '', status: x.legalCaseStatus || x.isActive === true ? 'в производстве' : (x.isActive === false ? 'завершено' : ''), date: String(x.date || x.Date || '').slice(0, 10) })).filter(x => x.name || x.inn);
     return { ...out, status: 'ok', summary: cases.length ? `Найден в реестре банкротств: ${cases.length} дел(о)` : 'В реестре банкротств не найден — плюс к надёжности', data: { cases } };
   }
 

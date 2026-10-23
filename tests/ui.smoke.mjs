@@ -9,6 +9,8 @@ import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..');
+// Версия из файла, а не вписанная в тест: повышение версии не должно ломать проверки.
+const VERSION = readFileSync(join(ROOT, 'VERSION'), 'utf8').trim();
 let JSDOM, VirtualConsole;
 try {
   ({ JSDOM, VirtualConsole } = await import('jsdom'));
@@ -883,7 +885,7 @@ try {
 
   // ── health без признака демонстрационных данных ──────────────────────────
   const h = await (await fetch(BASE + '/api/health')).json();
-  check('health: версия из VERSION, без признака demo', h.version === '1.0.0' && h.demo === undefined && h.schema >= 3, JSON.stringify({ v: h.version, demo: h.demo }));
+  check('health: версия из VERSION, без признака demo', h.version === VERSION && h.demo === undefined && h.schema >= 3, JSON.stringify({ v: h.version, want: VERSION, demo: h.demo }));
 
   // ── отсутствие эмодзи и версионного/демо-мусора в продукте ───────────────
   check('эмодзи нет в index.html', !hasEmojis(html));

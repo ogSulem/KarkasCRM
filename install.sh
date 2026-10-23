@@ -52,8 +52,11 @@ done
 if [ "$MODE" = "tls" ] && [ -z "$DOMAIN" ]; then
   echo "Для режима с доменом укажите его: ./install.sh --tls crm.example.ru [email]"; exit 1
 fi
+# Пустое значение — нормальный случай: --port не задан, порт возьмётся из .env.
+# Отдельной ветки для него не нужно: пустая строка не содержит посторонних
+# символов, поэтому шаблон *[!0-9]* её не ловит и case просто ничего не делает.
 case "$PORT_ARG" in
-  ''|*[!0-9]*) echo "Порт должен быть числом: ./install.sh --port 9090"; exit 1 ;;
+  *[!0-9]*) echo "Порт должен быть числом: ./install.sh --port 9090"; exit 1 ;;
 esac
 
 command -v docker >/dev/null || { echo "Docker не установлен. Поставьте: curl -fsSL https://get.docker.com | sh"; exit 1; }
@@ -107,6 +110,19 @@ port_busy() { # port_busy ПОРТ → 0, если порт кем-то заня
   # ни ss, ни netstat (минимальный образ) — пробуем соединиться средствами bash
   if (exec 3<>"/dev/tcp/127.0.0.1/${p}") 2>/dev/null; then return 0; fi
   return 1
+}
+
+edge_server() { # чем заняты 80/443: caddy / nginx / пусто, если не определили
+  # Нужно, чтобы после установки печатать пример для того сервера, который уже
+  # стоит на машине. Caddy проверяется первым: на сервере может быть и то и другое,
+  # а край держит именно Caddy, если он есть.
+  local imgs
+  if command -v caddy >/dev/null 2>&1; then echo caddy; return; fi
+  imgs=$(docker ps --format '{{.Image}}' 2>/dev/null || true)
+  case "$imgs" in *caddy*) echo caddy; return ;; esac
+  if command -v nginx >/dev/null 2>&1; then echo nginx; return; fi
+  case "$imgs" in *nginx*) echo nginx; return ;; esac
+  echo ''
 }
 
 # --port важнее .env: иначе docker слушает один порт, а проверка здоровья — другой
@@ -234,15 +250,40 @@ echo "Логи:                docker compose logs -f crm"
 
 if [ "$MODE" = "proxy" ]; then
   D="${DOMAIN:-crm.example.ru}"
+  EDGE=$(edge_server)
   echo
   echo "──────────────────────────────────────────────"
   echo " Осталось отдать CRM вашему веб-серверу. Существующий сайт при этом не трогается:"
-  echo " добавляется отдельный server-блок для поддомена ${D}."
+  echo " для поддомена ${D} добавляется отдельный блок."
   echo "──────────────────────────────────────────────"
-  if [ -f deploy/nginx.conf ]; then
-    sed -e "s/crm\.example\.com/${D}/g" -e "s|127\.0\.0\.1:8080|127.0.0.1:${PORT}|g" deploy/nginx.conf
-  fi
-  cat <<TXT
+  if [ "$EDGE" = caddy ]; then
+    echo " На сервере работает Caddy — пример для Caddyfile (deploy/caddy-site.conf):"
+    echo
+    if [ -f deploy/caddy-site.conf ]; then
+      sed -e "s/crm\.example\.com/${D}/g" -e "s|127\.0\.0\.1:8080|127.0.0.1:${PORT}|g" deploy/caddy-site.conf
+    fi
+    cat <<TXT
+
+Куда положить: дописать блок в конец Caddyfile (обычно /etc/caddy/Caddyfile), затем
+  caddy validate --config /etc/caddy/Caddyfile --adapter caddyfile
+  caddy reload   --config /etc/caddy/Caddyfile --adapter caddyfile
+Проверка до применения обязательна: ошибка в конфиге роняет Caddy вместе с другими сайтами.
+
+Если Caddy запущен в контейнере, 127.0.0.1 для него — сам контейнер, а не сервер.
+Подключите его к сети CRM и проксируйте на имя контейнера, reverse_proxy karkascrm:${PORT}:
+  docker network connect karkascrm_default <имя контейнера caddy>
+
+Пример для nginx — deploy/nginx.conf, для Apache и панельных серверов — DEPLOY.md, раздел 5.1.
+Домен ${D} должен указывать на этот сервер: dig +short ${D}
+TXT
+  else
+    [ "$EDGE" = nginx ] && echo " На сервере работает nginx — пример для sites-available (deploy/nginx.conf):" \
+                        || echo " Пример для nginx (deploy/nginx.conf); вариант для Caddy — deploy/caddy-site.conf:"
+    echo
+    if [ -f deploy/nginx.conf ]; then
+      sed -e "s/crm\.example\.com/${D}/g" -e "s|127\.0\.0\.1:8080|127.0.0.1:${PORT}|g" deploy/nginx.conf
+    fi
+    cat <<TXT
 
 Куда положить этот блок (Debian/Ubuntu):
   sudo nano /etc/nginx/sites-available/crm.conf     # вставьте блок выше
@@ -251,9 +292,11 @@ if [ "$MODE" = "proxy" ]; then
   sudo certbot --nginx -d ${D}                       # сертификат: порт 80 уже открыт вашим nginx
 
 На CentOS/RHEL/AlmaLinux тот же блок кладётся в /etc/nginx/conf.d/crm.conf.
+Если край держит Caddy — пример в deploy/caddy-site.conf, он дописывается в Caddyfile.
 Apache, ISPmanager или другой панельный сервер — DEPLOY.md, раздел 5.1.
 Домен ${D} должен указывать на этот сервер: dig +short ${D}
 TXT
+  fi
 fi
 
 echo

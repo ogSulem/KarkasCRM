@@ -11,10 +11,22 @@ node --check backend/src/competitors.js
 node --check backend/src/smtp.js
 node --check frontend/public/app.js
 node --check tests/routes.test.mjs
+node --check tests/timezone.test.js
+node --check tests/install-args.test.mjs
+# Скрипты установки и сопровождения. Ни один тест кода их не запускает, поэтому
+# опечатка в install.sh доходит до сервера пользователя: скрипт просто не стартует.
+for sh in install.sh run-local.sh run-tests.sh scripts/update.sh scripts/pack.sh deploy/start-caddy.sh; do
+  bash -n "$sh" || { echo "  ОШИБКА: синтаксис $sh"; exit 1; }
+done
 
-echo "[2/4] Интеграционные тесты (API, уведомления, гигиена базы, конкуренты, маршруты, миграции, S3)"
+echo "[2/4] Интеграционные тесты (API, конкуренты, уведомления, гигиена базы, маршруты, часовой пояс, установщик, миграции, S3)"
 node --experimental-sqlite --test tests/api.test.js tests/competitors.test.js tests/notifications.test.mjs tests/db-hygiene.test.mjs
 node --test tests/routes.test.mjs
+# Часовой пояс задан явно: в UTC модификатор localtime совпадает с UTC и сдвиг
+# на три часа между отметками в базе и местным месяцем выручки не увидеть.
+TZ=Europe/Moscow node --experimental-sqlite --test tests/timezone.test.js
+# Аргументы установщика — без docker, на копии скрипта во временном каталоге
+node --test tests/install-args.test.mjs
 node --experimental-sqlite tests/migrate.test.mjs
 node --experimental-sqlite tests/seed.test.mjs
 node --test tests/backup-s3.test.mjs
@@ -124,6 +136,16 @@ for frag in 'X-Forwarded-For' 'proxy_buffering off' 'client_max_body_size' 'prox
 done
 grep -q 'proxy_set_header Host $host' "$NGINX" || { echo "  ОШИБКА: nginx.conf: не передаётся Host"; exit 1; }
 echo "  ok   nginx.conf: реальный IP клиента, Host, размер тела и таймауты для чатов"
+
+echo "  - пример Caddy для того же случая (край держит Caddy, а не nginx)"
+CADDYSITE=deploy/caddy-site.conf
+for frag in 'crm.example.com' 'flush_interval -1' 'max_size 25MB' 'reverse_proxy 127.0.0.1:8080' 'docker network connect karkascrm_default'; do
+  grep -qF "$frag" "$CADDYSITE" || { echo "  ОШИБКА: caddy-site.conf: нет «$frag»"; exit 1; }
+done
+# без немедленной отправки Caddy копит поток, и живые события чата приходят пачкой
+grep -qF 'request_body' "$CADDYSITE" || { echo "  ОШИБКА: caddy-site.conf: нет ограничения размера тела"; exit 1; }
+grep -q 'deploy/caddy-site.conf' install.sh || { echo "  ОШИБКА: install.sh не предлагает пример для Caddy"; exit 1; }
+echo "  ok   caddy-site.conf: SSE без буферизации, размер тела, прокси, сеть контейнера; install.sh его печатает"
 
 echo "  - .env.example описывает необязательные параметры"
 for key in PUBLIC_URL LOGO_FILE ALLOW_PRIVATE_FETCH KARKAS_NO_SEED S3_ENDPOINT S3_BUCKET S3_ACCESS_KEY S3_SECRET_KEY; do

@@ -145,7 +145,7 @@ const freshDb = (() => {
 if (missingColumns.length && !freshDb) {
   try {
     mkdir(join(DATA_DIR, 'backups'), { recursive: true });
-    const pre = join(DATA_DIR, 'backups', `pre-upgrade-${new Date().toISOString().slice(0, 19).replace(/[:T]/g, '-')}.db`);
+    const pre = join(DATA_DIR, 'backups', `pre-upgrade-${localStamp()}.db`);
     // сбрасываем WAL на диск: копия одного файла должна быть согласованной
     try { db.exec('PRAGMA wal_checkpoint(TRUNCATE)') } catch {}
     copyFileSync(join(DATA_DIR, 'crm.db'), pre);
@@ -190,10 +190,44 @@ function localNow(d = new Date()) {
   const p = n => String(n).padStart(2, '0');
   return `${localDate(d)} ${p(d.getHours())}:${p(d.getMinutes())}:${p(d.getSeconds())}`;
 }
+// Метка для имён файлов резервных копий — местное время, а не UTC: имена видно
+// в интерфейсе, и они должны совпадать с тем, когда копия реально сделана.
+// Обычная копия называется crm-<местная дата>.db, страховочные — так же.
+function localStamp(d = new Date()) {
+  return localNow(d).replace(/[: ]/g, '-');
+}
 function nowDue(offsetHours = 2) {
   const d = new Date(Date.now() + offsetHours * 3600 * 1000);
   const pad = n => String(n).padStart(2, '0');
   return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(d.getHours())}:00`;
+}
+
+// Месяц закрытия сделки в местном поясе компании, в виде YYYY-MM.
+// Отметки времени база хранит в UTC (datetime('now')), а выручка месяца и план
+// продаж считаются по местным месяцам. Без приведения к местному поясу сделки,
+// закрытые с 00:00 до 03:00 по Москве, попадали в прошлый месяц, а сравнение
+// «закрыта в этом месяце» расходилось с ним на те же три часа.
+// NULLIF нужен потому, что COALESCE пропускает только NULL, а в колонках бывает
+// пустая строка: без него сделка с closed_at='' не дошла бы до updated_at.
+const DEAL_MONTH_SQL = "COALESCE(substr(datetime(COALESCE(NULLIF(closed_at,''),NULLIF(updated_at,''),NULLIF(created_at,'')),'localtime'),1,7),'')";
+
+// Отметка времени из запроса: «YYYY-MM-DD» или полное время, в формате базы
+// (UTC, «YYYY-MM-DD HH:MM:SS»). Пустая строка означает «не задано» — тогда
+// отметку ставит сам сервер. Принимается только разборчивая дата: иначе в базу
+// попала бы строка, которую datetime() не сможет привести к местному поясу.
+function normalizeStamp(raw) {
+  const s = String(raw ?? '').trim();
+  if (!s) return '';
+  const m = s.match(/^(\d{4})-(\d{2})-(\d{2})(?:[ T](\d{2}):(\d{2})(?::(\d{2}))?)?/);
+  if (!m) return '';
+  const day = `${m[1]}-${m[2]}-${m[3]}`;
+  const d = new Date(`${day}T${m[4] || '00'}:${m[5] || '00'}:${m[6] || '00'}Z`);
+  if (isNaN(d)) return '';
+  const out = d.toISOString();
+  // Разбор прощает лишние дни месяца и переносит 30 февраля на 1 марта. Сверяем
+  // день, чтобы в базу не попала дата, которой пользователь не вводил.
+  if (out.slice(0, 10) !== day) return '';
+  return out.slice(0, 19).replace('T', ' ');
 }
 
 function normalizeDue(raw) {
@@ -679,7 +713,10 @@ function dealDocument({ deal, items, doc, company }) {
   const isInvoice = doc === 'invoice';
   const sum = items.reduce((a, x) => a + x.price * x.qty, 0);
   const vat = Math.round(sum * 20 / 120);
-  const number = `${company.doc_prefix}-${String(deal.id).padStart(4, '0')}`;
+  // Префикс задаёт пользователь, разделитель добавляет документ. Хвостовой дефис
+  // убираем, чтобы и «КП», и «К-» давали «КП-0001» и «К-0001», а не «К--0001».
+  const prefix = String(company.doc_prefix || 'КП').trim().replace(/[-\s]+$/, '');
+  const number = `${prefix}-${String(deal.id).padStart(4, '0')}`;
   const rows = items.map((x, i) => `<tr><td>${i + 1}</td><td>${escHtml(x.name)}</td><td>шт</td><td class="r">${money(x.price, company.currency)}</td><td class="r">${x.qty}</td><td class="r">${money(x.price * x.qty, company.currency)}</td></tr>`).join('');
   return `<!doctype html><html lang="ru"><head><meta charset="utf-8"><title>${isInvoice ? 'Счёт' : 'КП'} № ${escHtml(number)} — ${escHtml(company.name)}</title>
 <style>
@@ -963,7 +1000,7 @@ export const server = http.createServer(async (req, res) => {
       RL.delete('login:' + ip);
       if (emailKey) RL.delete('login-acc:' + emailKey);
       // администратору видно, когда сотрудник заходил последний раз
-      try { db.prepare("UPDATE users SET last_login=datetime('now','localtime') WHERE id=?").run(user.id); } catch {}
+      try { db.prepare("UPDATE users SET last_login=datetime('now') WHERE id=?").run(user.id); } catch {}
       const token = sign({ id: user.id, email: user.email, name: user.name, role: user.role });
       res.setHeader('Set-Cookie', sessionCookie(req, token));
       return json(res, 200, { token, user: { id: user.id, name: user.name, email: user.email, role: user.role, must_change_password: user.must_change_password } }); }
@@ -1041,7 +1078,7 @@ export const server = http.createServer(async (req, res) => {
         myTasksOpen,
         myTasksOverdue,
         conversion: (() => { const w = cntWhere("stage='won'"), l = cntWhere("stage='lost'"); return w + l ? Math.round(w / (w + l) * 100) : 0 })(),
-        monthRevenue: sumWhere("stage='won' AND substr(COALESCE(closed_at,updated_at,''),1,7)=substr(datetime('now','localtime'),1,7)"),
+        monthRevenue: sumWhere(`stage='won' AND ${DEAL_MONTH_SQL}=substr(datetime('now','localtime'),1,7)`),
         activities: db.prepare('SELECT * FROM activities ORDER BY id DESC LIMIT 10').all(),
         recentDeals: db.prepare('SELECT d.*,c.name contact_name FROM deals d LEFT JOIN contacts c ON c.id=d.contact_id ORDER BY d.id DESC LIMIT 6').all()
       });
@@ -1052,14 +1089,14 @@ export const server = http.createServer(async (req, res) => {
       const wonLost = db.prepare("SELECT SUM(stage='won') w, SUM(stage='lost') l, SUM(CASE WHEN stage='won' THEN amount ELSE 0 END) wonSum FROM deals").get();
       const wonCount = wonLost.w || 0, lostCount = wonLost.l || 0, wonSum = wonLost.wonSum || 0;
       const month = localDate().slice(0, 7);
-      const monthRow = db.prepare("SELECT COUNT(*) n, COALESCE(SUM(amount),0) s FROM deals WHERE stage='won' AND substr(COALESCE(closed_at,updated_at,''),1,7)=?").get(month);
+      const monthRow = db.prepare(`SELECT COUNT(*) n, COALESCE(SUM(amount),0) s FROM deals WHERE stage='won' AND ${DEAL_MONTH_SQL}=?`).get(month);
       const target = Number(getSetting('SALES_TARGET', '0')) || 0;
       const plan = { target, fact: monthRow.s, month, deals: monthRow.n, percent: target ? Math.round(monthRow.s / target * 100) : null };
       const forecast = db.prepare("SELECT COALESCE(SUM(amount),0) s FROM deals WHERE stage NOT IN ('won','lost')").get().s;
       // выручка по месяцам: считаем месяц закрытия, а не месяц создания сделки
-      const byMonth = db.prepare(`SELECT substr(COALESCE(closed_at,updated_at,created_at,''),1,7) ym,
+      const byMonth = db.prepare(`SELECT ${DEAL_MONTH_SQL} ym,
           COUNT(*) n, COALESCE(SUM(amount),0) s
-        FROM deals WHERE stage='won' AND COALESCE(closed_at,updated_at,created_at,'') <> ''
+        FROM deals WHERE stage='won' AND ${DEAL_MONTH_SQL} <> ''
         GROUP BY ym ORDER BY ym DESC LIMIT 6`).all().reverse();
       return json(res, 200, {
         byMonth,
@@ -1383,8 +1420,11 @@ export const server = http.createServer(async (req, res) => {
         }
         { const err = missingRequiredCustom('deals', b.custom); if (err) return json(res, 400, { error: err }); }
         // сделку можно завести сразу закрытой («продали давно»). Дата закрытия нужна
-        // аналитике: без неё выручка привязалась бы к дате создания, а не к продаже
-        if (['won', 'lost'].includes(stage)) b.closed_at = new Date().toISOString().slice(0, 19).replace('T', ' ');
+        // аналитике: без неё выручка привязалась бы к дате создания, а не к продаже.
+        // Дату из запроса не затираем — иначе завести закрытую сделку задним числом
+        // было бы нельзя, хотя поле для неё разрешено.
+        if (['won', 'lost'].includes(stage)) b.closed_at = normalizeStamp(b.closed_at) || new Date().toISOString().slice(0, 19).replace('T', ' ');
+        else delete b.closed_at; // открытая сделка дату закрытия не хранит
         const fields = ['title', 'amount', 'stage', 'pipeline_id', 'contact_id', 'company_id', 'responsible', 'responsible_id', 'priority', 'loss_reason', 'deadline', 'closed_at', 'custom']; const ks = fields.filter(f => b[f] !== undefined); const r = db.prepare(`INSERT INTO deals(${ks}) VALUES(${ks.map(() => '?')})`).run(...ks.map(k => b[k])); log(`Сделка создана: ${b.title}`, 'deals', Number(r.lastInsertRowid), user.name); runAutomations('deal_created', { deal_id: Number(r.lastInsertRowid), contact_id: b.contact_id }); broadcast('change', { table: 'deals' }); return json(res, 201, db.prepare('SELECT * FROM deals WHERE id=?').get(r.lastInsertRowid)); }
     }
     // ===== печать документов по сделке: коммерческое предложение или счёт =====
@@ -1544,7 +1584,7 @@ export const server = http.createServer(async (req, res) => {
       // снимок выбранной копии делаем ДО страховочной копии: имена копий за день совпадают
       const tmp = join(DATA_DIR, '.restore-src.db');
       copyFileSync(src, tmp);
-      const safety = `before-restore-${new Date().toISOString().slice(0, 19).replace(/[:T]/g, '-')}.db`;
+      const safety = `before-restore-${localStamp()}.db`;
       try { db.exec('PRAGMA wal_checkpoint(TRUNCATE)'); copyFileSync(join(DATA_DIR, 'crm.db'), join(DATA_DIR, 'backups', safety)) } catch (e) { console.error('restore: страховочная копия', e.message) }
       try { db.close() } catch {}
       copyFileSync(tmp, join(DATA_DIR, 'crm.db'));
