@@ -12,7 +12,7 @@ process.env.PORT = String(PORT);
 process.env.SEED_MODE = 'off'; // миграция проверяется на чистой базе
 
 let failed = 0;
-const ok = (name, cond, extra = '') => { console.log(`${cond ? '✅' : '❌'} ${name}${extra ? ' — ' + extra : ''}`); if (!cond) failed++ };
+const ok = (name, cond, extra = '') => { console.log(`${cond ? 'ok  ' : 'FAIL'} ${name}${extra ? ' — ' + extra : ''}`); if (!cond) failed++ };
 
 // ── 1. Делаем «старую» базу: схема до новых полей, с данными внутри ─────────────
 const old = new DatabaseSync(join(DATA, 'crm.db'));
@@ -138,5 +138,5 @@ ok('колонки уже на месте (повторная миграция �
 
 server.close();
 rmSync(DATA, { recursive: true, force: true });
-console.log(`\nИтого: ${failed === 0 ? 'все проверки пройдены ✅' : failed + ' проверок не пройдено ❌'}\n`);
+console.log(`\nИтого: ${failed === 0 ? 'все проверки пройдены' : failed + ' проверок не пройдено'}\n`);
 process.exit(failed ? 1 : 0);

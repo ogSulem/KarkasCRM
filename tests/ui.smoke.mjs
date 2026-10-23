@@ -16,7 +16,7 @@ try {
   if (process.env.JSDOM_PATH) { try { ({ JSDOM, VirtualConsole } = await import(process.env.JSDOM_PATH)) } catch {} }
 }
 if (!JSDOM) {
-  console.log('⏭  jsdom не установлен — тест интерфейса пропущен.');
+  console.log('jsdom не установлен — тест интерфейса пропущен.');
   console.log('   Установите и повторите:  npm i --prefix /tmp/jsdomtest jsdom');
   process.exit(0);
 }
@@ -461,7 +461,7 @@ try {
 
   // ── конкуренты ───────────────────────────────────────────────────────────
   window.go('competitors'); await wait(400);
-  check('непроверенный конкурент честно помечен, а не «риск 0»', /не проверялся/.test($('#view').innerHTML) && !/риск 0 \(/.test($('#view').innerHTML));
+  check('непроверенный конкурент помечен как непроверенный, а не «риск 0»', /не проверялся/.test($('#view').innerHTML) && !/риск 0 \(/.test($('#view').innerHTML));
   check('в списке конкурентов есть поиск и наша таблица цен', Boolean($('#compFilter')) && /Наш прайс-лист/.test($('#view').textContent));
   // регрессия «$$(...).find is not a function»: селектор обязан возвращать массив,
   // а поиск кнопки по тексту — работать (именно он падал при поиске конкурента)
@@ -735,7 +735,7 @@ try {
     check('в настройках разведки нет второго управления прайсом', !/Скачать CSV/.test(st) && !/Загрузить из файла/.test(st) && !/Показать весь прайс/.test(st), st.slice(0, 140));
     check('настройки разведки ведут за ценами в раздел «Каталог»', /«Каталог»/.test(st) && /Открыть каталог/.test(st) && Boolean($$('#view button').find(b => /Открыть каталог/.test(b.textContent))));
     check('объяснено, что ключи источников не обязательны', /не обязательны/.test(st) && /работает без ключа/.test(st));
-    check('честно сказано, что официального API ФССП больше нет', /API ФССП закрыт/.test(st) && /банк исполнительных производств/.test(st));
+    check('в настройках сказано, что официального API ФССП больше нет', /API ФССП закрыт/.test(st) && /банк исполнительных производств/.test(st));
     check('в настройках нет мёртвого поля токена ФССП', !/Токен ФССП/.test(st) && !/FSSP_TOKEN/.test($('#view').innerHTML));
     check('источники без рабочего API помечены как ручные', /данные по ссылке вручную/.test(st));
     check('для Google указан действующий Places API (New)', /Places API \(New\)/.test(st));
@@ -852,7 +852,7 @@ try {
 
   // ── health без признака демонстрационных данных ──────────────────────────
   const h = await (await fetch(BASE + '/api/health')).json();
-  check('health: версия 1, без признака demo', h.version === '1' && h.demo === undefined && h.schema >= 3, JSON.stringify({ v: h.version, demo: h.demo }));
+  check('health: версия из VERSION, без признака demo', h.version === '1.0.0' && h.demo === undefined && h.schema >= 3, JSON.stringify({ v: h.version, demo: h.demo }));
 
   // ── отсутствие эмодзи и версионного/демо-мусора в продукте ───────────────
   check('эмодзи нет в index.html', !hasEmojis(html));
@@ -1000,6 +1000,6 @@ for (const sig of ['SIGINT', 'SIGTERM']) process.on(sig, () => { try { srv.kill(
 process.on('uncaughtException', e => { console.error('Smoke-тест упал:', e.message); try { srv.kill('SIGKILL') } catch {}; process.exit(1) });
 const failed = checks.filter(c => !c.ok);
 console.log('\n=== Smoke-тест интерфейса КаркасCRM ===');
-checks.forEach(c => console.log(`${c.ok ? '✅' : '❌'} ${c.name}${c.extra ? ' — ' + String(c.extra).slice(0, 160) : ''}`));
+checks.forEach(c => console.log(`${c.ok ? 'ok  ' : 'FAIL'} ${c.name}${c.extra ? ' — ' + String(c.extra).slice(0, 160) : ''}`));
 console.log(`\nИтого: ${checks.length - failed.length}/${checks.length} проверок пройдено`);
 process.exit(failed.length ? 1 : 0);

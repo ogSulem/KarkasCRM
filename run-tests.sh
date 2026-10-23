@@ -5,21 +5,21 @@ cd "$(dirname "$0")"
 
 command -v node >/dev/null || { echo "Node.js не найден (нужен 22.5+)"; exit 1; }
 
-echo "▶ 1/4 Проверка синтаксиса"
+echo "[1/4] Проверка синтаксиса"
 node --check backend/src/server.js
 node --check backend/src/competitors.js
 node --check backend/src/smtp.js
 node --check frontend/public/app.js
 node --check tests/routes.test.mjs
 
-echo "▶ 2/4 Интеграционные тесты (API, уведомления, гигиена базы, конкуренты, маршруты, миграции, S3)"
+echo "[2/4] Интеграционные тесты (API, уведомления, гигиена базы, конкуренты, маршруты, миграции, S3)"
 node --experimental-sqlite --test tests/api.test.js tests/competitors.test.js tests/notifications.test.mjs tests/db-hygiene.test.mjs
 node --test tests/routes.test.mjs
 node --experimental-sqlite tests/migrate.test.mjs
 node --experimental-sqlite tests/seed.test.mjs
 node --test tests/backup-s3.test.mjs
 
-echo "▶ 3/4 Проверка docker-compose, Caddyfile и CI"
+echo "[3/4] Проверка docker-compose, Caddyfile и CI"
 # Ошибка в YAML воркфлоу не выглядит как ошибка: прогон падает за 0 секунд
 # с подписью «workflow file issue», а проверки в pull request просто не
 # появляются. Проверяем файл до пуша.
@@ -35,7 +35,7 @@ try:
 except ImportError:
     pass
 except Exception as e:
-    print('  ❌ YAML воркфлоу не разобран:', str(e).splitlines()[0]); sys.exit(1)
+    print('  ОШИБКА: YAML воркфлоу не разобран:', str(e).splitlines()[0]); sys.exit(1)
 # Незакавыченное значение с «: » внутри парсер читает как второй ключ —
 # именно так ломается имя шага вида «- name: Маршруты API: …».
 bad = []
@@ -49,10 +49,10 @@ for i, line in enumerate(src.splitlines(), 1):
     if ': ' in val or val.endswith(':'):
         bad.append('строка %d: %s' % (i, val[:60]))
 if bad:
-    print('  ❌ воркфлоу: значение с «: » без кавычек — ' + '; '.join(bad)); sys.exit(1)
+    print('  ОШИБКА: воркфлоу: значение с «: » без кавычек — ' + '; '.join(bad)); sys.exit(1)
 if not re.search(r'^\s*-\s*uses:\s*actions/checkout', src, re.M):
-    print('  ❌ воркфлоу: нет шага actions/checkout'); sys.exit(1)
-print('  ✅ воркфлоу CI разбирается' + (' (проверено парсером YAML)' if parsed else ' (кавычки, «: » и checkout проверены)'))
+    print('  ОШИБКА: воркфлоу: нет шага actions/checkout'); sys.exit(1)
+print('  ok   воркфлоу CI разбирается' + (' (проверено парсером YAML)' if parsed else ' (кавычки, «: » и checkout проверены)'))
 WFCHECK
 
 if python3 -c 'import yaml' 2>/dev/null; then
@@ -61,22 +61,22 @@ import yaml, sys
 try:
     d = yaml.safe_load(open('docker-compose.yml'))
 except Exception as e:
-    print('  ❌ docker-compose.yml не разобран:', e); sys.exit(1)
+    print('  ОШИБКА: docker-compose.yml не разобран:', e); sys.exit(1)
 svc = d.get('services', {})
 assert 'crm' in svc and 'caddy' in svc, 'нет сервисов crm/caddy'
 assert svc['caddy'].get('profiles') == ['tls'], 'caddy должен быть в профиле tls'
 assert 'CRM_DOMAIN' in (svc['caddy'].get('environment') or {}), 'caddy без домена из .env'
-print('  ✅ docker-compose.yml: сервисы', ', '.join(svc), '| профиль tls и домен из .env настроены')
+print('  ok   docker-compose.yml: сервисы', ', '.join(svc), '| профиль tls и домен из .env настроены')
 PY
 else
   echo "  (pyyaml нет — проверяю ключевые строки docker-compose.yml)"
   grep -q 'profiles: \["tls"\]' docker-compose.yml && grep -q '^  caddy:' docker-compose.yml \
     && grep -q 'CRM_DOMAIN' docker-compose.yml && grep -q 'restart: unless-stopped' docker-compose.yml \
-    && echo "  ✅ docker-compose.yml: сервис caddy в профиле tls, домен из .env, автоперезапуск" \
-    || { echo "  ❌ docker-compose.yml: не найдены профиль tls / сервис caddy / CRM_DOMAIN"; exit 1; }
+    && echo "  ok   docker-compose.yml: сервис caddy в профиле tls, домен из .env, автоперезапуск" \
+    || { echo "  ОШИБКА: docker-compose.yml: не найдены профиль tls / сервис caddy / CRM_DOMAIN"; exit 1; }
 fi
 
-echo "  • Caddyfile (домен и HTTPS)"
+echo "  - Caddyfile (домен и HTTPS)"
 python3 << 'CADDYCHECK'
 import sys
 conf = open('deploy/Caddyfile').read()
@@ -84,11 +84,11 @@ checks = {'{$CRM_DOMAIN}': 'домен из .env', 'reverse_proxy crm:8080': 'п
           '.well-known/health': 'проверка домена', 'Strict-Transport-Security': 'HSTS'}
 missing = [name for frag, name in checks.items() if frag not in conf]
 if missing:
-    print('  ❌ Caddyfile: не найдено —', ', '.join(missing)); sys.exit(1)
-print('  ✅ Caddyfile: домен из .env, прокси на crm:8080, https://домен/.well-known/health → ok, HSTS')
+    print('  ОШИБКА: Caddyfile: не найдено —', ', '.join(missing)); sys.exit(1)
+print('  ok   Caddyfile: домен из .env, прокси на crm:8080, https://домен/.well-known/health → ok, HSTS')
 CADDYCHECK
 
-echo "  • файлы для Dockerfile не исключены из контекста сборки"
+echo "  - файлы для Dockerfile не исключены из контекста сборки"
 python3 << 'DOCKERCTX'
 import sys
 lines = open('Dockerfile').read().splitlines()
@@ -113,28 +113,28 @@ for line in lines:
             if src == ign or src.startswith(ign + '/'):
                 errors.append(f'{src}: исключён .dockerignore («{ign}») — сборка упадёт')
 if errors:
-    print('  ❌ Dockerfile и .dockerignore:', '; '.join(errors)); sys.exit(1)
-print('  ✅ Dockerfile: все COPY-источники есть и не отсечены .dockerignore')
+    print('  ОШИБКА: Dockerfile и .dockerignore:', '; '.join(errors)); sys.exit(1)
+print('  ok   Dockerfile: все COPY-источники есть и не отсечены .dockerignore')
 DOCKERCTX
 
-echo "  • nginx-пример для сервера с уже занятыми 80/443"
+echo "  - nginx-пример для сервера с уже занятыми 80/443"
 NGINX=deploy/nginx.conf
 for frag in 'X-Forwarded-For' 'proxy_buffering off' 'client_max_body_size' 'proxy_read_timeout'; do
-  grep -q "$frag" "$NGINX" || { echo "  ❌ nginx.conf: нет $frag"; exit 1; }
+  grep -q "$frag" "$NGINX" || { echo "  ОШИБКА: nginx.conf: нет $frag"; exit 1; }
 done
-grep -q 'proxy_set_header Host $host' "$NGINX" || { echo "  ❌ nginx.conf: не передаётся Host"; exit 1; }
-echo "  ✅ nginx.conf: реальный IP клиента, Host, размер тела и таймауты для чатов"
+grep -q 'proxy_set_header Host $host' "$NGINX" || { echo "  ОШИБКА: nginx.conf: не передаётся Host"; exit 1; }
+echo "  ok   nginx.conf: реальный IP клиента, Host, размер тела и таймауты для чатов"
 
-echo "  • .env.example описывает необязательные параметры"
+echo "  - .env.example описывает необязательные параметры"
 for key in PUBLIC_URL LOGO_FILE ALLOW_PRIVATE_FETCH KARKAS_NO_SEED S3_ENDPOINT S3_BUCKET S3_ACCESS_KEY S3_SECRET_KEY; do
-  grep -q "^$key=" .env.example || { echo "  ❌ .env.example: нет $key"; exit 1; }
+  grep -q "^$key=" .env.example || { echo "  ОШИБКА: .env.example: нет $key"; exit 1; }
 done
 for key in S3_ENDPOINT S3_BUCKET S3_ACCESS_KEY S3_SECRET_KEY; do
-  grep -q "$key" docker-compose.yml || { echo "  ❌ docker-compose.yml: не пробрасывается $key"; exit 1; }
+  grep -q "$key" docker-compose.yml || { echo "  ОШИБКА: docker-compose.yml: не пробрасывается $key"; exit 1; }
 done
-echo "  ✅ .env.example и compose: PUBLIC_URL, LOGO_FILE, ALLOW_PRIVATE_FETCH, KARKAS_NO_SEED, S3_*"
+echo "  ok   .env.example и compose: PUBLIC_URL, LOGO_FILE, ALLOW_PRIVATE_FETCH, KARKAS_NO_SEED, S3_*"
 
-echo "▶ 4/4 Smoke-тест интерфейса (нужен jsdom, иначе шаг пропускается)"
+echo "[4/4] Smoke-тест интерфейса (нужен jsdom, иначе шаг пропускается)"
 if node -e "import('jsdom').then(()=>process.exit(0)).catch(()=>process.exit(1))" 2>/dev/null; then
   node --experimental-sqlite tests/ui.smoke.mjs
 elif [ -n "${JSDOM_PATH:-}" ]; then
@@ -143,9 +143,9 @@ else
   if npm i --prefix /tmp/jsdomtest jsdom >/dev/null 2>&1; then
     JSDOM_PATH=/tmp/jsdomtest/node_modules/jsdom/lib/api.js node --experimental-sqlite tests/ui.smoke.mjs
   else
-    echo "  ⏭ jsdom недоступен — шаг пропущен (необязательно). Установить: npm i --prefix /tmp/jsdomtest jsdom"
+    echo "  jsdom недоступен — шаг пропущен (необязательно). Установить: npm i --prefix /tmp/jsdomtest jsdom"
   fi
 fi
 
 echo
-echo "✅ Все проверки пройдены."
+echo "Все проверки пройдены."

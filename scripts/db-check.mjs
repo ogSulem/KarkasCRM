@@ -68,12 +68,12 @@ for (const [key, value] of Object.entries(report.counts)) {
 
 const orph = Object.entries(report.orphans).filter(([, n]) => n);
 console.log('\nСвязанность данных:');
-if (!orph.length) console.log('  ✅ потерявших родителя строк нет');
-else for (const [key, n] of orph) console.log(`  ❌ ${labels[key] || key}: ${human(n)}`);
+if (!orph.length) console.log('  ok   потерявших родителя строк нет');
+else for (const [key, n] of orph) console.log(`  FAIL ${labels[key] || key}: ${human(n)}`);
 
 console.log('\nЦелостность:');
-console.log(`  ${report.integrity === 'ok' ? '✅' : '❌'} integrity_check: ${report.integrity}`);
-console.log(`  ${report.foreignKeyIssues ? '❌' : '✅'} внешние ключи: ${report.foreignKeyIssues ? report.foreignKeyIssues + ' нарушений' : 'нарушений нет'}`);
+console.log(`  ${report.integrity === 'ok' ? 'ok  ' : 'FAIL'} integrity_check: ${report.integrity}`);
+console.log(`  ${report.foreignKeyIssues ? 'FAIL' : 'ok  '} внешние ключи: ${report.foreignKeyIssues ? report.foreignKeyIssues + ' нарушений' : 'нарушений нет'}`);
 
 const backups = sizeOf(join(DATA_DIR, 'backups'));
 const uploads = sizeOf(UPLOADS);
@@ -84,5 +84,5 @@ console.log(`  вложения чатов:  ${uploads.files} шт., ${mb(upload
 db.close();
 const ok = report.integrity === 'ok' && report.foreignKeyIssues === 0 && report.orphanTotal === 0;
 if (!ok && !clean) console.log('\nЧтобы убрать безопасно: npm run db:clean');
-console.log(ok ? '\n✅ База в порядке.' : '\n❌ Есть замечания — см. выше.');
+console.log(ok ? '\nБаза в порядке.' : '\nЕсть замечания — см. выше.');
 process.exit(ok ? 0 : 1);

@@ -3,7 +3,12 @@ name: karkascrm
 # Запуск: docker compose up -d --build   →   http://IP:${CRM_PORT}
 services:
   crm:
-    build: .
+    build:
+      context: .
+      args:
+        # Базовый образ можно подменить (своё зеркало или фиксированная версия):
+        # NODE_IMAGE=node:22.22.3-alpine в .env
+        NODE_IMAGE: ${NODE_IMAGE:-node:22-alpine}
     image: karkascrm:latest
     container_name: karkascrm
     restart: unless-stopped
@@ -85,7 +90,9 @@ services:
   # Caddy сам получает сертификат Let's Encrypt для CRM_DOMAIN и проксирует на CRM.
   caddy:
     profiles: ["tls"]
-    image: caddy:2-alpine
+    # Фиксированная minor-ветка: reproducible-сборка, но патчи приходят сами.
+    # Подменить на своё зеркало: CADDY_IMAGE=registry.example.ru/caddy:2.11-alpine
+    image: ${CADDY_IMAGE:-caddy:2.11-alpine}
     container_name: karkascrm-caddy
     restart: unless-stopped
     depends_on:

@@ -27,7 +27,7 @@ const {
 } = process.env;
 
 function fail(message) {
-  console.error('❌ ' + message);
+  console.error('Ошибка: ' + message);
   process.exit(1);
 }
 
@@ -72,18 +72,18 @@ for (const name of files) {
     });
   } catch (err) {
     failed++;
-    console.error(`❌ ${name}: хранилище недоступно — ${err.message}`);
+    console.error(`Ошибка: ${name}: хранилище недоступно — ${err.message}`);
     continue;
   }
   if (!res.ok) {
     failed++;
     const text = await res.text().catch(() => '');
-    console.error(`❌ ${name}: HTTP ${res.status} ${text.slice(0, 300)}`);
+    console.error(`Ошибка: ${name}: HTTP ${res.status} ${text.slice(0, 300)}`);
     continue;
   }
   uploaded[name] = stamp;
   sent++;
-  console.log(`✅ ${name} (${(body.length / 1048576).toFixed(1)} МБ) → ${S3_BUCKET}/${key}`);
+  console.log(`Выгружено: ${name} (${(body.length / 1048576).toFixed(1)} МБ) → ${S3_BUCKET}/${key}`);
 }
 
 writeFileSync(stateFile, JSON.stringify(uploaded, null, 2));

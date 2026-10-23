@@ -13,7 +13,7 @@ const EMAIL = process.env.ADMIN_EMAIL || 'admin@example.com';
 let PASSWORD = process.env.ADMIN_PASSWORD || 'admin12345';
 let failed = 0;
 const ok = (name, cond, extra = '') => {
-  console.log(`${cond ? '✅' : '❌'} ${name}${extra ? ' — ' + extra : ''}`);
+  console.log(`${cond ? 'ok  ' : 'FAIL'} ${name}${extra ? ' — ' + extra : ''}`);
   if (!cond) failed++;
 };
 const sleep = ms => new Promise(r => setTimeout(r, ms));
@@ -57,7 +57,7 @@ const PNG = Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAIAAAACCAYAAABytg0kAAAAFElEQVR
 
   const anon = (await api('/api/health')).body;
   ok('публичный health не раскрывает счётчики клиентов', anon.counts === undefined && anon.backups === undefined);
-  ok('версия продукта читается из файла VERSION в образе', anon.version === '1', String(anon.version));
+  ok('версия продукта читается из файла VERSION в образе', anon.version === '1.0.0', String(anon.version));
 
   let token = await login();
   const adminHealth = (await api('/api/health', {}, token)).body;
@@ -100,6 +100,6 @@ const PNG = Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAIAAAACCAYAAABytg0kAAAAFElEQVR
   // убираем за собой проверочного клиента: база остаётся такой же, как до проверки
   if (made.body?.id) await api('/api/contacts/' + made.body.id, { method: 'DELETE' }, token);
 
-  console.log(`\n${failed ? `❌ Проверок не пройдено: ${failed}` : '✅ Docker-образ работает как ожидается'}`);
+  console.log(`\n${failed ? `Проверок не пройдено: ${failed}` : 'Docker-образ работает как ожидается'}`);
   process.exit(failed ? 1 : 0);
-})().catch(e => { console.error('❌ Проверка Docker не выполнена:', e.message); process.exit(1); });
+})().catch(e => { console.error('Проверка Docker не выполнена:', e.message); process.exit(1); });

@@ -469,7 +469,7 @@ function closeModal() {
   $('#modal').classList.add('hidden');
   if ($('#createdCredentials')) $('#modalBody').replaceChildren();
 }
-// Единое аккуратное окно подтверждения вместо системного confirm().
+// Единое окно подтверждения вместо системного confirm().
 function askConfirm(message, onYes, { okText = 'Подтвердить', danger = true, extraText = '', onExtra = null } = {}) {
   openModal(`<h3>Подтверждение действия</h3><p>${esc(message)}</p>
    <div style="display:flex;gap:8px;justify-content:flex-end;margin-top:14px">
@@ -524,8 +524,8 @@ function userOptions(selId) {
   return `<option value="">— не назначен —</option>` + __team.map(u => `<option value="${u.id}" ${u.id === selId ? 'selected' : ''}>${esc(u.name)} (${esc(roleLabel(u.role))})</option>`).join('');
 }
 
-// Честное объяснение, кому достанется новый контакт: людям важно понимать,
-// почему карточка оказалась у них, а не у коллеги.
+// Подсказка в форме: по текущим правилам распределения считает, кому
+// достанется новый контакт.
 function responsibleHint() {
   const active = (__team || []).filter(u => u.active !== 0);
   const count = active.length || (state.meta && state.meta.activeUsers) || 1;
@@ -1275,7 +1275,7 @@ async function editNote(id, entity_type, entity_id) {
   try { n = await api('/api/notes/' + id); } catch (e) { return toast(e.message, 'err'); }
   openModal(`<h3>Изменить заметку</h3><form onsubmit="return saveNote(event,${id},'${entity_type}',${entity_id})">
    <label>Текст заметки<textarea name="body" rows="4" required>${esc(n.body || '')}</textarea></label>
-   <p class="form-hint">Автор и дата создания сохраняются — история карточки остаётся честной.</p>
+   <p class="form-hint">Автор и дата создания сохраняются и видны в истории карточки.</p>
    <div style="display:flex;gap:8px;flex-wrap:wrap"><button class="btn primary">Сохранить заметку</button>
    <button type="button" class="btn" onclick="reopenCard('${entity_type}',${entity_id})">Отмена</button></div></form>`);
 }
@@ -1341,7 +1341,7 @@ async function delRow(table, id, parentId) {
 }
 
 /* ---------- inbox ---------- */
-// Вложение в пузыре сообщения: картинка — превью, остальное — аккуратная ссылка на файл.
+// Вложение в пузыре сообщения: картинка показывается превью, остальное — ссылкой на файл.
 function attachmentHtml(m) {
   // только безопасные схемы: javascript:/data: в ссылке вложения недопустимы
   if (!m.content_uri || !/^(https?:\/\/|\/uploads\/)/i.test(m.content_uri)) return '';
@@ -2267,9 +2267,8 @@ function competitorTab(c) {
   const g = key => checks.find(s => s.source === key) || {};
   if (state.compTab === 'report') {
     const color = rep.color || riskColor(rep.level);
-    // «0 ₽» и «0 дел» читались бы как «долгов и судов нет». Если источник не
-    // ответил, показываем прочерк и причину — иначе менеджер сделает вывод
-    // из пустоты, а это прямой риск потерять деньги на ненадёжном конкуренте.
+    // Нули вместо прочерка читались бы как «долгов и судов нет». Если источник
+    // не ответил, показываем прочерк и причину.
     const fsspChk = g('fssp'), kadChk = g('kad');
     const debtsTotal = (fsspChk.data || {}).total;
     const debtsKnown = fsspChk.status === 'ok' && debtsTotal != null;

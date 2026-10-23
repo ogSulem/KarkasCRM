@@ -15,10 +15,10 @@ if [ ! -d .git ]; then
   exit 1
 fi
 
-echo "▶ Забираем изменения из git"
+echo "Забираем изменения из git"
 git pull --ff-only
 
-echo "▶ Пересобираем и перезапускаем"
+echo "Пересобираем и перезапускаем"
 if [ -f .env ] && grep -qE '^CRM_DOMAIN=.+' .env; then
   echo "  режим: домен и HTTPS (профиль tls)"
   docker compose --profile tls up -d --build
@@ -30,8 +30,8 @@ fi
 PORT=$(grep -E '^CRM_PORT=' .env 2>/dev/null | cut -d= -f2- || true); PORT=${PORT:-8080}
 sleep 2
 if curl -fsS --max-time 5 "http://127.0.0.1:${PORT}/api/health" >/dev/null 2>&1; then
-  echo "✅ Обновление завершено: $(curl -s "http://127.0.0.1:${PORT}/api/health")"
+  echo "Обновление завершено: $(curl -s "http://127.0.0.1:${PORT}/api/health")"
 else
-  echo "⚠️  CRM пока не отвечает — смотрите логи: docker compose logs -f crm"
+  echo "CRM пока не отвечает — смотрите логи: docker compose logs -f crm"
 fi
 docker compose ps
