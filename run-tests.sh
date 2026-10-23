@@ -13,13 +13,14 @@ node --check frontend/public/app.js
 node --check tests/routes.test.mjs
 node --check tests/timezone.test.js
 node --check tests/install-args.test.mjs
+node --check tests/update-mode.test.mjs
 # Скрипты установки и сопровождения. Ни один тест кода их не запускает, поэтому
 # опечатка в install.sh доходит до сервера пользователя: скрипт просто не стартует.
 for sh in install.sh run-local.sh run-tests.sh scripts/update.sh scripts/pack.sh deploy/start-caddy.sh; do
   bash -n "$sh" || { echo "  ОШИБКА: синтаксис $sh"; exit 1; }
 done
 
-echo "[2/4] Интеграционные тесты (API, конкуренты, уведомления, гигиена базы, маршруты, часовой пояс, установщик, миграции, S3)"
+echo "[2/4] Интеграционные тесты (API, конкуренты, уведомления, гигиена базы, маршруты, часовой пояс, установщик, обновление, миграции, S3)"
 node --experimental-sqlite --test tests/api.test.js tests/competitors.test.js tests/notifications.test.mjs tests/db-hygiene.test.mjs
 node --test tests/routes.test.mjs
 # Часовой пояс задан явно: в UTC модификатор localtime совпадает с UTC и сдвиг
@@ -27,6 +28,9 @@ node --test tests/routes.test.mjs
 TZ=Europe/Moscow node --experimental-sqlite --test tests/timezone.test.js
 # Аргументы установщика — без docker, на копии скрипта во временном каталоге
 node --test tests/install-args.test.mjs
+# Режим обновления — на подставных docker/git/curl: ошибка здесь стоит портов
+# 80/443 чужого сайта, поэтому профиль tls должен включаться только по отметке режима
+node --test tests/update-mode.test.mjs
 node --experimental-sqlite tests/migrate.test.mjs
 node --experimental-sqlite tests/seed.test.mjs
 node --test tests/backup-s3.test.mjs
@@ -155,6 +159,14 @@ for key in S3_ENDPOINT S3_BUCKET S3_ACCESS_KEY S3_SECRET_KEY; do
   grep -q "$key" docker-compose.yml || { echo "  ОШИБКА: docker-compose.yml: не пробрасывается $key"; exit 1; }
 done
 echo "  ok   .env.example и compose: PUBLIC_URL, LOGO_FILE, ALLOW_PRIVATE_FETCH, KARKAS_NO_SEED, S3_*"
+
+echo "  - отметка режима установки (CRM_TLS)"
+# По одному CRM_DOMAIN режим не определить: его задаёт и --proxy, где 80/443
+# принадлежат чужому веб-серверу. update.sh обязан читать отметку режима.
+grep -q "^CRM_TLS=" .env.example || { echo "  ОШИБКА: .env.example: нет отметки режима CRM_TLS"; exit 1; }
+grep -q "CRM_TLS" scripts/update.sh || { echo "  ОШИБКА: update.sh не читает CRM_TLS"; exit 1; }
+grep -q "set_env CRM_TLS" install.sh || { echo "  ОШИБКА: install.sh не проставляет CRM_TLS"; exit 1; }
+echo "  ok   CRM_TLS: install.sh проставляет, update.sh читает, шаблон описывает"
 
 echo "[4/4] Smoke-тест интерфейса (нужен jsdom, иначе шаг пропускается)"
 if node -e "import('jsdom').then(()=>process.exit(0)).catch(()=>process.exit(1))" 2>/dev/null; then

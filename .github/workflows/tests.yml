@@ -33,6 +33,7 @@ jobs:
           node --check tests/competitors.test.js
           node --check tests/timezone.test.js
           node --check tests/install-args.test.mjs
+          node --check tests/update-mode.test.mjs
           node --check tests/ui.smoke.mjs
           node --check tests/migrate.test.mjs
           node --check tests/routes.test.mjs
@@ -51,6 +52,11 @@ jobs:
 
       - name: Аргументы установщика разбираются без docker
         run: node --test tests/install-args.test.mjs
+
+      # Профиль tls поднимает Caddy на 80/443. Включить его при обновлении там,
+      # где порты заняты чужим сайтом, значит уронить этот сайт.
+      - name: Режим обновления выбирается по отметке, а не по домену
+        run: node --test tests/update-mode.test.mjs
 
       - name: Тест миграций базы данных
         run: |
