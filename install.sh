@@ -202,6 +202,9 @@ else
 fi
 
 if [ "$MODE" = "tls" ]; then
+  # Отметка режима нужна scripts/update.sh: по одному CRM_DOMAIN режим не
+  # определить, его задаёт и --proxy, где 80/443 принадлежат чужому веб-серверу.
+  set_env CRM_TLS "1"
   set_env CRM_DOMAIN "$DOMAIN"
   [ -n "$EMAIL" ] && set_env ACME_EMAIL "$EMAIL"
   # CRM доступна только через HTTPS-прокси, наружу порт 8080 не торчит
@@ -213,6 +216,7 @@ if [ "$MODE" = "tls" ]; then
   compose_up --profile tls || exit 1
   ADDRESS="https://${DOMAIN}"
 elif [ "$MODE" = "proxy" ]; then
+  set_env CRM_TLS "0"
   # Сервер уже занят чужим сайтом: 80/443 принадлежат его веб-серверу, поэтому
   # CRM не торчит наружу вовсе — слушает только localhost, а прокси добавляется
   # в существующий nginx/apache. Данные боевые: демо на работающем сервере не нужно.
@@ -223,6 +227,7 @@ elif [ "$MODE" = "proxy" ]; then
   compose_up || exit 1
   ADDRESS="http://127.0.0.1:${PORT}  (наружу — через ваш веб-сервер: https://${DOMAIN:-ваш-домен})"
 else
+  set_env CRM_TLS "0"
   set_env CRM_BIND "0.0.0.0"
   # локально: сразу живые примеры, чтобы всё посмотреть и потрогать
   set_env SEED_MODE "demo"

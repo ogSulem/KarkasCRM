@@ -14,6 +14,7 @@
     "test": "node --experimental-sqlite --test tests/api.test.js tests/competitors.test.js tests/notifications.test.mjs tests/db-hygiene.test.mjs",
     "test:tz": "TZ=Europe/Moscow node --experimental-sqlite --test tests/timezone.test.js",
     "test:install": "node --test tests/install-args.test.mjs",
+    "test:update": "node --test tests/update-mode.test.mjs",
     "test:db": "node --experimental-sqlite --test tests/db-hygiene.test.mjs tests/migrate.test.mjs",
     "test:ui": "node --experimental-sqlite tests/ui.smoke.mjs",
     "test:all": "./run-tests.sh",
