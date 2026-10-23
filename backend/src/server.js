@@ -36,7 +36,7 @@ const ADMIN_EMAIL = (process.env.ADMIN_EMAIL || 'admin@example.com').toLowerCase
 const ADMIN_PASSWORD = process.env.ADMIN_PASSWORD || 'admin12345';
 
 // Версия продукта: единый источник — файл VERSION в корне (он же попадает в Docker-образ).
-const VERSION = (() => { try { return readFileSync(join(ROOT, '../../VERSION'), 'utf8').trim() || '1'; } catch { return '1'; } })();
+const VERSION = (() => { try { return readFileSync(join(ROOT, '../../VERSION'), 'utf8').trim() || '0.0.0'; } catch { return '0.0.0'; } })();
 const STARTED = Date.now();
 // Понятная ошибка вместо стектрейса, если каталог данных недоступен (не смонтирован том,
 // права root вместо пользователя node, диск только для чтения).
@@ -981,8 +981,8 @@ export const server = http.createServer(async (req, res) => {
       customFields: getCustomFields(),
       features: { email: !!getSetting('SMTP_HOST'), wazzup: !!getSetting('WAZZUP_API_KEY') },
       salesTarget: Number(getSetting('SALES_TARGET', '0')) || 0,
-      // интерфейсу нужно знать правила распределения, чтобы честно объяснить,
-      // кому достанется новый контакт (см. подсказку в форме)
+      // правила распределения нужны интерфейсу: по ним считается подсказка
+      // «кому достанется новый контакт» в форме
       autoAssign: getSetting('AUTO_ASSIGN', '0') === '1',
       autoDeal: getSetting('AUTO_DEAL', '1') === '1',
       activeUsers: db.prepare('SELECT COUNT(*) n FROM users WHERE active=1').get().n,
@@ -1570,7 +1570,7 @@ export const server = http.createServer(async (req, res) => {
         if (wantChannel === 'email') return json(res, 400, { error: 'Письмо отправляется кнопкой «Письмо» в шапке чата — через настроенный почтовый сервер' });
         try { send = await deliver(conv, wantChannel, b.body || '', user, file); status = send.delivered ? 'sent' : 'local'; }
         catch (e) {
-          // без подключённого Wazzup сообщение честно остаётся в CRM
+          // без подключённого Wazzup сообщение сохраняется только в CRM
           if (String(e.message) === 'WAZZUP_NOT_CONFIGURED') { status = 'local'; send = { delivered: false, mode: 'local-only', hint: 'Wazzup не подключён — сообщение сохранено в CRM. Настройки → Интеграции: вставьте API-ключ Wazzup, и ответ уйдёт клиенту.' }; }
           else { status = 'error'; send = { delivered: false, mode: 'error: ' + e.message }; }
         }
@@ -1986,12 +1986,12 @@ server.on('error', e => {
   process.exit(1);
 });
 
-// ── устойчивость: аккуратное завершение и защита от падения процесса ──
+// ── устойчивость: штатное завершение и защита от падения процесса ──
 let shuttingDown = false;
 const graceful = (sig) => {
   if (shuttingDown) return;
   shuttingDown = true;
-  console.log(`Получен ${sig} — завершаюсь аккуратно…`);
+  console.log(`Получен ${sig}, штатно завершаюсь…`);
   for (const res of clients) { try { res.end(); } catch {} }
   clients.clear();
   scheduler && clearInterval(scheduler);

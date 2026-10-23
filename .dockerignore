@@ -7,7 +7,6 @@ data
 *.db-wal
 *.db-shm
 tests
-licenses
 *.md
 docker-compose.yml
 run-local.sh

@@ -315,7 +315,7 @@ test('почта: входящее письмо попадает в тот же 
   const contacts = (await call('/api/contacts')).body.filter(c => c.email === 'client@mail.ru');
   assert.equal(contacts.length, 1, 'контакт создан один раз по e-mail');
   const send = await call(`/api/conversations/${convs[0].id}/email`, { method: 'POST', body: JSON.stringify({ subject: 'Ответ', body: 'Отправляю расчёт' }) });
-  assert.equal(send.status, 400, 'без настроенного SMTP отправка честно сообщает об этом');
+  assert.equal(send.status, 400, 'без настроенного SMTP отправка возвращает 400 с причиной');
   assert.ok(/Почта не настроена/.test(send.body.error));
 });
 
@@ -385,7 +385,7 @@ test('дубли контактов: поиск и объединение кар
 
 test('состояние системы: health, версия, резервные копии', async () => {
   const health = (await call('/api/health')).body;
-  assert.equal(health.version, '1', 'продукт всегда сообщает версию 1');
+  assert.equal(health.version, '1.0.0', 'health сообщает версию из файла VERSION');
   assert.ok(health.uptimeSec >= 0, 'health отдаёт аптайм');
   assert.ok(health.counts.contacts > 0 && health.counts.deals > 0, 'health отдаёт счётчики записей');
   const made = await call('/api/backups', { method: 'POST' });

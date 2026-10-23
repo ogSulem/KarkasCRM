@@ -31,7 +31,7 @@ const startIn = (dir, mode) => {
 const boot = mode => startIn(mkdtempSync(join(tmpdir(), 'karkas-seed-')), mode);
 
 let failed = 0;
-const ok = (name, cond, extra = '') => { console.log(`${cond ? '✅' : '❌'} ${name}${extra ? ' — ' + extra : ''}`); if (!cond) failed++ };
+const ok = (name, cond, extra = '') => { console.log(`${cond ? 'ok  ' : 'FAIL'} ${name}${extra ? ' — ' + extra : ''}`); if (!cond) failed++ };
 
 // demo: полные примеры
 let r = boot('demo');
@@ -137,8 +137,8 @@ rmSync(r.dir, { recursive: true, force: true });
   assert.notEqual(run('--confirm-test-data').status, 0, 'непустая база защищена');
   db.close();
   rmSync(dir, { recursive: true, force: true });
-  console.log('✅ CLI seed-demo.js: подтверждение, связанные записи, защита повторного запуска');
+  console.log('ok   CLI seed-demo.js: подтверждение, связанные записи, защита повторного запуска');
 }
 
-console.log(`\nИтого: ${failed === 0 ? 'все проверки пройдены ✅' : failed + ' проверок не пройдено ❌'}\n`);
+console.log(`\nИтого: ${failed === 0 ? 'все проверки пройдены' : failed + ' проверок не пройдено'}\n`);
 process.exit(failed ? 1 : 0);

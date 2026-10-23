@@ -8,6 +8,10 @@
 #                                      80/443 не трогаем, наружу её отдаёт ваш nginx/apache
 #   ./install.sh --port 9090           занять другой порт, если 8080 уже используется
 #
+# Если Docker Hub недоступен или медленный, задайте в .env своё зеркало:
+#   NODE_IMAGE=registry.example.ru/library/node:22-alpine
+#   CADDY_IMAGE=registry.example.ru/library/caddy:2.11-alpine
+#
 # Перед запуском скрипт проверяет, свободны ли нужные порты: на сервере может
 # работать чужой сайт, и падать с невнятным «address already in use» поздно.
 #
@@ -25,6 +29,8 @@ usage() {
   ./install.sh --proxy crm.example.ru           на сервере уже работает сайт: CRM на 127.0.0.1, 80/443 не трогаем
   ./install.sh --port 9090                      занять другой порт (сочетается с любым режимом)
 
+Без флага — режим локального запуска; отдельного флага для него нет.
+
 Полезные команды после установки:
   docker compose logs -f crm          логи приложения
   docker compose ps                   статус контейнеров
@@ -38,14 +44,10 @@ while [ $# -gt 0 ]; do
     --tls)   MODE="tls"; DOMAIN="${2:-}"; EMAIL="${3:-}"; shift $(( $# >= 3 ? 3 : $# )) ;;
     --proxy) MODE="proxy"; case "${2:-}" in ''|--*) ;; *) DOMAIN="$2"; shift ;; esac; shift ;;
     --port)  PORT_ARG="${2:-}"; if [ -n "$PORT_ARG" ]; then shift; fi; shift ;;
-    --local) MODE="local"; shift ;;
     -h|--help) usage; exit 0 ;;
     *) echo "Неизвестный аргумент: $1"; usage; exit 1 ;;
   esac
 done
-
-command -v docker >/dev/null || { echo "Docker не установлен. Поставьте: curl -fsSL https://get.docker.com | sh"; exit 1; }
-docker compose version >/dev/null 2>&1 || { echo "Нужен Docker Compose v2 (идёт вместе с Docker). Проверьте: docker compose version"; exit 1; }
 
 if [ "$MODE" = "tls" ] && [ -z "$DOMAIN" ]; then
   echo "Для режима с доменом укажите его: ./install.sh --tls crm.example.ru [email]"; exit 1
@@ -53,6 +55,9 @@ fi
 case "$PORT_ARG" in
   ''|*[!0-9]*) echo "Порт должен быть числом: ./install.sh --port 9090"; exit 1 ;;
 esac
+
+command -v docker >/dev/null || { echo "Docker не установлен. Поставьте: curl -fsSL https://get.docker.com | sh"; exit 1; }
+docker compose version >/dev/null 2>&1 || { echo "Нужен Docker Compose v2 (идёт вместе с Docker). Проверьте: docker compose version"; exit 1; }
 
 # ── .env: создаём из шаблона и заполняем секреты/режим ──────────────────────
 if [ ! -f .env ]; then
@@ -115,11 +120,39 @@ case "$MODE" in
   proxy) AGAIN="--proxy ${DOMAIN:-crm.example.ru}" ;;
 esac
 
+# Docker Hub отвечает нестабильно: скачивание слоя обрывается на
+# «TLS handshake timeout», и установка падает после долгой сборки. Повторяем.
+compose_up() { # compose_up [аргументы docker compose] → up -d --build
+  local attempt
+  for attempt in 1 2 3; do
+    if docker compose "$@" up -d --build; then return 0; fi
+    if [ "$attempt" -lt 3 ]; then
+      echo
+      echo "Сборка или скачивание образа не удались (попытка ${attempt} из 3). Повторяю через 10 с…"
+      sleep 10
+    fi
+  done
+  cat <<'TXT'
+
+Не удалось собрать и запустить контейнеры. Обычно это обрыв связи с Docker Hub
+(«TLS handshake timeout» при скачивании слоя образа), а не ошибка настроек.
+
+Что сделать:
+  1. Проверить доступ к реестру:   docker pull node:22-alpine
+  2. Повторить установку — со второй-третьей попытки обычно проходит.
+  3. Если Docker Hub недоступен вовсе, прописать в .env своё зеркало и повторить:
+       NODE_IMAGE=registry.example.ru/library/node:22-alpine
+       CADDY_IMAGE=registry.example.ru/library/caddy:2.11-alpine
+
+TXT
+  return 1
+}
+
 echo "Проверяю порты до запуска…"
 if port_busy "$PORT"; then
   cat <<TXT
 
-⚠️  Порт ${PORT} уже занят — CRM не сможет на нём работать.
+Внимание: порт ${PORT} уже занят, CRM не сможет на нём работать.
     Посмотреть, кто занял:   ss -ltnp | grep ':${PORT}'
     Запустить CRM на другом порту, например:
         ./install.sh ${AGAIN:+${AGAIN} }--port 9090
@@ -133,7 +166,7 @@ if [ "$MODE" = "tls" ]; then
   if [ -n "$BUSY" ]; then
     cat <<TXT
 
-⚠️  Порты ${BUSY}уже заняты: на сервере уже работает веб-сервер (nginx, apache или Caddy).
+Внимание: порты ${BUSY}уже заняты — на сервере уже работает веб-сервер (nginx, apache или Caddy).
     Режим --tls забирает 80 и 443 себе и сломал бы существующий сайт.
 
     Правильный вариант — чужой сайт не трогать, а CRM отдать существующему веб-серверу:
@@ -161,7 +194,7 @@ if [ "$MODE" = "tls" ]; then
   set_env SEED_MODE "base"
   echo "Режим: домен с HTTPS → https://${DOMAIN} (начальные данные — правовая основа, без демо)"
   echo "Проверьте, что DNS домена указывает на этот сервер, а порты 80 и 443 открыты."
-  docker compose --profile tls up -d --build
+  compose_up --profile tls || exit 1
   ADDRESS="https://${DOMAIN}"
 elif [ "$MODE" = "proxy" ]; then
   # Сервер уже занят чужим сайтом: 80/443 принадлежат его веб-серверу, поэтому
@@ -171,14 +204,14 @@ elif [ "$MODE" = "proxy" ]; then
   set_env CRM_BIND "127.0.0.1"
   set_env SEED_MODE "base"
   echo "Режим: рядом с существующим сайтом → CRM на 127.0.0.1:${PORT} (боевые данные, без демо)"
-  docker compose up -d --build
+  compose_up || exit 1
   ADDRESS="http://127.0.0.1:${PORT}  (наружу — через ваш веб-сервер: https://${DOMAIN:-ваш-домен})"
 else
   set_env CRM_BIND "0.0.0.0"
   # локально: сразу живые примеры, чтобы всё посмотреть и потрогать
   set_env SEED_MODE "demo"
   echo "Режим: локальный запуск / по IP без домена (с демонстрационными данными)"
-  docker compose up -d --build
+  compose_up || exit 1
   IP=$(curl -s --max-time 4 ifconfig.me || hostname -I | awk '{print $1}')
   ADDRESS="http://localhost:${PORT}  (снаружи: http://${IP}:${PORT})"
 fi
@@ -186,11 +219,11 @@ fi
 printf 'Ждём запуска CRM'
 for i in $(seq 1 30); do
   if curl -fsS --max-time 3 "http://127.0.0.1:${PORT}/api/health" >/dev/null 2>&1; then
-    printf '\n✅ CRM отвечает: %s\n' "$(curl -s "http://127.0.0.1:${PORT}/api/health")"
+    printf '\nCRM отвечает: %s\n' "$(curl -s "http://127.0.0.1:${PORT}/api/health")"
     break
   fi
   printf '.'; sleep 2
-  [ "$i" = 30 ] && printf '\n⚠️  CRM пока не отвечает — посмотрите логи: docker compose logs -f crm\n'
+  [ "$i" = 30 ] && printf '\nCRM пока не отвечает. Логи: docker compose logs -f crm\n'
 done
 
 echo

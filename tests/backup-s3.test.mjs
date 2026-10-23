@@ -42,7 +42,7 @@ test('кириллица и пробелы в имени файла кодиру
   assert.match(r.headers.Authorization, /Signature=[0-9a-f]{64}$/);
 });
 
-test('без ключей скрипт честно падает и подсказывает переменные', async () => {
+test('без ключей скрипт завершается с кодом 1 и перечисляет переменные', async () => {
   const env = { ...process.env };
   for (const k of ['S3_ENDPOINT', 'S3_BUCKET', 'S3_ACCESS_KEY', 'S3_SECRET_KEY']) delete env[k];
   await assert.rejects(

@@ -77,7 +77,7 @@ test('настройка источников: ключи и адреса, ст�
   assert.ok(!('FSSP_API_URL' in s.body.urls), 'адреса ФССП в настройках нет');
   const fsspDef = s.body.sources.find(x => x.key === 'fssp');
   assert.equal(fsspDef.needs.length, 0, 'ФССП больше не требует ключ');
-  assert.match(fsspDef.about, /закрыт/, 'в описании источника честно сказано, что API закрыт');
+  assert.match(fsspDef.about, /закрыт/, 'в описании источника сказано, что API закрыт');
 });
 
 test('«Пишем название конкурента» → полная проверка: долги, суды, банкротство, отзывы', async () => {
@@ -110,7 +110,7 @@ test('«Пишем название конкурента» → полная пр
   // риск-скор и факторы
   assert.ok(rep.risk >= 60, 'высокий риск из-за долгов и банкротства: ' + rep.risk);
   assert.equal(rep.level, 'высокий');
-  assert.ok(!rep.factors.some(f => f.source === 'fssp'), 'фактора про долги нет: данные ФССП недоступны, выдумывать их нельзя');
+  assert.ok(!rep.factors.some(f => f.source === 'fssp'), 'фактора про долги нет: официального API ФССП не существует');
   assert.ok(rep.factors.some(f => f.source === 'fedresurs'));
   assert.ok(rep.factors.some(f => f.source === 'fns' && /недоимка/i.test(f.text)));
   assert.ok(rep.factors.some(f => f.source === 'reviews' && /Слабая репутация/.test(f.text)));
@@ -151,13 +151,13 @@ test('повторная проверка показывает изменени�
   assert.ok(Array.isArray(r.body.history) && r.body.history.length >= 2, 'история проверок ведётся');
 });
 
-test('без ключей источники честно помечаются «skipped»', async () => {
+test('без ключей источники помечаются «skipped»', async () => {
   // ключи были заданы ранее для других тестов — проверяем поведение при пустых значениях
   await call('/api/competitor-sources', { method: 'PUT', body: JSON.stringify({ GOOGLE_PLACES_KEY: '' }) });
   const r2 = await call('/api/competitors/find', { method: 'POST', body: JSON.stringify({ name: 'ИП Без Канала 2', inn: '770000000998', sources: ['fssp', 'google'] }) });
   const s = r2.body.results.find(x => x.source === 'fssp');
   assert.equal(s.status, 'skipped');
-  assert.match(s.summary, /API ФССП закрыт/, 'честно сказано, что официального API больше нет');
+  assert.match(s.summary, /API ФССП закрыт/, 'в сводке сказано, что официального API больше нет');
   assert.equal(s.data.total, null, 'прочерк вместо нуля — ноль читался бы как «долгов нет»');
   assert.ok(s.links.some(l => /fssp\.gov\.ru/.test(l.url)), 'ссылка для ручной проверки есть');
   const ggl = r2.body.results.find(x => x.source === 'google');
@@ -346,7 +346,7 @@ test('диагностика источников: видно, кто отвеч
   // диагностика ничего не пишет в базу
   const list = (await call('/api/competitors')).body;
   assert.ok(!list.some(c => /Сбербанк/.test(c.name)), 'тестовая компания не стала карточкой конкурента');
-  // ключи убираем — источник честно помечается «нужен ключ»
+  // ключи убираем — источник помечается «нужен ключ»
   await call('/api/competitor-sources', { method: 'PUT', body: JSON.stringify({ FNS_API_KEY: '' }) });
   const r2 = await call('/api/competitor-sources/check', { method: 'POST' });
   const fns = r2.body.results.find(x => x.key === 'fns');
@@ -355,14 +355,14 @@ test('диагностика источников: видно, кто отвеч
   assert.match(fns.summary, /Не задан ключ/);
 });
 
-test('источник без соединения помечается «blocked», а отчёт честно сообщает о нехватке данных', async () => {
+test('источник без соединения помечается «blocked», а отчёт сообщает о нехватке данных', async () => {
   await call('/api/competitor-sources', { method: 'PUT', body: JSON.stringify({ RUSPROFILE_URL: 'http://127.0.0.1:9', FEDRESURS_API_URL: 'http://127.0.0.1:9', KAD_API_URL: 'http://127.0.0.1:9', COMPETITOR_TIMEOUT_MS: '1500', FNS_API_KEY: '', GOOGLE_PLACES_KEY: '', TWOGIS_KEY: '', YANDEX_API_KEY: '' }) });
   const r = await call('/api/competitors/find', { method: 'POST', body: JSON.stringify({ name: 'ООО Без Связи', inn: '6600000000' }) });
   const st = r.body.results.map(x => x.status);
   assert.ok(st.includes('blocked'), 'недоступные сайты помечены blocked: ' + JSON.stringify(st));
   assert.ok(st.includes('skipped'), 'источники без ключей помечены skipped');
   assert.equal(r.body.report.noData, true, 'отчёт понимает, что данных нет');
-  assert.match(r.body.report.verdict, /Данных пока мало/, 'честный вердикт вместо ложных выводов');
+  assert.match(r.body.report.verdict, /Данных пока мало/, 'вердикт не делает выводов из неполных данных');
   assert.ok(r.body.report.dataQuality.blocked + r.body.report.dataQuality.skipped === 8, 'посчитано качество данных по источникам');
   assert.ok(r.body.report.links.length >= 10, 'ссылки ручной проверки всё равно сформированы');
 });

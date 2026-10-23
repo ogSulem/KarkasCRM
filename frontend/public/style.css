@@ -415,7 +415,7 @@ body.dragging{cursor:grabbing}
 .empty-state b{display:block;color:var(--ink);font-size:15px;margin-bottom:4px}
 .empty-state .btn{margin-top:12px}
 
-/* ── логин: аккуратный «живой» фон + карточка ────────────────────────────── */
+/* ── логин: анимированный фон и карточка ─────────────────────────────────── */
 .login{overflow:hidden;background:radial-gradient(120% 120% at 15% 10%,#14532d 0%,#052e16 45%,#031a0d 100%)}
 .login::before,.login::after{content:'';position:absolute;width:60vw;height:60vw;border-radius:50%;filter:blur(60px);opacity:.55;pointer-events:none}
 .login::before{background:radial-gradient(circle at 30% 30%,rgba(34,197,94,.55),transparent 60%);top:-18vw;left:-10vw;animation:aurora 22s ease-in-out infinite}
