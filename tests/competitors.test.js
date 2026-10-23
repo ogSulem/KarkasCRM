@@ -46,7 +46,7 @@ before(async () => {
   await mock('rusprofile', (req, r) => {
     if (/blocked/.test(req.url)) { r.writeHead(403); return r.end('captcha') }
     r.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
-    r.end(`<html><head><title>ООО «Конкурент» — Москва — ИНН ${INN}</title></head><body><span itemprop="name">ООО «Конкурент»</span><span itemprop="address">г. Москва, ул. Стройная, 1</span>ИНН ${INN} ОГРН ${OGRN} Действующая организация <a href="/id/${OGRN}">карточка</a> 12 арбитражных дел</body></html>`);
+    r.end(`<html><head><title>ООО «Конкурент» — Москва — ИНН ${INN}</title></head><body><span itemprop="name">ООО «Конкурент»</span><span itemprop="address">г. Москва, ул. Стройная, 1</span>ИНН ${INN} ОГРН ${OGRN} Действующая организация <a href="/id/5448224">карточка</a> 12 арбитражных дел</body></html>`);
   });
   // Places API (New): карточка и отзывы приходят одним ответом на POST places:searchText.
   // Legacy-ветка оставлена — её проверяем отдельным тестом.
@@ -123,8 +123,13 @@ test('«Пишем название конкурента» → полная пр
   // ссылки ручной проверки ведут только на существующие адреса
   const links = rep.links.map(x => x.url);
   assert.ok(links.some(u => u.includes(INN)), 'в ссылках ручной проверки есть ИНН конкурента');
-  assert.ok(!links.some(u => /rusprofile\.ru\/(connections|search\/advanced)/.test(u)), 'нет адресов Rusprofile, которых не существует');
-  assert.ok(!links.some(u => /rusprofile\.ru\/id\/\d{13}/.test(u)), 'карточка юрлица не собирается из ОГРН: в /id/ у Rusprofile внутренний номер');
+  // Страница «Связи» у Rusprofile существует (/connections/5448224), но номер в
+  // адресе — внутренний номер сайта, а не ОГРН. Поэтому ссылку строим только
+  // тогда, когда номер пришёл из ответа самого сайта.
+  assert.ok(links.includes('https://www.rusprofile.ru/connections/5448224'), 'ссылка на «Связи» построена по внутреннему номеру Rusprofile');
+  assert.ok(links.includes('https://www.rusprofile.ru/id/5448224'), 'карточка Rusprofile открыта по внутреннему номеру, а не поиском');
+  assert.ok(!links.some(u => /rusprofile\.ru\/search\/advanced/.test(u)), 'адреса search/advanced у Rusprofile нет');
+  assert.ok(!links.some(u => /rusprofile\.ru\/(?:id|ip|connections)\/\d{13}/.test(u)), 'карточка и «Связи» не собираются из ОГРН');
   assert.equal(rep.found.ogrn, OGRN, 'ОГРН подтянут из ФНС в отчёт');
   assert.equal(rep.found.director, 'Иванов Иван Иванович');
   assert.ok(links.some(u => u.startsWith('https://pb.nalog.ru')), 'ссылка на ФНС');
@@ -434,4 +439,43 @@ test('убранные адреса не отвечают, а мёртвая н�
   const s = await call('/api/competitor-sources');
   assert.ok(!('ourPriceUrl' in s.body), 'настройка OUR_PRICE_URL больше не отдаётся');
   assert.ok(!Object.keys(s.body).some(k => /ourprice/i.test(k)), 'в настройках источников нет мёртвых ключей');
+});
+
+test('ручная находка записывается, попадает в отчёт и учитывается в риске', async () => {
+  const created = await call('/api/competitors', { method: 'POST', body: JSON.stringify({ name: 'ООО «Ручная проверка»', inn: '7700000002' }) });
+  assert.equal(created.status, 201);
+  const comp = { id: created.body.id };
+
+  // Банк данных ФССП и «Связи» Rusprofile автоматически не отдаются: API закрыт,
+  // сайт закрыт от роботов. Без записи такая проверка испарялась вместе с вкладкой.
+  const empty = await call(`/api/competitors/${comp.id}/findings`, { method: 'POST', body: JSON.stringify({ kind: 'долги' }) });
+  assert.equal(empty.status, 400, 'пустая находка не принимается');
+
+  const badUrl = await call(`/api/competitors/${comp.id}/findings`, { method: 'POST', body: JSON.stringify({ kind: 'долги', title: 'Долг', source_url: 'javascript:alert(1)' }) });
+  assert.equal(badUrl.status, 400, 'ссылка на источник проверяется');
+
+  const r = await call(`/api/competitors/${comp.id}/findings`, { method: 'POST', body: JSON.stringify({ kind: 'долги', title: '3 исполнительных производства', amount: 450000, source_url: 'https://fssp.gov.ru/iss/ip' }) });
+  assert.equal(r.status, 201);
+  assert.equal(r.body.findings.length, 1, 'находка сохранена');
+  assert.equal(r.body.findings[0].amount, 450000);
+
+  await call(`/api/competitors/${comp.id}/findings`, { method: 'POST', body: JSON.stringify({ kind: 'связи', title: 'Общий учредитель с ООО «Ромашка»' }) });
+  const full = await call('/api/competitors/' + comp.id);
+  assert.equal(full.body.findings.length, 2, 'находки отдаются в карточке конкурента');
+
+  const before = (await call(`/api/competitors/${comp.id}/check`, { method: 'POST', body: JSON.stringify({ sources: ['kad'] }) })).body.report;
+  const debtFactor = before.factors.find(f => f.source === 'manual' && /Долги у приставов/.test(f.text));
+  assert.ok(debtFactor, 'долг, найденный вручную, стал фактором отчёта: ' + JSON.stringify(before.factors.map(f => f.text)));
+  assert.match(debtFactor.text, /450[\s\u00A0]*000/, 'сумма в факторе напечатана с разделением разрядов');
+  assert.ok(before.factors.some(f => f.source === 'manual' && /Связанные организации/.test(f.text)), 'связи попали в отчёт как справка');
+  assert.ok(before.risk >= 20, 'ручной долг повышает оценку риска: ' + before.risk);
+
+  const fid = full.body.findings.find(f => f.kind === 'долги').id;
+  const del = await call(`/api/competitors/${comp.id}/findings/${fid}`, { method: 'DELETE' });
+  assert.equal(del.status, 200);
+  assert.equal(del.body.findings.length, 1, 'запись удалена');
+  const after = (await call(`/api/competitors/${comp.id}/check`, { method: 'POST', body: JSON.stringify({ sources: ['kad'] }) })).body.report;
+  assert.ok(!after.factors.some(f => f.source === 'manual' && /Долги у приставов/.test(f.text)), 'удалённая находка больше не влияет на отчёт');
+
+  assert.equal((await call(`/api/competitors/999999/findings`, { method: 'POST', body: JSON.stringify({ kind: 'долги', title: 'x' }) })).status, 404, 'несуществующему конкуренту находку не добавить');
 });

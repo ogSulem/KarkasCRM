@@ -53,7 +53,9 @@ export function ensureCompetitorsSchema(db) {
   CREATE TABLE IF NOT EXISTS reviews(id INTEGER PRIMARY KEY,competitor_id INTEGER REFERENCES competitors(id) ON DELETE CASCADE,source TEXT DEFAULT 'вручную',rating REAL,text TEXT,author TEXT,url TEXT,created_at TEXT DEFAULT (datetime('now')));
   CREATE TABLE IF NOT EXISTS price_rows(id INTEGER PRIMARY KEY,competitor_id INTEGER,scope TEXT DEFAULT 'competitor',item TEXT,price REAL,unit TEXT,sku TEXT,note TEXT,source_name TEXT,updated_at TEXT DEFAULT (datetime('now')));
   CREATE INDEX IF NOT EXISTS idx_checks_comp ON competitor_checks(competitor_id,source);
+  CREATE TABLE IF NOT EXISTS competitor_findings(id INTEGER PRIMARY KEY,competitor_id INTEGER REFERENCES competitors(id) ON DELETE CASCADE,kind TEXT DEFAULT 'прочее',title TEXT,amount REAL,note TEXT,source_url TEXT,author TEXT,created_at TEXT DEFAULT (datetime('now')));
   CREATE INDEX IF NOT EXISTS idx_reviews_comp ON reviews(competitor_id);
+  CREATE INDEX IF NOT EXISTS idx_findings_comp ON competitor_findings(competitor_id);
   CREATE INDEX IF NOT EXISTS idx_prices_comp ON price_rows(competitor_id,scope);
   `);
   for (const [t, c, d] of [['competitors', 'demo', 'INTEGER DEFAULT 0'], ['price_rows', 'demo', 'INTEGER DEFAULT 0']]) {
@@ -233,13 +235,23 @@ export function createCompetitors(ctx) {
   //    юрлицо открываем через поиск, иначе ссылка приводит на «404».
   //  • kad.arbitr.ru: картотека не принимает параметр поиска в адресе,
   //    ИНН сотрудник вводит в форму сам — об этом сказано в названии ссылки.
-  function linksFor({ name = '', inn = '', ogrn = '' } = {}) {
+  function linksFor({ name = '', inn = '', ogrn = '', rpId = '' } = {}) {
     const q = encodeURIComponent(inn || ogrn || name || '');
     const id = ogrn || inn;
     const rp = 'https://www.rusprofile.ru';
     const isIp = digits(ogrn).length === 15;
+    const rid = digits(rpId).length <= 12 ? digits(rpId) : '';
+    // Карточка Rusprofile открывается по его внутреннему номеру, а не по ОГРН:
+    // у ООО «УК «Дримхаус» ОГРН 1115260005057, а адрес карточки — /id/5448224.
+    // Номер приходит из ответа самого сайта; пока он неизвестен, ведём на поиск.
+    const cardUrl = rid ? `${rp}/${isIp ? 'ip' : 'id'}/${rid}`
+      : isIp && digits(ogrn) ? `${rp}/ip/${digits(ogrn)}` : `${rp}/search?query=${q}`;
     return [
-      { label: 'Rusprofile: карточка', url: isIp ? `${rp}/ip/${digits(ogrn)}` : `${rp}/search?query=${q}` },
+      { label: 'Rusprofile: карточка', url: cardUrl },
+      // «Связи» строятся по тому же внутреннему номеру. Без него адрес
+      // /connections/<ОГРН> открыл бы чужую страницу или 404, поэтому ссылку
+      // даём только когда номер известен.
+      ...(rid ? [{ label: 'Rusprofile: связи и аффилированные лица', url: `${rp}/connections/${rid}` }] : []),
       { label: 'Rusprofile: поиск по названию', url: `${rp}/search?query=${encodeURIComponent(name || id)}` },
       { label: 'ФНС: Прозрачный бизнес', url: `https://pb.nalog.ru/search.html?mode=search-ul&queryAll=${q}` },
       { label: 'ФНС: бухотчётность (ГИР БО)', url: `https://bo.nalog.gov.ru/search?allFieldsMatch=false&query=${q}` },
@@ -271,8 +283,21 @@ export function createCompetitors(ctx) {
       courts: Number(pick(/(\d+)\s*(?:арбитражн|судебн)/i)) || 0,
       debts: /исполнительн[^<]{0,80}/i.test(html) ? pick(/(\d[\d\s]{2,})\s*₽/i) : '',
       found: /\/id\/\d+|\/ip\/\d+|ОГРН/i.test(html),
+      rpId: '',
     };
-    return { ...out, status: 'ok', summary: card.found ? `Найдено: ${card.name || q}${card.status ? ' · ' + card.status : ''}` : 'Совпадение не найдено — уточните ИНН', data: { card } };
+    // Внутренний номер Rusprofile — из ссылки на карточку в ответе сайта. Он
+    // короткий и не совпадает с ОГРН: если в HTML попался сам ОГРН, строить по
+    // нему /id/ и /connections/ нельзя — адрес откроет чужую страницу или 404.
+    const rid = pick(/href="\/(?:id|ip)\/(\d+)"/i) || pick(/\/(?:id|ip)\/(\d{4,12})/i);
+    if (rid && rid.length <= 12 && rid !== digits(ogrn) && rid !== digits(inn)) card.rpId = rid;
+    card.found = card.found || Boolean(card.rpId);
+    return {
+      ...out,
+      links: linksFor({ name, inn, ogrn, rpId: card.rpId }),
+      status: 'ok',
+      summary: card.found ? `Найдено: ${card.name || q}${card.status ? ' · ' + card.status : ''}` : 'Совпадение не найдено — уточните ИНН',
+      data: { card },
+    };
   }
 
   async function srcFns({ name, inn }) {
@@ -452,7 +477,7 @@ export function createCompetitors(ctx) {
   const RUNNERS = { rusprofile: srcRusprofile, fns: srcFns, fedresurs: srcFedresurs, fssp: srcFssp, kad: srcKad, google: srcGoogle, '2gis': src2gis, yandex: srcYandex };
 
   // ─────────────────────────── оценка риска ───────────────────────────
-  function buildReport(comp, results, { ourPrices = [], competitorRows = [] } = {}) {
+  function buildReport(comp, results, { ourPrices = [], competitorRows = [], findings = [] } = {}) {
     const by = k => results.find(r => r.source === k)?.data || {};
     const fnsCard = by('fns').card || {};
     const rusCard = by('rusprofile').card || {};
@@ -470,6 +495,19 @@ export function createCompetitors(ctx) {
     // ответу нельзя — менеджер принял бы это за проверенную надёжность.
     if (money(fnsCard.arrears) > 0) add('risk', `Налоговая недоимка: ${money(fnsCard.arrears).toLocaleString('ru-RU')} ₽`, 18, 'fns');
     if (fnsCard.invalid) add('risk', 'В ЕГРЮЛ внесена запись о недостоверных сведениях', 15, 'fns');
+    // Ручные находки: банк данных ФССП, «Связи» на Rusprofile и отзывы на Авито
+    // автоматически не отдаются (API закрыт, сайт закрыт от роботов, данные за
+    // платным доступом). Без записи такая проверка испарялась: менеджер посмотрел
+    // и забыл, а отчёт продолжал показывать прочерк.
+    for (const f of findings) {
+      const n = Number(f.amount) || 0;
+      const what = String(f.title || '').trim();
+      if (f.kind === 'долги' && n > 0) add('risk', `Долги у приставов (записано вручную): ${Math.round(n).toLocaleString('ru-RU')} ₽${what ? ' — ' + what : ''}`, 18, 'manual');
+      else if (f.kind === 'суды' && n > 0) add('risk', `Судебные дела (записано вручную): ${Math.round(n)}${what ? ' — ' + what : ''}`, n >= 10 ? 15 : 8, 'manual');
+      else if (f.kind === 'связи') add('info', `Связанные организации (записано вручную): ${what || f.note || '—'}`, 0, 'manual');
+      else if (what || f.note) add('info', `${f.kind || 'Прочее'}: ${what || f.note}`, 0, 'manual');
+    }
+
     const courts = kad.total || 0;
     if (courts >= 10) add('risk', `Много арбитражных дел: ${courts}`, 15, 'kad');
     else if (courts >= 3) add('risk', `Арбитражные дела: ${courts}`, 8, 'kad');
@@ -528,7 +566,7 @@ export function createCompetitors(ctx) {
     lines.push(`Проверено источников: ${results.filter(r => r.status === 'ok').length} из ${results.length} (без ключей: ${results.filter(r => r.status === 'skipped').length})`);
     const innKnown = comp.inn || fnsCard.inn || rusCard.inn || '';
     const ogrnKnown = comp.ogrn || fnsCard.ogrn || rusCard.ogrn || '';
-    return { risk: score, noData: !hasAnyData, dataQuality, level: levelOf(score), color: levelColor(score), factors, verdict: verdicts.join('. ') + '.', talking_points: talking, pricing, reviews: { avgRating, totalReviews, sources: { google: g, '2gis': t, yandex: y } }, summary: lines, links: linksFor({ name: comp.name, inn: innKnown, ogrn: ogrnKnown }), found: { inn: innKnown, ogrn: ogrnKnown, name: fnsCard.name || rusCard.name || comp.name, address: fnsCard.address || rusCard.address || g?.address || y?.address || '', director: fnsCard.director || '' } };
+    return { risk: score, noData: !hasAnyData, dataQuality, level: levelOf(score), color: levelColor(score), factors, verdict: verdicts.join('. ') + '.', talking_points: talking, pricing, reviews: { avgRating, totalReviews, sources: { google: g, '2gis': t, yandex: y } }, summary: lines, links: linksFor({ name: comp.name, inn: innKnown, ogrn: ogrnKnown, rpId: rusCard.rpId }), found: { inn: innKnown, ogrn: ogrnKnown, name: fnsCard.name || rusCard.name || comp.name, address: fnsCard.address || rusCard.address || g?.address || y?.address || '', director: fnsCard.director || '' } };
   }
 
   // ─────────────────────────── Excel / CSV ───────────────────────────
@@ -649,7 +687,8 @@ export function createCompetitors(ctx) {
     }
     // «наши цены» — это каталог: позиции без цены в сравнении не участвуют
     const ourPrices = catalogPrices(db, { pricedOnly: true });
-    const report = buildReport(comp, results, { ourPrices, competitorRows });
+    const findings = db.prepare('SELECT * FROM competitor_findings WHERE competitor_id=? ORDER BY id DESC').all(comp.id);
+    const report = buildReport(comp, results, { ourPrices, competitorRows, findings });
     // сохранение
     const prev = db.prepare('SELECT * FROM competitor_reports WHERE competitor_id=? ORDER BY id DESC LIMIT 1').get(comp.id);
     db.prepare('DELETE FROM competitor_checks WHERE competitor_id=?').run(comp.id);
@@ -705,6 +744,7 @@ export function createCompetitors(ctx) {
       report: report ? { id: report.id, risk: report.risk, level: report.level, verdict: report.verdict, created_at: report.created_at, ...JSON.parse(report.payload || '{}') } : null,
       checks: db.prepare('SELECT source,status,summary,checked_at,payload FROM competitor_checks WHERE competitor_id=?').all(id).map(c => ({ ...c, data: (() => { try { return JSON.parse(c.payload || '{}').data || {} } catch { return {} } })(), links: (() => { try { return JSON.parse(c.payload || '{}').links || [] } catch { return [] } })(), title: (() => { try { return JSON.parse(c.payload || '{}').title || c.source } catch { return c.source } })(), payload: undefined })),
       reviews: db.prepare('SELECT * FROM reviews WHERE competitor_id=? ORDER BY id DESC').all(id),
+      findings: db.prepare('SELECT * FROM competitor_findings WHERE competitor_id=? ORDER BY id DESC').all(id),
       prices: db.prepare("SELECT * FROM price_rows WHERE competitor_id=? AND scope='competitor' ORDER BY item").all(id),
       history: db.prepare('SELECT id,risk,level,verdict,created_at FROM competitor_reports WHERE competitor_id=? ORDER BY id DESC LIMIT 12').all(id),
     };
@@ -774,6 +814,35 @@ export function createCompetitors(ctx) {
         }));
       }
       if (req.method === 'POST') { const b = await readBody(req); const r = db.prepare('INSERT INTO competitors(name,inn,ogrn,city,website,phone,notes,price_url) VALUES(?,?,?,?,?,?,?,?)').run(b.name || 'Конкурент', digits(b.inn) || null, digits(b.ogrn) || null, b.city || '', b.website || '', b.phone || '', b.notes || '', b.price_url || ''); log(`Добавлен конкурент: ${b.name}`, 'competitors', Number(r.lastInsertRowid), user.name); return json(res, 201, { id: r.lastInsertRowid }); }
+    }
+    // Ручные находки: то, что менеджер посмотрел сам по ссылкам и записал.
+    const mFind = p.match(/^\/api\/competitors\/(\d+)\/findings(?:\/(\d+))?$/);
+    if (mFind) {
+      const id = Number(mFind[1]);
+      if (!db.prepare('SELECT id FROM competitors WHERE id=?').get(id)) return json(res, 404, { error: 'Конкурент не найден' });
+      const list = () => db.prepare('SELECT * FROM competitor_findings WHERE competitor_id=? ORDER BY id DESC').all(id);
+      if (req.method === 'GET') return json(res, 200, list());
+      if (req.method === 'POST') {
+        const b = await readBody(req);
+        const KINDS = ['долги', 'суды', 'связи', 'прочее'];
+        const kind = KINDS.includes(String(b.kind || '').trim().toLowerCase()) ? String(b.kind).trim().toLowerCase() : 'прочее';
+        const title = String(b.title || '').slice(0, 200);
+        const note = String(b.note || '').slice(0, 2000);
+        const amount = Number(b.amount) || 0;
+        const url = String(b.source_url || '').trim();
+        if (!title && !note && !(amount > 0)) return json(res, 400, { error: 'Пустая находка: напишите, что нашли, или укажите сумму либо число дел' });
+        if (url && !/^https?:\/\//i.test(url)) return json(res, 400, { error: 'Ссылка на источник должна начинаться с http:// или https://' });
+        if (amount < 0 || amount > 1e12) return json(res, 400, { error: 'Сумма или число дел выглядят неправдоподобно' });
+        db.prepare('INSERT INTO competitor_findings(competitor_id,kind,title,amount,note,source_url,author) VALUES(?,?,?,?,?,?,?)')
+          .run(id, kind, title, amount > 0 ? amount : null, note, url.slice(0, 500), user?.name || '');
+        return json(res, 201, { findings: list() });
+      }
+      if (req.method === 'DELETE' && mFind[2]) {
+        const r = db.prepare('DELETE FROM competitor_findings WHERE id=? AND competitor_id=?').run(Number(mFind[2]), id);
+        if (!r.changes) return json(res, 404, { error: 'Находка не найдена' });
+        return json(res, 200, { deleted: true, findings: list() });
+      }
+      return json(res, 405, { error: 'Метод не поддерживается' });
     }
     const mId = p.match(/^\/api\/competitors\/(\d+)(?:\/(check|reviews|prices|report))?$/);
     if (mId) {
