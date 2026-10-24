@@ -126,6 +126,9 @@ const SCHEMA_COLUMNS = [...SCHEMA,
   ['products', 'demo', 'INTEGER DEFAULT 0'], ['templates', 'demo', 'INTEGER DEFAULT 0'], ['automations', 'demo', 'INTEGER DEFAULT 0'],
   ['products', 'note', "TEXT DEFAULT ''"],   // примечание к позиции каталога (= прайс-листа)
   ['companies', 'demo', 'INTEGER DEFAULT 0'], ['notes', 'demo', 'INTEGER DEFAULT 0'],
+  // своё название канала: вендор отдаёт только номер или юзернейм, а каналов
+  // бывает по одному на сотрудника, и отличить их друг от друга нужно человеку
+  ['channels', 'label', 'TEXT'],
 ];
 
 // чего не хватает в этой базе: если она из старой версии — сначала копия, потом изменения
@@ -592,6 +595,29 @@ const wzBody = m => m.text || (m.contentUri ? '[вложение: ' + (m.type ||
 // обёртка {channels:[…]} встречается только в партнёрском API. Чтение ответа как
 // объекта давало пустой список при рабочем ключе: «синхронизировано: 0».
 const wzChannels = data => (Array.isArray(data) ? data : (data?.channels || data?.data || []));
+// Какому типу чата соответствуют транспорты подключённых аккаунтов. Карта обратная
+// к интерфейсной: у типа чата telegram два транспорта (личный аккаунт и бот), у max
+// тоже, а групповой чат приходит с транспортом того же мессенджера.
+const WZ_CHAT_TRANSPORTS = {
+  whatsapp: ['whatsapp', 'wapi'], whatsgroup: ['whatsgroup'], viber: ['viber'],
+  instagram: ['instagram'], telegram: ['telegram', 'tgapi'], telegroup: ['telegram', 'tgapi'],
+  vk: ['vk'], avito: ['avito'], max: ['max', 'maxbot'], maxgroup: ['max', 'maxbot']
+};
+// Канал и тип чата должны соответствовать друг другу. Если клиент писал в WhatsApp
+// одного сотрудника, а отвечают в Telegram-бот компании, прежний канал не годится:
+// вендор получит пару «тип чата telegram + канал от WhatsApp» и ответ не уйдёт.
+const pickChannelId = (conv, chatType) => {
+  const fits = t => (WZ_CHAT_TRANSPORTS[chatType] || []).includes(String(t || '').trim().toLowerCase());
+  const own = isUuid(conv?.channel_id) ? conv.channel_id : '';
+  const rows = db.prepare("SELECT external_id,transport,state FROM channels WHERE provider='wazzup'").all();
+  const ownRow = own ? rows.find(c => c.external_id === own) : null;
+  // клиент писал сюда, и аккаунт подходит под выбранный мессенджер — отвечаем с него же;
+  // канал не синхронизирован (ownRow пуст) — тоже доверяем беседе
+  if (own && (!ownRow || fits(ownRow.transport))) return own;
+  // иначе берём подключённый и работающий аккаунт нужного мессенджера
+  const match = rows.find(c => fits(c.transport) && wzUsable(c));
+  return match?.external_id || own || '';
+};
 // понятные ошибки вместо «Wazzup API 401»
 function wazzupError(e, status) {
   const m = String(e?.message || e || '');
@@ -602,14 +628,14 @@ function wazzupError(e, status) {
   return 'Wazzup: ' + m;
 }
 export async function sendViaWazzup(conv, text, user, chatTypeOverride = '', file = null) {
-  // Wazzup принимает только id канала в формате uuid — иначе отвечаем каналом по умолчанию из настроек
-  const channelId = (isUuid(conv.channel_id) ? conv.channel_id : '') || getSetting('WAZZUP_CHANNEL_ID');
-  if (!channelId) throw new Error('Не выбран канал Wazzup. Настройки → Интеграции → «Проверить и синхронизировать каналы», затем выберите канал по умолчанию.');
   // Пустой тип бывает у беседы, созданной вручную, — там годится канал по
   // умолчанию. Неизвестный тип подменять на whatsapp нельзя: ответ ушёл бы
   // клиенту не в тот мессенджер, и выглядело бы это как delivered.
   const rawType = String(chatTypeOverride || conv.chat_type || '').trim().toLowerCase();
   const chatType = normChatType(rawType);
+  // Какой аккаунт отправляет, зависит от типа чата, поэтому канал выбираем после него
+  const channelId = pickChannelId(conv, chatType) || getSetting('WAZZUP_CHANNEL_ID');
+  if (!channelId) throw new Error('Не выбран канал Wazzup. Настройки → Интеграции → «Проверить и синхронизировать каналы», затем выберите канал по умолчанию.');
   if (!chatType) {
     if (!rawType) throw new Error('Не выбран канал отправки');
     throw new Error(`Тип чата «${rawType}» не поддерживается. Wazzup принимает chatType из списка: ${WZ_CHAT_TYPES.join(', ')}`);
@@ -874,7 +900,7 @@ const ADMIN_ONLY = [
   /^\/api\/settings(\/.*)?$/, /^\/api\/users(\/.*)?$/, /^\/api\/pipelines(\/.*)?$/, /^\/api\/automations(\/.*)?$/,
   /^\/api\/custom-fields(\/.*)?$/, /^\/api\/competitor-sources(\/.*)?$/,
   /^\/api\/backups(\/.*)?$/, /^\/api\/integrations(\/.*)?$/, /^\/api\/prices\/ours(\/.*)?$/,
-  /^\/api\/demo\/cleanup$/,
+  /^\/api\/demo\/cleanup$/, /^\/api\/channels(\/.*)?$/,
 ];
 // Отказ по правам понятнее, если сказать, что именно закрыто и что делать вместо этого.
 const ADMIN_ONLY_HINT = [
@@ -1799,6 +1825,15 @@ export const server = http.createServer(async (req, res) => {
 
     // ===== channels & integrations (all configurable from UI) =====
     if (p === '/api/channels') return json(res, 200, db.prepare('SELECT * FROM channels ORDER BY id DESC').all());
+    // Своё название канала. Вендор имени не отдаёт, только номер или юзернейм,
+    // а каналов у заказчика бывает по одному на сотрудника.
+    const mChLabel = p.match(/^\/api\/channels\/(\d+)$/);
+    if (mChLabel && req.method === 'PUT') {
+      const b = await readBody(req);
+      const label = String(b.label ?? '').trim().slice(0, 60);
+      if (!db.prepare('UPDATE channels SET label=? WHERE id=?').run(label, mChLabel[1]).changes) return json(res, 404, { error: 'Канал не найден' });
+      return json(res, 200, db.prepare('SELECT * FROM channels WHERE id=?').get(mChLabel[1]));
+    }
     if (p === '/api/integrations/wazzup/test' && req.method === 'POST') { try { const list = wzChannels(await wazzupFetch('/channels')); return json(res, 200, { ok: true, channels: list }); } catch (e) { return json(res, 400, { ok: false, error: e.message }); } }
     // Каналом по умолчанию становится рабочий: первым вендор может вернуть
     // отключённый или заблокированный, и ответы молча не уходили бы вовсе.

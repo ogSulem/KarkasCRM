@@ -23,6 +23,9 @@ const WZ_PORT = 18157;
 const CRM_HOOK = `http://127.0.0.1:18098/webhooks/wazzup?secret=${SECRET}`;
 const GROUP_CHAT = '-1001234567890';
 const TG_CHANNEL = 'bbbbbbbb-2222-4222-8222-222222222222';
+const WA_CHANNEL = 'aaaaaaaa-1111-4111-8111-111111111111';
+const MAXBOT_CHANNEL = 'cccccccc-3333-4333-8333-333333333333';
+const WA_PHONE = '79992223344';
 
 // что увидел мок Wazzup
 const seen = { channels: 0, messages: [], webhook: null, longUrlRejected: 0 };
@@ -37,8 +40,8 @@ const wz = createServer(async (req, res) => {
     seen.channels++;
     // первым стоит нерабочий канал: каналом по умолчанию должен стать не он
     return send(200, [
-      { channelId: 'cccccccc-3333-4333-8333-333333333333', transport: 'maxbot', plainId: '79994445566', state: 'notEnoughMoney' },
-      { channelId: 'aaaaaaaa-1111-4111-8111-111111111111', transport: 'whatsapp', plainId: '79991112233', state: 'active' },
+      { channelId: MAXBOT_CHANNEL, transport: 'maxbot', plainId: '79994445566', state: 'notEnoughMoney' },
+      { channelId: WA_CHANNEL, transport: 'whatsapp', plainId: '79991112233', state: 'active' },
       { channelId: TG_CHANNEL, transport: 'tgapi', plainId: 'karkas_dom', state: 'active' },
     ]);
   }
@@ -222,6 +225,61 @@ test('входящее из канала без типа чата сохраня
   assert.ok(!conv.phone, 'идентификатор Циана не записан в телефон клиента');
   const reply = await call(`/api/conversations/${conv.id}/messages`, { method: 'POST', token: admin, body: { body: 'Ответ', chat_type: 'cian' } });
   assert.equal(reply.data.message.status, 'error', 'отправить туда нельзя — и это не выглядит как доставка');
+});
+
+test('аккаунт отправки соответствует выбранному мессенджеру', async () => {
+  // Клиент написал на WhatsApp одного сотрудника. Каналов у заказчика несколько,
+  // поэтому пара «тип чата + канал» обязана быть согласованной: тип чата telegram
+  // с каналом от WhatsApp вендор отклоняет.
+  const r = await hook({ messages: [{ messageId: 'wz-wa-1', channelId: WA_CHANNEL, chatType: 'whatsapp', chatId: WA_PHONE, dateTime: '2026-10-23T12:30:00.000', type: 'text', isEcho: false, status: 'inbound', text: 'Сколько стоит дом 6 на 8?', contact: { name: 'Клиент WhatsApp' } }] });
+  assert.equal(r.status, 200);
+  const conv = db.prepare('SELECT * FROM conversations WHERE external_chat_id=?').get(WA_PHONE);
+  assert.ok(conv, 'беседа создана');
+  assert.equal(conv.channel_id, WA_CHANNEL, 'беседа запомнила аккаунт, на который писал клиент');
+
+  const same = await call(`/api/conversations/${conv.id}/messages`, { method: 'POST', token: admin, body: { body: 'Добрый день!', chat_type: 'whatsapp' } });
+  assert.equal(same.data.send.delivered, true, JSON.stringify(same.data.send));
+  assert.equal(seen.messages[seen.messages.length - 1].channelId, WA_CHANNEL, 'ответ в WhatsApp уходит с того же аккаунта');
+
+  const other = await call(`/api/conversations/${conv.id}/messages`, { method: 'POST', token: admin, body: { body: 'И то же в Telegram', chat_type: 'telegram' } });
+  assert.equal(other.data.send.delivered, true, JSON.stringify(other.data.send));
+  assert.equal(seen.messages[seen.messages.length - 1].channelId, TG_CHANNEL, 'для Telegram взят аккаунт Telegram, а не канал от WhatsApp');
+});
+
+test('нерабочий аккаунт не подставляется под тип чата', async () => {
+  // единственный MAX-аккаунт в кабинете не работает: брать его нельзя, иначе
+  // сообщение выглядело бы отправленным и не дошло
+  const conv = db.prepare('SELECT * FROM conversations WHERE external_chat_id=?').get(WA_PHONE);
+  const r = await call(`/api/conversations/${conv.id}/messages`, { method: 'POST', token: admin, body: { body: 'Ответ', chat_type: 'max' } });
+  assert.equal(r.status, 201);
+  assert.notEqual(seen.messages[seen.messages.length - 1].channelId, MAXBOT_CHANNEL, 'канал с пустым балансом не выбран');
+});
+
+test('своё название канала сохраняется и переживает синхронизацию', async () => {
+  const chans = (await call('/api/channels', { token: admin })).data;
+  const wa = chans.find(c => c.transport === 'whatsapp');
+  const saved = await call(`/api/channels/${wa.id}`, { method: 'PUT', token: admin, body: { label: 'WhatsApp — Ирина' } });
+  assert.equal(saved.status, 200);
+  assert.equal(saved.data.label, 'WhatsApp — Ирина');
+  // вендор имени не отдаёт, поэтому синхронизация не должна затирать подпись
+  const again = await call('/api/integrations/wazzup/sync', { method: 'POST', token: admin });
+  assert.equal(again.status, 200);
+  const after = (await call('/api/channels', { token: admin })).data.find(c => c.transport === 'whatsapp');
+  assert.equal(after.label, 'WhatsApp — Ирина', 'название осталось после повторной синхронизации');
+  assert.equal(after.state, 'active', 'состояние при этом обновляется');
+
+  // название сотрудника — не администратора: менять каналы ему нельзя
+  const created = await call('/api/users', { method: 'POST', token: admin, body: { name: 'Канал Менеджер', email: 'chan-mgr@example.com', role: 'manager', active: 1, password: 'TemporaryPass-2026!' } });
+  assert.ok(created.data.id, 'сотрудник создан');
+  let mgr = (await call('/api/auth/login', { method: 'POST', body: { email: 'chan-mgr@example.com', password: 'TemporaryPass-2026!' } })).data.token;
+  await call('/api/me/password', { method: 'POST', token: mgr, body: { old_password: 'TemporaryPass-2026!', new_password: 'PersonalPass-2026!', confirm_password: 'PersonalPass-2026!' } });
+  mgr = (await call('/api/auth/login', { method: 'POST', body: { email: 'chan-mgr@example.com', password: 'PersonalPass-2026!' } })).data.token;
+  assert.ok(mgr, 'сотрудник вошёл после смены пароля');
+  const denied = await call(`/api/channels/${wa.id}`, { method: 'PUT', token: mgr, body: { label: 'Чужая подпись' } });
+  assert.equal(denied.status, 403, 'менеджер не переименовывает каналы');
+  const stillThere = (await call('/api/channels', { token: admin })).data.find(c => c.transport === 'whatsapp');
+  assert.equal(stillThere.label, 'WhatsApp — Ирина', 'подпись администратора не изменена');
+  assert.ok((await call('/api/channels', { token: mgr })).data.length >= 3, 'читать список каналов менеджеру можно: он нужен списку отправки в чате');
 });
 
 test('проверочный запрос вендора проходит, а чужой запрос без кода защиты отклоняется', async () => {

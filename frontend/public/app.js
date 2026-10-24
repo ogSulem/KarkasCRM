@@ -170,8 +170,10 @@ const sourceOptions = selected => Object.entries(SOURCE_LABELS).map(([code, name
 const CHANNEL_LABELS = { ...WZ_TRANSPORTS, telegram: 'Telegram', email: 'Почта', any: 'Любой канал' };
 const channelLabel = c => CHANNEL_LABELS[c] || c || '';
 const wzTransportLabel = t => WZ_TRANSPORTS[String(t || '').trim().toLowerCase()] || channelLabel(t);
-// название канала для списка в настройках: «WhatsApp · 79991112233»
-const wzTitle = c => [wzTransportLabel(c.transport), c.name || c.phone || c.external_id].filter(Boolean).join(' · ');
+// название канала для списков: своё название, если его задали, иначе
+// «WhatsApp · 79991112233» — вендор передаёт только номер или юзернейм
+const wzTitle = c => (c.label ? String(c.label)
+  : [wzTransportLabel(c.transport), c.name || c.phone || c.external_id].filter(Boolean).join(' · '));
 // бейджи каналов клиента: «WhatsApp · Telegram» — одна строка для списков
 const chan = c => (c || 'whatsapp').split(',').map(x => x.trim()).filter(Boolean).map(x => `<span class="chan ${x}">${esc(channelLabel(x))}</span>`).join(' ');
 
@@ -2642,8 +2644,13 @@ async function settings(v) {
       ${hookLine(wazzupHookUrl(s))}
       <p><small>${s.wazzup.webhook_secret ? 'Секрет в адресе — пароль от этой двери: без него чужие люди не смогут присылать поддельные сообщения.' : 'Секрет не задан: адрес примет сообщение от любого, кто его узнает. Для работы в интернете лучше задать секрет выше.'}</small></p>
       <div style="display:flex;gap:8px;flex-wrap:wrap"><button class="btn sm" onclick="registerWazzupWebhook()">${icon('sync', 13)} Зарегистрировать адрес автоматически</button></div>
-      <hr><h3>Подключённые каналы (${chans.length})</h3>${chans.map(c => { const [label, cls] = wzState(c.state);
-        return `<div class="row"><span><b>${esc(wzTransportLabel(c.transport) || 'Канал')}</b><br><small>${esc(c.name || c.phone || c.external_id)}</small></span><span class="tag ${cls}">${esc(label)}</span></div>` }).join('')
+      <hr><h3>Подключённые каналы (${chans.length})</h3>
+      <p><small>Канал — это один подключённый аккаунт: номер WhatsApp, аккаунт Telegram или бот. Если к Wazzup подключено по аккаунту на каждого сотрудника, каналов будет столько же, сколько сотрудников, и это нормально. Имена людей Wazzup не передаёт, только номер или юзернейм, поэтому подпишите каналы своими словами — названия хранятся в CRM и не затираются следующей синхронизацией.</small></p>
+      <p><small>Ответ клиенту уходит с того аккаунта, на который клиент написал: канал запоминается в беседе. Выбор ниже нужен только для бесед, заведённых вручную, где входящих сообщений ещё не было.</small></p>
+      ${chans.map(c => { const [st, cls] = wzState(c.state);
+        return `<div class="row"><span style="min-width:0;overflow-wrap:anywhere"><b>${esc(c.label || c.name || c.phone || c.external_id || 'Канал')}</b><br><small>${esc(wzTransportLabel(c.transport))}${c.label ? ' · ' + esc(c.name || c.phone || c.external_id || '') : ''}</small></span>
+        <span style="display:flex;gap:6px;align-items:center;flex:1 1 240px;min-width:0"><input id="chLabel${c.id}" value="${esc(c.label || '')}" placeholder="своё название, например «WhatsApp — Ирина»" maxlength="60"><button type="button" class="btn sm" style="white-space:nowrap" onclick="saveChannelLabel(${c.id})">Подписать</button></span>
+        <span class="tag ${cls}">${esc(st)}</span></div>` }).join('')
         || '<small>Каналы появятся после сохранения ключа и синхронизации.</small>'}
       ${chans.length && !chans.some(wzAlive) ? '<p class="form-hint">Ни один канал пока не работает — сообщения не отправятся. Причина указана справа от канала: её устраняют в личном кабинете Wazzup.</p>' : ''}</div>
 
@@ -2926,6 +2933,17 @@ async function settings(v) {
   if (state.settingsTab === 'data') loadBackups();
 }
 
+// Своё название канала. Вендор имени не передаёт, только номер или юзернейм,
+// а каналов у заказчика бывает по одному на сотрудника: без подписей список
+// выглядит как перечень номеров и непонятно, чей из них чей.
+// Название хранится в CRM и не затирается следующей синхронизацией.
+async function saveChannelLabel(id) {
+  const el = $('#chLabel' + id);
+  try {
+    await api('/api/channels/' + id, { method: 'PUT', body: JSON.stringify({ label: el ? el.value : '' }) });
+    toast('Название канала сохранено'); state.channels = []; render();
+  } catch (e) { toast(e.message, 'err'); }
+}
 async function saveWazzup() { await api('/api/settings', { method: 'PUT', body: JSON.stringify({ WAZZUP_API_KEY: $('#wzKey').value, WAZZUP_CHANNEL_ID: $('#wzChannel').value, WAZZUP_WEBHOOK_SECRET: $('#wzSecret').value, WAZZUP_API_URL: $('#wzUrl').value }) }); toast('Ключ сохранён'); render(); }
 let __fields = null;
 async function loadFields() { if (!__fields) __fields = (await api('/api/custom-fields')).fields; return __fields; }

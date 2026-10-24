@@ -61,7 +61,8 @@ Object.assign(window, {
   ourPriceRows, filterOurPrices, toggleAutomation, openAutomation, noteRow, editNote, lockFormsForViewer, AUTO_TRIGGERS, AUTO_ACTIONS,
   busyButton, priceImportText,
   punyDecodeLabel, humanOrigin, wazzupHookUrl, wzAlive, wzState, wzTitle, closeConv,
-  WZ_TRANSPORT_TO_CHAT, WZ_DEAD_STATES, WZ_CHAT_SET, WZ_TRANSPORTS, WZ_STATE_LABELS, wzTransportLabel
+  WZ_TRANSPORT_TO_CHAT, WZ_DEAD_STATES, WZ_CHAT_SET, WZ_TRANSPORTS, WZ_STATE_LABELS, wzTransportLabel,
+  saveChannelLabel
 });`;
 const pageErrors = [];
 const vConsole = new VirtualConsole();
@@ -412,6 +413,8 @@ try {
   check('ноль каналов объясняет, что делать дальше', /нет ни одного канала/.test(appJsRaw) && /ни один сейчас не работает/.test(appJsRaw));
   check('нерабочие состояния канала распознаются', ['disabled', 'blocked', 'unauthorized', 'openelsewhere', 'foreignphone', 'waitForPassword', 'onModeration', 'rejected', 'phoneUnavailable', 'notEnoughMoney', 'qridle'].every(st => !window.wzAlive({ state: st })) && window.wzAlive({ state: 'active' }));
   check('название канала собирается из мессенджера и номера', window.wzTitle({ transport: 'whatsapp', phone: '79991112233' }) === 'WhatsApp · 79991112233');
+  check('своё название канала важнее номера в списках', window.wzTitle({ label: 'WhatsApp — Ирина', transport: 'whatsapp', phone: '79991112233' }) === 'WhatsApp — Ирина');
+  check('название канала сохраняется отдельным действием', typeof window.saveChannelLabel === 'function' && /\/api\/channels\/.*PUT/.test(appJsRaw.replace(/\s+/g, ' ')));
   // в списке каналов важно, бот это или личный аккаунт; в типе чата — уже нет
   check('список каналов различает бота и личный Telegram, а тип чата один', window.wzTransportLabel('telegram') === 'Telegram-бот' && window.wzTransportLabel('tgapi') === 'Telegram' && window.channelLabel('telegram') === 'Telegram');
   const imgMsg = window.msgHtml({ direction: 'out', body: '', content_uri: '/uploads/x.png', content_type: 'image/png', content_name: 'x.png', channel: 'whatsapp', created_at: '2026-01-01 10:00' });
@@ -1025,6 +1028,10 @@ try {
   for (let i = 0; i < 60 && !$('#view').textContent.includes('это называется вебхук'); i++) await wait(100);
   const integText = $('#view').textContent;
   check('интеграции: вместо «Локальный режим» — «не подключено»', !integText.includes('Локальный режим') && integText.includes('не подключено'));
+  // каналов у заказчика бывает по одному на сотрудника, и без объяснения список
+  // номеров выглядит как ошибка
+  check('интеграции объясняют, что канал — это аккаунт, а не сотрудник', integText.includes('Канал — это один подключённый аккаунт') && integText.includes('каналов будет столько же, сколько сотрудников'), integText.slice(0, 80));
+  check('интеграции объясняют, с какого аккаунта уходит ответ', integText.includes('с того аккаунта, на который клиент написал'));
   check('интеграции: термин webhook объяснён по-русски', integText.includes('(это называется вебхук)') && integText.includes('Адрес, по которому Wazzup присылает сообщения'), integText.slice(0, 120));
 
   // ── адрес вебхука Wazzup: один для показа и для регистрации ──────────────
