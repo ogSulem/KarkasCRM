@@ -473,6 +473,9 @@ try {
   const leafTxt = await leafRes.text();
   check('иконка вкладки — вектор и открывается без входа', leafRes.status === 200 && (leafRes.headers.get('content-type') || '').includes('svg') && leafTxt.includes('<path'));
   check('лист красится цветом интерфейса, а не зашитым цветом', /fill="currentColor"/.test(leafTxt) && /viewBox="0 0 254 238"/.test(leafTxt));
+  const leafD = (leafTxt.match(/<path id="leaf" fill="currentColor" d="([^"]+)"/) || [])[1] || '';
+  const symD = (html.match(/<symbol id="karkas-leaf"[^>]*><path fill="currentColor" d="([^"]+)"/) || [])[1] || '';
+  check('контур листа в разметке тот же, что в файле вкладки', leafD.length > 200 && symD === leafD, `символ ${symD.length} против файла ${leafD.length}`);
   const photoLogo = await fetch(BASE + '/logo.png');
   await photoLogo.arrayBuffer();
   check('фото-логотип больше не отдаётся картинкой', !(photoLogo.headers.get('content-type') || '').startsWith('image/'));
