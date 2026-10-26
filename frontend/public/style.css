@@ -10,16 +10,19 @@ code,pre{font-family:var(--font-mono)}
 .login-card{background:var(--card);padding:32px;border-radius:20px;width:min(420px,100%);box-shadow:0 30px 60px -20px rgba(0,0,0,.5);display:flex;flex-direction:column;gap:12px}
 .login-card h1{margin:0}.login-card p{color:var(--muted);margin:0 0 6px}
 .err{color:#dc2626;min-height:18px;font-size:13.5px}
-/* logo & brand */
-.logo-img{width:36px;height:36px;object-fit:contain;border-radius:10px;flex-shrink:0}
-.logo-img.big{width:52px;height:52px;border-radius:14px}
+/* brand */
+.brand-leaf{width:32px;height:30px;color:#fff;transition:color .2s ease;flex-shrink:0}
+.brand-leaf.big{width:76px;height:71px}
 .brand{display:inline-flex;gap:10px;align-items:center;color:#fff;cursor:pointer;text-decoration:none;user-select:none}
 .brand-text{font-size:20px;font-weight:800;letter-spacing:-0.02em;line-height:1;display:inline-flex;align-items:baseline}
 .brand-part-karkas{color:#ffffff;transition:color .2s ease}
 .brand-part-crm{color:var(--orange);transition:color .2s ease}
 .brand:hover .brand-part-karkas{color:var(--orange)}
+.brand:hover .brand-leaf{color:var(--orange)}
 .brand-login .brand-part-karkas{color:var(--ink);transition:color .2s ease}
+.brand-login .brand-leaf{color:var(--ink)}
 .brand-login:hover .brand-part-karkas{color:var(--orange)}
+.brand-login:hover .brand-leaf{color:var(--orange)}
 /* layout */
 .layout{display:grid;grid-template-columns:260px 1fr;min-height:100vh}
 aside{background:linear-gradient(180deg,#052e16,#14532d);color:#dcefe1;padding:18px 14px;display:flex;flex-direction:column;gap:14px;position:sticky;top:0;height:100vh;overflow:auto}
@@ -205,9 +208,6 @@ html[data-theme=dark] .send-btn{background:#16a34a;border-color:#16a34a;color:#f
 .chat-attach.file{display:inline-flex;align-items:center;gap:7px;background:rgba(22,163,74,.12);color:inherit;padding:7px 11px;border-radius:9px;font-size:13px;text-decoration:none;max-width:100%}
 .chat-attach.file span{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .msg.out .chat-attach.file{background:rgba(255,255,255,.22);color:#fff}
-.logo-admin{display:flex;gap:14px;align-items:center;flex-wrap:wrap}
-.logo-admin-img{width:88px;height:88px;object-fit:contain;border:1px solid var(--line);border-radius:12px;background:#fff;padding:6px}
-.logo-admin-actions{display:flex;flex-direction:column;gap:8px;align-items:flex-start}
 .profile{padding:14px}
 /* misc */
 .modal{position:fixed;inset:0;background:rgba(15,23,42,.45);display:grid;place-items:center;z-index:50;padding:16px;backdrop-filter:blur(2px)}
@@ -453,7 +453,7 @@ body.dragging{cursor:grabbing}
 .login::after{background:radial-gradient(circle at 60% 40%,rgba(249,115,22,.5),transparent 60%);bottom:-22vw;right:-12vw;animation:aurora 26s ease-in-out infinite reverse}
 .login-card{position:relative;z-index:1;animation:fadeUp .35s ease both;background:color-mix(in srgb,var(--card) 94%,transparent);backdrop-filter:blur(10px)}
 .login-card h1{font-size:24px;letter-spacing:-.02em}
-.login-card .logo.big{animation:popIn .5s ease both}
+.login-card .brand-leaf.big{animation:popIn .5s ease both}
 .pw-wrap{position:relative}
 .pw-wrap input{padding-right:44px}
 .pw-wrap button{position:absolute;right:6px;top:50%;transform:translateY(-50%);all:unset;cursor:pointer;padding:6px 8px;font-size:15px;opacity:.7}
@@ -623,7 +623,6 @@ html[data-theme=dark] .chan.cian{background:#152a4d;color:#93c5fd}
 html[data-theme=dark] .chan.vk{background:#1d2740;color:#a8bce8}
 html[data-theme=dark] .prio.high{background:#3b1418;color:#fca5a5}
 html[data-theme=dark] .prio.low{background:#1c262c;color:#c3ced6}
-html[data-theme=dark] .logo-admin-img{background:#fff}
 html[data-theme=dark] .search-results div:hover{background:#123326;color:#86efac}
 html[data-theme=dark] .dropdown-pop{background:var(--card);border-color:var(--line);box-shadow:0 20px 40px -18px rgba(0,0,0,.8)}
 html[data-theme=dark] .cal-task{background:#123326;color:#86efac}

@@ -31,8 +31,6 @@ if (SEED_MODE_RAW && !['demo', 'base', 'off'].includes(SEED_MODE_RAW)) {
 const ROOT = fileURLToPath(new URL('.', import.meta.url));
 const DATA_DIR = process.env.DATA_DIR || join(ROOT, '../../data');
 const PUBLIC_DIR = process.env.PUBLIC_DIR || join(ROOT, '../../frontend/public');
-const BUNDLED_LOGO = join(ROOT, '../../logo.jpg');
-const CUSTOM_LOGO_DIR = join(DATA_DIR, 'logo');
 const UPLOAD_DIR = join(DATA_DIR, 'uploads');
 const ADMIN_EMAIL = (process.env.ADMIN_EMAIL || 'admin@example.com').toLowerCase();
 const ADMIN_PASSWORD = process.env.ADMIN_PASSWORD || 'admin12345';
@@ -1174,29 +1172,6 @@ const readBody = async (req, maxBytes = 5e6) => {
   catch { const e = new Error('Некорректный JSON в запросе — проверьте данные формы'); e.statusCode = 400; throw e; }
 };
 const MIME = { '.html': 'text/html', '.js': 'text/javascript', '.css': 'text/css', '.svg': 'image/svg+xml', '.png': 'image/png', '.jpg': 'image/jpeg', '.jpeg': 'image/jpeg', '.gif': 'image/gif', '.webp': 'image/webp', '.ico': 'image/x-icon', '.pdf': 'application/pdf', '.zip': 'application/zip', '.txt': 'text/plain', '.csv': 'text/csv', '.doc': 'application/msword', '.docx': 'application/vnd.openxmlformats-officedocument.wordprocessingml.document', '.xls': 'application/vnd.ms-excel', '.xlsx': 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet', '.patch': 'text/plain', '.diff': 'text/plain' };
-// Определение типа изображения по сигнатуре файла: расширению доверять нельзя
-// (логотип могут загрузить в .jpg, .png или любом другом формате).
-function sniffImage(buf, fallback = 'application/octet-stream') {
-  if (!Buffer.isBuffer(buf) || buf.length < 12) return fallback;
-  if (buf.subarray(0, 8).equals(Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]))) return 'image/png';
-  if (buf[0] === 0xff && buf[1] === 0xd8 && buf[2] === 0xff) return 'image/jpeg';
-  if (buf.toString('ascii', 0, 6) === 'GIF87a' || buf.toString('ascii', 0, 6) === 'GIF89a') return 'image/gif';
-  if (buf.toString('ascii', 0, 4) === 'RIFF' && buf.toString('ascii', 8, 12) === 'WEBP') return 'image/webp';
-  if (buf.subarray(0, 4).equals(Buffer.from([0, 0, 1, 0]))) return 'image/x-icon';
-  return fallback;
-}
-// Логотип: явный путь из LOGO_FILE → загруженный в интерфейсе → логотип из комплекта поставки.
-function findCustomLogo() {
-  try {
-    if (!existsSync(CUSTOM_LOGO_DIR)) return null;
-    const f = readdirSync(CUSTOM_LOGO_DIR).find(x => /^logo\.(png|jpe?g|gif|webp|ico)$/i.test(x));
-    return f ? join(CUSTOM_LOGO_DIR, f) : null;
-  } catch { return null; }
-}
-function resolveLogo() {
-  if (process.env.LOGO_FILE && existsSync(process.env.LOGO_FILE)) return process.env.LOGO_FILE;
-  return findCustomLogo() || (existsSync(BUNDLED_LOGO) ? BUNDLED_LOGO : null);
-}
 const IMAGE_UPLOAD_TYPES = ['image/png', 'image/jpeg', 'image/gif', 'image/webp'];
 const FILE_UPLOAD_TYPES = [...IMAGE_UPLOAD_TYPES, 'application/pdf', 'text/plain', 'text/csv', 'application/zip',
   'application/msword', 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
@@ -2237,29 +2212,6 @@ ${user?.name || ''}`.trim();
       log(`Файл загружен в чат #${cid}: ${safeName}`, 'conversations', cid, user.name);
       return json(res, 201, { url: '/uploads/' + stored, name: safeName, contentType, size: raw.length });
     }
-    // ===== логотип компании: загрузка и возврат к стандартному =====
-    if (p === '/api/logo' && req.method === 'POST') {
-      if (!requireAdmin(user, res)) return;
-      const b = await readBody(req, 8e6);
-      const contentType = String(b.contentType || '').split(';')[0].trim().toLowerCase();
-      if (!IMAGE_UPLOAD_TYPES.includes(contentType)) return json(res, 400, { error: 'Логотип: только PNG, JPEG, GIF или WebP' });
-      const raw = Buffer.from(String(b.dataBase64 || '').split(',').pop() || '', 'base64');
-      if (!raw.length || raw.length > 4 * 1024 * 1024) return json(res, 400, { error: 'Логотип пустой или больше 4 МБ' });
-      const realType = sniffImage(raw);
-      if (!IMAGE_UPLOAD_TYPES.includes(realType)) return json(res, 400, { error: 'Содержимое файла не является изображением' });
-      const ext = { 'image/png': 'png', 'image/jpeg': 'jpg', 'image/gif': 'gif', 'image/webp': 'webp' }[realType];
-      mkdir(CUSTOM_LOGO_DIR, { recursive: true });
-      for (const f of readdirSync(CUSTOM_LOGO_DIR)) if (/^logo\.(png|jpe?g|gif|webp|ico)$/i.test(f)) { try { unlinkSync(join(CUSTOM_LOGO_DIR, f)); } catch { } }
-      writeFileSync(join(CUSTOM_LOGO_DIR, 'logo.' + ext), raw);
-      log('Логотип компании обновлён', null, null, user.name);
-      return json(res, 200, { saved: true, url: '/logo.png?ts=' + Date.now() });
-    }
-    if (p === '/api/logo' && req.method === 'DELETE') {
-      if (!requireAdmin(user, res)) return;
-      if (existsSync(CUSTOM_LOGO_DIR)) for (const f of readdirSync(CUSTOM_LOGO_DIR)) if (/^logo\.(png|jpe?g|gif|webp|ico)$/i.test(f)) { try { unlinkSync(join(CUSTOM_LOGO_DIR, f)); } catch { } }
-      log('Логотип сброшен на стандартный', null, null, user.name);
-      return json(res, 200, { saved: false, url: '/logo.png' });
-    }
     // CSV export/import
     if (p === '/api/export/contacts') {
       // свои поля тоже попадают в выгрузку: колонки называются так, как их назвал пользователь
@@ -2374,7 +2326,6 @@ ${user?.name || ''}`.trim();
           advanced: { frame_ancestors: getSetting('FRAME_ANCESTORS'), login_rate_limit: num('LOGIN_RATE_LIMIT', 12) },
           auto_deal: getSetting('AUTO_DEAL', '1'), auto_assign: getSetting('AUTO_ASSIGN', '0'),
           webhook: { secret: getSetting('WEBHOOK_SECRET'), configured: !!getSetting('WEBHOOK_SECRET') },
-          logo: { custom: !!findCustomLogo(), env: !!process.env.LOGO_FILE },
           wazzup: { api_key: mask(getSetting('WAZZUP_API_KEY')), api_url: getSetting('WAZZUP_API_URL', 'https://api.wazzup24.com/v3'), channel_id: getSetting('WAZZUP_CHANNEL_ID'), webhook_secret: getSetting('WAZZUP_WEBHOOK_SECRET'), configured: !!getSetting('WAZZUP_API_KEY') },
         });
       }
@@ -2569,25 +2520,9 @@ ${user?.name || ''}`.trim();
       return createReadStream(src).pipe(res);
     }
 
-    // логотип и favicon: путь один (/logo.png), а формат определяем по содержимому —
-    // поэтому загрузка JPEG/PNG/WebP не ломает отображение
-    if (p === '/logo.png' || p === '/favicon.ico') {
-      const logoPath = resolveLogo();
-      if (logoPath && existsSync(logoPath)) {
-        const stLogo = statSync(logoPath);
-        // ETag по содержимому: браузер не скачивает логотип заново, но мгновенно
-        // подхватывает замену (новый файл — новый ETag, старый — ответ 304).
-        const etag = `"${stLogo.size.toString(16)}-${Math.round(stLogo.mtimeMs).toString(16)}"`;
-        const headers = {
-          'Cache-Control': 'no-cache', ETag: etag,
-          'Last-Modified': new Date(stLogo.mtimeMs).toUTCString(),
-        };
-        if (req.headers['if-none-match'] === etag) { res.writeHead(304, headers); return res.end(); }
-        const buf = readFileSync(logoPath);
-        res.writeHead(200, { ...headers, 'Content-Type': sniffImage(buf, 'image/png'), 'Content-Length': buf.length });
-        return res.end(buf);
-      }
-    }
+    // прежний адрес иконки: браузеры и старые закладки просят /favicon.ico,
+    // отправляем их к векторному файлу одним ответом без тела
+    if (p === '/favicon.ico') { res.writeHead(301, { Location: '/favicon.svg' }); return res.end(); }
 
     let file = normalize(join(PUBLIC_DIR, p === '/' ? 'index.html' : p));
     if (existsSync(file) && statSync(file).isDirectory()) {

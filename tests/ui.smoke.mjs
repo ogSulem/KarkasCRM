@@ -54,7 +54,7 @@ Object.assign(window, {
   siteFormCode, bulkApply, openContactCard, openDealCard, api, get token() { return token },
   icon, normalizeDue, taskDueMeta, isAscii, endSession, togglePass,
   toggleUserMenu, closeUserMenu, toggleTaskSelect, ICON_PATHS, msgHtml, channelOptions,
-  uploadChatFile, uploadLogo, deleteLogo, checkHealth, refreshLogo,
+  uploadChatFile, checkHealth,
   sourceLabel, channelLabel, roleLabel, askConfirm, askInput, translit, SOURCE_LABELS, CHANNEL_LABELS, ROLE_LABELS,
   isoDate, todayISO, fmtDayMonth, kindStage, fld, grid2, formLegend, pushToast, notify, captureFocus, restoreFocus, PALETTE_ACTIONS,
   openMenu, closeMenu, contactsMoreMenu, openOurPrices, comparePrices, setBuiltinTab, BUILTIN_FIELDS, amAdmin, canEdit,
@@ -468,16 +468,16 @@ try {
   const badUp = await fetch(BASE + `/api/conversations/${conv.id}/upload`, { method: 'POST', headers: authH(), body: JSON.stringify({ filename: 'x.exe', contentType: 'application/x-msdownload', dataBase64: PNG_B64 }) });
   check('запрещённый тип файла отклоняется', badUp.status === 400);
 
-  // ── логотип компании ─────────────────────────────────────────────────────
-  const logoUp = await (await fetch(BASE + '/api/logo', { method: 'POST', headers: authH(), body: JSON.stringify({ filename: 'logo.jpg', contentType: 'image/jpeg', dataBase64: PNG_B64 }) })).json();
-  check('логотип загружается администратором', logoUp.saved === true && /^\/logo\.png/.test(logoUp.url));
-  const logoServed = await fetch(BASE + '/logo.png?ts=1');
-  const logoBytes = Buffer.from(await logoServed.arrayBuffer()).subarray(0, 4).toString('hex');
-  check('формат логотипа определяется по содержимому, а не расширению', logoServed.status === 200 && (logoServed.headers.get('content-type') || '').includes('image/png') && logoBytes === '89504e47');
-  const mgrCannotLogo = await fetch(BASE + '/api/logo', { method: 'POST', headers: { 'Content-Type': 'application/json', Authorization: 'Bearer manager-token' }, body: '{}' });
-  check('чужой токен не проходит авторизацию на загрузке логотипа', mgrCannotLogo.status === 401);
-  const logoDel = await (await fetch(BASE + '/api/logo', { method: 'DELETE', headers: authH() })).json();
-  check('логотип можно вернуть к стандартному', logoDel.saved === false);
+  // ── бренд: векторный лист вместо фото-логотипа ───────────────────────────
+  const leafRes = await fetch(BASE + '/favicon.svg');
+  const leafTxt = await leafRes.text();
+  check('иконка вкладки — вектор и открывается без входа', leafRes.status === 200 && (leafRes.headers.get('content-type') || '').includes('svg') && leafTxt.includes('<path'));
+  check('лист красится цветом интерфейса, а не зашитым цветом', /fill="currentColor"/.test(leafTxt) && /viewBox="0 0 254 238"/.test(leafTxt));
+  const photoLogo = await fetch(BASE + '/logo.png');
+  await photoLogo.arrayBuffer();
+  check('фото-логотип больше не отдаётся картинкой', !(photoLogo.headers.get('content-type') || '').startsWith('image/'));
+  const logoApi = await fetch(BASE + '/api/logo', { method: 'POST', headers: authH(), body: '{}' });
+  check('адрес загрузки фото-логотипа закрыт', logoApi.status === 404);
 
   // ── задачи: фильтры, календарь, мультивыбор ──────────────────────────────
   window.go('tasks'); await wait(350);
@@ -705,14 +705,16 @@ try {
   check('normalizeDue/taskDueMeta работают', window.normalizeDue('сегодня 14:00').includes('14:00') && window.normalizeDue('15.10.2026 18:30') === '2026-10-15 18:30' && window.taskDueMeta('2020-01-01 10:00', false).overdue === true);
 
   // ── бренд, логотип, фавикон ──────────────────────────────────────────────
-  const logoRes = await fetch(BASE + '/logo.png');
-  check('/logo.png отдаёт встроенный JPEG', logoRes.status === 200 && (logoRes.headers.get('content-type') || '').includes('image/jpeg'));
-  const favRes = await fetch(BASE + '/favicon.ico');
-  check('/favicon.ico доступен', favRes.status === 200);
+  const favRes = await fetch(BASE + '/favicon.svg');
+  check('/favicon.svg отдаёт векторный лист', favRes.status === 200 && (favRes.headers.get('content-type') || '').includes('svg'));
+  const favIco = await fetch(BASE + '/favicon.ico', { redirect: 'manual' });
+  check('прежний /favicon.ico уводит на вектор', favIco.status === 301 && favIco.headers.get('location') === '/favicon.svg');
   check('бренд: Каркас + CRM', $('.brand-part-karkas')?.textContent === 'Каркас' && $('.brand-part-crm')?.textContent === 'CRM');
   check('клик по бренду ведёт на дашборд', ($('aside .brand')?.getAttribute('onclick') || '').includes("go('dashboard')"));
-  check('логотип в бренде имеет класс logo-img', Boolean($('.brand img.logo-img')));
-  check('CSS содержит реакцию бренда на наведение', cssText.includes('.brand:hover .brand-part-karkas'));
+  check('лист в меню векторный и красится как слово Каркас', Boolean($('.brand svg.brand-leaf use')) && cssText.includes('.brand:hover .brand-leaf'));
+  check('лист на странице входа тоже векторный', Boolean($('.brand-login svg.brand-leaf use')) && cssText.includes('.brand-login .brand-leaf'));
+  check('фото-логотипа в интерфейсе не осталось', !$('img[src*="logo"]'));
+  check('CSS содержит реакцию бренда на наведение', cssText.includes('.brand:hover .brand-part-karkas') && cssText.includes('.brand:hover .brand-leaf'));
 
   check('вход: логотип над названием и подсказка о доступе', cssText.includes('.login-card .brand-login{flex-direction:column') && $('.login-note')?.textContent.includes('администратор'));
   await window.openUser();
@@ -907,13 +909,19 @@ try {
 
   // ── роли ─────────────────────────────────────────────────────────────────
   await apiPost('/api/users', { name: 'Менеджер Тест', email: 'mgr_ui@example.com', password: 'password123', role: 'manager' });
-  const mgrLogin = await (await fetch(BASE + '/api/auth/login', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ email: 'mgr_ui@example.com', password: 'password123' }) })).json();
+  let mgrLogin = await (await fetch(BASE + '/api/auth/login', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ email: 'mgr_ui@example.com', password: 'password123' }) })).json();
+  // временный пароль обязывает сменить его при первом входе: без этого любой
+  // запрос менеджера отвечал 403 и проверки прав теряли смысл
+  if (mgrLogin.user?.must_change_password) {
+    const ch = await (await fetch(BASE + '/api/me/password', { method: 'POST', headers: { 'Content-Type': 'application/json', Authorization: 'Bearer ' + mgrLogin.token }, body: JSON.stringify({ old_password: 'password123', new_password: 'password1234' }) })).json();
+    mgrLogin = { ...mgrLogin, token: ch.token };
+  }
   const mgrToken = mgrLogin.token;
   check('менеджер создаётся и входит', !!mgrToken);
   const set403 = await fetch(BASE + '/api/settings', { method: 'PUT', headers: { 'Content-Type': 'application/json', Authorization: 'Bearer ' + mgrToken }, body: JSON.stringify({ COMPANY_NAME: 'Hack' }) });
   check('менеджеру запрещено менять настройки (403)', set403.status === 403);
-  const logo403 = await fetch(BASE + '/api/logo', { method: 'POST', headers: { 'Content-Type': 'application/json', Authorization: 'Bearer ' + mgrToken }, body: JSON.stringify({}) });
-  check('менеджеру запрещено менять логотип (403)', logo403.status === 403);
+  const logoGone = await fetch(BASE + '/api/logo', { method: 'POST', headers: { 'Content-Type': 'application/json', Authorization: 'Bearer ' + mgrToken }, body: JSON.stringify({}) });
+  check('загрузка фото-логотипа больше не существует (404)', logoGone.status === 404);
   await apiPost('/api/users', { name: 'Наблюдатель Тест', email: 'view_ui@example.com', password: 'password123', role: 'viewer' });
   const viewLogin = await (await fetch(BASE + '/api/auth/login', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ email: 'view_ui@example.com', password: 'password123' }) })).json();
   const view403 = await fetch(BASE + '/api/contacts', { method: 'POST', headers: { 'Content-Type': 'application/json', Authorization: 'Bearer ' + viewLogin.token }, body: JSON.stringify({ name: 'Hack' }) });

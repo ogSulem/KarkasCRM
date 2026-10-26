@@ -2998,18 +2998,6 @@ async function settings(v) {
       <div id="s3status">${s3line(s.s3)}</div>
       <p class="form-hint">Секретный ключ хранится в базе CRM и наружу не показывается. Если выгрузка не удалась, копия всё равно остаётся на сервере, а причина пишется выше.</p>
      </div>
-     <div class="card"><h3>Логотип компании</h3>
-      <p><small>Загрузка необязательна: по умолчанию используется logo.jpg из комплекта. PNG, JPG, GIF или WebP, до 4 МБ. Логотип показывается на странице входа, в боковой панели, во вкладке браузера и на документах.</small></p>
-      <div class="logo-admin">
-        <img id="logoPreview" src="/logo.png?ts=${Date.now()}" alt="Логотип" class="logo-admin-img">
-        <div class="logo-admin-actions">
-          <button type="button" class="btn primary sm" onclick="document.getElementById('logoFile').click()">${icon('upload', 13)} Загрузить логотип</button>
-          <input type="file" id="logoFile" class="hidden" accept="image/png,image/jpeg,image/gif,image/webp" onchange="uploadLogo(this)">
-          <button type="button" class="btn danger sm" id="logoDeleteBtn" ${s.logo && s.logo.custom ? '' : 'disabled'} onclick="deleteLogo()">Удалить логотип</button>
-        </div>
-      </div>
-      ${s.logo && s.logo.env ? '<p><small>Логотип задан на сервере при установке — он важнее загруженного здесь.</small></p>' : ''}
-    </div>
      <div class="card"><h3>Обслуживание и уведомления</h3>
       <p><small>Резервные копии создаются автоматически и хранятся указанное число дней. Просроченные задачи можно отправлять и во внешний сервис — например, в Slack или Telegram-бот (если он у вас есть).</small></p>
       <form onsubmit="return saveMaintenance(event)">
@@ -3556,38 +3544,6 @@ function restoreBackup(file) {
       } catch (e) { toast(e.message, 'err'); }
     })();
   }, { okText: 'Восстановить', danger: false });
-}
-// Загрузка логотипа компании: картинка проверяется сервером по содержимому, а не по расширению.
-async function uploadLogo(input) {
-  const file = input.files && input.files[0];
-  input.value = '';
-  if (!file) return;
-  if (file.size > 4 * 1024 * 1024) return toast('Файл больше 4 МБ — выберите изображение поменьше');
-  const reader = new FileReader();
-  reader.onload = async () => {
-    try {
-      const dataBase64 = String(reader.result).split(',').pop();
-      const r = await api('/api/logo', { method: 'POST', body: JSON.stringify({ filename: file.name, contentType: file.type, dataBase64 }) });
-      refreshLogo(r.url);
-      toast('Логотип обновлён');
-      render();
-    } catch (err) { toast(err.message, 'err'); }
-  };
-  reader.readAsDataURL(file);
-}
-function deleteLogo() {
-  askConfirm('Удалить загруженный логотип? Будет использоваться стандартный.', async () => {
-    const r = await api('/api/logo', { method: 'DELETE' });
-    refreshLogo(r.url);
-    toast('Логотип удалён');
-    render();
-  }, { okText: 'Удалить логотип' });
-}
-function refreshLogo(url) {
-  const withTs = url.includes('?') ? url : url + '?ts=' + Date.now();
-  $$('img[src^="/logo.png"]').forEach(img => { img.src = withTs; });
-  const fav = document.querySelector('link[rel="icon"]');
-  if (fav) fav.href = withTs;
 }
 async function importContacts() { openModal(`<h3>Импорт контактов из CSV</h3><p><small>Первая строка — заголовки: <code>Имя;Телефон;E-mail;Компания</code>. Разделитель — <code>;</code> или <code>,</code>.</small></p><form onsubmit="return doImport(event)"><label>Вставьте CSV<textarea name="csv" rows="8" placeholder="Имя;Телефон;E-mail;Компания&#10;Иван Петров;+7 900 111-22-33;ivan@mail.ru;ООО Иван"></textarea></label><label>…или выберите файл<input type="file" accept=".csv,text/csv" onchange="csvFromFile(this)"></label><button class="btn primary w">Импортировать</button></form>`); }
 function csvFromFile(input) { const f = input.files[0]; if (!f) return; const r = new FileReader(); r.onload = () => { $('#modalBody textarea').value = r.result; }; r.readAsText(f); }
