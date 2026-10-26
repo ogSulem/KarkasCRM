@@ -606,7 +606,7 @@ try {
     check('в форме есть сумма и описание', /name="amount"/.test(html) && /name="title"/.test(html));
     check('находку можно удалить', /deleteFinding\(3,7\)/.test(html));
     const emptyHtml = window.findingsBlock({ id: 8, findings: [] });
-    check('без записей блок объясняет, что делать', /Записей пока нет/.test(emptyHtml) && /откройте реестр|Откройте реестр/i.test(emptyHtml));
+    check('без записей блок объясняет, что делать', /Записей пока нет/.test(emptyHtml) && /Запишите, что увидели в реестре/.test(emptyHtml));
   }
   window.closeModal();
   // «Ссылка на прайс»: сервер умел подтягивать таблицу конкурента по адресу,
@@ -634,7 +634,7 @@ try {
     priceBtn.click(); await wait(400);
     check('прайс-лист открывается таблицей, а не просьбой загрузить файл', /Наш прайс-лист/.test($('#modalBody').textContent) && $$('#ourPriceTable tr').length === 3 && !$('#modalBody input[type=file]'), $('#modalBody').textContent.replace(/\s+/g, ' ').slice(0, 90));
     check('прайс можно скачать, загрузить и открыть как каталог', /Скачать прайс/.test($('#modalBody').textContent) && /Загрузить из файла/.test($('#modalBody').textContent) && /Открыть каталог/.test($('#modalBody').textContent));
-    check('объяснено, что прайс-лист и каталог — один список', /Это ваш каталог/.test($('#modalBody').textContent) || /это ваш каталог/i.test($('#modalBody').textContent), $('#modalBody').textContent.replace(/\s+/g, ' ').slice(0, 90));
+    check('объяснено, что прайс-лист и каталог — один список', /Ваш прайс-лист/.test($('#modalBody').textContent) || /это ваш каталог/i.test($('#modalBody').textContent), $('#modalBody').textContent.replace(/\s+/g, ' ').slice(0, 90));
     check('в таблице цен есть поиск по позициям', Boolean($('#ourPriceFilter')));
     window.filterOurPrices('баня'); await wait(60);
     check('поиск по таблице цен работает', $$('#ourPriceTable tr').length === 2 && /Баня/.test($('#ourPriceTable').textContent));
@@ -682,7 +682,7 @@ try {
     const dash = $('#view').innerHTML;
     check('на рабочем столе «Мои задачи» стоят выше ленты событий', dash.indexOf('Мои задачи') > -1 && dash.indexOf('Мои задачи') < dash.indexOf('Последние события компании'));
     check('блока «Быстрые действия» на рабочем столе нет', !/Быстрые действия/.test(dash));
-    check('лента событий объясняет, зачем она', /что недавно меняли коллеги/.test($('#view').textContent));
+    check('лента событий объясняет, зачем она', /недавно меняли коллеги/.test($('#view').textContent));
   }
 
   // ── тема и меню пользователя ─────────────────────────────────────────────
@@ -714,10 +714,10 @@ try {
   check('прежний /favicon.ico уводит на вектор', favIco.status === 301 && favIco.headers.get('location') === '/favicon.svg');
   check('бренд: Каркас + CRM', $('.brand-part-karkas')?.textContent === 'Каркас' && $('.brand-part-crm')?.textContent === 'CRM');
   check('клик по бренду ведёт на дашборд', ($('aside .brand')?.getAttribute('onclick') || '').includes("go('dashboard')"));
-  check('лист в меню векторный и красится как слово Каркас', Boolean($('.brand svg.brand-leaf use')) && cssText.includes('.brand:hover .brand-leaf'));
-  check('лист на странице входа тоже векторный', Boolean($('.brand-login svg.brand-leaf use')) && cssText.includes('.brand-login .brand-leaf'));
+  check('лист в меню векторный и оранжевый, как слово Каркас', Boolean($('.brand svg.brand-leaf use')) && cssText.includes('.brand-leaf{width:32px;height:30px;color:var(--orange)') && cssText.includes('.brand-part-karkas{color:var(--orange)}'));
+  check('лист на странице входа тоже векторный, цвет не перебит', Boolean($('.brand-login svg.brand-leaf use')) && !/\.brand-login \.brand-leaf\{color:/.test(cssText));
   check('фото-логотипа в интерфейсе не осталось', !$('img[src*="logo"]'));
-  check('CSS содержит реакцию бренда на наведение', cssText.includes('.brand:hover .brand-part-karkas') && cssText.includes('.brand:hover .brand-leaf'));
+  check('при наведении подсвечивается слово CRM', cssText.includes('.brand:hover .brand-part-crm') && cssText.includes('.brand-login:hover .brand-part-crm'));
 
   check('вход: логотип над названием и подсказка о доступе', cssText.includes('.login-card .brand-login{flex-direction:column') && $('.login-note')?.textContent.includes('администратор'));
   await window.openUser();

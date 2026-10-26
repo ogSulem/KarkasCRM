@@ -647,7 +647,7 @@ function myTasksBlock() {
 const fld = (label, inner, required = false) =>
   `<label class="${required ? 'req' : 'opt'}">${label}${required ? '<span class="star" aria-hidden="true">*</span>' : ''}${inner}</label>`;
 const grid2 = html => `<div class="form-grid2">${html}</div>`;
-const formLegend = () => `<p class="form-hint"><span class="star">*</span> — обязательные поля: они идут первыми, без них карточка не сохранится. Остальные можно заполнить позже.</p>`;
+const formLegend = () => `<p class="form-hint"><span class="star">*</span> — обязательные поля. Остальные можно заполнить позже.</p>`;
 
 // ── свои поля (custom fields) ─────────────────────────────────────────────
 function cfFor(entity) {
@@ -976,7 +976,7 @@ async function openNotifications() {
   };
   const empty = 'Ничего не ждёт — можно спокойно работать с клиентами.';
   openModal(`<h3>${icon('bell', 18)} Уведомления</h3>
-   <p class="form-hint">Здесь всё, что требует вашего внимания сейчас. Колокольчик показывает общее число, а сообщения клиентов всплывают внизу экрана с кнопкой «Открыть чат».</p>
+   <p class="form-hint">Просроченные задачи и новые сообщения клиентов. Сообщения всплывают внизу экрана с кнопкой «Открыть чат».</p>
    <h4 class="danger-text" style="margin:12px 0 4px">Просрочено: ${over.length}</h4>
    <p class="form-hint" style="margin:0 0 4px">Срок уже прошёл — лучше заняться этим первым.</p>
    ${over.map(rowHtml).join('') || `<small>${empty}</small>`}
@@ -1090,7 +1090,7 @@ async function dashboard(v) {
    <div class="card"><div class="row" style="border:0"><h3>Мои задачи</h3><button class="btn sm" onclick="go('tasks')">Все задачи</button></div>
     <div class="list">${myTasksBlock()}</div></div>
    <div class="card"><h3>Последние события компании</h3>
-    <p class="form-hint">Короткая лента о том, что недавно меняли коллеги: кто добавил клиента, перевёл сделку на этап или отправил письмо. Руководителю видно работу без отчётов, а себе — что уже сделано.</p>
+    <p class="form-hint">Что недавно меняли коллеги: клиенты, этапы сделок, письма, документы.</p>
     <div class="list feed">${d.activities.map(a => `<div class="row"><span>• ${esc(a.text)}<br><small>${esc(dt(a.created_at))}${a.user_name ? ' · ' + esc(a.user_name) : ''}</small></span></div>`).join('') || '<small>Пока пусто</small>'}</div></div>
   </div></div>`;
 }
@@ -1220,7 +1220,7 @@ async function sendDoc(id) {
     ${fld('Какой документ', `<select name="doc"><option value="quote">Коммерческое предложение</option><option value="invoice">Счёт на оплату</option></select>`, true)}
     ${fld('E-mail клиента', `<input name="to" type="email" required value="${esc(deal.contact_email || '')}" placeholder="client@company.ru">`, true)}
     ${fld('Текст письма', `<textarea name="body" rows="3" placeholder="${esc(deal.contact_name || 'Добрый день')}! Направляю документы по вашему запросу…"></textarea>`)}
-    <p class="form-hint">К письму добавится ссылка на документ: она открывается без входа в CRM и действует ограниченное время — срок указан в самом письме. Файл клиент сохраняет в браузере: «Печать» → «Сохранить как PDF».</p>
+    <p class="form-hint">В письме будет ссылка на документ: открывается без входа в CRM, срок действия указан в письме.</p>
     <div style="display:flex;gap:8px;justify-content:flex-end;margin-top:14px">
       <button type="button" class="btn" onclick="openDealCard(${id})">Отмена</button>
       <button class="btn primary">Отправить</button>
@@ -1404,7 +1404,6 @@ async function editNote(id, entity_type, entity_id) {
   try { n = await api('/api/notes/' + id); } catch (e) { return toast(e.message, 'err'); }
   openModal(`<h3>Изменить заметку</h3><form onsubmit="return saveNote(event,${id},'${entity_type}',${entity_id})">
    <label>Текст заметки<textarea name="body" rows="4" required>${esc(n.body || '')}</textarea></label>
-   <p class="form-hint">Автор и дата создания сохраняются и видны в истории карточки.</p>
    <div style="display:flex;gap:8px;flex-wrap:wrap"><button class="btn primary">Сохранить заметку</button>
    <button type="button" class="btn" onclick="reopenCard('${entity_type}',${entity_id})">Отмена</button></div></form>`);
 }
@@ -2342,7 +2341,7 @@ async function openOurPrices(backId = null) {
   state.ourPricesBack = backId || null;
   const sum = rows.reduce((a, r) => a + (Number(r.price) || 0), 0);
   openModal(`<h3>${icon('excel', 18)} Наш прайс-лист</h3>
-   <p class="form-hint">Это ваш <b>каталог</b> — один и тот же список: эти позиции подставляются в сделки, и эти же цены CRM сравнивает с ценами конкурента во вкладке «Сравнение цен». Позиций: <b>${rows.length}</b>${rows.length ? ` · суммарно на <b>${fmt(sum)}</b>` : ''}.</p>
+   <p class="form-hint">Ваш прайс-лист: позиции подставляются в сделки, и эти же цены сравниваются с ценами конкурентов. Позиций: <b>${rows.length}</b>${rows.length ? ` · суммарно на <b>${fmt(sum)}</b>` : ''}.</p>
    <div style="display:flex;gap:8px;flex-wrap:wrap;margin:10px 0">
      <button class="btn sm" title="Скачать прайс-лист таблицей CSV" onclick="download('/api/prices/export?scope=ours','price-list.csv')">${icon('download', 13)} Скачать прайс (CSV)</button>
      ${amAdmin() ? `<button class="btn sm primary" onclick="openPriceImport(null,'ours')">${icon('upload', 13)} Загрузить из файла</button>` : ''}
@@ -2454,7 +2453,7 @@ const FINDING_KINDS = ['долги', 'суды', 'связи', 'прочее'];
 function findingsBlock(c) {
   const finds = c.findings || [];
   return `<hr><div class="row" style="border:0"><h4>Найдено вручную (${finds.length})</h4></div>
-   <p class="form-hint">Откройте реестр по ссылке выше и запишите, что увидели: сумма долга, число дел, связанные организации. Запись попадает в отчёт и учитывается в оценке риска.</p>
+   <p class="form-hint">Запишите, что увидели в реестре: сумма долга, число дел, связанные организации. Запись учитывается в оценке риска.</p>
    <div class="list">${finds.map(f => `<div class="row"><span><b>${esc(f.kind || 'прочее')}</b>${f.title ? ': ' + esc(f.title) : ''}
       ${f.amount ? `<br><small>${f.kind === 'суды' ? esc(String(Math.round(f.amount))) + ' дел' : esc(fmt(f.amount))}</small>` : ''}
       ${f.note ? `<br><small>${esc(f.note)}</small>` : ''}
@@ -2724,9 +2723,9 @@ async function settings(v) {
       <label>Ключ доступа Wazzup<input id="wzKey" placeholder="${esc(s.wazzup.api_key || 'вставьте ключ из личного кабинета Wazzup')}"></label>
       <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px"><label>Куда отправлять ответы по умолчанию<select id="wzChannel"><option value="">— выберите канал —</option>${chans.map(c => `<option value="${esc(c.external_id)}" ${c.external_id === s.wazzup.channel_id ? 'selected' : ''}>${esc(wzTitle(c))}${wzAlive(c) ? '' : ' — не работает'}</option>`).join('')}</select></label>
       <label>Код защиты адреса (необязательно)<input id="wzSecret" value="${esc(s.wazzup.webhook_secret || '')}" placeholder="придумайте длинный код"></label></div>
-      <p class="form-hint">Код защиты подставляется в адрес ниже. С ним никто посторонний не сможет присылать в CRM поддельные сообщения.</p>
+      <p class="form-hint">Код подставляется в адрес вебхука и защищает от поддельных сообщений.</p>
       <label>Адрес сервера Wazzup<input id="wzUrl" value="${esc(s.wazzup.api_url)}"></label>
-      <p class="form-hint">Обычно менять не нужно — это адрес, по которому CRM общается с Wazzup.</p>
+      <p class="form-hint">Адрес API Wazzup. Менять обычно не нужно.</p>
       <div style="display:flex;gap:8px;flex-wrap:wrap"><button class="btn primary" onclick="saveWazzup()">Сохранить</button><button class="btn" onclick="testWazzup()">${icon('sync', 13)} Проверить и синхронизировать каналы</button></div>
       <hr><p><b>Адрес, по которому Wazzup присылает сообщения</b></p>
       <p><small>Это «входная дверь» для сообщений: когда клиент пишет в WhatsApp или Telegram, Wazzup передаёт сообщение на этот адрес, и оно появляется в «Чатах». Вставьте адрес в личном кабинете Wazzup (раздел с адресами уведомлений) или нажмите кнопку ниже — CRM зарегистрирует его сама.</small></p>
@@ -2761,7 +2760,7 @@ async function settings(v) {
       <p>Статус: <b class="${s.email.configured ? 'green' : ''}">${s.email.configured ? 'почта настроена' : 'не настроена'}</b></p>
       <form onsubmit="return saveEmail(event)">
        <div style="display:grid;grid-template-columns:2fr 1fr;gap:12px"><label>Почтовый сервер<input name="SMTP_HOST" value="${esc(s.email.host || '')}" placeholder="smtp.mail.ru"></label><label>Порт<input name="SMTP_PORT" value="${esc(s.email.port || '587')}" placeholder="465 или 587"></label></div>
-       <p class="form-hint">Адрес почтового сервера спрашивается в справке вашей почты (Яндекс, Mail.ru, Gmail): обычно <code>smtp.название.ru</code>. Порт и шифрование ниже обычно определяются сами.</p>
+       <p class="form-hint">Обычно <code>smtp.название.ru</code>, точно — в справке вашей почты. Порт и шифрование определяются сами.</p>
        <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px"><label>Логин (адрес ящика)<input name="SMTP_USER" value="${esc(s.email.user || '')}" placeholder="crm@company.ru"></label><label>Пароль приложения<input name="SMTP_PASS" type="password" placeholder="${s.email.pass ? '•••••• (сохранён)' : 'пароль приложения'}"></label></div>
        <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px"><label>Защита соединения<select name="SMTP_SECURE"><option value="" ${!s.email.secure ? 'selected' : ''}>Авто: STARTTLS</option><option value="1" ${s.email.secure === '1' ? 'selected' : ''}>SSL/TLS сразу (обычно 465)</option><option value="0" ${s.email.secure === '0' ? 'selected' : ''}>Без шифрования (внутренний сервер)</option></select></label><label>Адрес отправителя<input name="MAIL_FROM" value="${esc(s.email.from || '')}" placeholder="crm@company.ru"></label></div>
        <label>Адрес для проверочного письма<input name="SMTP_TEST_TO" value="${esc(s.email.test_to || '')}" placeholder="admin@company.ru"></label>
@@ -2806,7 +2805,7 @@ async function settings(v) {
       : (src.configured ? 'ключ задан — данные подтягиваются сами' : 'ключа нет — данные по ссылкам');
     body = `<div class="settings-cols"><div>
      <div class="card"><h3>Источники проверки</h3>
-      <p class="form-hint">Ключи <b>не обязательны</b>. Без них CRM не молчит: в отчёте остаются прямые ссылки на официальные реестры, по которым сотрудник проверяет компанию за минуту. С ключом те же данные подтягиваются сами и попадают в риск-оценку.</p>
+      <p class="form-hint">Ключи <b>не обязательны</b>: без них в отчёте остаются ссылки на официальные реестры, с ними данные подтягиваются сами и попадают в риск-оценку.</p>
       <table class="mini"><tr><th>Источник</th><th>Что даёт</th><th>Ключ</th><th>Готовность</th></tr>${cs.sources.map(src => `<tr><td><b>${esc(src.name)}</b></td><td><small>${esc(src.about)}</small></td><td>${src.needs.length ? (src.configured ? '<span class="tag">задан</span>' : '<span class="tag grey">не задан</span>') : '<span class="tag grey">не нужен</span>'}</td><td><small>${esc(readyLabel(src))}</small></td></tr>`).join('')}</table>
       <div style="display:flex;gap:8px;flex-wrap:wrap;margin-top:10px">
         ${isAdmin ? `<button class="btn sm" onclick="probeSources(this)">${icon('sync', 13)} Проверить доступность источников</button>` : ''}
@@ -2815,7 +2814,7 @@ async function settings(v) {
       <div id="srcProbe" style="margin-top:10px"></div>
      </div>
      ${isAdmin ? `<div class="card"><h3>Ключи источников</h3>
-      <p class="form-hint">Хранятся на вашем сервере и нужны только тем источникам, которые отдают данные по ключу. Пустое поле — источник работает по ссылкам.</p>
+      <p class="form-hint">Нужны только источникам, которые отдают данные по ключу. Пусто — источник работает по ссылкам.</p>
       <form onsubmit="return saveCompetitorKeys(event)">${KEY_FIELDS.map(([k, label, hint]) => `<label>${esc(label)}<input name="${k}" placeholder="${cs.keys[k] ? '•••••• (сохранён)' : 'вставьте ключ или оставьте пустым'}"></label><p class="form-hint" style="margin:-6px 0 10px">${esc(hint)}</p>`).join('')}<button class="btn primary">Сохранить ключи</button></form></div>`
       : `<div class="card"><h3>Ключи источников</h3><p><small>Ключи задаёт администратор: Настройки → Конкуренты и источники. Отчёты, ссылки и сравнение цен доступны вам и без ключей.</small></p></div>`}
     </div><div>
@@ -2868,12 +2867,12 @@ async function settings(v) {
       : a.action_value) + delayText(a);
     body = `<div class="settings-cols"><div>
      <div class="card"><h3>Что CRM делает сама</h3>
-      <p class="form-hint">Эти два правила работают всегда — создавать их не нужно. Они касаются обращений из чатов, формы на сайте и вебхуков.</p>
+      <p class="form-hint">Эти два правила работают всегда, создавать их не нужно.</p>
       <form onsubmit="return saveCompanySettings(event)">
        <label>Автосоздание сделки при обращении<select name="AUTO_DEAL"><option value="1" ${s.auto_deal === '1' ? 'selected' : ''}>Да — создавать сделку «Неразобранное»</option><option value="0" ${s.auto_deal !== '1' ? 'selected' : ''}>Нет</option></select></label>
-       <p class="form-hint">Когда клиент впервые пишет в чат или оставляет заявку на сайте, CRM сразу создаёт сделку. Так обращение не потеряется, даже если менеджер ещё не открыл чат.</p>
+       <p class="form-hint">Сделка создаётся сразу при первом обращении: чат, форма на сайте, вебхук.</p>
        <label>Распределять новые обращения между менеджерами<select name="AUTO_ASSIGN"><option value="0" ${s.auto_assign !== '1' ? 'selected' : ''}>Нет — оставлять без ответственного</option><option value="1" ${s.auto_assign === '1' ? 'selected' : ''}>Да — отдавать наименее загруженному менеджеру</option></select></label>
-       <p class="form-hint">CRM выбирает сотрудника с меньшим числом сделок в работе — нагрузка распределяется поровну. Контакты, созданные вручную, остаются за тем, кто их создал: в форме можно сразу выбрать другого ответственного.</p>
+       <p class="form-hint">Новое обращение получает сотрудник с меньшим числом сделок. Созданный вручную контакт остаётся за автором.</p>
        <button class="btn primary">Сохранить</button></form></div>
      <div class="card">
      <div class="row" style="border:0"><div><h3>Свои правила (${rows.length})</h3><small>Простые правила: «когда случилось — сделай». Работают сами, без участия сотрудника.</small></div><button class="btn sm primary" onclick="openAutomation()">+ Правило</button></div>
@@ -2883,7 +2882,7 @@ async function settings(v) {
        <td style="white-space:nowrap"><button class="btn sm" onclick="openAutomation(${a.id})">${icon('edit', 13)} Изменить</button> <button class="btn sm danger" onclick="del('automations',${a.id})">${icon('trash', 13)} Удалить</button></td></tr>`).join('')
         || `<tr><td colspan="5"><div class="empty">Правил нет. Начните с простого: «Появилась новая сделка → создать задачу «Позвонить клиенту»».</div></td></tr>`}</table></div>
      ${queue.length ? `<div class="card"><h3>Запланированные действия (${queue.length})</h3>
-      <p class="form-hint">Правила с выдержкой ждут своего срока и выполняются сами, даже если браузер закрыт и сервер перезагрузился. Здесь видно, что и когда сработает; лишнее можно отменить.</p>
+      <p class="form-hint">Действия с выдержкой выполняются в срок сами. Лишнее можно отменить.</p>
       <div class="tbl-scroll"><table><tr><th>Когда</th><th>Правило</th><th>Что сделает</th><th>Сделка или клиент</th><th class="act"></th></tr>
        ${queue.map(q => `<tr>
         <td style="white-space:nowrap"><b>${esc(q.run_at_human)}</b><br><small>${esc(String(q.run_at).slice(11, 16))}</small></td>
@@ -2895,16 +2894,16 @@ async function settings(v) {
       </table></div>
      </div>` : ''}
     </div><div><div class="card"><h3>Как это работает</h3>
-      <p><small>Правило проверяется каждый раз, когда происходит событие: создана сделка, клиент написал в чат или сделку перевели на другой этап.</small></p>
-      <p><small><b>Создать задачу</b> — дело появляется у ответственного за сделку или клиента, срок сегодня 14:00. Он сразу получает уведомление.</small></p>
-      <p><small><b>Перевести на этап</b> — сделка сама переезжает на нужный этап, дата закрытия и аналитика пересчитываются.</small></p>
-      <p><small><b>Добавить тег</b> — клиенту ставится метка; по тегам работает фильтр в контактах.</small></p>
-      <p><small><b>Отправить сообщение</b> — текст уходит клиенту в тот канал, откуда он писал. Если переписки ещё нет, правило отметит это в истории сделки и ничего не отправит.</small></p>
-      <p><small><b>Отправить письмо</b> — уходит на e-mail из карточки клиента, тема письма берётся из названия правила. Нужна настроенная почта.</small></p>
-      <p><small><b>Передать сделку</b> — сделка и клиент переходят выбранному сотруднику, он получает уведомление.</small></p>
-      <p><small><b>Выдержка «через N дней»</b> — действие не выполняется сразу, а попадает в список «Запланированные действия» выше и срабатывает в срок. Оттуда его можно отменить.</small></p>
+      <p><small>Правило срабатывает на событие: создана сделка, клиент написал, сменился этап.</small></p>
+      <p><small><b>Создать задачу</b> — задача ответственному, срок сегодня 14:00, с уведомлением.</small></p>
+      <p><small><b>Перевести на этап</b> — сделка переходит на указанный этап, аналитика пересчитывается.</small></p>
+      <p><small><b>Добавить тег</b> — метка клиенту для фильтра в контактах.</small></p>
+      <p><small><b>Отправить сообщение</b> — в канал, откуда писал клиент; без переписки ничего не уходит, причина пишется в историю.</small></p>
+      <p><small><b>Отправить письмо</b> — на e-mail из карточки клиента; тема — название правила. Нужна настроенная почта.</small></p>
+      <p><small><b>Передать сделку</b> — сделка и клиент переходят сотруднику, с уведомлением.</small></p>
+      <p><small><b>Выдержка «через N дней»</b> — действие попадает в список «Запланированные действия» выше и срабатывает в срок.</small></p>
       <p><small>В тексте сообщения и письма работают подстановки: <code>{name}</code> — имя клиента, <code>{deal}</code> — название сделки, <code>{sum}</code> — сумма, <code>{company}</code> — ваша компания.</small></p>
-      <p><small>Правила придуманы так, чтобы не зациклиться: перевод на этап, где сделка уже стоит, ничего не меняет, а тег не дублируется.</small></p></div></div></div>`;
+      <p><small>Правила не зацикливаются: перевод на текущий этап ничего не меняет, тег не дублируется.</small></p></div></div></div>`;
   } else if (state.settingsTab === 'templates') {
     const rows = await api('/api/templates');
     const tq = (state.tplQuery || '').trim().toLowerCase();
@@ -2956,7 +2955,7 @@ async function settings(v) {
     const demoRows = Object.values(s.demo || {}).reduce((a, b) => a + b, 0);
     body = `${demoRows ? `<div class="card tint-info"><h3>${icon('sparkles', 16)} Демонстрационные данные</h3><p><small>Сейчас в базе примеры: клиентов ${s.demo?.contacts || 0}, сделок ${s.demo?.deals || 0}, задач ${s.demo?.tasks || 0}, чатов ${s.demo?.conversations || 0}, конкурентов ${s.demo?.competitors || 0}, товаров каталога ${s.demo?.products || 0}, шаблонов ${s.demo?.templates || 0}, правил ${s.demo?.automations || 0}. Их можно редактировать как обычные данные или удалить одной кнопкой — тогда CRM будет полностью чистой.</small></p><button class="btn danger sm" onclick="cleanDemo()">${icon('trash', 13)} Удалить демонстрационные данные</button></div>` : ''}
     <div class="settings-cols"><div><div class="card"><h3>Название компании</h3><form onsubmit="return saveCompanySettings(event)"><div style="display:grid;grid-template-columns:2fr 1fr;gap:12px"><label>Название<input name="COMPANY_NAME" value="${esc(s.company.name)}"></label><label>Валюта<input name="CURRENCY" value="${esc(s.company.currency)}"></label></div>
-     <p class="form-hint">Название и валюта попадают в печатные документы (КП, счёт) и во все суммы в CRM. Правила «создавать сделку автоматически» и «распределять обращения между менеджерами» — во вкладке «Автоматизации».</p>
+     <p class="form-hint">Название и валюта попадают в печатные документы и во все суммы. Автосоздание и распределение сделок — во вкладке «Автоматизации».</p>
      <button class="btn primary">Сохранить</button></form></div>
      <div class="card"><h3>Реквизиты для КП и счёта</h3><p><small>Попадают в печатные документы сделки (кнопки «КП» и «Счёт»). Префикс номера — начало нумерации, например «КП», «СЧ».</small></p>
       <form onsubmit="return saveCompanySettings(event)">
@@ -2977,7 +2976,7 @@ async function settings(v) {
        <div style="display:flex;gap:8px;flex-wrap:wrap"><button class="btn primary sm" onclick="makeBackup()">${icon('plus', 13)} Создать копию сейчас</button>
        <button class="btn sm" onclick="download('/api/export/json','karkas-backup.json')" title="Текстовый файл со всеми данными — для переноса в другую программу">${icon('download', 13)} Скачать все данные</button></div>
        <div id="backupList" style="margin-top:10px">Загрузка…</div>
-       <p class="form-hint">Копии лежат на этом сервере в папке <code>data/backups</code>, плюс кнопка «Скачать все данные» сохраняет файл себе на компьютер. Как положить вторую копию в облако или на другой сервер — коротко описано в файле <code>DEPLOY.md</code> из комплекта.</p>
+       <p class="form-hint">Копии лежат на сервере в <code>data/backups</code>; кнопка «Скачать все данные» сохраняет файл на компьютер. Вторая копия в облако — DEPLOY.md, раздел 7.1.</p>
      </div>
      <div class="card"><h3>Резервные копии в хранилище</h3>
       <p><small>Ночная копия остаётся на этом же сервере. Если сервер выйдет из строя или файлы зашифрует вирус, копия пропадёт вместе с базой. Хранилище — это отдельный сервер, куда CRM сама отправляет каждую новую копию. Подходит любое S3-хранилище: Рег.ру, Timeweb, Selectel, Яндекс Облако, VK Cloud. Данные берутся из панели провайдера.</small></p>
@@ -2996,7 +2995,7 @@ async function settings(v) {
        </div>
       </form>
       <div id="s3status">${s3line(s.s3)}</div>
-      <p class="form-hint">Секретный ключ хранится в базе CRM и наружу не показывается. Если выгрузка не удалась, копия всё равно остаётся на сервере, а причина пишется выше.</p>
+      <p class="form-hint">Секретный ключ наружу не показывается. Сбой выгрузки не отменяет копию на сервере.</p>
      </div>
      <div class="card"><h3>Обслуживание и уведомления</h3>
       <p><small>Резервные копии создаются автоматически и хранятся указанное число дней. Просроченные задачи можно отправлять и во внешний сервис — например, в Slack или Telegram-бот (если он у вас есть).</small></p>

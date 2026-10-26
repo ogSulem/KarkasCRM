@@ -11,18 +11,15 @@ code,pre{font-family:var(--font-mono)}
 .login-card h1{margin:0}.login-card p{color:var(--muted);margin:0 0 6px}
 .err{color:#dc2626;min-height:18px;font-size:13.5px}
 /* brand */
-.brand-leaf{width:32px;height:30px;color:#fff;transition:color .2s ease;flex-shrink:0}
+.brand-leaf{width:32px;height:30px;color:var(--orange);flex-shrink:0}
 .brand-leaf.big{width:76px;height:71px}
 .brand{display:inline-flex;gap:10px;align-items:center;color:#fff;cursor:pointer;text-decoration:none;user-select:none}
 .brand-text{font-size:20px;font-weight:800;letter-spacing:-0.02em;line-height:1;display:inline-flex;align-items:baseline}
-.brand-part-karkas{color:#ffffff;transition:color .2s ease}
-.brand-part-crm{color:var(--orange);transition:color .2s ease}
-.brand:hover .brand-part-karkas{color:var(--orange)}
-.brand:hover .brand-leaf{color:var(--orange)}
-.brand-login .brand-part-karkas{color:var(--ink);transition:color .2s ease}
-.brand-login .brand-leaf{color:var(--ink)}
-.brand-login:hover .brand-part-karkas{color:var(--orange)}
-.brand-login:hover .brand-leaf{color:var(--orange)}
+.brand-part-karkas{color:var(--orange)}
+.brand-part-crm{color:#ffffff;transition:color .2s ease}
+.brand:hover .brand-part-crm{color:var(--orange)}
+.brand-login .brand-part-crm{color:var(--ink);transition:color .2s ease}
+.brand-login:hover .brand-part-crm{color:var(--orange)}
 /* layout */
 .layout{display:grid;grid-template-columns:260px 1fr;min-height:100vh}
 aside{background:linear-gradient(180deg,#052e16,#14532d);color:#dcefe1;padding:18px 14px;display:flex;flex-direction:column;gap:14px;position:sticky;top:0;height:100vh;overflow:auto}
