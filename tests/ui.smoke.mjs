@@ -195,7 +195,9 @@ try {
   await fetch(BASE + '/api/templates/' + tplDemo.id, { method: 'DELETE', headers: authH() });
 
   // ── вебхуки: полный адрес, понятное объяснение, кнопка «копировать» ──────
-  window.__state.settingsTab = 'integrations'; window.go('settings'); await wait(400);
+  // вкладка стала тяжелее: у каждого канала своё название и выбор сотрудника.
+  // На медленном прогоне прежних 400 мс не хватало, и проверки шли по пустому месту
+  window.__state.settingsTab = 'integrations'; window.go('settings'); await wait(700);
   {
     const links = $$('#view .hook-line code').map(c => c.textContent.trim());
     check('вебхуки: адреса собраны с хостом', links.length === 3 && links.every(u => /^https?:\/\//.test(u)) && links.some(u => /\/webhooks\/wazzup$/.test(u)) && links.some(u => /\/webhooks\/email$/.test(u)));
@@ -787,7 +789,7 @@ try {
     check('кнопка справа подписана «Редактировать»', /Редактировать/.test(actions.textContent));
     check('тип этапа виден в карточке воронки', /успех|отказ/.test(card.textContent));
   }
-  window.__state.settingsTab = 'automations'; window.go('settings'); await wait(450);
+  window.__state.settingsTab = 'automations'; window.go('settings'); await wait(700);
   {
     const bad = await fetch(BASE + '/api/automations', { method: 'POST', headers: authH(), body: JSON.stringify({ name: 'Плохое правило', trigger_type: 'deal_created', action_type: 'change_stage', action_value: 'этапа-нет' }) });
     const badBody = await bad.json();
@@ -808,7 +810,7 @@ try {
     check('при выборе «перевести на этап» появляется список этапов', Boolean($('#autoActionValue select[name=action_value]')) && $$('#autoActionValue option').length >= 2);
     window.closeModal();
   }
-  window.__state.settingsTab = 'data'; window.go('settings'); await wait(450);
+  window.__state.settingsTab = 'data'; window.go('settings'); await wait(700);
   {
     check('в разделе данных нет сворачиваемого блока про другой сервер', !$('#view details.settings-more') && !/Копии на другом сервере/.test($('#view').textContent));
     check('короткая подсказка про вторую копию осталась', /DEPLOY\.md/.test($('#view').textContent));
