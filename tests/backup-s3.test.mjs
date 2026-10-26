@@ -37,8 +37,9 @@ const call = async (path, { method = 'GET', body, token } = {}) => {
 
 // Хранилище ведёт себя как настоящее: принимает PUT, отдаёт список объектов
 // и удаляет лишнее. Ключи держим в памяти — проверяем не файлы, а протокол.
-function fakeS3() {
+function fakeS3({ pageSize = 0 } = {}) {
   const store = new Map();
+  const stats = { lists: 0, deletes: 0, puts: 0 };
   const srv = http.createServer((req, res) => {
     const chunks = [];
     req.on('data', c => chunks.push(c));
@@ -49,18 +50,24 @@ function fakeS3() {
         res.writeHead(404, { 'Content-Type': 'application/xml' });
         return res.end('<Error><Code>NoSuchBucket</Code><Message>Ведро не найдено: в пути нет его имени</Message></Error>');
       }
-      if (req.method === 'PUT') { store.set(path, Buffer.concat(chunks)); res.writeHead(200); return res.end() }
-      if (req.method === 'DELETE') { store.delete(path); res.writeHead(204); return res.end() }
+      if (req.method === 'PUT') { stats.puts++; store.set(path, Buffer.concat(chunks)); res.writeHead(200); return res.end() }
+      if (req.method === 'DELETE') { stats.deletes++; store.delete(path); res.writeHead(204); return res.end() }
+      // список объектов: настоящее хранилище отдаёт его страницами и помечает
+      // незавершённый ответ, поэтому досборку нужно проверять на том же поведении
+      stats.lists++;
       const prefix = u.searchParams.get('prefix') || '';
-      const keys = [...store.keys()]
-        .filter(k => k.startsWith('/karkas-backups/' + prefix))
-        .sort()
-        .map(k => `<Contents><Key>${k.replace('/karkas-backups/', '')}</Key></Contents>`).join('');
+      const marker = u.searchParams.get('marker') || '';
+      const rel = [...store.keys()].filter(k => k.startsWith('/karkas-backups/' + prefix))
+        .map(k => k.replace('/karkas-backups/', '')).sort();
+      let page = marker ? rel.filter(k => k > marker) : rel;
+      let truncated = false;
+      if (pageSize > 0 && page.length > pageSize) { page = page.slice(0, pageSize); truncated = true; }
+      const keys = page.map(k => `<Contents><Key>${k}</Key></Contents>`).join('');
       res.writeHead(200, { 'Content-Type': 'application/xml' });
-      res.end(`<?xml version="1.0" encoding="UTF-8"?><ListBucketResult><Name>karkas-backups</Name><Prefix>${prefix}</Prefix>${keys}</ListBucketResult>`);
+      res.end(`<?xml version="1.0" encoding="UTF-8"?><ListBucketResult><Name>karkas-backups</Name><Prefix>${prefix}</Prefix><IsTruncated>${truncated}</IsTruncated>${truncated ? `<NextMarker>${page[page.length - 1]}</NextMarker>` : ''}${keys}</ListBucketResult>`);
     });
   });
-  return { srv, store, start: () => new Promise(r => srv.listen(0, '127.0.0.1', r)), port: () => srv.address().port };
+  return { srv, store, stats, start: () => new Promise(r => srv.listen(0, '127.0.0.1', r)), port: () => srv.address().port };
 }
 
 before(async () => {
@@ -125,6 +132,25 @@ test('в хранилище остаётся заданное число пос�
     const left = [...s3.store.keys()].sort();
     assert.ok(left.some(k => k.includes(made.data.created)), 'свежая копия на месте');
     assert.ok(!left.some(k => k.includes('2026-09-01')), 'самая старая удалена');
+  } finally { await new Promise(r => s3.srv.close(r)) }
+});
+
+test('список копий в хранилище дособирается по страницам', async () => {
+  // Хранилище отдаёт по два объекта за раз. Без досборки чистка увидела бы только
+  // первую страницу и оставила старые копии лежать: место платное, а страховки нет.
+  const s3 = fakeS3({ pageSize: 2 });
+  await s3.start();
+  for (const d of ['2026-08-01', '2026-08-02', '2026-08-03', '2026-08-04', '2026-08-05']) {
+    s3.store.set('/karkas-backups/karkascrm/crm-' + d + '.db', Buffer.from('old'));
+  }
+  try {
+    await call('/api/settings', { method: 'PUT', token: admin, body: { S3_ENDPOINT: `http://127.0.0.1:${s3.port()}`, S3_BUCKET: 'karkas-backups', S3_ACCESS_KEY: 'AKIATEST', S3_SECRET_KEY: 'secret-test', S3_PREFIX: 'karkascrm', S3_KEEP: '1' } });
+    const made = await call('/api/backups', { method: 'POST', token: admin, body: {} });
+    assert.equal(made.data.s3.ok, true, JSON.stringify(made.data.s3));
+    assert.ok(s3.stats.lists >= 3, 'список запрошен несколькими страницами: ' + s3.stats.lists);
+    assert.equal(s3.store.size, 1, 'в хранилище осталась одна копия, а не первая страница: ' + [...s3.store.keys()].join(', '));
+    assert.ok([...s3.store.keys()][0].includes(made.data.created), 'оставлена свежая копия');
+    assert.equal(s3.stats.deletes, 5, 'старые копии удалены все: ' + s3.stats.deletes);
   } finally { await new Promise(r => s3.srv.close(r)) }
 });
 

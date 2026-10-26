@@ -63,7 +63,7 @@ Object.assign(window, {
   punyDecodeLabel, humanOrigin, wazzupHookUrl, wzAlive, wzState, wzTitle, closeConv,
   WZ_TRANSPORT_TO_CHAT, WZ_DEAD_STATES, WZ_CHAT_SET, WZ_TRANSPORTS, WZ_STATE_LABELS, wzTransportLabel,
   saveChannel, startConv, submitStartConv, scAddrHint, sendDoc, submitSendDoc,
-  saveS3, uploadS3, s3line
+  saveS3, uploadS3, s3line, cancelQueued
 });`;
 const pageErrors = [];
 const vConsole = new VirtualConsole();
@@ -817,6 +817,24 @@ try {
     $('#modalBody select[name=action_type]').dispatchEvent(new window.Event('change', { bubbles: true })); await wait(80);
     check('при выборе «перевести на этап» появляется список этапов', Boolean($('#autoActionValue select[name=action_value]')) && $$('#autoActionValue option').length >= 2);
     window.closeModal();
+    // правило с выдержкой: действие должно попасть в список запланированных,
+    // иначе сотрудник не узнает, что CRM собирается сделать через три дня
+    const txt0 = $('#view').textContent;
+    check('в подсказке объяснены все действия правил', ['Создать задачу', 'Перевести на этап', 'Добавить тег', 'Отправить сообщение', 'Отправить письмо', 'Передать сделку', 'Выдержка'].every(w => txt0.includes(w)), ['Создать задачу', 'Перевести на этап', 'Добавить тег', 'Отправить сообщение', 'Отправить письмо', 'Передать сделку', 'Выдержка'].filter(w => !txt0.includes(w)).join(','));
+    check('в подсказке названы подстановки имени клиента и сделки', txt0.includes('{name}') && txt0.includes('{deal}') && txt0.includes('{sum}') && txt0.includes('{company}'));
+    const q0 = await window.api('/api/automation-queue');
+    check('при пустой очереди блок запланированных действий не показывается', q0.length === 0 && !/Запланированные действия \(/.test(txt0), 'в очереди ' + q0.length + ' шт.');
+
+    await window.api('/api/automations', { method: 'POST', body: JSON.stringify({ name: 'Отложить напоминание', trigger_type: 'stage_changed', trigger_value: 'offer', action_type: 'create_task', action_value: 'Позвонить позже', active: 1, delay_days: 3 }) });
+    const cq = await window.api('/api/contacts', { method: 'POST', body: JSON.stringify({ name: 'Очередь Тест', phone: '+7 900 000-00-01' }) });
+    const dq = await window.api('/api/deals', { method: 'POST', body: JSON.stringify({ title: 'Сделка очереди', amount: 1000, stage: 'new', contact_id: cq.id }) });
+    await window.api('/api/deals/' + dq.id, { method: 'PATCH', body: JSON.stringify({ stage: 'offer' }) });
+    window.__state.settingsTab = 'automations'; window.go('settings'); await wait(700);
+    const txt1 = $('#view').textContent;
+    check('запланированное действие видно в настройках', /Запланированные действия \(1\)/.test(txt1) && txt1.includes('Отложить напоминание'), txt1.replace(/\s+/g, ' ').slice(0, 180));
+    check('у запланированного действия названы срок, сделка и суть', txt1.includes('Позвонить позже') && txt1.includes('Сделка очереди') && /\d{2}\.\d{2}\.\d{4}/.test(txt1));
+    check('запланированное действие можно отменить', typeof window.cancelQueued === 'function' && $$('#view button').some(b => /Отменить/.test(b.textContent)));
+    check('выдержка видна и в самом правиле', /через 3 дн\./.test(txt1), txt1.replace(/\s+/g, ' ').match(/.{0,60}дн\./)?.[0] || '');
   }
   window.__state.settingsTab = 'data'; window.go('settings'); await wait(700);
   {

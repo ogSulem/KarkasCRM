@@ -2851,7 +2851,7 @@ async function settings(v) {
   } else if (state.settingsTab === 'automations') {
     // имена сотрудников нужны подписи правила «передать сделку»: без них в списке
     // стоит прочерк, и непонятно, кому правило отдаёт сделку
-    const [rows, pl, staff] = await Promise.all([api('/api/automations'), api('/api/pipelines'), team()]);
+    const [rows, pl, staff, queue] = await Promise.all([api('/api/automations'), api('/api/pipelines'), team(), api('/api/automation-queue').catch(() => [])]);
     window.__autoUsers = (staff || []).filter(u => u.active !== 0);
     const stageName = code => (pl.flatMap(p => p.stages).find(s2 => s2.code === code) || {}).name || code;
     const whenText = a => a.trigger_type === 'deal_created' ? 'Появилась новая сделка'
@@ -2882,11 +2882,28 @@ async function settings(v) {
        <td><input type="checkbox" style="width:auto" title="${a.active ? 'Правило работает — снимите, чтобы выключить' : 'Правило выключено'}" ${a.active ? 'checked' : ''} onchange="toggleAutomation(${a.id},this)"></td>
        <td style="white-space:nowrap"><button class="btn sm" onclick="openAutomation(${a.id})">${icon('edit', 13)} Изменить</button> <button class="btn sm danger" onclick="del('automations',${a.id})">${icon('trash', 13)} Удалить</button></td></tr>`).join('')
         || `<tr><td colspan="5"><div class="empty">Правил нет. Начните с простого: «Появилась новая сделка → создать задачу «Позвонить клиенту»».</div></td></tr>`}</table></div>
+     ${queue.length ? `<div class="card"><h3>Запланированные действия (${queue.length})</h3>
+      <p class="form-hint">Правила с выдержкой ждут своего срока и выполняются сами, даже если браузер закрыт и сервер перезагрузился. Здесь видно, что и когда сработает; лишнее можно отменить.</p>
+      <div class="tbl-scroll"><table><tr><th>Когда</th><th>Правило</th><th>Что сделает</th><th>Сделка или клиент</th><th class="act"></th></tr>
+       ${queue.map(q => `<tr>
+        <td style="white-space:nowrap"><b>${esc(q.run_at_human)}</b><br><small>${esc(String(q.run_at).slice(11, 16))}</small></td>
+        <td>${esc(q.rule)}${q.orphan ? ' <small>— правило удалено, действие не выполнится</small>' : ''}</td>
+        <td><small>${esc(whatText({ action_type: q.action_type, action_value: q.action_value, name: q.rule, delay_days: 0 }))}</small></td>
+        <td><small>${esc(q.deal_title || q.contact_name || '—')}</small></td>
+        <td class="act"><button class="btn sm danger" onclick="cancelQueued(${q.id})">${icon('trash', 13)} Отменить</button></td>
+       </tr>`).join('')}
+      </table></div>
+     </div>` : ''}
     </div><div><div class="card"><h3>Как это работает</h3>
       <p><small>Правило проверяется каждый раз, когда происходит событие: создана сделка, клиент написал в чат или сделку перевели на другой этап.</small></p>
       <p><small><b>Создать задачу</b> — дело появляется у ответственного за сделку или клиента, срок сегодня 14:00. Он сразу получает уведомление.</small></p>
       <p><small><b>Перевести на этап</b> — сделка сама переезжает на нужный этап, дата закрытия и аналитика пересчитываются.</small></p>
       <p><small><b>Добавить тег</b> — клиенту ставится метка; по тегам работает фильтр в контактах.</small></p>
+      <p><small><b>Отправить сообщение</b> — текст уходит клиенту в тот канал, откуда он писал. Если переписки ещё нет, правило отметит это в истории сделки и ничего не отправит.</small></p>
+      <p><small><b>Отправить письмо</b> — уходит на e-mail из карточки клиента, тема письма берётся из названия правила. Нужна настроенная почта.</small></p>
+      <p><small><b>Передать сделку</b> — сделка и клиент переходят выбранному сотруднику, он получает уведомление.</small></p>
+      <p><small><b>Выдержка «через N дней»</b> — действие не выполняется сразу, а попадает в список «Запланированные действия» выше и срабатывает в срок. Оттуда его можно отменить.</small></p>
+      <p><small>В тексте сообщения и письма работают подстановки: <code>{name}</code> — имя клиента, <code>{deal}</code> — название сделки, <code>{sum}</code> — сумма, <code>{company}</code> — ваша компания.</small></p>
       <p><small>Правила придуманы так, чтобы не зациклиться: перевод на этап, где сделка уже стоит, ничего не меняет, а тег не дублируется.</small></p></div></div></div>`;
   } else if (state.settingsTab === 'templates') {
     const rows = await api('/api/templates');
@@ -3357,6 +3374,14 @@ async function saveAutomation(e, id) {
     await api(id ? '/api/automations/' + id : '/api/automations', { method: id ? 'PATCH' : 'POST', body: JSON.stringify(b) });
   } catch (err) { toast(err.message, 'err'); return false; }
   closeModal(); toast(id ? 'Правило сохранено' : 'Правило создано и уже работает'); render(); return false;
+}
+// Отмена запланированного действия: правило с выдержкой могло стать неактуальным,
+// а держать его в очереди — значит отправить клиенту лишнее сообщение.
+function cancelQueued(id) {
+  askConfirm('Отменить запланированное действие? Оно не выполнится.', async () => {
+    try { await api('/api/automation-queue/' + id, { method: 'DELETE' }); closeModal(); toast('Запланированное действие отменено'); render(); }
+    catch (e) { toast(e.message, 'err'); }
+  }, { okText: 'Отменить действие' });
 }
 // Переключатель «Вкл.» в таблице правил: при ошибке галочка возвращается назад.
 async function toggleAutomation(id, el) {
