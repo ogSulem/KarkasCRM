@@ -1810,8 +1810,10 @@ function copySiteFormCode() {
 // который отвечает (Настройки → Интеграции), а если привязки нет — любой
 // работающий аккаунт нужного мессенджера.
 async function startConv(contactId) {
-  const c = await api('/api/contacts/' + contactId);
-  const chans = state.channels.length ? state.channels : await api('/api/channels').catch(() => []);
+  const [c, chans] = await Promise.all([
+    api('/api/contacts/' + contactId),
+    state.channels.length ? state.channels : api('/api/channels').catch(() => []),
+  ]);
   state.channels = chans;
   const types = [...new Set(chans.filter(wzAlive).map(x => WZ_TRANSPORT_TO_CHAT[String(x.transport || '').trim().toLowerCase()]).filter(Boolean))];
   const list = types.length ? types : ['whatsapp'];
@@ -2696,10 +2698,17 @@ async function settings(v) {
   let body = '';
 
   if (state.settingsTab === 'integrations') {
-    const chans = state.channels.length ? state.channels : await api('/api/channels').catch(() => []); state.channels = chans;
-    // сотрудники нужны, чтобы привязать к каждому аккаунту того, кто с него отвечает
-    const team = state.users.length ? state.users : await api('/api/users').catch(() => []); state.users = team;
-    const staff = team.filter(u => u.active !== 0);
+    // сотрудники нужны, чтобы привязать к каждому аккаунту того, кто с него
+    // отвечает. Запрашиваем вместе с каналами, а не после них: вкладка не должна
+    // ждать второго обращения к серверу, чтобы показаться.
+    const [chans, users] = await Promise.all([
+      state.channels.length ? state.channels : api('/api/channels').catch(() => []),
+      state.users.length ? state.users : api('/api/users').catch(() => []),
+    ]);
+    state.channels = chans; state.users = users;
+    // уволенного сотрудника привязать к аккаунту нельзя: обращения назначались бы
+    // на того, кто уже не работает
+    const staff = (users || []).filter(u => u.active !== 0);
     body = `${!isAdmin ? '<div class="card tint-info"><b>Режим просмотра</b><br><small>Ключи и настройки интеграций меняет администратор. Вы можете работать с чатами, сделками и задачами — всё остальное доступно.</small></div>' : ''}
     <div class="settings-cols"><div>
      <div class="card"><h3>Адрес CRM в интернете</h3>
@@ -2840,11 +2849,10 @@ async function settings(v) {
       <p><small><b>Редактировать</b> — названия, цвета, порядок и тип этапа. Тип важен: этап «успех» попадает в выручку, «отказ» — в причины проигрыша, остальные считаются работой в процессе.</small></p>
       <p><small>Удалить можно только пустую воронку: пока в ней есть сделки, CRM не даст её убрать — сначала перенесите сделки в другую воронку.</small></p></div></div></div>`;
   } else if (state.settingsTab === 'automations') {
-    const rows = await api('/api/automations');
-    const pl = await api('/api/pipelines');
     // имена сотрудников нужны подписи правила «передать сделку»: без них в списке
     // стоит прочерк, и непонятно, кому правило отдаёт сделку
-    window.__autoUsers = (await team()).filter(u => u.active !== 0);
+    const [rows, pl, staff] = await Promise.all([api('/api/automations'), api('/api/pipelines'), team()]);
+    window.__autoUsers = (staff || []).filter(u => u.active !== 0);
     const stageName = code => (pl.flatMap(p => p.stages).find(s2 => s2.code === code) || {}).name || code;
     const whenText = a => a.trigger_type === 'deal_created' ? 'Появилась новая сделка'
       : a.trigger_type === 'message_in' ? (a.trigger_value ? `Клиент написал сообщение со словом «${a.trigger_value}»` : 'Клиент написал сообщение')
@@ -3321,12 +3329,12 @@ function autoFields(form) {
   const av = $('#autoActionValue'); if (av) av.innerHTML = autoActionField(draft);
 }
 async function openAutomation(id) {
-  const rows = await api('/api/automations'); const a = id ? (rows.find(x => x.id === id) || {}) : {};
-  const pl = await api('/api/pipelines');
-  window.__autoStages = pl.flatMap(p => p.stages.map(st => ({ ...st, pipeline: p.name })));
   // список сотрудников нужен действию «передать сделку»: выбирать из живых,
   // а не вписывать идентификатор руками
-  window.__autoUsers = (await team()).filter(u => u.active !== 0);
+  const [rows, pl, staff] = await Promise.all([api('/api/automations'), api('/api/pipelines'), team()]);
+  const a = id ? (rows.find(x => x.id === id) || {}) : {};
+  window.__autoStages = pl.flatMap(p => p.stages.map(st => ({ ...st, pipeline: p.name })));
+  window.__autoUsers = (staff || []).filter(u => u.active !== 0);
   openModal(`<h3>${id ? 'Правило автоматизации' : 'Новое правило автоматизации'}</h3>
    <p class="form-hint">Правило состоит из двух частей: <b>когда</b> случилось и <b>что</b> сделать. Пример: «Появилась новая сделка → создать задачу «Позвонить клиенту»».</p>
    <form onsubmit="return saveAutomation(event,${id || 'null'})">
