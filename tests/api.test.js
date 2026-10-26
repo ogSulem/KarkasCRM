@@ -54,20 +54,21 @@ test('объединение чатов WhatsApp + Telegram в один диал
   assert.equal(deals.length, 1, 'автосоздана сделка на первом обращении');
 });
 
-test('логотип: отдаётся как изображение и кэшируется по ETag', async () => {
-  const first = await fetch(base + '/logo.png');
-  const bytes = (await first.arrayBuffer()).byteLength; // тело обязательно читаем: иначе сокет держит процесс
+test('фирменный лист: вектор отдаётся без входа и кэшируется по ETag', async () => {
+  const first = await fetch(base + '/favicon.svg');
+  const text = await first.text(); // тело обязательно читаем: иначе сокет держит процесс
   assert.equal(first.status, 200);
-  assert.ok(bytes > 100, 'логотип не пустой');
-  assert.match(first.headers.get('content-type') || '', /^image\//, 'логотип отдаётся изображением');
+  assert.match(first.headers.get('content-type') || '', /image\/svg/, 'лист отдаётся вектором');
+  assert.ok(text.includes('<path') && text.includes('currentColor'), 'лист — контур, красится цветом интерфейса');
   const etag = first.headers.get('etag');
-  assert.ok(etag, 'у логотипа есть ETag');
-  const second = await fetch(base + '/logo.png', { headers: { 'If-None-Match': etag } });
+  assert.ok(etag, 'у вектора есть ETag');
+  const second = await fetch(base + '/favicon.svg', { headers: { 'If-None-Match': etag } });
   await second.arrayBuffer();
-  assert.equal(second.status, 304, 'неизменённый логотип не скачивается повторно');
-  const favicon = await fetch(base + '/favicon.ico');
+  assert.equal(second.status, 304, 'неизменённый лист не скачивается повторно');
+  const favicon = await fetch(base + '/favicon.ico', { redirect: 'manual' });
   await favicon.arrayBuffer();
-  assert.equal(favicon.status, 200, 'иконка вкладки отдаётся по /favicon.ico');
+  assert.equal(favicon.status, 301, 'прежний адрес иконки уводит на вектор');
+  assert.equal(favicon.headers.get('location'), '/favicon.svg');
 });
 
 test('сделки, товары и пересчёт суммы', async () => {
@@ -778,11 +779,12 @@ test('управление командой: валидация, актуаль�
   assert.equal((await call('/api/me', { headers })).status, 401);
 });
 
-test('встроенный логотип JPEG доступен без авторизации', async () => {
+test('фото-логотип не отдаётся, а адрес загрузки закрыт', async () => {
   const r = await fetch(base + '/logo.png');
-  assert.equal(r.status, 200);
-  assert.equal(r.headers.get('content-type'), 'image/jpeg');
-  assert.equal(new Uint8Array(await r.arrayBuffer())[0], 255);
+  await r.arrayBuffer();
+  assert.ok(!(r.headers.get('content-type') || '').startsWith('image/'), 'по прежнему адресу нет картинки');
+  const up = await call('/api/logo', { method: 'POST', body: '{}' });
+  assert.equal(up.status, 404, 'маршрут загрузки фото-логотипа не существует');
 });
 
 test('последний администратор защищён от отключения и понижения роли', async () => {

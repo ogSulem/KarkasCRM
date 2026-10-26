@@ -98,8 +98,8 @@ jobs:
           docker compose config --quiet
           docker compose up -d --build --wait
           curl --fail http://127.0.0.1:8080/api/health
-          curl --fail http://127.0.0.1:8080/logo.png -o /tmp/logo.jpg
-          cmp logo.jpg /tmp/logo.jpg
+          curl --fail http://127.0.0.1:8080/favicon.svg -o /tmp/favicon.svg
+          cmp frontend/public/favicon.svg /tmp/favicon.svg
       - name: Домен передаётся приложению (иначе прод стартовал бы с демо-данными)
         run: |
           CRM_DOMAIN=crm.example.com docker compose config | grep -q 'CRM_DOMAIN: crm.example.com'

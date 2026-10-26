@@ -160,13 +160,20 @@ grep -q 'deploy/caddy-site.conf' install.sh || { echo "  ОШИБКА: install.s
 echo "  ok   caddy-site.conf: SSE без буферизации, размер тела, прокси, сеть контейнера; install.sh его печатает"
 
 echo "  - .env.example описывает необязательные параметры"
-for key in PUBLIC_URL LOGO_FILE ALLOW_PRIVATE_FETCH KARKAS_NO_SEED S3_ENDPOINT S3_BUCKET S3_ACCESS_KEY S3_SECRET_KEY; do
+for key in PUBLIC_URL ALLOW_PRIVATE_FETCH KARKAS_NO_SEED S3_ENDPOINT S3_BUCKET S3_ACCESS_KEY S3_SECRET_KEY; do
   grep -q "^$key=" .env.example || { echo "  ОШИБКА: .env.example: нет $key"; exit 1; }
 done
 for key in S3_ENDPOINT S3_BUCKET S3_ACCESS_KEY S3_SECRET_KEY; do
   grep -q "$key" docker-compose.yml || { echo "  ОШИБКА: docker-compose.yml: не пробрасывается $key"; exit 1; }
 done
-echo "  ok   .env.example и compose: PUBLIC_URL, LOGO_FILE, ALLOW_PRIVATE_FETCH, KARKAS_NO_SEED, S3_*"
+echo "  ok   .env.example и compose: PUBLIC_URL, ALLOW_PRIVATE_FETCH, KARKAS_NO_SEED, S3_*"
+
+echo "  - бренд: векторный лист, фото-логотипа в коде нет"
+test -f frontend/public/favicon.svg || { echo "  ОШИБКА: нет frontend/public/favicon.svg"; exit 1; }
+grep -q 'rel="icon" type="image/svg+xml" href="/favicon.svg"' frontend/public/index.html || { echo "  ОШИБКА: index.html не ссылается на favicon.svg"; exit 1; }
+grep -q 'logo.jpg' frontend/public/index.html frontend/public/app.js backend/src/server.js && { echo "  ОШИБКА: фото-логотип упомянут в коде"; exit 1; }
+grep -qs 'LOGO_FILE' .env.example docker-compose.yml backend/src/server.js && { echo "  ОШИБКА: LOGO_FILE снова в конфигурации"; exit 1; }
+echo "  ok   бренд: лист вектором в меню и во вкладке, фото-лого и LOGO_FILE удалены"
 
 echo "  - отметка режима установки (CRM_TLS)"
 # По одному CRM_DOMAIN режим не определить: его задаёт и --proxy, где 80/443

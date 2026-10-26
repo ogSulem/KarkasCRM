@@ -6,14 +6,18 @@
 <meta name="robots" content="noindex,nofollow,noarchive"><meta name="referrer" content="same-origin">
 <!-- тема применяется до отрисовки: нет вспышки белым в тёмном режиме -->
 <script>try{var t=localStorage.getItem('karkas_theme');document.documentElement.dataset.theme=(t==='dark'||t==='light')?t:(matchMedia('(prefers-color-scheme: dark)').matches?'dark':'light')}catch(e){}</script>
-<link rel="icon" href="/logo.png">
+<link rel="icon" type="image/svg+xml" href="/favicon.svg">
 <link rel="stylesheet" href="/style.css"></head><body>
+<!-- Фирменный лист: один векторный контур на всё приложение. Красится цветом
+     интерфейса (currentColor), поэтому в меню он повторяет слово «Каркас»,
+     а в тёмной теме и на странице входа остаётся видимым без отдельных картинок. -->
+<svg xmlns="http://www.w3.org/2000/svg" style="display:none" aria-hidden="true"><symbol id="karkas-leaf" viewBox="0 0 254 238"><path fill="currentColor" d="leaf"/></symbol></svg>
 
 <!-- ── вход ─────────────────────────────────────────────────────────────── -->
 <div id="login" class="login hidden">
   <form id="loginForm" class="login-card" autocomplete="on">
     <div class="brand brand-login">
-      <img src="/logo.png" alt="КаркасCRM" class="logo-img big">
+      <svg class="brand-leaf big" aria-hidden="true"><use href="#karkas-leaf"/></svg>
       <div class="brand-text"><span class="brand-part-karkas">Каркас</span><span class="brand-part-crm">CRM</span></div>
     </div>
     <label>E-mail<input name="email" type="email" autocomplete="username" placeholder="you@company.ru" required></label>
@@ -43,7 +47,7 @@
 <!-- ── приложение ───────────────────────────────────────────────────────── -->
 <div id="app" class="layout hidden"><aside>
   <div class="brand" onclick="go('dashboard')" style="cursor:pointer" title="На главную">
-    <img src="/logo.png" alt="КаркасCRM" class="logo-img">
+    <svg class="brand-leaf" aria-hidden="true"><use href="#karkas-leaf"/></svg>
     <div class="brand-text"><span class="brand-part-karkas">Каркас</span><span class="brand-part-crm">CRM</span></div>
   </div>
   <nav id="nav">

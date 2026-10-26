@@ -55,8 +55,6 @@ async function login() {
   return r.body.token;
 }
 
-// 2×2 пикселя PNG: достаточно, чтобы проверить загрузку и точное совпадение байтов
-const PNG = Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAIAAAACCAYAAABytg0kAAAAFElEQVR4nGP8z8Dwn4GBgYGJAQoAHgQCAf3l1sAAAAAASUVORK5CYII=', 'base64');
 
 (async () => {
   ok('контейнер отвечает /api/health', await waitHealthy());
@@ -86,10 +84,9 @@ const PNG = Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAIAAAACCAYAAABytg0kAAAAFElEQVR
   const made = await api('/api/contacts', { method: 'POST', body: JSON.stringify({ name, phone: '+7 900 000-11-22' }) }, token);
   ok('через API создаётся клиент', made.status === 201 && made.body.id > 0, 'id ' + made.body.id);
 
-  const up = await api('/api/logo', { method: 'POST', body: JSON.stringify({ filename: 'logo.png', contentType: 'image/png', dataBase64: PNG.toString('base64') }) }, token);
-  ok('свой логотип загружается', up.status === 200 && up.body.saved === true);
-  const beforeLogo = Buffer.from(await (await fetch(BASE + '/logo.png')).arrayBuffer());
-  ok('сразу после загрузки отдаётся именно загруженный файл', beforeLogo.equals(PNG), `${beforeLogo.length} байт`);
+  const bk = await api('/api/backups', { method: 'POST', body: '{"s3":false}' }, token);
+  ok('резервная копия создаётся файлом в /data', bk.status === 200 && !!bk.body.created, String(bk.body.created || bk.status));
+  const beforeCopy = bk.body.created;
 
   // ── перезапуск контейнера ─────────────────────────────────────────────────
   compose(['restart', 'crm']);
@@ -98,8 +95,8 @@ const PNG = Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAIAAAACCAYAAABytg0kAAAAFElEQVR
   token = await login();
   const contacts = (await api('/api/contacts', {}, token)).body;
   ok('клиент сохранился после перезапуска (том /data)', Array.isArray(contacts) && contacts.some(c => c.name === name));
-  const afterLogo = Buffer.from(await (await fetch(BASE + '/logo.png')).arrayBuffer());
-  ok('свой логотип пережил перезапуск и не подменился стандартным', afterLogo.equals(PNG));
+  const copiesAfter = (await api('/api/backups', {}, token)).body;
+  ok('файл резервной копии пережил перезапуск (том /data)', (copiesAfter.files || []).some(f => f.name === beforeCopy), beforeCopy);
   const adminAfter = (await api('/api/health', {}, token)).body;
   ok('health после перезапуска содержит счётчики для администратора', Number.isInteger(adminAfter.counts?.contacts));
 
