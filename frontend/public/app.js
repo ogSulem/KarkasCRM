@@ -1208,6 +1208,39 @@ function printDoc(id, doc) {
   window.open(`/api/deals/${id}/print?doc=${doc}`, '_blank', 'noopener');
 }
 
+// Отправить КП или счёт клиенту. Документ приходит ссылкой, которая открывается
+// без входа в CRM: клиенту не нужно заводить учётную запись, а менеджеру —
+// скачивать файл и прикладывать его в другой почтовой программе.
+async function sendDoc(id) {
+  const card = await api('/api/deals/' + id);
+  const deal = card.deal;
+  const noItems = !(card.products || []).length;
+  openModal(`<h3>Отправить документ письмом</h3><form onsubmit="return submitSendDoc(event,${id})">
+    ${noItems ? '<p class="form-hint">В сделке нет позиций — документ получится пустым. Сначала добавьте товары или услуги.</p>' : ''}
+    ${fld('Какой документ', `<select name="doc"><option value="quote">Коммерческое предложение</option><option value="invoice">Счёт на оплату</option></select>`, true)}
+    ${fld('E-mail клиента', `<input name="to" type="email" required value="${esc(deal.contact_email || '')}" placeholder="client@company.ru">`, true)}
+    ${fld('Текст письма', `<textarea name="body" rows="3" placeholder="${esc(deal.contact_name || 'Добрый день')}! Направляю документы по вашему запросу…"></textarea>`)}
+    <p class="form-hint">К письму добавится ссылка на документ: она открывается без входа в CRM и действует ограниченное время — срок указан в самом письме. Файл клиент сохраняет в браузере: «Печать» → «Сохранить как PDF».</p>
+    <div style="display:flex;gap:8px;justify-content:flex-end;margin-top:14px">
+      <button type="button" class="btn" onclick="openDealCard(${id})">Отмена</button>
+      <button class="btn primary">Отправить</button>
+    </div></form>`);
+}
+async function submitSendDoc(e, id) {
+  e.preventDefault();
+  const f = new FormData(e.target);
+  const btn = e.target.querySelector('button.primary');
+  if (btn) { btn.disabled = true; btn.textContent = 'Отправляем…'; }
+  try {
+    const r = await api(`/api/deals/${id}/send-doc`, { method: 'POST', body: JSON.stringify({ doc: f.get('doc'), to: f.get('to'), body: f.get('body') }) });
+    closeModal(); toast('Письмо ушло на ' + r.to);
+  } catch (err) {
+    if (btn) { btn.disabled = false; btn.textContent = 'Отправить'; }
+    toast(err.message, 'err');
+  }
+  return false;
+}
+
 async function openDeal(contactId, stageCode) {
   await team();
   await ensureStages();
@@ -1286,6 +1319,7 @@ async function openDealCard(id) {
      <div style="display:flex;gap:6px">
        <button class="btn sm" onclick="printDoc(${deal.id},'quote')" title="Коммерческое предложение">${icon('print', 13)} КП</button>
        <button class="btn sm" onclick="printDoc(${deal.id},'invoice')" title="Счёт на оплату">${icon('fileText', 13)} Счёт</button>
+       <button class="btn sm" onclick="sendDoc(${deal.id})" title="Отправить КП или счёт клиенту письмом">${icon('mail', 13)} Отправить</button>
      </div>
    </div>
    ${!done && !openTasks ? `<div class="card tint-warn" style="margin:10px 0;padding:10px 12px"><b>${icon('alertCircle', 15)} У сделки нет открытых задач</b> — она может зависнуть. <button class="btn sm" style="margin-left:6px" onclick="openTask(null,{deal_id:${deal.id},contact_id:${deal.contact_id || 'null'}})">${icon('plus', 13)} Поставить задачу</button></div>` : ''}
@@ -1770,6 +1804,47 @@ function copySiteFormCode() {
   navigator.clipboard.writeText(siteFormCode()).then(() => toast('Код формы скопирован в буфер')).catch(() => openModal(`<h3>Код формы для сайта</h3><textarea rows="14" readonly onclick="this.select()">${esc(siteFormCode())}</textarea><p><small>Выделите и скопируйте код, затем вставьте его на страницу сайта.</small></p>`));
 }
 
+// Написать первым. Беседа появлялась только из входящего сообщения, поэтому
+// менеджер не мог отправить клиенту, который ещё не обращался, ни КП, ни
+// напоминание. Канал отправки выбирается сам: берётся аккаунт того сотрудника,
+// который отвечает (Настройки → Интеграции), а если привязки нет — любой
+// работающий аккаунт нужного мессенджера.
+async function startConv(contactId) {
+  const c = await api('/api/contacts/' + contactId);
+  const chans = state.channels.length ? state.channels : await api('/api/channels').catch(() => []);
+  state.channels = chans;
+  const types = [...new Set(chans.filter(wzAlive).map(x => WZ_TRANSPORT_TO_CHAT[String(x.transport || '').trim().toLowerCase()]).filter(Boolean))];
+  const list = types.length ? types : ['whatsapp'];
+  const phone = String(c.phone || '').replace(/\D/g, '');
+  openModal(`<h3>Написать клиенту</h3><form onsubmit="return submitStartConv(event,${contactId})">
+    ${types.length ? '' : '<p class="form-hint">Каналы не синхронизированы, поэтому выбрать мессенджер не из чего: сообщение сохранится в CRM, но клиенту не уйдёт. Настройки → Интеграции → «Проверить и синхронизировать каналы».</p>'}
+    ${fld('Куда написать', `<select name="chat_type" id="scType" onchange="scAddrHint()">${list.map(t => `<option value="${esc(t)}">${esc(channelLabel(t))}</option>`).join('')}</select>`, true)}
+    ${fld('Адрес получателя', `<input name="chat_id" id="scAddr" value="${esc(phone)}"><small class="form-hint" id="scHint"></small>`, true)}
+    <div style="display:flex;gap:8px;justify-content:flex-end;margin-top:14px">
+      <button type="button" class="btn" onclick="closeModal()">Отмена</button>
+      <button class="btn primary">Открыть чат</button>
+    </div></form>`);
+  scAddrHint();
+}
+function scAddrHint() {
+  const t = ($('#scType') || {}).value || 'whatsapp', a = $('#scAddr'), h = $('#scHint');
+  if (!a) return;
+  const byPhone = ['whatsapp', 'viber'].includes(t);
+  if (h) h.textContent = byPhone
+    ? 'Номер цифрами: на него уйдёт сообщение, и с него придёт ответ'
+    : 'Имя чата видно в первом сообщении клиента. Адрес не угадать, поэтому без него отправить нельзя';
+  a.placeholder = byPhone ? '79991234567' : 'имя аккаунта';
+}
+async function submitStartConv(e, contactId) {
+  e.preventDefault();
+  const f = new FormData(e.target);
+  try {
+    const r = await api('/api/conversations', { method: 'POST', body: JSON.stringify({ contact_id: contactId, chat_type: f.get('chat_type'), chat_id: String(f.get('chat_id') || '').trim() }) });
+    closeModal(); openConv(r.id);
+  } catch (err) { toast(err.message, 'err'); }
+  return false;
+}
+
 async function openContactCard(id) {
   await ensureStages();
   const c = await api('/api/contacts/' + id);
@@ -1786,7 +1861,9 @@ async function openContactCard(id) {
      <div><h3 style="margin:0">${esc(c.name)}</h3><small>${esc(c.company || 'Частное лицо')} · источник: ${esc(sourceLabel(c.source))}</small></div>
      <div style="margin-left:auto;display:flex;gap:6px;flex-wrap:wrap">
        ${rawPhone ? `<a class="btn sm" href="https://wa.me/${rawPhone}" target="_blank" rel="noopener">${icon('whatsapp', 13)} WhatsApp</a><a class="btn sm" href="tel:${esc(String(c.phone).replace(/[^+\d]/g, ''))}">${icon('phone', 13)} Позвонить</a>` : ''}
-       ${conv ? `<button class="btn sm" onclick="closeModal();openConv(${conv.id})">${icon('chat', 13)} Чат</button>` : ''}
+       ${conv
+        ? `<button class="btn sm" onclick="closeModal();openConv(${conv.id})">${icon('chat', 13)} Чат</button>`
+        : `<button class="btn sm" onclick="startConv(${c.id})">${icon('chat', 13)} Написать</button>`}
        <button class="btn sm" onclick="openTask(null,{contact_id:${c.id}})">+ Задача</button>
        <button class="btn sm primary" onclick="openDeal(${c.id})">+ Сделка</button>
        <button class="btn sm" onclick="openContact(${c.id})">Редактировать</button>
@@ -2620,6 +2697,9 @@ async function settings(v) {
 
   if (state.settingsTab === 'integrations') {
     const chans = state.channels.length ? state.channels : await api('/api/channels').catch(() => []); state.channels = chans;
+    // сотрудники нужны, чтобы привязать к каждому аккаунту того, кто с него отвечает
+    const team = state.users.length ? state.users : await api('/api/users').catch(() => []); state.users = team;
+    const staff = team.filter(u => u.active !== 0);
     body = `${!isAdmin ? '<div class="card tint-info"><b>Режим просмотра</b><br><small>Ключи и настройки интеграций меняет администратор. Вы можете работать с чатами, сделками и задачами — всё остальное доступно.</small></div>' : ''}
     <div class="settings-cols"><div>
      <div class="card"><h3>Адрес CRM в интернете</h3>
@@ -2646,10 +2726,10 @@ async function settings(v) {
       <div style="display:flex;gap:8px;flex-wrap:wrap"><button class="btn sm" onclick="registerWazzupWebhook()">${icon('sync', 13)} Зарегистрировать адрес автоматически</button></div>
       <hr><h3>Подключённые каналы (${chans.length})</h3>
       <p><small>Канал — это один подключённый аккаунт: номер WhatsApp, аккаунт Telegram или бот. Если к Wazzup подключено по аккаунту на каждого сотрудника, каналов будет столько же, сколько сотрудников, и это нормально. Имена людей Wazzup не передаёт, только номер или юзернейм, поэтому подпишите каналы своими словами — названия хранятся в CRM и не затираются следующей синхронизацией.</small></p>
-      <p><small>Ответ клиенту уходит с того аккаунта, на который клиент написал: канал запоминается в беседе. Выбор ниже нужен только для бесед, заведённых вручную, где входящих сообщений ещё не было.</small></p>
+      <p><small>Ответ клиенту уходит с того аккаунта, на который клиент написал: канал запоминается в беседе, выбирать аккаунт на каждое сообщение не нужно. Укажите у канала сотрудника, и тогда обращение, пришедшее на этот аккаунт, назначается на него же, а исходящее письмо клиенту, который ещё не писал, уходит с его аккаунта. Выбор канала по умолчанию ниже нужен только для бесед, заведённых вручную, когда ни привязки, ни входящих сообщений нет.</small></p>
       ${chans.map(c => { const [st, cls] = wzState(c.state);
         return `<div class="row"><span style="min-width:0;overflow-wrap:anywhere"><b>${esc(c.label || c.name || c.phone || c.external_id || 'Канал')}</b><br><small>${esc(wzTransportLabel(c.transport))}${c.label ? ' · ' + esc(c.name || c.phone || c.external_id || '') : ''}</small></span>
-        <span style="display:flex;gap:6px;align-items:center;flex:1 1 240px;min-width:0"><input id="chLabel${c.id}" value="${esc(c.label || '')}" placeholder="своё название, например «WhatsApp — Ирина»" maxlength="60"><button type="button" class="btn sm" style="white-space:nowrap" onclick="saveChannelLabel(${c.id})">Подписать</button></span>
+        <span style="display:flex;gap:6px;align-items:center;flex:1 1 320px;min-width:0"><input id="chLabel${c.id}" value="${esc(c.label || '')}" placeholder="своё название, например «WhatsApp — Ирина»" maxlength="60" style="flex:1 1 150px;min-width:0"><select id="chUser${c.id}" title="Кто отвечает с этого аккаунта" style="flex:1 1 150px;min-width:0"><option value="">— сотрудник не указан —</option>${staff.map(u => `<option value="${u.id}" ${Number(c.user_id) === Number(u.id) ? 'selected' : ''}>${esc(u.name)}</option>`).join('')}</select><button type="button" class="btn sm" style="white-space:nowrap" onclick="saveChannel(${c.id})">Сохранить</button></span>
         <span class="tag ${cls}">${esc(st)}</span></div>` }).join('')
         || '<small>Каналы появятся после сохранения ключа и синхронизации.</small>'}
       ${chans.length && !chans.some(wzAlive) ? '<p class="form-hint">Ни один канал пока не работает — сообщения не отправятся. Причина указана справа от канала: её устраняют в личном кабинете Wazzup.</p>' : ''}</div>
@@ -2762,15 +2842,22 @@ async function settings(v) {
   } else if (state.settingsTab === 'automations') {
     const rows = await api('/api/automations');
     const pl = await api('/api/pipelines');
+    // имена сотрудников нужны подписи правила «передать сделку»: без них в списке
+    // стоит прочерк, и непонятно, кому правило отдаёт сделку
+    window.__autoUsers = (await team()).filter(u => u.active !== 0);
     const stageName = code => (pl.flatMap(p => p.stages).find(s2 => s2.code === code) || {}).name || code;
     const whenText = a => a.trigger_type === 'deal_created' ? 'Появилась новая сделка'
       : a.trigger_type === 'message_in' ? (a.trigger_value ? `Клиент написал сообщение со словом «${a.trigger_value}»` : 'Клиент написал сообщение')
       : a.trigger_type === 'stage_changed' ? (a.trigger_value ? `Сделку перевели на этап «${stageName(a.trigger_value)}»` : 'Сделку перевели на другой этап')
       : a.trigger_type;
-    const whatText = a => a.action_type === 'create_task' ? `Создать задачу «${a.action_value}»`
+    const delayText = a => Number(a.delay_days) > 0 ? `, через ${Number(a.delay_days)} дн.` : '';
+    const whatText = a => (a.action_type === 'create_task' ? `Создать задачу «${a.action_value}»`
       : a.action_type === 'change_stage' ? `Перевести сделку на этап «${stageName(a.action_value)}»`
       : a.action_type === 'add_tag' ? `Добавить клиенту тег «${a.action_value}»`
-      : a.action_value;
+      : a.action_type === 'send_message' ? `Отправить клиенту сообщение: «${String(a.action_value || '').slice(0, 60)}»`
+      : a.action_type === 'send_email' ? `Отправить клиенту письмо «${a.name}»`
+      : a.action_type === 'assign_user' ? `Передать сделку сотруднику ${(window.__autoUsers || []).find(u => String(u.id) === String(a.action_value))?.name || '—'}`
+      : a.action_value) + delayText(a);
     body = `<div class="settings-cols"><div>
      <div class="card"><h3>Что CRM делает сама</h3>
       <p class="form-hint">Эти два правила работают всегда — создавать их не нужно. Они касаются обращений из чатов, формы на сайте и вебхуков.</p>
@@ -2867,6 +2954,25 @@ async function settings(v) {
        <div id="backupList" style="margin-top:10px">Загрузка…</div>
        <p class="form-hint">Копии лежат на этом сервере в папке <code>data/backups</code>, плюс кнопка «Скачать все данные» сохраняет файл себе на компьютер. Как положить вторую копию в облако или на другой сервер — коротко описано в файле <code>DEPLOY.md</code> из комплекта.</p>
      </div>
+     <div class="card"><h3>Резервные копии в хранилище</h3>
+      <p><small>Ночная копия остаётся на этом же сервере. Если сервер выйдет из строя или файлы зашифрует вирус, копия пропадёт вместе с базой. Хранилище — это отдельный сервер, куда CRM сама отправляет каждую новую копию. Подходит любое S3-хранилище: Рег.ру, Timeweb, Selectel, Яндекс Облако, VK Cloud. Данные берутся из панели провайдера.</small></p>
+      <form onsubmit="return saveS3(event)">
+       ${fld('Адрес хранилища', `<input name="S3_ENDPOINT" value="${esc(s.s3?.endpoint || '')}" placeholder="https://s3.regru.cloud">`, true)}
+       ${fld('Ведро (bucket)', `<input name="S3_BUCKET" value="${esc(s.s3?.bucket || '')}" placeholder="karkas-backups">`, true)}
+       ${fld('Ключ доступа', `<input name="S3_ACCESS_KEY" value="${esc(s.s3?.access_key || '')}" placeholder="обычно начинается с двух заглавных пар букв и цифр">`, true)}
+       ${fld('Секретный ключ', `<input name="S3_SECRET_KEY" type="password" value="" placeholder="${s.s3?.secret_set ? 'сохранён — введите, только чтобы заменить' : 'вставьте секретный ключ'}">`, true)}
+       ${fld('Папка внутри ведра', `<input name="S3_PREFIX" value="${esc(s.s3?.prefix || '')}" placeholder="karkascrm">`)}
+       ${fld('Регион', `<input name="S3_REGION" value="${esc(s.s3?.region || 'us-east-1')}" placeholder="us-east-1">`)}
+       ${fld('Сколько копий держать в хранилище', `<input name="S3_KEEP" type="number" min="0" max="365" value="${esc(String(s.s3?.keep ?? 14))}">`)}
+       <label class="opt" style="display:flex;gap:8px;align-items:center"><input name="S3_AUTO" type="checkbox" value="1" ${s.s3?.auto ? 'checked' : ''}> Отправлять каждую новую копию автоматически</label>
+       <div style="display:flex;gap:8px;flex-wrap:wrap;margin-top:10px">
+        <button class="btn primary">Сохранить хранилище</button>
+        <button type="button" class="btn" onclick="uploadS3()">Выгрузить последнюю копию сейчас</button>
+       </div>
+      </form>
+      <div id="s3status">${s3line(s.s3)}</div>
+      <p class="form-hint">Секретный ключ хранится в базе CRM и наружу не показывается. Если выгрузка не удалась, копия всё равно остаётся на сервере, а причина пишется выше.</p>
+     </div>
      <div class="card"><h3>Логотип компании</h3>
       <p><small>Загрузка необязательна: по умолчанию используется logo.jpg из комплекта. PNG, JPG, GIF или WebP, до 4 МБ. Логотип показывается на странице входа, в боковой панели, во вкладке браузера и на документах.</small></p>
       <div class="logo-admin">
@@ -2937,11 +3043,11 @@ async function settings(v) {
 // а каналов у заказчика бывает по одному на сотрудника: без подписей список
 // выглядит как перечень номеров и непонятно, чей из них чей.
 // Название хранится в CRM и не затирается следующей синхронизацией.
-async function saveChannelLabel(id) {
-  const el = $('#chLabel' + id);
+async function saveChannel(id) {
+  const name = $('#chLabel' + id), who = $('#chUser' + id);
   try {
-    await api('/api/channels/' + id, { method: 'PUT', body: JSON.stringify({ label: el ? el.value : '' }) });
-    toast('Название канала сохранено'); state.channels = []; render();
+    await api('/api/channels/' + id, { method: 'PUT', body: JSON.stringify({ label: name ? name.value : '', user_id: who && who.value ? Number(who.value) : '' }) });
+    toast('Канал сохранён'); state.channels = []; render();
   } catch (e) { toast(e.message, 'err'); }
 }
 async function saveWazzup() { await api('/api/settings', { method: 'PUT', body: JSON.stringify({ WAZZUP_API_KEY: $('#wzKey').value, WAZZUP_CHANNEL_ID: $('#wzChannel').value, WAZZUP_WEBHOOK_SECRET: $('#wzSecret').value, WAZZUP_API_URL: $('#wzUrl').value }) }); toast('Ключ сохранён'); render(); }
@@ -3171,7 +3277,14 @@ async function pkSave() {
   finally { if (btn) btn.disabled = false; }
 }
 const AUTO_TRIGGERS = { deal_created: 'Появилась новая сделка', message_in: 'Клиент написал сообщение', stage_changed: 'Сделку перевели на другой этап' };
-const AUTO_ACTIONS = { create_task: 'Создать задачу', change_stage: 'Перевести сделку на этап', add_tag: 'Добавить клиенту тег' };
+const AUTO_ACTIONS = {
+  create_task: 'Создать задачу',
+  change_stage: 'Перевести сделку на этап',
+  add_tag: 'Добавить клиенту тег',
+  send_message: 'Отправить клиенту сообщение в чат',
+  send_email: 'Отправить клиенту письмо',
+  assign_user: 'Передать сделку сотруднику',
+};
 function autoStageOptions(sel) {
   const list = window.__autoStages || [];
   return list.map(s2 => `<option value="${esc(s2.code)}" ${s2.code === sel ? 'selected' : ''}>${esc(s2.name)}${s2.kind === 'won' ? ' (успех)' : s2.kind === 'lost' ? ' (отказ)' : ''}</option>`).join('');
@@ -3188,6 +3301,12 @@ function autoTriggerField(a) {
 // Значение действия: этап выбирается из воронки, тег и текст задачи пишутся словами.
 function autoActionField(a) {
   const t = a.action_type || 'create_task';
+  if (t === 'send_message') return `<label>Текст сообщения<input name="action_value" required value="${esc(a.action_value || '')}" placeholder="{name}, отправляю смету по заявке «{deal}»"></label>
+   <p class="form-hint" style="margin:-6px 0 10px">Уходит в тот канал, откуда клиент писал: WhatsApp, Telegram или другой. Можно подставить {name} — имя клиента, {deal} — название сделки, {sum} — сумму, {company} — название вашей компании. Если переписки с клиентом ещё нет, правило отметит это в истории и ничего не отправит.</p>`;
+  if (t === 'send_email') return `<label>Текст письма<textarea name="action_value" rows="4" required placeholder="{name}, добрый день! Направляю предложение по заявке «{deal}».">${esc(a.action_value || '')}</textarea></label>
+   <p class="form-hint" style="margin:-6px 0 10px">Тема письма — название правила. Подстановки те же: {name}, {deal}, {sum}, {company}. Письмо уходит на e-mail из карточки клиента; без него или без настроенной почты правило напишет об этом в историю.</p>`;
+  if (t === 'assign_user') return `<label>Кому передать<select name="action_value" required>${(window.__autoUsers || []).map(u => `<option value="${u.id}" ${String(u.id) === String(a.action_value || '') ? 'selected' : ''}>${esc(u.name)} — ${esc(roleLabel(u.role))}</option>`).join('')}</select></label>
+   <p class="form-hint" style="margin:-6px 0 10px">Сделка и клиент переходят к этому сотруднику, он получает уведомление. Удобно для ночных обращений: утром их разбирает дежурный.</p>`;
   if (t === 'change_stage') return `<label>Этап, на который перевести сделку<select name="action_value" required>${autoStageOptions(a.action_value)}</select></label>
    <p class="form-hint" style="margin:-6px 0 10px">Этап берётся из вашей воронки. Если сделка уже на этом этапе, правило ничего не меняет.</p>`;
   if (t === 'add_tag') return `<label>Тег<input name="action_value" required value="${esc(a.action_value || '')}" placeholder="Горячий, Нужна смета, Ипотека"></label>
@@ -3205,6 +3324,9 @@ async function openAutomation(id) {
   const rows = await api('/api/automations'); const a = id ? (rows.find(x => x.id === id) || {}) : {};
   const pl = await api('/api/pipelines');
   window.__autoStages = pl.flatMap(p => p.stages.map(st => ({ ...st, pipeline: p.name })));
+  // список сотрудников нужен действию «передать сделку»: выбирать из живых,
+  // а не вписывать идентификатор руками
+  window.__autoUsers = (await team()).filter(u => u.active !== 0);
   openModal(`<h3>${id ? 'Правило автоматизации' : 'Новое правило автоматизации'}</h3>
    <p class="form-hint">Правило состоит из двух частей: <b>когда</b> случилось и <b>что</b> сделать. Пример: «Появилась новая сделка → создать задачу «Позвонить клиенту»».</p>
    <form onsubmit="return saveAutomation(event,${id || 'null'})">
@@ -3213,6 +3335,8 @@ async function openAutomation(id) {
    <div id="autoTriggerValue">${autoTriggerField(a)}</div>
    ${fld('Что сделать', `<select name="action_type" onchange="autoFields(this.form)">${Object.entries(AUTO_ACTIONS).map(([k, n]) => `<option value="${k}" ${k === (a.action_type || 'create_task') ? 'selected' : ''}>${n}</option>`).join('')}</select>`, true)}
    <div id="autoActionValue">${autoActionField(a)}</div>
+   ${fld('Когда выполнить', `<select name="delay_days">${[0, 1, 2, 3, 5, 7, 14, 30].map(n => `<option value="${n}" ${Number(a.delay_days || 0) === n ? 'selected' : ''}>${n === 0 ? 'Сразу' : 'Через ' + n + ' дн.'}</option>`).join('')}</select>`)}
+   <p class="form-hint" style="margin:-6px 0 10px">«Через N дн.» — CRM запомнит действие и выполнит его в срок, даже если страницу закрыли. Отсчёт идёт от момента события, дата указывается в истории сделки.</p>
    <label class="check-line"><input type="checkbox" name="active" style="width:auto" ${a.active === 0 ? '' : 'checked'}><span>Правило включено <small>(можно сохранить выключенным и включить позже)</small></span></label>
    <button class="btn primary w">${id ? 'Сохранить правило' : 'Создать правило'}</button></form>`);
 }
@@ -3220,6 +3344,7 @@ async function saveAutomation(e, id) {
   e.preventDefault();
   const b = Object.fromEntries(new FormData(e.target));
   b.active = e.target.elements.active && e.target.elements.active.checked ? 1 : 0;
+  b.delay_days = Number(b.delay_days) || 0;
   try {
     await api(id ? '/api/automations/' + id : '/api/automations', { method: id ? 'PATCH' : 'POST', body: JSON.stringify(b) });
   } catch (err) { toast(err.message, 'err'); return false; }
@@ -3302,6 +3427,41 @@ async function copyCreatedCredentials() {
     field.focus(); field.select();
     if (status) status.textContent = 'Автоматическое копирование недоступно. Нажмите Ctrl+C или скопируйте выделенный текст вручную.';
   }
+}
+
+// Состояние выгрузки показываем всегда: и когда всё хорошо, и когда хранилище
+// недоступно. Молча невыгруженная копия выглядит как «настроено и работает».
+function s3line(s3) {
+  if (!s3) return '';
+  if (!s3.configured) return `<p><small>Хранилище не настроено${(s3.missing || []).length ? ': не заполнено ' + esc(s3.missing.join(', ')) : ''}. Копии остаются только на этом сервере.</small></p>`;
+  const bad = s3.last_error ? `<p><small>Последняя выгрузка не удалась: ${esc(s3.last_error)}</small></p>` : '';
+  const good = s3.last_ok ? `<p><small>Последняя выгрузка: <b>${esc(dt(s3.last_ok))}</b>${s3.last_file ? ' · ' + esc(s3.last_file) : ''} · ${esc(s3.bucket)}</small></p>` : '<p><small>Хранилище настроено, но копии ещё не выгружались.</small></p>';
+  return good + bad;
+}
+async function saveS3(e) {
+  e.preventDefault();
+  const f = new FormData(e.target);
+  const body = {};
+  for (const [k, v] of f.entries()) body[k] = String(v).trim();
+  body.S3_AUTO = f.get('S3_AUTO') ? '1' : '0';
+  if (!body.S3_SECRET_KEY) delete body.S3_SECRET_KEY; // пустое поле = ключ не меняем
+  try {
+    await api('/api/settings', { method: 'PUT', body: JSON.stringify(body) });
+    toast('Настройки хранилища сохранены');
+    const check = await api('/api/backups/s3', { method: 'POST' }).catch(err => ({ error: err.message }));
+    await render();
+    toast(check.ok ? 'Проверили: копия ушла в хранилище' : 'Сохранено, но выгрузка не прошла: ' + (check.error || ''), check.ok ? 'ok' : 'err');
+  } catch (err) { toast(err.message, 'err'); }
+  return false;
+}
+async function uploadS3() {
+  toast('Отправляем копию в хранилище…');
+  try {
+    const r = await api('/api/backups/s3', { method: 'POST' });
+    toast('Копия ' + r.name + ' выгружена в ' + r.bucket + (r.removed ? ', старых удалено: ' + r.removed : ''));
+  } catch (e) { toast(e.message, 'err'); }
+  const host = $('#s3status');
+  if (host) { try { host.innerHTML = s3line((await api('/api/backups')).s3) } catch {} }
 }
 
 async function loadBackups() {

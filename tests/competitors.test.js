@@ -479,3 +479,34 @@ test('ручная находка записывается, попадает в 
 
   assert.equal((await call(`/api/competitors/999999/findings`, { method: 'POST', body: JSON.stringify({ kind: 'долги', title: 'x' }) })).status, 404, 'несуществующему конкуренту находку не добавить');
 });
+
+test('сбой источника 5xx повторяется один раз и проверка не теряет данные', async () => {
+  // Карты и реестры периодически отвечают ошибкой на отдельный запрос. Без
+  // повтора источник выглядел бы сломанным, а отчёт — неполным.
+  let hits = 0;
+  await mock('flaky', (req, r) => {
+    hits++;
+    if (hits === 1) return jsonReply(r, { meta: { error: { message: 'Bad Gateway' } } }, 502);
+    jsonReply(r, { result: { items: [{ name: 'ООО «Конкурент»', address_name: 'Москва, Ленина 1', reviews: { general_rating: 4.7, general_review_count: 12 } }] } });
+  });
+  await call('/api/competitor-sources', { method: 'PUT', body: JSON.stringify({ TWOGIS_KEY: 'test-2gis-key', TWOGIS_API_URL: url('flaky') }) });
+  const r = await call('/api/competitors/find', { method: 'POST', body: JSON.stringify({ name: 'ООО «Конкурент»', inn: INN }) });
+  const g = r.body.results.find(x => x.source === '2gis');
+  assert.equal(hits, 2, 'запрос повторён ровно один раз: ' + hits);
+  assert.equal(g.status, 'ok', 'после повтора данные получены: ' + g.summary);
+  assert.match(g.summary, /4[.,]7/, 'рейтинг из ответа разобран: ' + g.summary);
+  assert.equal(g.data.card.count, 12, 'число отзывов сохранено');
+
+  // если источник отвечает 5xx постоянно, проверка не падает и говорит об этом
+  let dead = 0;
+  await mock('alwaysdown', (req, r) => { dead++; jsonReply(r, { meta: { error: { message: 'Internal Server Error' } } }, 503); });
+  await call('/api/competitor-sources', { method: 'PUT', body: JSON.stringify({ TWOGIS_API_URL: url('alwaysdown') }) });
+  const r2 = await call('/api/competitors/find', { method: 'POST', body: JSON.stringify({ name: 'ООО «Конкурент»', inn: INN }) });
+  const g2 = r2.body.results.find(x => x.source === '2gis');
+  assert.equal(dead, 2, 'повторили один раз и остановились: ' + dead);
+  assert.equal(g2.status, 'error', 'источник помечен ошибкой, а не «данных нет»');
+  assert.match(g2.summary, /503/, 'код ответа виден сотруднику: ' + g2.summary);
+  assert.match(g2.summary, /повторите|Повторите/i, 'сказано, что это не навсегда');
+  assert.ok(g2.links.length >= 5, 'ссылки ручной проверки на месте');
+  assert.ok(r2.body.report, 'отчёт собран, несмотря на сбой одного источника');
+});

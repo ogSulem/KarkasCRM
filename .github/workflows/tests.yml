@@ -35,6 +35,7 @@ jobs:
           node --check tests/install-args.test.mjs
           node --check tests/update-mode.test.mjs
           node --check tests/wazzup-contract.test.mjs
+          node --check tests/mail.test.mjs
           node --check tests/ui.smoke.mjs
           node --check tests/migrate.test.mjs
           node --check tests/routes.test.mjs
@@ -47,6 +48,11 @@ jobs:
       # при регистрации вебхука приходит проверочный POST и требуется ответ 200.
       - name: Контракт Wazzup — сверка с документацией вендора
         run: node --experimental-sqlite --test tests/wazzup-contract.test.mjs
+
+      # Письмо уходит на подставной SMTP-сервер: проверяются и простой текст,
+      # и структура вложения, и ссылка на документ, которая открывается без входа.
+      - name: Почта — отправка, вложения и ссылка на документ
+        run: node --experimental-sqlite --test tests/mail.test.mjs
 
       - name: Маршруты API — интерфейс не ходит в никуда
         run: node --test tests/routes.test.mjs

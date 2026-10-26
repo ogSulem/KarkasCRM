@@ -1,6 +1,6 @@
 {
   "name": "karkascrm",
-  "version": "1.0.3",
+  "version": "1.0.4",
   "private": true,
   "description": "КаркасCRM — сделки и воронки, клиенты, задачи, единый инбокс мессенджеров, почта и разведка конкурентов. Без внешних зависимостей, один контейнер.",
   "license": "UNLICENSED",
@@ -16,6 +16,7 @@
     "test:install": "node --test tests/install-args.test.mjs",
     "test:update": "node --test tests/update-mode.test.mjs",
     "test:wazzup": "node --experimental-sqlite --test tests/wazzup-contract.test.mjs",
+    "test:mail": "node --experimental-sqlite --test tests/mail.test.mjs",
     "test:db": "node --experimental-sqlite --test tests/db-hygiene.test.mjs tests/migrate.test.mjs",
     "test:ui": "node --experimental-sqlite tests/ui.smoke.mjs",
     "test:all": "./run-tests.sh",

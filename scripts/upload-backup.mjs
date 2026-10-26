@@ -64,7 +64,7 @@ for (const name of files) {
   const key = `${prefix}/${name}`;
   let res;
   try {
-    const req = signedHeaders({ method: 'PUT', key, body, region: S3_REGION, endpoint: S3_ENDPOINT, accessKey: S3_ACCESS_KEY, secretKey: S3_SECRET_KEY });
+    const req = signedHeaders({ method: 'PUT', key, bucket: S3_BUCKET, body, region: S3_REGION, endpoint: S3_ENDPOINT, accessKey: S3_ACCESS_KEY, secretKey: S3_SECRET_KEY });
     res = await fetch(req.url, {
       method: 'PUT',
       headers: { ...req.headers, 'Content-Type': 'application/vnd.sqlite3', 'Content-Length': String(body.length) },

@@ -214,18 +214,32 @@ export function createCompetitors(ctx) {
     }
     return { ok: res.ok, status: res.status, text: Buffer.concat(chunks).toString('utf8') };
   }
-  async function http(url, opt = {}, ms = Number(getSetting('COMPETITOR_TIMEOUT_MS', '12000'))) {
+  const httpOnce = async (url, opt, ms) => {
     try {
       const res = await safeFetch(url, opt, ms);
       let data = null; try { data = JSON.parse(res.text); } catch {}
       return { ok: res.ok, status: res.status, text: res.text, data };
     } catch (e) { return { ok: false, status: 0, text: '', data: null, error: e.message }; }
+  };
+  async function http(url, opt = {}, ms = Number(getSetting('COMPETITOR_TIMEOUT_MS', '12000'))) {
+    const first = await httpOnce(url, opt, ms);
+    // Один повтор при обрыве соединения, таймауте или ответе 5xx: карты и реестры
+    // периодически отвечают ошибкой на отдельный запрос. Без повтора источник
+    // выглядел бы сломанным, а проверка — неполной. Больше одного раза не
+    // повторяем: источник может отвечать отказом именно из-за частоты запросов.
+    const transient = first.status === 0 || (first.status >= 500 && first.status <= 599);
+    if (!transient) return first;
+    await new Promise(r => setTimeout(r, 400));
+    const second = await httpOnce(url, opt, ms);
+    if (second.ok) return { ...second, retried: true };
+    return { ...(second.status ? second : first), retried: true };
   }
   const blockedHint = 'сайт не отдал данные автоматически — проверьте по ссылке ниже';
   // нет соединения / блокировка антиботом / превышен лимит — во всех случаях данные берём по ссылке
   const failStatus = res => ([0, 401, 403, 410, 429].includes(res.status) ? 'blocked' : 'error');
   const failText = res => res.status === 0 ? `Источник недоступен (${res.error || 'нет соединения'}). ${blockedHint}`
     : res.status === 410 ? `HTTP 410 — источник закрыт навсегда и данные больше не отдаёт. ${blockedHint}`
+    : res.status >= 500 ? `HTTP ${res.status} — сервер источника не справился с запросом${res.retried ? ', повтор тоже не помог' : ''}. Повторите проверку позже. ${blockedHint}`
     : `HTTP ${res.status}. ${blockedHint}`;
 
   // Прямые ссылки ручной проверки: работают всегда, без ключей и API.
@@ -307,7 +321,12 @@ export function createCompetitors(ctx) {
     const base = srcUrl('FNS_API_URL');
     const q = digits(inn).length >= 10 ? digits(inn) : name;
     const res = await http(`${base}/egr?req=${encodeURIComponent(q)}&key=${encodeURIComponent(key)}`);
-    if (!res.ok || !res.data) return { ...out, status: failStatus(res), summary: res.data?.error || failText(res), data: {} };
+    if (!res.ok || !res.data) {
+      // при сбое сначала наше объяснение с кодом ответа, потом текст источника:
+      // одно лишь «Internal Server Error» не говорит сотруднику, что делать
+      const vendor = res.data?.error;
+      return { ...out, status: failStatus(res), summary: res.ok ? (vendor || 'Источник не отдал данные') : failText(res) + (vendor ? ' Ответ источника: ' + vendor : ''), data: {} };
+    }
     const item = (res.data.items || [])[0] || res.data;
     const ul = item['ЮЛ'] || item['ИП'] || item['НР'] || item;
     // Ответ api-fns.ru вложенный: адрес, руководитель, ОКВЭД и численность лежат
@@ -444,7 +463,8 @@ export function createCompetitors(ctx) {
     });
     const hit = r.data?.places?.[0];
     if (!hit) {
-      return { ...out, status: r.ok ? 'ok' : failStatus(r), summary: r.data?.error?.message || (r.ok ? 'Организация не найдена на Google Картах' : failText(r)), data: {} };
+      const vendor = r.data?.error?.message;
+      return { ...out, status: r.ok ? 'ok' : failStatus(r), summary: r.ok ? (vendor || 'Организация не найдена на Google Картах') : failText(r) + (vendor ? ' Ответ источника: ' + vendor : ''), data: {} };
     }
     const reviews = (hit.reviews || []).map(x => ({ author: x.author?.displayName, rating: x.rating, text: x.text?.text, url: hit.googleMapsUri, created_at: x.relativePublishTimeDescription }));
     return { ...out, status: 'ok', summary: `Рейтинг ${hit.rating ?? '—'}${hit.userRatingCount ? ` · ${hit.userRatingCount} отзывов` : ''}${hit.formattedAddress ? ' · ' + hit.formattedAddress : ''}`, data: { card: { name: hit.displayName?.text || name, address: hit.formattedAddress, phone: hit.nationalPhoneNumber, url: hit.googleMapsUri, rating: hit.rating ?? null, count: hit.userRatingCount ?? 0 }, reviews } };
@@ -458,7 +478,10 @@ export function createCompetitors(ctx) {
     // Город остаётся в тексте запроса: без геоограничения 2ГИС требует указывать его в q.
     const res = await http(`${srcUrl('TWOGIS_API_URL')}/items?q=${encodeURIComponent([name, city].filter(Boolean).join(' '))}&type=branch&locale=ru_RU&fields=items.reviews,items.address,items.contact_groups&key=${encodeURIComponent(key)}`);
     const item = res.data?.result?.items?.[0];
-    if (!item) return { ...out, status: res.ok ? 'ok' : 'error', summary: res.data?.meta?.error?.message || 'Организация не найдена в 2ГИС', data: {} };
+    if (!item) {
+      const vendor = res.data?.meta?.error?.message;
+      return { ...out, status: res.ok ? 'ok' : failStatus(res), summary: res.ok ? (vendor || 'Организация не найдена в 2ГИС') : failText(res) + (vendor ? ' Ответ источника: ' + vendor : ''), data: {} };
+    }
     const rv = item.reviews || {};
     return { ...out, status: 'ok', summary: `Рейтинг ${rv.general_rating ?? rv.org_rating ?? '—'}${rv.general_review_count || rv.org_review_count ? ` · ${rv.general_review_count || rv.org_review_count} отзывов` : ''}`, data: { card: { name: item.name, address: item.address_name, rating: rv.general_rating ?? rv.org_rating ?? null, count: rv.general_review_count ?? rv.org_review_count ?? 0 } } };
   }
@@ -469,7 +492,12 @@ export function createCompetitors(ctx) {
     if (!key) return { ...out, status: 'skipped', summary: 'Не задан ключ Яндекс Геопоиска — карточка по ссылке', data: {} };
     const res = await http(`${srcUrl('YANDEX_API_URL')}?apikey=${encodeURIComponent(key)}&text=${encodeURIComponent([name, city].filter(Boolean).join(' '))}&type=biz&lang=ru_RU&results=3`);
     const f = res.data?.features?.[0];
-    if (!f) return { ...out, status: res.ok ? 'ok' : 'error', summary: res.data?.message || 'Организация не найдена на Яндекс Картах', data: {} };
+    if (!f) {
+      const vendor = res.data?.message;
+      // 403 и 429 у Яндекса означают ключ или лимит, а не «данных нет»:
+      // помечаем так же, как остальные источники
+      return { ...out, status: res.ok ? 'ok' : failStatus(res), summary: res.ok ? (vendor || 'Организация не найдена на Яндекс Картах') : failText(res) + (vendor ? ' Ответ источника: ' + vendor : ''), data: {} };
+    }
     const cm = f.properties?.CompanyMetaData || {};
     return { ...out, status: 'ok', summary: `${f.properties?.name || name}${cm.address ? ' · ' + cm.address : ''}`, data: { card: { name: f.properties?.name, address: cm.address, url: cm.url, phone: (cm.Phones || [])[0]?.formatted, rating: cm.rating ?? null, count: cm.reviews ?? 0 } } };
   }
