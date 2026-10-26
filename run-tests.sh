@@ -172,6 +172,11 @@ echo "  - бренд: векторный лист, фото-логотипа в 
 test -f frontend/public/favicon.svg || { echo "  ОШИБКА: нет frontend/public/favicon.svg"; exit 1; }
 grep -q 'rel="icon" type="image/svg+xml" href="/favicon.svg"' frontend/public/index.html || { echo "  ОШИБКА: index.html не ссылается на favicon.svg"; exit 1; }
 grep -q 'logo.jpg' frontend/public/index.html frontend/public/app.js backend/src/server.js && { echo "  ОШИБКА: фото-логотип упомянут в коде"; exit 1; }
+# контур листа в разметке обязан быть тем же, что в файле вкладки: пустой путь
+# не отрисовывается, и меню остаётся без знака при живом favicon
+LEAF_D=$(sed -n 's/.*<path id="leaf" fill="currentColor" d="\([^"]*\)".*/\1/p' frontend/public/favicon.svg)
+IDX_D=$(sed -n 's/.*<symbol id="karkas-leaf"[^>]*><path fill="currentColor" d="\([^"]*\)".*/\1/p' frontend/public/index.html)
+[ -n "$LEAF_D" ] && [ "$LEAF_D" = "$IDX_D" ] && [ ${#LEAF_D} -gt 200 ] || { echo "  ОШИБКА: контур листа в index.html не совпадает с favicon.svg"; exit 1; }
 grep -qs 'LOGO_FILE' .env.example docker-compose.yml backend/src/server.js && { echo "  ОШИБКА: LOGO_FILE снова в конфигурации"; exit 1; }
 echo "  ok   бренд: лист вектором в меню и во вкладке, фото-лого и LOGO_FILE удалены"
 
