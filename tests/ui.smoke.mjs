@@ -1164,6 +1164,11 @@ process.on('exit', () => { try { srv.kill('SIGKILL') } catch {} });
 for (const sig of ['SIGINT', 'SIGTERM']) process.on(sig, () => { try { srv.kill('SIGKILL') } catch {}; process.exit(1) });
 process.on('uncaughtException', e => { console.error('Smoke-тест упал:', e.message); try { srv.kill('SIGKILL') } catch {}; process.exit(1) });
 const failed = checks.filter(c => !c.ok);
+// В CI журнал шага без загрузки не прочитать, а причина провала нужна сразу:
+// продублируем провалившиеся проверки аннотациями — они видны в самой проверке.
+if (process.env.GITHUB_ACTIONS) {
+  for (const c of failed.slice(0, 12)) console.log(`::error::Проверка интерфейса не прошла: ${c.name}${c.extra ? ' — ' + String(c.extra).slice(0, 220).replace(/\r?\n/g, ' ') : ''}`);
+}
 console.log('\n=== Smoke-тест интерфейса КаркасCRM ===');
 checks.forEach(c => console.log(`${c.ok ? 'ok  ' : 'FAIL'} ${c.name}${c.extra ? ' — ' + String(c.extra).slice(0, 160) : ''}`));
 console.log(`\nИтого: ${checks.length - failed.length}/${checks.length} проверок пройдено`);
