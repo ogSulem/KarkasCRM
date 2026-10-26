@@ -1137,7 +1137,15 @@ try {
       window.wazzupHookUrl({ public_url: 'https://crm.xn--80aaamzedb7cml.xn--p1ai', wazzup: {} }).includes('xn--80aaamzedb7cml'));
     // расшифровка нужна только там, где адрес читает человек. Вебхук и код для
     // сайта уходят машинам: им нужен валидный домен, а не красивые буквы.
-    check('код формы для сайта и адрес вебхука не расшифровываются',
+    // ── входящие из Wazzup: админ видит, доходят ли сообщения ────────────────
+  await fetch(BASE + '/api/settings', { method: 'PUT', headers: authH(), body: JSON.stringify({ WAZZUP_API_KEY: 'f'.repeat(32), WAZZUP_WEBHOOK_SECRET: 'smoke-hook' }) });
+  const whTest = await fetch(BASE + '/webhooks/wazzup?secret=smoke-hook', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{"test":true}' });
+  check('проверочный запрос Wazzup проходит', whTest.status === 200);
+  const whMsg = await fetch(BASE + '/webhooks/wazzup?secret=smoke-hook', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ messages: [{ messageId: 'smoke-wz-1', channelId: 'c1', chatType: 'whatsapp', chatId: '79000000009', type: 'text', text: 'Здравствуйте', contact: { name: 'Дым Incoming', phone: '+7 900 000-00-09' } }] }) });
+  check('входящее сообщение принимается вебхуком', whMsg.status === 200);
+  window.__state.settingsTab = 'integrations'; window.go('settings'); await wait(700);
+  check('в карточке интеграций виден счётчик входящих', /Входящих получено: 1/.test($('#view').textContent), $('#view').textContent.replace(/\s+/g, ' ').slice(0, 160));
+  check('код формы для сайта и адрес вебхука не расшифровываются',
       !/function siteFormCode[\s\S]{0,800}humanOrigin/.test(appJsRaw) && !/function wazzupHookUrl[\s\S]{0,400}humanOrigin/.test(appJsRaw));
     check('человекочитаемый адрес применяется только в данных для входа', (appJsRaw.match(/humanOrigin\(/g) || []).length === 2, String((appJsRaw.match(/humanOrigin\(/g) || []).length));
   }

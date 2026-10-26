@@ -469,6 +469,10 @@ const autoVars = ctx => {
 };
 const fillVars = (text, vars) => String(text ?? '').replace(/\{(\w+)\}/g, (m, k) => (vars[k] !== undefined && vars[k] !== '' ? String(vars[k]) : m));
 const ruDate = v => String(v || '').slice(0, 10).split('-').reverse().join('.');
+// Отметки входящих из Wazzup: без них администратор не отличит «никто не пишет»
+// от «сообщения не доходят до CRM».
+const wzHookMark = (key, value) => db.prepare('INSERT INTO settings(key,value) VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value').run(key, value);
+const wzHookHuman = v => v ? ruDate(v) + ' ' + String(v).slice(11, 16) : '';
 
 // Одно действие правила. Отдельной функцией — потому что его выполняют и сразу,
 // и по очереди, если задана выдержка.
@@ -1300,6 +1304,8 @@ export const server = http.createServer(async (req, res) => {
     if (p === '/webhooks/wazzup' && req.method === 'POST') {
       const secret = getSetting('WAZZUP_WEBHOOK_SECRET'); if (secret && u.searchParams.get('secret') !== secret && req.headers['x-webhook-secret'] !== secret) return json(res, 403, { error: 'bad secret' });
       const b = await readBody(req);
+      wzHookMark('WZ_HOOK_LAST_AT', localNow());
+      if (b.test) { wzHookMark('WZ_HOOK_TEST_AT', localNow()); return json(res, 200, { received: true, test: true }); }
       const legacy = b.messages || [];
       const modern = (b.data || []).concat(!b.data && (b.message_id || b.messageId) ? [b] : []).map(m => ({
         messageId: m.message_id || m.messageId, channelId: m.channel_id || m.channelId,
@@ -1314,6 +1320,12 @@ export const server = http.createServer(async (req, res) => {
         if (m.status && m.status !== 'inbound') { db.prepare('UPDATE messages SET status=? WHERE external_id=?').run(m.status, m.messageId); continue; }
         if (m.isEcho) continue;
         await upsertIncoming({ channel: wzChannel(m.chatType), chatType: normChatType(m.chatType), phone: m.contact?.phone || '', chatId: m.chatId || '', name: m.contact?.name || m.authorName || '', body: wzBody(m), contentUri: m.contentUri || '', external_id: m.messageId, channelId: m.channelId, author: m.authorName || '' });
+      }
+      const inbound = legacy.concat(modern).filter(m => !(m.status && m.status !== 'inbound') && !m.isEcho).length;
+      if (inbound) {
+        const total = Number(db.prepare("SELECT value FROM settings WHERE key='WZ_HOOK_MSG_TOTAL'").get()?.value || 0) + inbound;
+        wzHookMark('WZ_HOOK_MSG_TOTAL', String(total));
+        log(`Wazzup: получено сообщений: ${inbound}`, null, null, 'Wazzup');
       }
       for (const s of b.statuses || []) db.prepare('UPDATE messages SET status=? WHERE external_id=?').run(s.status, s.messageId);
       for (const cu of b.channelsUpdates || []) db.prepare('INSERT INTO channels(provider,external_id,state) VALUES(?,?,?) ON CONFLICT(external_id) DO UPDATE SET state=excluded.state').run('wazzup', cu.channelId, cu.state);
@@ -2326,7 +2338,7 @@ ${user?.name || ''}`.trim();
           advanced: { frame_ancestors: getSetting('FRAME_ANCESTORS'), login_rate_limit: num('LOGIN_RATE_LIMIT', 12) },
           auto_deal: getSetting('AUTO_DEAL', '1'), auto_assign: getSetting('AUTO_ASSIGN', '0'),
           webhook: { secret: getSetting('WEBHOOK_SECRET'), configured: !!getSetting('WEBHOOK_SECRET') },
-          wazzup: { api_key: mask(getSetting('WAZZUP_API_KEY')), api_url: getSetting('WAZZUP_API_URL', 'https://api.wazzup24.com/v3'), channel_id: getSetting('WAZZUP_CHANNEL_ID'), webhook_secret: getSetting('WAZZUP_WEBHOOK_SECRET'), configured: !!getSetting('WAZZUP_API_KEY') },
+          wazzup: { api_key: mask(getSetting('WAZZUP_API_KEY')), api_url: getSetting('WAZZUP_API_URL', 'https://api.wazzup24.com/v3'), channel_id: getSetting('WAZZUP_CHANNEL_ID'), webhook_secret: getSetting('WAZZUP_WEBHOOK_SECRET'), configured: !!getSetting('WAZZUP_API_KEY'), hook_last_at: getSetting('WZ_HOOK_LAST_AT') || '', hook_test_at: getSetting('WZ_HOOK_TEST_AT') || '', hook_last_human: wzHookHuman(getSetting('WZ_HOOK_LAST_AT')), hook_test_human: wzHookHuman(getSetting('WZ_HOOK_TEST_AT')), hook_msgs: Number(getSetting('WZ_HOOK_MSG_TOTAL', '0')) || 0 }
         });
       }
       if (req.method === 'PUT') {
