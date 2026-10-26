@@ -189,7 +189,7 @@ CREATE INDEX IF NOT EXISTS idx_activities_entity ON activities(entity_type, enti
 `);
 try { db.exec('CREATE UNIQUE INDEX IF NOT EXISTS idx_msg_ext ON messages(external_id) WHERE external_id IS NOT NULL'); }
 catch (e) { console.error('Не удалось создать уникальный индекс по external_id (в базе есть дубли внешних id):', e.message); }
-const SCHEMA_VERSION = 6;
+const SCHEMA_VERSION = 7;
 
 // Дата в местном часовом поясе (в базе время хранится в UTC, а сроки задач —
 // в местном настенном времени; сравнивать их с UTC-«сегодня» нельзя).
@@ -894,9 +894,23 @@ async function s3request(c, { method, key = '', query, body = null, contentType 
 // файлов — локальные копии чистятся раньше и живут меньше.
 async function s3prune(c, keep) {
   if (!keep || keep <= 0) return { kept: 0, removed: 0 };
-  const res = await s3request(c, { method: 'GET', key: '', query: { prefix: c.prefix ? c.prefix + '/' : '', 'max-keys': '500' } });
-  const xml = await res.text();
-  const keys = [...xml.matchAll(/<Key>([^<]+)<\/Key>/g)].map(m => decodeURIComponent(m[1])).filter(k => k.endsWith('.db'));
+  // Хранилище отдаёт список страницами. Без досборки чистка посчитала бы только
+  // первую тысячу объектов, а старые копии продолжали бы лежать и занимать место.
+  const prefix = c.prefix ? c.prefix + '/' : '';
+  const unesc = v => decodeURIComponent(String(v).replace(/&amp;/g, '&').replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&quot;/g, '"'));
+  const all = [];
+  let marker = '';
+  for (let page = 0; page < 10; page++) {
+    const query = { prefix, 'max-keys': '1000' };
+    if (marker) query.marker = marker;
+    const xml = await (await s3request(c, { method: 'GET', key: '', query })).text();
+    const page_keys = [...xml.matchAll(/<Key>([^<]+)<\/Key>/g)].map(m => unesc(m[1]));
+    all.push(...page_keys);
+    if (!/<IsTruncated>\s*true\s*<\/IsTruncated>/i.test(xml) || !page_keys.length) break;
+    const next = (xml.match(/<NextMarker>([^<]+)<\/NextMarker>/) || [])[1];
+    marker = unesc(next || page_keys[page_keys.length - 1]);
+  }
+  const keys = all.filter(k => k.endsWith('.db'));
   // имена копий начинаются с даты, поэтому сортировка по имени = сортировка по времени
   keys.sort();
   const extra = keys.slice(0, Math.max(0, keys.length - keep));
@@ -1207,7 +1221,7 @@ const ADMIN_ONLY = [
   /^\/api\/settings(\/.*)?$/, /^\/api\/users(\/.*)?$/, /^\/api\/pipelines(\/.*)?$/, /^\/api\/automations(\/.*)?$/,
   /^\/api\/custom-fields(\/.*)?$/, /^\/api\/competitor-sources(\/.*)?$/,
   /^\/api\/backups(\/.*)?$/, /^\/api\/integrations(\/.*)?$/, /^\/api\/prices\/ours(\/.*)?$/,
-  /^\/api\/demo\/cleanup$/, /^\/api\/channels(\/.*)?$/,
+  /^\/api\/demo\/cleanup$/, /^\/api\/channels(\/.*)?$/, /^\/api\/automation-queue(\/.*)?$/,
 ];
 // Отказ по правам понятнее, если сказать, что именно закрыто и что делать вместо этого.
 const ADMIN_ONLY_HINT = [
@@ -1576,6 +1590,36 @@ export const server = http.createServer(async (req, res) => {
       // полная выгрузка содержит пользователей и настройки — только администратор
       if (!requireAdmin(user, res)) return;
       const tables = ['users', 'companies', 'contacts', 'pipelines', 'stages', 'deals', 'tasks', 'notes', 'products', 'templates', 'automations', 'conversations', 'messages', 'channels', 'competitors', 'competitor_checks', 'competitor_reports', 'reviews', 'price_rows']; const out = {}; tables.forEach(t => out[t] = db.prepare(`SELECT * FROM ${t}`).all()); res.writeHead(200, { 'Content-Type': 'application/json', 'Content-Disposition': 'attachment; filename=karkas-backup.json' }); return res.end(JSON.stringify(out, null, 2)); }
+
+    // Очередь отложенных действий. Без неё правило с выдержкой выглядит как
+    // «настроил и забыл»: не видно, что именно сработает и можно ли отменить.
+    if (p === '/api/automation-queue' && req.method === 'GET') {
+      const rows = db.prepare(`SELECT q.id, q.automation_id, q.deal_id, q.contact_id, q.run_at, q.created_at,
+          a.name rule_name, a.action_type, a.action_value,
+          d.title deal_title, c.name contact_name
+        FROM automation_queue q
+        LEFT JOIN automations a ON a.id = q.automation_id
+        LEFT JOIN deals d ON d.id = q.deal_id
+        LEFT JOIN contacts c ON c.id = q.contact_id
+        ORDER BY q.run_at, q.id`).all();
+      return json(res, 200, rows.map(q => ({
+        id: q.id, run_at: q.run_at, run_at_human: ruDate(q.run_at), created_at: q.created_at,
+        rule: q.rule_name || 'Правило удалено', orphan: !q.rule_name,
+        action_type: q.action_type || '', action_value: q.action_value || '',
+        deal_id: q.deal_id, deal_title: q.deal_title || '', contact_id: q.contact_id, contact_name: q.contact_name || '',
+      })));
+    }
+    const mQueue = p.match(/^\/api\/automation-queue\/(\d+)$/);
+    if (mQueue && req.method === 'DELETE') {
+      if (!requireAdmin(user, res)) return;
+      const q = db.prepare('SELECT * FROM automation_queue WHERE id=?').get(Number(mQueue[1]));
+      if (!q) return json(res, 404, { error: 'Запланированного действия нет — возможно, оно уже выполнилось' });
+      db.prepare('DELETE FROM automation_queue WHERE id=?').run(q.id);
+      const rule = db.prepare('SELECT name FROM automations WHERE id=?').get(q.automation_id);
+      log(`Запланированное действие отменено: «${rule?.name || 'правило удалено'}»`, q.deal_id ? 'deals' : 'contacts', q.deal_id || q.contact_id || null, user.name);
+      broadcast('change', { table: 'automations' });
+      return json(res, 200, { cancelled: q.id });
+    }
 
     // ===== generic CRUD =====
     const CRUD = { contacts: ['name', 'phone', 'email', 'company', 'company_id', 'position', 'source', 'tags', 'notes', 'responsible_id', 'custom'], companies: ['name', 'inn', 'phone', 'email', 'site', 'notes'], tasks: ['title', 'type', 'due', 'priority', 'done', 'deal_id', 'contact_id', 'responsible_id', 'result', 'repeat'], deals: ['title', 'amount', 'stage', 'pipeline_id', 'contact_id', 'company_id', 'responsible', 'responsible_id', 'priority', 'loss_reason', 'deadline', 'custom'], products: ['name', 'sku', 'price', 'unit', 'active', 'note'], templates: ['name', 'body'], automations: ['name', 'trigger_type', 'trigger_value', 'action_type', 'action_value', 'active', 'delay_days'], notes: ['entity_type', 'entity_id', 'body', 'author'] };

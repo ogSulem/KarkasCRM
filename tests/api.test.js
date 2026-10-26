@@ -1011,3 +1011,47 @@ test('защита входа: ограничение попыток подбо�
   const ok = await call('/api/health');
   assert.equal(ok.status, 200, 'сервис продолжает работать');
 });
+
+test('очередь отложенных действий видна, отменяется администратором и помечает удалённое правило', async () => {
+  const rule = (await call('/api/automations', { method: 'POST', body: JSON.stringify({ name: 'Напомнить о предложении', trigger_type: 'stage_changed', trigger_value: 'offer', action_type: 'create_task', action_value: 'Перезвонить по предложению', active: 1, delay_days: 5 }) })).body;
+  assert.ok(rule.id, 'правило с выдержкой создано: ' + JSON.stringify(rule));
+  const contact = (await call('/api/contacts', { method: 'POST', body: JSON.stringify({ name: 'Очередной Клиент', phone: '+7 900 777-66-55' }) })).body;
+  const deal = (await call('/api/deals', { method: 'POST', body: JSON.stringify({ title: 'Сделка в очереди', amount: 250000, stage: 'new', contact_id: contact.id }) })).body;
+  assert.equal((await call(`/api/deals/${deal.id}`, { method: 'PATCH', body: JSON.stringify({ stage: 'offer' }) })).status, 200);
+
+  const q = await call('/api/automation-queue');
+  assert.equal(q.status, 200);
+  const mine = q.body.filter(x => x.rule === 'Напомнить о предложении');
+  assert.equal(mine.length, 1, 'действие стоит в очереди: ' + JSON.stringify(q.body).slice(0, 300));
+  assert.equal(mine[0].deal_title, 'Сделка в очереди', 'в очереди видно сделку');
+  assert.equal(mine[0].contact_name, 'Очередной Клиент', 'и клиента');
+  assert.equal(mine[0].action_type, 'create_task', 'действие правило сохранилось');
+  assert.match(mine[0].run_at_human, /^\d{2}\.\d{2}\.\d{4}$/, 'срок показан датой, а не строкой базы: ' + mine[0].run_at_human);
+  assert.equal(mine[0].orphan, false, 'живое правило не помечается удалённым');
+
+  const created = (await call('/api/users', { method: 'POST', body: JSON.stringify({ name: 'Менеджер Очереди', email: 'queue-mgr@example.com', password: 'ochered12345', role: 'manager' }) }));
+  assert.ok(created.status === 200 || created.status === 201, 'менеджер создан');
+  const mgrLogin = await readyLogin('/api/auth/login', { method: 'POST', body: JSON.stringify({ email: 'queue-mgr@example.com', password: 'ochered12345' }) });
+  const mgrH = { Authorization: 'Bearer ' + mgrLogin.body.token };
+  assert.equal((await call('/api/automation-queue', { headers: mgrH })).status, 200, 'менеджер видит, что запланировано');
+  assert.equal((await call(`/api/automation-queue/${mine[0].id}`, { method: 'DELETE', headers: mgrH })).status, 403, 'отменяет только администратор');
+
+  const cancel = await call(`/api/automation-queue/${mine[0].id}`, { method: 'DELETE' });
+  assert.equal(cancel.status, 200);
+  assert.equal(cancel.body.cancelled, mine[0].id);
+  assert.equal((await call('/api/automation-queue')).body.filter(x => x.rule === 'Напомнить о предложении').length, 0, 'после отмены действия в очереди нет');
+  const again = await call(`/api/automation-queue/${mine[0].id}`, { method: 'DELETE' });
+  assert.equal(again.status, 404, 'повторная отмена не проходит молча');
+  assert.match(String(again.body.error), /уже выполнилось/, 'текст объясняет, почему действия нет: ' + again.body.error);
+
+  // правило удалили, а действие осталось в очереди: в интерфейсе это должно быть
+  // видно, иначе сотрудник ждал бы отправки, которой не существует
+  const gone = (await call('/api/automations', { method: 'POST', body: JSON.stringify({ name: 'Временное правило', trigger_type: 'stage_changed', trigger_value: 'negotiation', action_type: 'add_tag', action_value: 'Отложенный', active: 1, delay_days: 2 }) })).body;
+  await call(`/api/deals/${deal.id}`, { method: 'PATCH', body: JSON.stringify({ stage: 'negotiation' }) });
+  assert.equal((await call('/api/automation-queue')).body.filter(x => x.rule === 'Временное правило').length, 1, 'второе действие в очереди');
+  assert.equal((await call('/api/automations/' + gone.id, { method: 'DELETE' })).status, 200, 'правило удалено');
+  const orphan = (await call('/api/automation-queue')).body.filter(x => x.rule === 'Правило удалено');
+  assert.equal(orphan.length, 1, 'осиротевшее действие помечено, а не пропало без следа');
+  assert.equal(orphan[0].orphan, true);
+  assert.equal((await call(`/api/automation-queue/${orphan[0].id}`, { method: 'DELETE' })).status, 200, 'его тоже можно отменить');
+});
