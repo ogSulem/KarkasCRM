@@ -85,6 +85,23 @@ test('сделки, товары и пересчёт суммы', async () => {
   assert.equal((await call('/api/deals/' + c.id)).body.deal.amount, 0, 'после удаления позиции сумма = 0');
 });
 
+test('история сделки: смену суммы, ответственного и названия видно в карточке', async () => {
+  const staff = (await call('/api/users', { method: 'POST', body: JSON.stringify({ name: 'Историк Олег', email: 'history-oleg@example.com', role: 'manager', active: 1, password: 'HistoryPass-2026!' }) })).body;
+  assert.ok(staff.id, 'сотрудник создан');
+  const d = (await call('/api/deals', { method: 'POST', body: JSON.stringify({ title: 'Дом для журнала', amount: 100000, stage: 'new', contact_id: 1 }) })).body;
+  await call('/api/deals/' + d.id, { method: 'PATCH', body: JSON.stringify({ amount: 250000, title: 'Дом для журнала (уточнён)', responsible_id: staff.id, deadline: '2026-11-30' }) });
+  const texts = (await call('/api/deals/' + d.id)).body.history.map(x => x.text);
+  assert.ok(texts.some(t => t.includes('сумма: 100 000 ₽ → 250 000 ₽')), 'смена суммы записана: ' + texts.join(' | '));
+  assert.ok(texts.some(t => t.includes('ответственный:') && t.includes('Историк Олег')), 'смена ответственного записана');
+  assert.ok(texts.some(t => t.includes('название:')), 'смена названия записана');
+  assert.ok(texts.some(t => t.includes('срок:') && t.includes('30.11.2026')), 'срок в привычном виде дд.мм.гггг: ' + texts.join(' | '));
+  // повторное сохранение того же значения не должно раздувать журнал
+  await call('/api/deals/' + d.id, { method: 'PATCH', body: JSON.stringify({ amount: 250000 }) });
+  const after = (await call('/api/deals/' + d.id)).body.history;
+  assert.equal(after.filter(x => x.text.includes('сумма:')).length, 1, 'та же сумма второй раз не пишется');
+  assert.ok(after.some(x => x.user_name), 'в истории видно, кто менял');
+});
+
 test('строгая проверка данных: цена, срок и удалённые записи', async () => {
   const badPrice = await call('/api/products', { method: 'POST', body: JSON.stringify({ name: 'Отрицательная цена', price: -10 }) });
   assert.equal(badPrice.status, 400, 'отрицательная цена не сохраняется');

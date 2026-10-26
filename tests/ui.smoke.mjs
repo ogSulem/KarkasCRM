@@ -62,7 +62,8 @@ Object.assign(window, {
   busyButton, priceImportText,
   punyDecodeLabel, humanOrigin, wazzupHookUrl, wzAlive, wzState, wzTitle, closeConv,
   WZ_TRANSPORT_TO_CHAT, WZ_DEAD_STATES, WZ_CHAT_SET, WZ_TRANSPORTS, WZ_STATE_LABELS, wzTransportLabel,
-  saveChannelLabel
+  saveChannel, startConv, submitStartConv, scAddrHint, sendDoc, submitSendDoc,
+  saveS3, uploadS3, s3line
 });`;
 const pageErrors = [];
 const vConsole = new VirtualConsole();
@@ -194,7 +195,9 @@ try {
   await fetch(BASE + '/api/templates/' + tplDemo.id, { method: 'DELETE', headers: authH() });
 
   // ── вебхуки: полный адрес, понятное объяснение, кнопка «копировать» ──────
-  window.__state.settingsTab = 'integrations'; window.go('settings'); await wait(400);
+  // вкладка стала тяжелее: у каждого канала своё название и выбор сотрудника.
+  // На медленном прогоне прежних 400 мс не хватало, и проверки шли по пустому месту
+  window.__state.settingsTab = 'integrations'; window.go('settings'); await wait(700);
   {
     const links = $$('#view .hook-line code').map(c => c.textContent.trim());
     check('вебхуки: адреса собраны с хостом', links.length === 3 && links.every(u => /^https?:\/\//.test(u)) && links.some(u => /\/webhooks\/wazzup$/.test(u)) && links.some(u => /\/webhooks\/email$/.test(u)));
@@ -414,7 +417,40 @@ try {
   check('нерабочие состояния канала распознаются', ['disabled', 'blocked', 'unauthorized', 'openelsewhere', 'foreignphone', 'waitForPassword', 'onModeration', 'rejected', 'phoneUnavailable', 'notEnoughMoney', 'qridle'].every(st => !window.wzAlive({ state: st })) && window.wzAlive({ state: 'active' }));
   check('название канала собирается из мессенджера и номера', window.wzTitle({ transport: 'whatsapp', phone: '79991112233' }) === 'WhatsApp · 79991112233');
   check('своё название канала важнее номера в списках', window.wzTitle({ label: 'WhatsApp — Ирина', transport: 'whatsapp', phone: '79991112233' }) === 'WhatsApp — Ирина');
-  check('название канала сохраняется отдельным действием', typeof window.saveChannelLabel === 'function' && /\/api\/channels\/.*PUT/.test(appJsRaw.replace(/\s+/g, ' ')));
+  check('название и сотрудник канала сохраняются одним действием', typeof window.saveChannel === 'function' && /label: name \? name\.value : '', user_id: who && who\.value/.test(appJsRaw.replace(/\s+/g, ' ')));
+  // канал Wazzup — это аккаунт, а не сотрудник: привязку задаёт администратор,
+  // и выбирать номер на каждое сообщение менеджеру не нужно
+  check('у канала в настройках выбирают сотрудника', /id="chUser\$\{c\.id\}"/.test(appJsRaw) && /Кто отвечает с этого аккаунта/.test(appJsRaw));
+  check('объяснено, что ответ уходит с аккаунта клиента', /на который клиент написал/.test(appJsRaw) && /выбирать аккаунт на каждое сообщение не нужно/.test(appJsRaw));
+
+  // ── написать клиенту первым ──────────────────────────────────────────────
+  check('переписку можно начать без входящего сообщения', typeof window.startConv === 'function' && /method: 'POST'/.test(String(window.submitStartConv)) && /\/api\/conversations/.test(String(window.submitStartConv)));
+  check('в карточке клиента есть кнопка «Написать», когда чата ещё нет', /startConv\(\$\{c\.id\}\)/.test(appJsRaw) && /Написать<\/button>/.test(appJsRaw));
+  check('адрес получателя объясняется по-человечески', typeof window.scAddrHint === 'function' && /Имя чата видно в первом сообщении клиента/.test(appJsRaw));
+  check('список мессенджеров для нового чата берут из подключённых каналов', /chans\.filter\(wzAlive\)/.test(appJsRaw));
+
+  // ── отправить КП или счёт клиенту ────────────────────────────────────────
+  check('документ можно отправить клиенту письмом', typeof window.sendDoc === 'function' && /\/send-doc/.test(String(window.submitSendDoc)));
+  check('в карточке сделки есть кнопка отправки документа', /sendDoc\(\$\{deal\.id\}\)/.test(appJsRaw));
+  check('объяснено, что клиент открывает документ без входа в CRM', /открывается без входа в CRM/.test(appJsRaw));
+  check('пустой документ не предлагают отправить', /В сделке нет позиций/.test(appJsRaw));
+
+  // ── копии на другом сервере ──────────────────────────────────────────────
+  check('хранилище резервных копий настраивается из интерфейса', typeof window.saveS3 === 'function' && typeof window.uploadS3 === 'function' && /S3_ENDPOINT/.test(appJsRaw) && /S3_SECRET_KEY/.test(appJsRaw));
+  check('показано время последней выгрузки копии', typeof window.s3line === 'function' && /Последняя выгрузка/.test(window.s3line({ configured: true, last_ok: '2026-10-26 03:00:00', last_file: 'crm-2026-10-26.db', bucket: 'karkas-backups' })));
+  check('ошибка выгрузки не прячется', /не удалась/.test(window.s3line({ configured: true, last_ok: '', last_error: 'хранилище ответило 403' })));
+  check('без настроек хранилища сказано, чего не хватает', /не настроено/.test(window.s3line({ configured: false, missing: ['S3_ENDPOINT'] })) && /S3_ENDPOINT/.test(window.s3line({ configured: false, missing: ['S3_ENDPOINT'] })));
+  check('секретный ключ не показывается в поле', /type="password"/.test(appJsRaw.split('saveS3')[0].slice(-3000)) || /S3_SECRET_KEY" type="password"/.test(appJsRaw));
+
+  // ── действия правил автоматизации ────────────────────────────────────────
+  check('правило умеет писать клиенту в чат', window.AUTO_ACTIONS.send_message === 'Отправить клиенту сообщение в чат');
+  check('правило умеет отправлять письмо', window.AUTO_ACTIONS.send_email === 'Отправить клиенту письмо');
+  check('правило умеет передавать сделку сотруднику', window.AUTO_ACTIONS.assign_user === 'Передать сделку сотруднику');
+  check('прежние действия правил на месте', ['create_task', 'change_stage', 'add_tag'].every(k => window.AUTO_ACTIONS[k]) && Object.keys(window.AUTO_ACTIONS).length === 6);
+  check('в тексте правила подставляются имя клиента и сделка', /\{name\}/.test(appJsRaw) && /\{deal\}/.test(appJsRaw) && /\{sum\}/.test(appJsRaw));
+  check('действие можно отложить на несколько дней', /name="delay_days"/.test(appJsRaw) && /Через ' \+ n \+ ' дн\./.test(appJsRaw));
+  check('выдержка объяснена: правило сработает в срок', /CRM запомнит действие и выполнит его в срок/.test(appJsRaw));
+  check('сотрудника для передачи выбирают из списка, а не вписывают номером', /window\.__autoUsers/.test(appJsRaw));
   // в списке каналов важно, бот это или личный аккаунт; в типе чата — уже нет
   check('список каналов различает бота и личный Telegram, а тип чата один', window.wzTransportLabel('telegram') === 'Telegram-бот' && window.wzTransportLabel('tgapi') === 'Telegram' && window.channelLabel('telegram') === 'Telegram');
   const imgMsg = window.msgHtml({ direction: 'out', body: '', content_uri: '/uploads/x.png', content_type: 'image/png', content_name: 'x.png', channel: 'whatsapp', created_at: '2026-01-01 10:00' });
@@ -516,6 +552,14 @@ try {
     check('после ответа кнопка снова рабочая', Boolean(probe) && probe.disabled === false);
   }
   {
+    // Проверка конкурента не должна зависеть от интернета прогонщика: внешние
+    // источники уводим на недоступный локальный адрес. Иначе поиск ждёт настоящие
+    // сайты до таймаута, и карточка не успевает открыться к проверке.
+    await window.api('/api/competitor-sources', { method: 'PUT', body: JSON.stringify({
+      RUSPROFILE_URL: 'http://127.0.0.1:9', FEDRESURS_API_URL: 'http://127.0.0.1:9', KAD_API_URL: 'http://127.0.0.1:9',
+      FNS_API_URL: 'http://127.0.0.1:9', GOOGLE_API_URL: 'http://127.0.0.1:9', TWOGIS_API_URL: 'http://127.0.0.1:9',
+      YANDEX_API_URL: 'http://127.0.0.1:9', COMPETITOR_TIMEOUT_MS: '1500',
+    }) }).catch(() => {});
     const search = $('#compSearch');
     search.value = 'ООО «Проверка Поиска»';
     const btn = $$('#view button').find(b => /Найти и проверить/.test(b.textContent));
@@ -753,7 +797,7 @@ try {
     check('кнопка справа подписана «Редактировать»', /Редактировать/.test(actions.textContent));
     check('тип этапа виден в карточке воронки', /успех|отказ/.test(card.textContent));
   }
-  window.__state.settingsTab = 'automations'; window.go('settings'); await wait(450);
+  window.__state.settingsTab = 'automations'; window.go('settings'); await wait(700);
   {
     const bad = await fetch(BASE + '/api/automations', { method: 'POST', headers: authH(), body: JSON.stringify({ name: 'Плохое правило', trigger_type: 'deal_created', action_type: 'change_stage', action_value: 'этапа-нет' }) });
     const badBody = await bad.json();
@@ -774,7 +818,7 @@ try {
     check('при выборе «перевести на этап» появляется список этапов', Boolean($('#autoActionValue select[name=action_value]')) && $$('#autoActionValue option').length >= 2);
     window.closeModal();
   }
-  window.__state.settingsTab = 'data'; window.go('settings'); await wait(450);
+  window.__state.settingsTab = 'data'; window.go('settings'); await wait(700);
   {
     check('в разделе данных нет сворачиваемого блока про другой сервер', !$('#view details.settings-more') && !/Копии на другом сервере/.test($('#view').textContent));
     check('короткая подсказка про вторую копию осталась', /DEPLOY\.md/.test($('#view').textContent));
@@ -1130,6 +1174,11 @@ process.on('exit', () => { try { srv.kill('SIGKILL') } catch {} });
 for (const sig of ['SIGINT', 'SIGTERM']) process.on(sig, () => { try { srv.kill('SIGKILL') } catch {}; process.exit(1) });
 process.on('uncaughtException', e => { console.error('Smoke-тест упал:', e.message); try { srv.kill('SIGKILL') } catch {}; process.exit(1) });
 const failed = checks.filter(c => !c.ok);
+// В CI журнал шага без загрузки не прочитать, а причина провала нужна сразу:
+// продублируем провалившиеся проверки аннотациями — они видны в самой проверке.
+if (process.env.GITHUB_ACTIONS) {
+  for (const c of failed.slice(0, 12)) console.log(`::error::Проверка интерфейса не прошла: ${c.name}${c.extra ? ' — ' + String(c.extra).slice(0, 220).replace(/\r?\n/g, ' ') : ''}`);
+}
 console.log('\n=== Smoke-тест интерфейса КаркасCRM ===');
 checks.forEach(c => console.log(`${c.ok ? 'ok  ' : 'FAIL'} ${c.name}${c.extra ? ' — ' + String(c.extra).slice(0, 160) : ''}`));
 console.log(`\nИтого: ${checks.length - failed.length}/${checks.length} проверок пройдено`);

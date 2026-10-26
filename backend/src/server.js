@@ -6,6 +6,8 @@ import { DatabaseSync } from 'node:sqlite';
 import { createHmac, randomBytes, scrypt, scryptSync, timingSafeEqual } from 'node:crypto';
 import { promisify } from 'node:util';
 import { gzipSync } from 'node:zlib';
+// подпись запросов к S3-хранилищу — тот же модуль, что использует скрипт выгрузки
+import { signedHeaders } from '../../scripts/s3-sign.mjs';
 import { readFileSync, writeFileSync, existsSync, mkdirSync, chmodSync, statSync, readdirSync, unlinkSync, copyFileSync, mkdirSync as mkdir, createReadStream } from 'node:fs';
 import { extname, join, normalize, basename } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -100,6 +102,7 @@ CREATE TABLE IF NOT EXISTS conversations(id INTEGER PRIMARY KEY,contact_id INTEG
 CREATE TABLE IF NOT EXISTS messages(id INTEGER PRIMARY KEY,conversation_id INTEGER REFERENCES conversations(id) ON DELETE CASCADE,channel TEXT DEFAULT 'whatsapp',direction TEXT DEFAULT 'in',body TEXT,content_uri TEXT,status TEXT,external_id TEXT,author TEXT,subject TEXT,created_at TEXT DEFAULT (datetime('now')));
 CREATE TABLE IF NOT EXISTS settings(key TEXT PRIMARY KEY,value TEXT);
 CREATE TABLE IF NOT EXISTS activities(id INTEGER PRIMARY KEY,text TEXT,entity_type TEXT,entity_id INTEGER,user_name TEXT,created_at TEXT DEFAULT (datetime('now')));
+CREATE TABLE IF NOT EXISTS automation_queue(id INTEGER PRIMARY KEY,automation_id INTEGER,trigger_type TEXT,deal_id INTEGER,contact_id INTEGER,run_at TEXT,created_at TEXT DEFAULT (datetime('now')));
 `);
 // мягкие миграции: дополняем ранее созданные таблицы недостающими колонками
 const SCHEMA = [
@@ -129,6 +132,11 @@ const SCHEMA_COLUMNS = [...SCHEMA,
   // своё название канала: вендор отдаёт только номер или юзернейм, а каналов
   // бывает по одному на сотрудника, и отличить их друг от друга нужно человеку
   ['channels', 'label', 'TEXT'],
+  // сотрудник, чей это аккаунт: с него отвечаем, когда клиент ещё не писал,
+  // и на него назначается обращение, пришедшее на этот аккаунт
+  ['channels', 'user_id', 'INTEGER'],
+  // выдержка правила: действие срабатывает не сразу, а через N дней
+  ['automations', 'delay_days', 'INTEGER'],
 ];
 
 // чего не хватает в этой базе: если она из старой версии — сначала копия, потом изменения
@@ -405,7 +413,9 @@ export function broadcastTo(userId, ev, data) {
 // Автоматизации: событие → одно действие. Правило проверяется при сохранении,
 // поэтому во время работы с клиентом ничего не ломается из-за опечатки.
 const AUTOMATION_TRIGGERS = ['deal_created', 'message_in', 'stage_changed'];
-const AUTOMATION_ACTIONS = ['create_task', 'change_stage', 'add_tag'];
+const AUTOMATION_ACTIONS = ['create_task', 'change_stage', 'add_tag', 'send_message', 'send_email', 'assign_user'];
+// текст письма или сообщения длиннее названия этапа, поэтому предел свой
+const ACTION_VALUE_LIMIT = { send_message: 2000, send_email: 4000 };
 function validateAutomation(b, current = {}) {
   const merged = { ...current, ...b };
   const name = String(merged.name || '').trim();
@@ -417,9 +427,22 @@ function validateAutomation(b, current = {}) {
   if (merged.action_type === 'change_stage' && !db.prepare('SELECT 1 x FROM stages WHERE code=?').get(value)) return 'Такого этапа нет — обновите страницу и выберите этап из списка';
   const tv = String(merged.trigger_value || '').trim();
   if (merged.trigger_type === 'stage_changed' && tv && !db.prepare('SELECT 1 x FROM stages WHERE code=?').get(tv)) return 'Этап-условие не найден — выберите этап из списка';
+  // сотруднику, которого в правиле нет, сделку передать нельзя: правило молча
+  // ничего бы не сделало, а менеджер ждал бы, что заявка ушла дежурному
+  if (merged.action_type === 'assign_user') {
+    const u = db.prepare('SELECT id FROM users WHERE id=? AND active=1').get(Number(value));
+    if (!u) return 'Сотрудник не найден или уже не работает — выберите из списка';
+  }
   b.name = name.slice(0, 120);
-  b.action_value = value.slice(0, 300);
+  b.action_value = value.slice(0, ACTION_VALUE_LIMIT[merged.action_type] || 300);
   b.trigger_value = tv.slice(0, 120);
+  // выдержка: целое число дней от 0 до года. Отрицательная означала бы «выполнить
+  // вчера», и правило сработало бы на первом же тике
+  if (b.delay_days !== undefined) {
+    const d = Number(b.delay_days);
+    if (!Number.isFinite(d) || d < 0 || d > 365) return 'Выдержка задаётся в днях: от 0 (сразу) до 365';
+    b.delay_days = Math.round(d);
+  }
   if (b.active !== undefined) b.active = b.active ? 1 : 0;
   return null;
 }
@@ -430,16 +453,31 @@ function keywordHit(text, rule) {
   return String(rule || '').split(/[,;]/).map(w => w.trim().toLowerCase()).filter(Boolean)
     .some(w => haystack.includes(w) || (w.length >= 5 && haystack.includes(w.slice(0, -1))));
 }
-function runAutomations(trigger, ctx = {}) {
-  for (const a of db.prepare('SELECT * FROM automations WHERE active=1 AND trigger_type=? ORDER BY id').all(trigger)) {
-    try {
-      // условие правила: конкретный этап или ключевое слово в сообщении
-      if (a.trigger_value) {
-        if (trigger === 'stage_changed' && a.trigger_value !== ctx.stage) continue;
-        if (trigger === 'message_in' && !keywordHit(ctx.text, a.trigger_value)) continue;
-      }
+// Настройки почты собраны в одном месте: раньше они повторялись в трёх маршрутах,
+// и расхождение означало бы, что письмо из одного места уходит, а из другого нет.
+const smtpSettings = () => ({
+  host: getSetting('SMTP_HOST'), port: Number(getSetting('SMTP_PORT', '587')),
+  secure: getSetting('SMTP_SECURE') === '1' ? true : getSetting('SMTP_SECURE') === '0' ? false : undefined,
+  user: getSetting('SMTP_USER') || undefined, pass: getSetting('SMTP_PASS') || undefined,
+  from: getSetting('MAIL_FROM') || getSetting('SMTP_USER') || undefined,
+  fromName: getSetting('MAIL_FROM_NAME') || companyRequisites().name || undefined,
+});
+// В текст правила подставляются те же значения, что и в шаблоны: {name} — имя
+// клиента, {deal} — название сделки, {sum} — сумма, {company} — наша компания.
+const autoVars = ctx => {
+  const c = ctx.contact_id ? db.prepare('SELECT name FROM contacts WHERE id=?').get(ctx.contact_id) : null;
+  const d = ctx.deal_id ? db.prepare('SELECT title,amount FROM deals WHERE id=?').get(ctx.deal_id) : null;
+  return { name: c?.name || 'Добрый день', deal: d?.title || '', sum: d ? String(Math.round(Number(d.amount) || 0)) : '', company: companyRequisites().name || '' };
+};
+const fillVars = (text, vars) => String(text ?? '').replace(/\{(\w+)\}/g, (m, k) => (vars[k] !== undefined && vars[k] !== '' ? String(vars[k]) : m));
+const ruDate = v => String(v || '').slice(0, 10).split('-').reverse().join('.');
+
+// Одно действие правила. Отдельной функцией — потому что его выполняют и сразу,
+// и по очереди, если задана выдержка.
+async function applyAction(a, ctx) {
+  {
       if (a.action_type === 'create_task') {
-        if (!ctx.contact_id && !ctx.deal_id) continue;
+        if (!ctx.contact_id && !ctx.deal_id) return;
         const owner = (ctx.deal_id && db.prepare('SELECT responsible_id FROM deals WHERE id=?').get(ctx.deal_id)?.responsible_id)
           || (ctx.contact_id && db.prepare('SELECT responsible_id FROM contacts WHERE id=?').get(ctx.contact_id)?.responsible_id) || null;
         const r = db.prepare('INSERT INTO tasks(title,due,contact_id,deal_id,responsible_id) VALUES(?,?,?,?,?)')
@@ -450,10 +488,10 @@ function runAutomations(trigger, ctx = {}) {
       }
       if (a.action_type === 'change_stage' && ctx.deal_id && a.action_value) {
         const d = db.prepare('SELECT * FROM deals WHERE id=?').get(ctx.deal_id);
-        if (!d || d.stage === a.action_value) continue;
+        if (!d || d.stage === a.action_value) return;
         // этап должен принадлежать воронке сделки: иначе карточка исчезнет из доски
         const st = getStages(Number(d.pipeline_id) || 1).find(x => x.code === a.action_value);
-        if (!st) { console.warn(`Автоматизация «${a.name}»: этап ${a.action_value} не найден в воронке сделки`); continue; }
+        if (!st) { console.warn(`Автоматизация «${a.name}»: этап ${a.action_value} не найден в воронке сделки`); return; }
         const closed = ['won', 'lost'].includes(st.code) ? ",closed_at=datetime('now')" : ',closed_at=NULL';
         db.prepare(`UPDATE deals SET stage=?,updated_at=datetime('now')${closed} WHERE id=?`).run(st.code, d.id);
         log(`Автоматизация «${a.name}»: сделка «${d.title}» → этап «${st.name}»`, 'deals', d.id);
@@ -461,15 +499,117 @@ function runAutomations(trigger, ctx = {}) {
       }
       if (a.action_type === 'add_tag' && ctx.contact_id && a.action_value) {
         const c = db.prepare('SELECT tags FROM contacts WHERE id=?').get(ctx.contact_id);
-        if (!c) continue;
+        if (!c) return;
         const tags = [...new Set([...(c.tags || '').split(',').map(x => x.trim()).filter(Boolean), a.action_value])].join(',');
-        if (tags === (c.tags || '')) continue;
+        if (tags === (c.tags || '')) return;
         db.prepare('UPDATE contacts SET tags=? WHERE id=?').run(tags, ctx.contact_id);
         log(`Автоматизация «${a.name}»: клиенту добавлен тег «${a.action_value}»`, 'contacts', ctx.contact_id);
         broadcast('change', { table: 'contacts' });
       }
+      // передать сделку и клиента другому сотруднику
+      if (a.action_type === 'assign_user' && a.action_value) {
+        const u = db.prepare('SELECT id,name FROM users WHERE id=? AND active=1').get(Number(a.action_value));
+        if (!u) { console.warn(`Автоматизация «${a.name}»: сотрудник ${a.action_value} не найден или уже не работает`); return; }
+        let changed = false;
+        if (ctx.deal_id) {
+          const d = db.prepare('SELECT id,title,responsible_id FROM deals WHERE id=?').get(ctx.deal_id);
+          if (d && Number(d.responsible_id) !== u.id) {
+            db.prepare("UPDATE deals SET responsible_id=?,responsible=?,updated_at=datetime('now') WHERE id=?").run(u.id, u.name, d.id);
+            log(`Автоматизация «${a.name}»: сделка «${d.title}» передана сотруднику ${u.name}`, 'deals', d.id);
+            if (Number(u.id) !== Number(ctx.actor_id)) broadcastTo(u.id, 'notify', { type: 'deal_assigned', id: d.id, title: d.title });
+            changed = true;
+          }
+        }
+        if (ctx.contact_id) {
+          const c = db.prepare('SELECT id,name,responsible_id FROM contacts WHERE id=?').get(ctx.contact_id);
+          if (c && Number(c.responsible_id) !== u.id) {
+            db.prepare('UPDATE contacts SET responsible_id=? WHERE id=?').run(u.id, c.id);
+            log(`Автоматизация «${a.name}»: клиент «${c.name}» передан сотруднику ${u.name}`, 'contacts', c.id);
+            changed = true;
+          }
+        }
+        if (changed) { broadcast('change', { table: 'deals' }); broadcast('change', { table: 'contacts' }) }
+      }
+      // написать клиенту в тот канал, откуда он обращался
+      if (a.action_type === 'send_message') {
+        const body = fillVars(a.action_value, autoVars(ctx)).trim();
+        if (!body) return;
+        const conv = ctx.contact_id ? db.prepare('SELECT cv.*,c.phone FROM conversations cv LEFT JOIN contacts c ON c.id=cv.contact_id WHERE cv.contact_id=?').get(ctx.contact_id) : null;
+        if (!conv) { log(`Автоматизация «${a.name}»: переписки с клиентом нет, сообщение не отправлено`, 'contacts', ctx.contact_id || null); return; }
+        const channel = conv.chat_type || '';
+        let status = 'error';
+        try {
+          const send = await deliver(conv, channel, body, null);
+          status = send.delivered ? 'sent' : 'local';
+        } catch (e) {
+          // без подключённого Wazzup текст остаётся в переписке: правило не «молчит»
+          status = String(e.message) === 'WAZZUP_NOT_CONFIGURED' ? 'local' : 'error';
+          log(`Автоматизация «${a.name}»: сообщение клиенту не ушло — ${e.message}`, 'contacts', ctx.contact_id || null);
+        }
+        db.prepare('INSERT INTO messages(conversation_id,channel,direction,body,status,author) VALUES(?,?,?,?,?,?)')
+          .run(conv.id, channel || 'whatsapp', 'out', body, status, 'Автоматизация');
+        db.prepare("UPDATE conversations SET last_at=datetime('now') WHERE id=?").run(conv.id);
+        broadcast('message', { conversation_id: conv.id, direction: 'out' });
+        if (status === 'sent') log(`Автоматизация «${a.name}»: клиенту отправлено сообщение`, 'contacts', ctx.contact_id || null);
+      }
+      // отправить письмо: тема — название правила, текст — значение действия
+      if (a.action_type === 'send_email') {
+        const c = ctx.contact_id ? db.prepare('SELECT id,name,email FROM contacts WHERE id=?').get(ctx.contact_id) : null;
+        if (!c?.email) { log(`Автоматизация «${a.name}»: у клиента нет e-mail, письмо не отправлено`, 'contacts', ctx.contact_id || null); return; }
+        if (!getSetting('SMTP_HOST')) { log(`Автоматизация «${a.name}»: почта не настроена, письмо не отправлено`, 'contacts', c.id); return; }
+        const body = fillVars(a.action_value, autoVars(ctx)).trim();
+        let status = 'sent';
+        try { await sendMail({ ...smtpSettings(), to: c.email, toName: c.name || undefined, subject: a.name, text: body }); }
+        catch (e) { status = 'error'; log(`Автоматизация «${a.name}»: письмо не ушло — ${e.message}`, 'contacts', c.id); }
+        const conv = db.prepare('SELECT id FROM conversations WHERE contact_id=?').get(c.id);
+        if (conv) {
+          db.prepare("INSERT INTO messages(conversation_id,channel,direction,body,subject,status,author) VALUES(?,?,?,?,?,?,?)")
+            .run(conv.id, 'email', 'out', body, a.name, status, 'Автоматизация');
+          db.prepare("UPDATE conversations SET last_at=datetime('now') WHERE id=?").run(conv.id);
+          broadcast('message', { conversation_id: conv.id, direction: 'out' });
+        }
+        if (status === 'sent') log(`Автоматизация «${a.name}»: клиенту отправлено письмо на ${c.email}`, 'contacts', c.id);
+      }
+  }
+}
+
+async function runAutomations(trigger, ctx = {}) {
+  for (const a of db.prepare('SELECT * FROM automations WHERE active=1 AND trigger_type=? ORDER BY id').all(trigger)) {
+    try {
+      // условие правила: конкретный этап или ключевое слово в сообщении
+      if (a.trigger_value) {
+        if (trigger === 'stage_changed' && a.trigger_value !== ctx.stage) continue;
+        if (trigger === 'message_in' && !keywordHit(ctx.text, a.trigger_value)) continue;
+      }
+      const delay = Number(a.delay_days) || 0;
+      if (delay > 0) {
+        // действие с выдержкой: планировщик выполнит его в срок. Ставим в очередь
+        // и сразу выходим — иначе «напомнить через 3 дня» сработало бы сейчас.
+        const runAt = localNow(new Date(Date.now() + delay * 864e5));
+        db.prepare('INSERT INTO automation_queue(automation_id,trigger_type,deal_id,contact_id,run_at) VALUES(?,?,?,?,?)')
+          .run(a.id, trigger, ctx.deal_id || null, ctx.contact_id || null, runAt);
+        log(`Автоматизация «${a.name}»: сработает ${ruDate(runAt)}, через ${delay} дн.`,
+          ctx.deal_id ? 'deals' : 'contacts', ctx.deal_id || ctx.contact_id || null);
+        continue;
+      }
+      await applyAction(a, ctx);
     } catch (e) { console.error('automation', e); }
   }
+}
+
+// Очередь отложенных действий. Строку удаляем до выполнения: иначе сбой оставил
+// бы её в очереди навсегда, и правило повторялось бы каждый тик.
+export async function queueTick() {
+  const due = db.prepare('SELECT * FROM automation_queue WHERE run_at <= ? ORDER BY id').all(localNow());
+  for (const q of due) {
+    db.prepare('DELETE FROM automation_queue WHERE id=?').run(q.id);
+    const a = db.prepare('SELECT * FROM automations WHERE id=? AND active=1').get(q.automation_id);
+    // правило выключили или удалили — выполнять уже нечего
+    if (!a) continue;
+    try { await applyAction(a, { deal_id: q.deal_id, contact_id: q.contact_id }) }
+    catch (e) { console.error('automation queue', e) }
+  }
+  return due.length;
 }
 
 // ---------- unified inbox ----------
@@ -481,7 +621,7 @@ export function nextManager() {
   const load = db.prepare("SELECT COUNT(*) n FROM deals WHERE responsible_id=? AND stage NOT IN ('won','lost')");
   return users.map(u => ({ u, n: load.get(u.id).n })).sort((a, b) => a.n - b.n || a.u.id - b.u.id)[0].u;
 }
-export function ensureDeal(contact) {
+export async function ensureDeal(contact) {
   if (getSetting('AUTO_DEAL', '1') !== '1' || !contact) return null;
   const open = db.prepare("SELECT id FROM deals WHERE contact_id=? AND stage NOT IN ('won','lost') ORDER BY id DESC").get(contact.id);
   if (open) return null;
@@ -498,12 +638,12 @@ export function ensureDeal(contact) {
   }
   const dr = db.prepare('INSERT INTO deals(title,amount,stage,contact_id,responsible,responsible_id) VALUES(?,?,?,?,?,?)').run('Обращение: ' + contact.name, 0, stage, contact.id, ownerName, ownerId);
   log(`Новое обращение «${contact.name}» → сделка в этапе «${stage}»`, 'deals', Number(dr.lastInsertRowid));
-  runAutomations('deal_created', { deal_id: Number(dr.lastInsertRowid), contact_id: contact.id });
+  await runAutomations('deal_created', { deal_id: Number(dr.lastInsertRowid), contact_id: contact.id });
   broadcast('change', { table: 'deals' });
   return Number(dr.lastInsertRowid);
 }
 
-export function upsertIncoming({ channel = 'whatsapp', chatType = '', phone = '', chatId = '', name = '', body = '', external_id = null, channelId = '', contentUri = '', author = '', email = '', subject = '', direction = 'in' }) {
+export async function upsertIncoming({ channel = 'whatsapp', chatType = '', phone = '', chatId = '', name = '', body = '', external_id = null, channelId = '', contentUri = '', author = '', email = '', subject = '', direction = 'in' }) {
   if (!body && !contentUri) return null;
   // ограничиваем длину: вебхук — доверенный, но не бесконечный источник
   const cap = (s, n) => String(s ?? '').slice(0, n);
@@ -524,20 +664,36 @@ export function upsertIncoming({ channel = 'whatsapp', chatType = '', phone = ''
   if (!contact && email) contact = db.prepare('SELECT * FROM contacts WHERE lower(email)=lower(?)').get(String(email).trim());
   if (!contact && chatId) { const conv0 = db.prepare('SELECT * FROM conversations WHERE external_chat_id=?').get(String(chatId)); if (conv0) contact = db.prepare('SELECT * FROM contacts WHERE id=?').get(conv0.contact_id); }
   if (!contact) { const r = db.prepare('INSERT INTO contacts(name,phone,email,source,phone_norm) VALUES(?,?,?,?,?)').run(name || ph || chatId || email || 'Новый клиент', ph, email || '', channel === 'email' ? 'email' : 'wazzup-' + (chatType || channel), phNorm || null); contact = db.prepare('SELECT * FROM contacts WHERE id=?').get(r.lastInsertRowid); log(`Новый контакт (${channel === 'email' ? 'email' : chatType || channel}): ${contact.name}`, 'contacts', contact.id); }
+  // Клиент написал на аккаунт конкретного сотрудника — значит, обращением
+  // занимается он, а не тот, кому выпало по очереди. Привязку канала к сотруднику
+  // задаёт администратор один раз в настройках; без привязки работает прежнее
+  // распределение по загруженности. Назначаем до создания сделки, чтобы сделка
+  // сразу завелась на нужного человека.
+  const boundId = channelId ? Number(db.prepare('SELECT user_id FROM channels WHERE external_id=?').get(String(channelId))?.user_id) || 0 : 0;
+  if (boundId && !contact.responsible_id) {
+    const bound = db.prepare('SELECT id,name FROM users WHERE id=? AND active=1').get(boundId);
+    if (bound) {
+      db.prepare('UPDATE contacts SET responsible_id=? WHERE id=?').run(bound.id, contact.id);
+      contact.responsible_id = bound.id;
+      log(`Обращение «${contact.name}» пришло на аккаунт ${bound.name} и назначено на него`, 'contacts', contact.id);
+    }
+  }
   let conv = db.prepare('SELECT * FROM conversations WHERE contact_id=?').get(contact.id);
   let dealId = null;
   if (!conv) {
     const r = db.prepare('INSERT INTO conversations(contact_id,title,channels,channel_id,external_chat_id,chat_type) VALUES(?,?,?,?,?,?)').run(contact.id, contact.name, channel, channelId, String(chatId || ph || ''), chatType || channel);
     conv = db.prepare('SELECT * FROM conversations WHERE id=?').get(r.lastInsertRowid);
-    dealId = ensureDeal(contact);
+    dealId = await ensureDeal(contact);
   }
   const channels = [...new Set([...(conv.channels || '').split(',').filter(Boolean), channel])].join(',');
   try { db.prepare('INSERT INTO messages(conversation_id,channel,direction,body,subject,content_uri,status,external_id,author) VALUES(?,?,?,?,?,?,?,?,?)').run(conv.id, channel, 'in', body || '[вложение]', subject, contentUri, channel === 'email' ? 'received' : 'inbound', external_id, author); }
   catch (e) { if (/UNIQUE/i.test(e.message)) return conv; console.error('message insert', e); throw e; }
   db.prepare("UPDATE conversations SET channels=?,channel_id=COALESCE(NULLIF(?,''),channel_id),external_chat_id=COALESCE(NULLIF(?,''),external_chat_id),chat_type=COALESCE(NULLIF(?,''),chat_type),unread=unread+1,last_at=datetime('now') WHERE id=?").run(channels, channelId, String(chatId || ''), chatType, conv.id);
-  if (!dealId) dealId = ensureDeal(contact); // клиент вернулся, а открытой сделки нет — заводим новое обращение
+  // беседу тоже отмечаем за владельцем канала, если она ничья
+  if (boundId && !conv.assigned_id) db.prepare('UPDATE conversations SET assigned_id=? WHERE id=?').run(boundId, conv.id);
+  if (!dealId) dealId = await ensureDeal(contact); // клиент вернулся, а открытой сделки нет — заводим новое обращение
   const openDeal = db.prepare("SELECT id FROM deals WHERE contact_id=? AND stage NOT IN ('won','lost') ORDER BY id DESC").get(contact.id);
-  runAutomations('message_in', { contact_id: contact.id, deal_id: dealId || openDeal?.id, text: body });
+  await runAutomations('message_in', { contact_id: contact.id, deal_id: dealId || openDeal?.id, text: body });
   // в событии есть имя и превью: интерфейс показывает понятное уведомление
   broadcast('message', { conversation_id: conv.id, title: contact.name || conv.title || 'Клиент', preview: String(body || '').slice(0, 90), direction: 'in' });
   return conv;
@@ -606,15 +762,21 @@ const WZ_CHAT_TRANSPORTS = {
 // Канал и тип чата должны соответствовать друг другу. Если клиент писал в WhatsApp
 // одного сотрудника, а отвечают в Telegram-бот компании, прежний канал не годится:
 // вендор получит пару «тип чата telegram + канал от WhatsApp» и ответ не уйдёт.
-const pickChannelId = (conv, chatType) => {
+const pickChannelId = (conv, chatType, user = null) => {
   const fits = t => (WZ_CHAT_TRANSPORTS[chatType] || []).includes(String(t || '').trim().toLowerCase());
   const own = isUuid(conv?.channel_id) ? conv.channel_id : '';
-  const rows = db.prepare("SELECT external_id,transport,state FROM channels WHERE provider='wazzup'").all();
+  const rows = db.prepare("SELECT external_id,transport,state,user_id FROM channels WHERE provider='wazzup'").all();
   const ownRow = own ? rows.find(c => c.external_id === own) : null;
-  // клиент писал сюда, и аккаунт подходит под выбранный мессенджер — отвечаем с него же;
-  // канал не синхронизирован (ownRow пуст) — тоже доверяем беседе
+  // Клиент писал на этот аккаунт, и он подходит под выбранный мессенджер —
+  // отвечаем с него же. Иначе клиент получит сообщение с незнакомого номера.
+  // Канал не синхронизирован (ownRow пуст) — тоже доверяем беседе.
   if (own && (!ownRow || fits(ownRow.transport))) return own;
-  // иначе берём подключённый и работающий аккаунт нужного мессенджера
+  // Исходящая беседа: клиент ещё не писал, или его аккаунт не подходит под
+  // выбранный мессенджер. Тогда берём аккаунт того сотрудника, который отвечает,
+  // если администратор привязал к нему канал.
+  const mine = user?.id ? rows.find(c => Number(c.user_id) === Number(user.id) && fits(c.transport) && wzUsable(c)) : null;
+  if (mine) return mine.external_id;
+  // иначе любой подключённый и работающий аккаунт нужного мессенджера
   const match = rows.find(c => fits(c.transport) && wzUsable(c));
   return match?.external_id || own || '';
 };
@@ -634,7 +796,7 @@ export async function sendViaWazzup(conv, text, user, chatTypeOverride = '', fil
   const rawType = String(chatTypeOverride || conv.chat_type || '').trim().toLowerCase();
   const chatType = normChatType(rawType);
   // Какой аккаунт отправляет, зависит от типа чата, поэтому канал выбираем после него
-  const channelId = pickChannelId(conv, chatType) || getSetting('WAZZUP_CHANNEL_ID');
+  const channelId = pickChannelId(conv, chatType, user) || getSetting('WAZZUP_CHANNEL_ID');
   if (!channelId) throw new Error('Не выбран канал Wazzup. Настройки → Интеграции → «Проверить и синхронизировать каналы», затем выберите канал по умолчанию.');
   if (!chatType) {
     if (!rawType) throw new Error('Не выбран канал отправки');
@@ -691,6 +853,105 @@ function makeBackup(force = false) {
   log(`Резервная копия базы создана: ${name}`);
   return name;
 }
+// ----- выгрузка резервных копий в S3 -----
+// Копия на том же диске, что и база, не спасает ни при потере сервера, ни при
+// шифровальщике. Поэтому после создания копии отправляем её в S3-хранилище,
+// если администратор его настроил. Ошибка выгрузки саму копию не отменяет:
+// база остаётся защищённой локально, а причина видна в настройках.
+const s3cfg = () => {
+  const g = (k, d = '') => String(getSetting(k) || process.env[k] || d);
+  return {
+    endpoint: g('S3_ENDPOINT').replace(/\/+$/, ''),
+    bucket: g('S3_BUCKET'),
+    region: g('S3_REGION', 'us-east-1'),
+    accessKey: g('S3_ACCESS_KEY'),
+    secretKey: g('S3_SECRET_KEY'),
+    prefix: g('S3_PREFIX', 'karkascrm').replace(/^\/+|\/+$/g, ''),
+    keep: Number(getSetting('S3_KEEP') || process.env.S3_KEEP || '14') || 0,
+    auto: String(getSetting('S3_AUTO') || process.env.S3_AUTO || '1') === '1',
+  };
+};
+export const s3ready = c => Boolean(c.endpoint && c.bucket && c.accessKey && c.secretKey);
+export const s3missing = c => ['S3_ENDPOINT', 'S3_BUCKET', 'S3_ACCESS_KEY', 'S3_SECRET_KEY']
+  .filter(k => !String(getSetting(k) || process.env[k] || '').trim());
+
+async function s3request(c, { method, key = '', query, body = null, contentType = '' }) {
+  const signed = signedHeaders({ method, key, bucket: c.bucket, query, body: body || '', region: c.region, endpoint: c.endpoint, accessKey: c.accessKey, secretKey: c.secretKey });
+  const headers = { ...signed.headers };
+  if (contentType) headers['Content-Type'] = contentType;
+  if (body) headers['Content-Length'] = String(Buffer.byteLength(body));
+  const res = await fetch(signed.url, { method, headers, body });
+  if (!res.ok) {
+    const text = await res.text().catch(() => '');
+    const code = (text.match(/<Code>([^<]+)<\/Code>/) || [])[1];
+    throw new Error(`хранилище ответило ${res.status}${code ? ' (' + code + ')' : ''}`);
+  }
+  return res;
+}
+
+// Оставляем в хранилище N последних копий: без этого ведро растёт бесконечно,
+// а платят за него по объёму. Список берём из хранилища, а не из локальных
+// файлов — локальные копии чистятся раньше и живут меньше.
+async function s3prune(c, keep) {
+  if (!keep || keep <= 0) return { kept: 0, removed: 0 };
+  const res = await s3request(c, { method: 'GET', key: '', query: { prefix: c.prefix ? c.prefix + '/' : '', 'max-keys': '500' } });
+  const xml = await res.text();
+  const keys = [...xml.matchAll(/<Key>([^<]+)<\/Key>/g)].map(m => decodeURIComponent(m[1])).filter(k => k.endsWith('.db'));
+  // имена копий начинаются с даты, поэтому сортировка по имени = сортировка по времени
+  keys.sort();
+  const extra = keys.slice(0, Math.max(0, keys.length - keep));
+  let removed = 0;
+  for (const key of extra) {
+    try { await s3request(c, { method: 'DELETE', key }); removed++ }
+    catch (e) { console.error('S3: не удалось удалить старую копию ' + key + ': ' + e.message) }
+  }
+  return { kept: keys.length - removed, removed, total: keys.length };
+}
+
+// ключ доступа показываем хвостом: полностью его видеть не нужно, а понять,
+// тот ли ключ вставлен, — нужно
+const maskKey = v => v ? '••••••' + String(v).slice(-4) : '';
+// Что видит администратор в настройках: настроено ли хранилище, когда была
+// последняя успешная выгрузка и почему не получилось в прошлый раз. Секретный
+// ключ наружу не отдаём — только отметку, что он задан.
+const s3status = () => {
+  const c = s3cfg();
+  return {
+    configured: s3ready(c), missing: s3missing(c),
+    endpoint: c.endpoint, bucket: c.bucket, region: c.region, prefix: c.prefix,
+    access_key: maskKey(c.accessKey), secret_set: Boolean(c.secretKey),
+    keep: c.keep, auto: c.auto,
+    last_ok: getSetting('S3_LAST_OK', ''), last_file: getSetting('S3_LAST_FILE', ''), last_error: getSetting('S3_LAST_ERROR', ''),
+  };
+};
+
+export async function uploadBackupToS3(name) {
+  const c = s3cfg();
+  if (!s3ready(c)) {
+    const missing = s3missing(c);
+    const err = missing.length ? `не заполнены поля: ${missing.join(', ')}` : 'хранилище не настроено';
+    setSetting('S3_LAST_ERROR', err);
+    return { ok: false, error: err };
+  }
+  const file = join(DATA_DIR, 'backups', name);
+  if (!existsSync(file)) { setSetting('S3_LAST_ERROR', `нет файла копии: ${name}`); return { ok: false, error: 'нет файла копии' }; }
+  const key = `${c.prefix ? c.prefix + '/' : ''}${name}`;
+  try {
+    const body = readFileSync(file);
+    await s3request(c, { method: 'PUT', key, body, contentType: 'application/vnd.sqlite3' });
+    const pruned = await s3prune(c, c.keep).catch(e => { console.error('S3: чистка старых копий не удалась: ' + e.message); return { removed: 0 } });
+    setSetting('S3_LAST_OK', localNow());
+    setSetting('S3_LAST_FILE', name);
+    setSetting('S3_LAST_ERROR', '');
+    log(`Резервная копия ${name} выгружена в хранилище${pruned.removed ? `, старых удалено: ${pruned.removed}` : ''}`);
+    return { ok: true, name, key, bucket: c.bucket, ...pruned };
+  } catch (e) {
+    setSetting('S3_LAST_ERROR', String(e.message).slice(0, 300));
+    console.error('S3: выгрузка копии не удалась: ' + e.message);
+    return { ok: false, error: e.message };
+  }
+}
+
 async function overdueTick() {
   const today = localDate();
   const now = localNow();
@@ -715,7 +976,12 @@ function startScheduler() {
       const day = localDate(now);
       if (lastBackupDay !== day && now.getHours() >= Number(hourly)) {
         lastBackupDay = day;
-        try { makeBackup() } catch (e) { console.error('backup', e) }
+        try {
+          const made = makeBackup();
+          // ночная копия сразу уезжает в хранилище: ждать ручного запуска нельзя,
+          // иначе она так и лежит на одном диске с базой
+          if (made && s3cfg().auto) await uploadBackupToS3(made);
+        } catch (e) { console.error('backup', e) }
         // ежедневная уборка: лента активности (20 000 событий), осиротевшие
         // строки и старые файлы чатов, на которые больше нет ссылок
         try {
@@ -725,6 +991,8 @@ function startScheduler() {
         } catch (e) { console.error('maintenance', e) }
       }
       await overdueTick();
+      // отложенные действия правил: «напомнить клиенту через 3 дня»
+      try { const n = await queueTick(); if (n) console.log(`Автоматизация: выполнено отложенных действий ${n}`) } catch (e) { console.error('automation queue', e) }
     } catch (e) { console.error('scheduler', e) }
   };
   tick();
@@ -765,6 +1033,45 @@ function applySecurityHeaders(req, res) {
   for (const [k, v] of Object.entries(headers)) res.setHeader(k, v);
 }
 // реквизиты компании для печатных документов (задаются в интерфейсе: Настройки → Данные и компания)
+// ----- документ по ссылке -----
+// КП и счёт нужно отправить клиенту, а входить в CRM он не должен. Ссылка
+// подписана секретом сервера и действует ограниченное время: подделать её
+// нельзя, перебор номера сделки ничего не даст, а через две недели она
+// сама перестаёт открываться.
+const DOC_LINK_DAYS = Math.max(1, Number(process.env.DOC_LINK_DAYS) || 14);
+const docSign = data => createHmac('sha256', SECRET).update(String(data)).digest('base64url');
+export function docToken(id, doc, days = DOC_LINK_DAYS) {
+  const exp = Date.now() + Number(days) * 86400000;
+  const data = `${Number(id)}.${doc === 'invoice' ? 'invoice' : 'quote'}.${exp}`;
+  return Buffer.from(data, 'utf8').toString('base64url') + '.' + docSign(data);
+}
+export function readDocToken(token) {
+  const t = String(token || '');
+  const dot = t.lastIndexOf('.');
+  if (dot <= 0 || dot === t.length - 1) return null;
+  const data = Buffer.from(t.slice(0, dot), 'base64url').toString('utf8');
+  const got = Buffer.from(t.slice(dot + 1));
+  const want = Buffer.from(docSign(data));
+  // сравнение постоянным временем и только равных длин: иначе подпись подбирают
+  if (got.length !== want.length || !timingSafeEqual(got, want)) return null;
+  const m = data.match(/^(\d+)\.(quote|invoice)\.(\d+)$/);
+  if (!m || Number(m[3]) < Date.now()) return null;
+  return { id: Number(m[1]), doc: m[2], expiresAt: Number(m[3]) };
+}
+// Адрес, по которому CRM видна снаружи: его кладём в письмо клиенту. Внутренний
+// адрес контейнера в письме был бы бесполезен.
+const publicBase = req => {
+  const set = String(getSetting('PUBLIC_URL') || '').replace(/\/+$/, '');
+  if (set) return set;
+  const host = String(req?.headers?.host || '').replace(/[^A-Za-z0-9._:\-]/g, '');
+  if (!host) return '';
+  return `${isHttps(req) ? 'https' : 'http'}://${host}`;
+};
+const docPage = (title, text) => `<!doctype html><html lang="ru"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>${escHtml(title)}</title>
+<style>body{font:15px/1.6 -apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,Arial,sans-serif;color:#0f172a;background:#f6f7f9;margin:0;padding:40px 16px}
+.box{max-width:520px;margin:0 auto;background:#fff;border:1px solid #e5e7eb;border-radius:14px;padding:26px}h1{font-size:19px;margin:0 0 8px}p{margin:0;color:#475569}</style>
+</head><body><div class="box"><h1>${escHtml(title)}</h1><p>${escHtml(text)}</p></div></body></html>`;
+
 function companyRequisites() {
   const g = k => getSetting(k, '');
   return {
@@ -982,6 +1289,17 @@ export const server = http.createServer(async (req, res) => {
   const u = new URL(req.url, `http://${req.headers.host}`), p = u.pathname;
   applySecurityHeaders(req, res);
   try {
+    // ===== документ по подписанной ссылке (КП и счёт для клиента) =====
+    const mDocLink = p.match(/^\/d\/([A-Za-z0-9_.\-]+)$/);
+    if (mDocLink && req.method === 'GET') {
+      const link = readDocToken(mDocLink[1]);
+      if (!link) return html(res, 404, docPage('Ссылка не работает', 'Документ открыли по неверной или просроченной ссылке. Попросите менеджера отправить её заново.'));
+      const deal = db.prepare('SELECT d.*,c.name contact_name,c.phone contact_phone,c.email contact_email,co.name company_name FROM deals d LEFT JOIN contacts c ON c.id=d.contact_id LEFT JOIN companies co ON co.id=d.company_id WHERE d.id=?').get(link.id);
+      if (!deal) return html(res, 404, docPage('Документ не найден', 'Сделка, к которой относился документ, удалена.'));
+      const items = db.prepare('SELECT * FROM deal_products WHERE deal_id=? ORDER BY id').all(link.id);
+      return html(res, 200, dealDocument({ deal, items, doc: link.doc, company: companyRequisites() }));
+    }
+
     // ===== публичные вебхуки =====
     // защита от спам-шторма: лимит запросов с одного IP только на вебхуки
     if (p.startsWith('/webhooks/')) {
@@ -1006,7 +1324,7 @@ export const server = http.createServer(async (req, res) => {
       for (const m of legacy.concat(modern)) {
         if (m.status && m.status !== 'inbound') { db.prepare('UPDATE messages SET status=? WHERE external_id=?').run(m.status, m.messageId); continue; }
         if (m.isEcho) continue;
-        upsertIncoming({ channel: wzChannel(m.chatType), chatType: normChatType(m.chatType), phone: m.contact?.phone || '', chatId: m.chatId || '', name: m.contact?.name || m.authorName || '', body: wzBody(m), contentUri: m.contentUri || '', external_id: m.messageId, channelId: m.channelId, author: m.authorName || '' });
+        await upsertIncoming({ channel: wzChannel(m.chatType), chatType: normChatType(m.chatType), phone: m.contact?.phone || '', chatId: m.chatId || '', name: m.contact?.name || m.authorName || '', body: wzBody(m), contentUri: m.contentUri || '', external_id: m.messageId, channelId: m.channelId, author: m.authorName || '' });
       }
       for (const s of b.statuses || []) db.prepare('UPDATE messages SET status=? WHERE external_id=?').run(s.status, s.messageId);
       for (const cu of b.channelsUpdates || []) db.prepare('INSERT INTO channels(provider,external_id,state) VALUES(?,?,?) ON CONFLICT(external_id) DO UPDATE SET state=excluded.state').run('wazzup', cu.channelId, cu.state);
@@ -1022,14 +1340,14 @@ export const server = http.createServer(async (req, res) => {
       const chIn = String(b.channel || '').trim().toLowerCase();
       const channel = (WZ_ALL.includes(chIn) || chIn === 'email') ? chIn : 'site';
       const name = String((msg.from && msg.from.first_name) || b.name || '').slice(0, 120);
-      upsertIncoming({ channel, chatType: b.chatType || channel, phone: String(b.phone || (msg.chat && msg.chat.id) || ''), chatId: String(b.chatId || ''), name, body: String(msg.text || b.body || ''), external_id: msg.message_id ? `${channel}-${msg.message_id}` : (b.external_id || null) });
+      await upsertIncoming({ channel, chatType: b.chatType || channel, phone: String(b.phone || (msg.chat && msg.chat.id) || ''), chatId: String(b.chatId || ''), name, body: String(msg.text || b.body || ''), external_id: msg.message_id ? `${channel}-${msg.message_id}` : (b.external_id || null) });
       return json(res, 200, { received: true });
     }
     if (p === '/webhooks/email' && req.method === 'POST') {
       const secret = getSetting('EMAIL_WEBHOOK_SECRET');
       if (secret && u.searchParams.get('secret') !== secret && req.headers['x-webhook-secret'] !== secret) return json(res, 403, { error: 'bad secret' });
       const b = await readBody(req);
-      upsertIncoming({ channel: 'email', chatType: 'email', email: String(b.from || b.email || '').trim(), name: b.name || String(b.from || '').split('@')[0] || 'E-mail', subject: b.subject || '', body: b.text || b.body || b.html || '', external_id: b.message_id || b.external_id || null, direction: 'in' });
+      await upsertIncoming({ channel: 'email', chatType: 'email', email: String(b.from || b.email || '').trim(), name: b.name || String(b.from || '').split('@')[0] || 'E-mail', subject: b.subject || '', body: b.text || b.body || b.html || '', external_id: b.message_id || b.external_id || null, direction: 'in' });
       return json(res, 200, { received: true });
     }
     if (p === '/api/health') {
@@ -1260,7 +1578,7 @@ export const server = http.createServer(async (req, res) => {
       const tables = ['users', 'companies', 'contacts', 'pipelines', 'stages', 'deals', 'tasks', 'notes', 'products', 'templates', 'automations', 'conversations', 'messages', 'channels', 'competitors', 'competitor_checks', 'competitor_reports', 'reviews', 'price_rows']; const out = {}; tables.forEach(t => out[t] = db.prepare(`SELECT * FROM ${t}`).all()); res.writeHead(200, { 'Content-Type': 'application/json', 'Content-Disposition': 'attachment; filename=karkas-backup.json' }); return res.end(JSON.stringify(out, null, 2)); }
 
     // ===== generic CRUD =====
-    const CRUD = { contacts: ['name', 'phone', 'email', 'company', 'company_id', 'position', 'source', 'tags', 'notes', 'responsible_id', 'custom'], companies: ['name', 'inn', 'phone', 'email', 'site', 'notes'], tasks: ['title', 'type', 'due', 'priority', 'done', 'deal_id', 'contact_id', 'responsible_id', 'result', 'repeat'], deals: ['title', 'amount', 'stage', 'pipeline_id', 'contact_id', 'company_id', 'responsible', 'responsible_id', 'priority', 'loss_reason', 'deadline', 'custom'], products: ['name', 'sku', 'price', 'unit', 'active', 'note'], templates: ['name', 'body'], automations: ['name', 'trigger_type', 'trigger_value', 'action_type', 'action_value', 'active'], notes: ['entity_type', 'entity_id', 'body', 'author'] };
+    const CRUD = { contacts: ['name', 'phone', 'email', 'company', 'company_id', 'position', 'source', 'tags', 'notes', 'responsible_id', 'custom'], companies: ['name', 'inn', 'phone', 'email', 'site', 'notes'], tasks: ['title', 'type', 'due', 'priority', 'done', 'deal_id', 'contact_id', 'responsible_id', 'result', 'repeat'], deals: ['title', 'amount', 'stage', 'pipeline_id', 'contact_id', 'company_id', 'responsible', 'responsible_id', 'priority', 'loss_reason', 'deadline', 'custom'], products: ['name', 'sku', 'price', 'unit', 'active', 'note'], templates: ['name', 'body'], automations: ['name', 'trigger_type', 'trigger_value', 'action_type', 'action_value', 'active', 'delay_days'], notes: ['entity_type', 'entity_id', 'body', 'author'] };
     const mCrud = p.match(/^\/api\/(contacts|companies|tasks|products|templates|automations|notes)(?:\/(\d+))?$/);
     if (mCrud) { const [, table, id] = mCrud; const fields = CRUD[table];
       if (table === 'templates') {
@@ -1515,6 +1833,56 @@ export const server = http.createServer(async (req, res) => {
       return html(res, 200, dealDocument({ deal, items, doc, company: companyRequisites() }));
     }
 
+    // отправить клиенту КП или счёт письмом
+    const mSendDoc = p.match(/^\/api\/deals\/(\d+)\/send-doc$/);
+    if (mSendDoc && req.method === 'POST') {
+      const id = Number(mSendDoc[1]);
+      const deal = db.prepare('SELECT d.*,c.name contact_name,c.email contact_email FROM deals d LEFT JOIN contacts c ON c.id=d.contact_id WHERE d.id=?').get(id);
+      if (!deal) return json(res, 404, { error: 'Сделка не найдена' });
+      const b = await readBody(req);
+      const doc = b.doc === 'invoice' ? 'invoice' : 'quote';
+      const to = String(b.to || deal.contact_email || '').trim();
+      if (!to.includes('@')) return json(res, 400, { error: 'У клиента не указан e-mail — добавьте его в карточке клиента' });
+      if (!getSetting('SMTP_HOST')) return json(res, 400, { error: 'Почта не настроена: Настройки → Интеграции → Почта (SMTP)' });
+      const items = db.prepare('SELECT * FROM deal_products WHERE deal_id=? ORDER BY id').all(id);
+      if (!items.length) return json(res, 400, { error: doc === 'invoice' ? 'В сделке нет позиций: не на что выставить счёт. Добавьте товары или услуги.' : 'В сделке нет позиций: КП получилось бы пустым. Добавьте товары или услуги.' });
+      const base = publicBase(req);
+      if (!base) return json(res, 400, { error: 'Не задан внешний адрес CRM: Настройки → Данные и компания → «Адрес для входа»' });
+      const company = companyRequisites();
+      const link = `${base}/d/${docToken(id, doc)}`;
+      const kind = doc === 'invoice' ? 'Счёт' : 'Коммерческое предложение';
+      const sum = items.reduce((a, x) => a + Number(x.price) * Number(x.qty), 0);
+      const text = `${String(b.body || '').trim() || `${deal.contact_name || 'Добрый день'}!`}
+
+${kind} по заявке «${deal.title}» на сумму ${money(sum, company.currency)} — по ссылке:
+${link}
+
+Ссылка действует ${DOC_LINK_DAYS} дней. Откройте её в браузере и, если нужен файл, сохраните как PDF: «Печать» → «Сохранить как PDF».
+
+${company.name || ''}${company.phone ? ', ' + company.phone : ''}
+${user?.name || ''}`.trim();
+      try {
+        await sendMail({
+          host: getSetting('SMTP_HOST'), port: Number(getSetting('SMTP_PORT', '587')),
+          secure: getSetting('SMTP_SECURE') === '1' ? true : getSetting('SMTP_SECURE') === '0' ? false : undefined,
+          user: getSetting('SMTP_USER') || undefined, pass: getSetting('SMTP_PASS') || undefined,
+          from: getSetting('MAIL_FROM') || getSetting('SMTP_USER') || undefined, fromName: getSetting('MAIL_FROM_NAME') || company.name || undefined,
+          to, toName: deal.contact_name || undefined, subject: String(b.subject || '').trim() || `${kind} от ${company.name || 'нашей компании'}`, text,
+        });
+      } catch (e) {
+        return json(res, 502, { error: 'Письмо не ушло: ' + e.message });
+      }
+      log(`Клиенту отправлен ${kind.toLowerCase()} по сделке «${deal.title}» на ${to}`, 'deals', id, user.name);
+      // письмо видно и в переписке клиента, если она уже есть
+      const conv = deal.contact_id ? db.prepare('SELECT id FROM conversations WHERE contact_id=?').get(deal.contact_id) : null;
+      if (conv) {
+        db.prepare("INSERT INTO messages(conversation_id,channel,direction,body,subject,status,author) VALUES(?,?,?,?,?,'sent',?)").run(conv.id, 'email', 'out', text, kind, user.name);
+        db.prepare("UPDATE conversations SET last_at=datetime('now') WHERE id=?").run(conv.id);
+        broadcast('message', { conversation_id: conv.id });
+      }
+      return json(res, 200, { ok: true, to, doc, link, expiresDays: DOC_LINK_DAYS });
+    }
+
     const mDeal = p.match(/^\/api\/deals\/(\d+)(?:\/(products))?$/);
     if (mDeal) { const id = mDeal[1];
       if (mDeal[2] === 'products') {
@@ -1535,7 +1903,13 @@ export const server = http.createServer(async (req, res) => {
         // переписка клиента по этой сделке — единый диалог прямо в карточке
         const conv = deal?.contact_id ? db.prepare('SELECT id,title,channels,unread,chat_type FROM conversations WHERE contact_id=? ORDER BY last_at DESC').get(deal.contact_id) : null;
         const messages = conv ? db.prepare('SELECT * FROM messages WHERE conversation_id=? ORDER BY id DESC LIMIT 40').all(conv.id).reverse() : [];
-        return json(res, 200, { deal, notes: db.prepare("SELECT * FROM notes WHERE entity_type='deals' AND entity_id=? ORDER BY id DESC").all(id), tasks: db.prepare('SELECT * FROM tasks WHERE deal_id=? ORDER BY id DESC').all(id), products, history: db.prepare("SELECT * FROM activities WHERE entity_type='deals' AND entity_id=? ORDER BY id DESC LIMIT 20").all(id), conversation: conv, messages });
+        // в историю берём и события клиента: обращение, назначение, переписка
+        // относятся к той же продаже, а в отдельной вкладке их никто не найдёт
+        const history = db.prepare(`SELECT * FROM (
+            SELECT * FROM activities WHERE entity_type='deals' AND entity_id=?
+            UNION ALL SELECT * FROM activities WHERE entity_type='contacts' AND entity_id=?
+          ) ORDER BY id DESC LIMIT 40`).all(id, deal.contact_id || 0);
+        return json(res, 200, { deal, notes: db.prepare("SELECT * FROM notes WHERE entity_type='deals' AND entity_id=? ORDER BY id DESC").all(id), tasks: db.prepare('SELECT * FROM tasks WHERE deal_id=? ORDER BY id DESC').all(id), products, history, conversation: conv, messages });
       }
       if (req.method === 'PATCH') { const b = await readBody(req); const old = db.prepare('SELECT * FROM deals WHERE id=?').get(id);
         if (!old) return json(res, 404, { error: 'Сделка не найдена' });
@@ -1570,7 +1944,28 @@ export const server = http.createServer(async (req, res) => {
         if (newResp && newResp !== Number(old.responsible_id) && newResp !== Number(user.id)) {
           broadcastTo(newResp, 'notify', { type: 'deal_assigned', id: Number(id), title: String(b.title || old.title || 'Сделка') });
         }
-        if (b.stage && old && b.stage !== old.stage) { const s = db.prepare('SELECT name FROM stages WHERE code=?').get(b.stage); log(`Сделка «${old.title}» → этап «${s?.name || b.stage}»`, 'deals', Number(id), user.name); runAutomations('stage_changed', { deal_id: Number(id), contact_id: old.contact_id, stage: b.stage }); } broadcast('change', { table: 'deals' }); return json(res, 200, db.prepare('SELECT * FROM deals WHERE id=?').get(id)); }
+        // История карточки. Без записи о смене суммы, ответственного или срока
+        // вкладка «История» остаётся пустой, и по сделке не видно, кто и что
+        // менял — а это первое, что спрашивают при разборе потерянного клиента.
+        {
+          // пробел обычный, не неразрывный: текст истории сравнивают и ищут
+          const money = n => String(Math.round(Number(n) || 0)).replace(/\B(?=(\d{3})+(?!\d))/g, ' ') + ' ₽';
+          const day = v => { const t = String(v || '').trim(); return t ? t.slice(0, 10).split('-').reverse().join('.') : 'не задан'; };
+          const who = uid => uid ? (db.prepare('SELECT name FROM users WHERE id=?').get(Number(uid))?.name || '—') : 'не назначен';
+          const what = (tbl, eid) => eid ? (db.prepare(`SELECT name FROM ${tbl} WHERE id=?`).get(Number(eid))?.name || '—') : 'не задано';
+          const title = b.title !== undefined ? b.title : old.title;
+          const changes = [];
+          if (b.title !== undefined && String(b.title) !== String(old.title)) changes.push(`название: «${old.title}» → «${b.title}»`);
+          if (b.amount !== undefined && Number(b.amount || 0) !== Number(old.amount || 0)) changes.push(`сумма: ${money(old.amount)} → ${money(b.amount)}`);
+          if (b.responsible_id !== undefined && Number(b.responsible_id || 0) !== Number(old.responsible_id || 0)) changes.push(`ответственный: ${who(old.responsible_id)} → ${who(b.responsible_id)}`);
+          if (b.contact_id !== undefined && Number(b.contact_id || 0) !== Number(old.contact_id || 0)) changes.push(`клиент: ${what('contacts', old.contact_id)} → ${what('contacts', b.contact_id)}`);
+          if (b.company_id !== undefined && Number(b.company_id || 0) !== Number(old.company_id || 0)) changes.push(`компания: ${what('companies', old.company_id)} → ${what('companies', b.company_id)}`);
+          if (b.pipeline_id !== undefined && Number(b.pipeline_id || 0) !== Number(old.pipeline_id || 0)) changes.push(`воронка: ${what('pipelines', old.pipeline_id)} → ${what('pipelines', b.pipeline_id)}`);
+          if (b.deadline !== undefined && String(b.deadline || '') !== String(old.deadline || '')) changes.push(`срок: ${day(old.deadline)} → ${day(b.deadline)}`);
+          if (b.loss_reason !== undefined && String(b.loss_reason || '').trim() !== String(old.loss_reason || '').trim()) changes.push(`причина проигрыша: ${String(b.loss_reason || '').trim() || 'не указана'}`);
+          for (const ch of changes) log(`Сделка «${title}»: ${ch}`, 'deals', Number(id), user.name);
+        }
+        if (b.stage && old && b.stage !== old.stage) { const s = db.prepare('SELECT name FROM stages WHERE code=?').get(b.stage); log(`Сделка «${old.title}» → этап «${s?.name || b.stage}»`, 'deals', Number(id), user.name); await runAutomations('stage_changed', { deal_id: Number(id), contact_id: old.contact_id, stage: b.stage, actor_id: user.id }); } broadcast('change', { table: 'deals' }); return json(res, 200, db.prepare('SELECT * FROM deals WHERE id=?').get(id)); }
       if (req.method === 'DELETE') {
         const d = db.prepare('SELECT * FROM deals WHERE id=?').get(id);
         if (!d) return json(res, 404, { error: 'Сделка не найдена' });
@@ -1638,8 +2033,27 @@ export const server = http.createServer(async (req, res) => {
     }
     if (p === '/api/backups') {
       const dir = join(DATA_DIR, 'backups');
-      if (req.method === 'GET') return json(res, 200, { dir: '/data/backups', keepDays: Number(getSetting('BACKUP_KEEP_DAYS', '7')) || 0, files: existsSync(dir) ? readdirSync(dir).filter(f => f.endsWith('.db')).sort().reverse().map(f => ({ name: f, sizeBytes: statSync(join(dir, f)).size, created_at: statSync(join(dir, f)).mtime.toISOString() })) : [] });
-      if (req.method === 'POST') { if (!requireAdmin(user, res)) return; const file = makeBackup(true); return json(res, 200, { created: file }) }
+      if (req.method === 'GET') return json(res, 200, { dir: '/data/backups', keepDays: Number(getSetting('BACKUP_KEEP_DAYS', '7')) || 0, s3: s3status(), files: existsSync(dir) ? readdirSync(dir).filter(f => f.endsWith('.db')).sort().reverse().map(f => ({ name: f, sizeBytes: statSync(join(dir, f)).size, created_at: statSync(join(dir, f)).mtime.toISOString() })) : [] });
+      if (req.method === 'POST') {
+        if (!requireAdmin(user, res)) return;
+        const file = makeBackup(true);
+        const b = await readBody(req).catch(() => ({}));
+        const wantS3 = b.s3 === undefined ? s3cfg().auto : b.s3 !== false;
+        const s3 = (file && wantS3) ? await uploadBackupToS3(file) : null;
+        return json(res, 200, { created: file, s3 });
+      }
+    }
+    // выгрузить последнюю копию в хранилище, не создавая новую
+    if (p === '/api/backups/s3' && req.method === 'POST') {
+      if (!requireAdmin(user, res)) return;
+      const b = await readBody(req).catch(() => ({}));
+      const dir = join(DATA_DIR, 'backups');
+      const name = String(b.name || '') || (existsSync(dir) ? readdirSync(dir).filter(f => f.endsWith('.db')).sort().pop() : '');
+      if (!name) return json(res, 400, { error: 'Резервных копий пока нет — сначала создайте копию' });
+      const c = s3cfg();
+      if (!s3ready(c)) return json(res, 400, { error: 'Хранилище не настроено. Заполните адрес, ведро и ключи доступа: ' + (s3missing(c).join(', ') || '—') });
+      const out = await uploadBackupToS3(name);
+      return out.ok ? json(res, 200, out) : json(res, 502, out);
     }
     if (p === '/api/backups/download') {
       if (!requireAdmin(user, res)) return;
@@ -1690,6 +2104,32 @@ export const server = http.createServer(async (req, res) => {
     if (p === '/api/conversations' && req.method === 'GET') return json(res, 200, db.prepare(`SELECT cv.*,c.phone,c.email,(SELECT body FROM messages WHERE conversation_id=cv.id ORDER BY id DESC LIMIT 1) last_body,
       (SELECT d.amount FROM deals d WHERE d.contact_id=cv.contact_id AND d.stage NOT IN ('won','lost') ORDER BY d.id DESC LIMIT 1) deal_amount
       FROM conversations cv LEFT JOIN contacts c ON c.id=cv.contact_id ORDER BY cv.last_at DESC, cv.id DESC`).all());
+    // Начать переписку первым. Беседа появлялась только из входящего сообщения,
+    // поэтому менеджер не мог написать клиенту, который ещё не обращался.
+    if (p === '/api/conversations' && req.method === 'POST') {
+      const b = await readBody(req);
+      const cid = Number(b.contact_id);
+      if (!cid) return json(res, 400, { error: 'Не указан клиент' });
+      const contact = db.prepare('SELECT * FROM contacts WHERE id=?').get(cid);
+      if (!contact) return json(res, 404, { error: 'Клиент не найден' });
+      const chatType = normChatType(String(b.chat_type || 'whatsapp').trim().toLowerCase());
+      if (!chatType) return json(res, 400, { error: `Мессенджер «${b.chat_type}» не поддерживается. Доступны: ${WZ_CHAT_TYPES.join(', ')}` });
+      // у беседы один клиент (UNIQUE по contact_id): вторая ветка разделила бы историю
+      const exist = db.prepare('SELECT * FROM conversations WHERE contact_id=?').get(cid);
+      if (exist) return json(res, 200, exist);
+      // Адресат: в WhatsApp и Viber это номер цифрами, в остальных — имя чата,
+      // которое даёт вендор. Без адресата сообщение не ушло бы, и беседа осталась
+      // бы пустой записью, поэтому спрашиваем его сразу.
+      let chatId = String(b.chat_id || '').trim().slice(0, 120);
+      const byPhone = ['whatsapp', 'viber'].includes(chatType);
+      if (byPhone) chatId = digits(chatId || contact.phone || '');
+      if (!chatId) return json(res, 400, { error: byPhone ? 'У клиента не заполнен телефон — без номера отправить в ' + chatType + ' нельзя' : `Укажите адрес получателя в ${chatType}: номер или имя аккаунта. Его видно в первом сообщении клиента.` });
+      const r = db.prepare("INSERT INTO conversations(contact_id,title,channels,channel_id,external_chat_id,chat_type,assigned_id,last_at) VALUES(?,?,?,?,?,?,?,datetime('now'))")
+        .run(cid, contact.name || 'Клиент', chatType, '', chatId, chatType, user?.id || null);
+      const conv = db.prepare('SELECT * FROM conversations WHERE id=?').get(r.lastInsertRowid);
+      log(`Начата переписка с «${conv.title}» (${chatType})`, 'contacts', cid, user?.name || '');
+      return json(res, 201, conv);
+    }
     const mConv = p.match(/^\/api\/conversations\/(\d+)\/messages$/);
     if (mConv) { const id = mConv[1];
       if (req.method === 'GET') { db.prepare('UPDATE conversations SET unread=0 WHERE id=?').run(id); return json(res, 200, db.prepare('SELECT * FROM messages WHERE conversation_id=? ORDER BY id').all(id)); }
@@ -1831,7 +2271,19 @@ export const server = http.createServer(async (req, res) => {
     if (mChLabel && req.method === 'PUT') {
       const b = await readBody(req);
       const label = String(b.label ?? '').trim().slice(0, 60);
-      if (!db.prepare('UPDATE channels SET label=? WHERE id=?').run(label, mChLabel[1]).changes) return json(res, 404, { error: 'Канал не найден' });
+      // сотрудника проверяем: привязка к удалённому или неактивному означала бы,
+      // что обращения назначаются на того, кто уже не работает
+      let uid = null;
+      if (b.user_id !== undefined && b.user_id !== '' && b.user_id !== null) {
+        uid = Number(b.user_id);
+        if (!Number.isInteger(uid) || uid <= 0) return json(res, 400, { error: 'Некорректный сотрудник' });
+        const u = db.prepare('SELECT id FROM users WHERE id=? AND active=1').get(uid);
+        if (!u) return json(res, 400, { error: 'Сотрудник не найден или уже не работает' });
+      }
+      const upd = uid === null
+        ? db.prepare('UPDATE channels SET label=?,user_id=NULL WHERE id=?').run(label, mChLabel[1])
+        : db.prepare('UPDATE channels SET label=?,user_id=? WHERE id=?').run(label, uid, mChLabel[1]);
+      if (!upd.changes) return json(res, 404, { error: 'Канал не найден' });
       return json(res, 200, db.prepare('SELECT * FROM channels WHERE id=?').get(mChLabel[1]));
     }
     if (p === '/api/integrations/wazzup/test' && req.method === 'POST') { try { const list = wzChannels(await wazzupFetch('/channels')); return json(res, 200, { ok: true, channels: list }); } catch (e) { return json(res, 400, { ok: false, error: e.message }); } }
@@ -1873,6 +2325,7 @@ export const server = http.createServer(async (req, res) => {
           demo: demoCounts(db),
           email: { host: getSetting('SMTP_HOST'), port: getSetting('SMTP_PORT', '587'), secure: getSetting('SMTP_SECURE', ''), user: getSetting('SMTP_USER'), pass: mask(getSetting('SMTP_PASS')), from: getSetting('MAIL_FROM'), webhook_secret: getSetting('EMAIL_WEBHOOK_SECRET'), test_to: getSetting('SMTP_TEST_TO'), configured: !!getSetting('SMTP_HOST') },
           maintenance: { backup_keep_days: num('BACKUP_KEEP_DAYS', 7), backup_hour: num('BACKUP_HOUR', 3), notify_webhook: getSetting('NOTIFY_WEBHOOK') },
+          s3: s3status(),
           requisites: companyRequisites(),
           advanced: { frame_ancestors: getSetting('FRAME_ANCESTORS'), login_rate_limit: num('LOGIN_RATE_LIMIT', 12) },
           auto_deal: getSetting('AUTO_DEAL', '1'), auto_assign: getSetting('AUTO_ASSIGN', '0'),
@@ -1897,6 +2350,14 @@ export const server = http.createServer(async (req, res) => {
         if (clean(b.SMTP_PASS)) setSetting('SMTP_PASS', clean(b.SMTP_PASS));
         if (b.SALES_TARGET !== undefined) putNum('SALES_TARGET', b.SALES_TARGET, 0, 1e15, 0);
         if (b.BACKUP_KEEP_DAYS !== undefined) putNum('BACKUP_KEEP_DAYS', b.BACKUP_KEEP_DAYS, 0, 3650, 7);
+        // хранилище резервных копий: адрес и ключи. Секретный ключ принимаем
+        // только если он не пришёл маской — иначе сохранили бы «••••••» вместо ключа
+        for (const k of ['S3_ENDPOINT', 'S3_BUCKET', 'S3_REGION', 'S3_PREFIX', 'S3_ACCESS_KEY']) {
+          if (b[k] !== undefined && !String(b[k]).includes('•')) setSetting(k, String(b[k] ?? '').trim().slice(0, 255));
+        }
+        if (b.S3_SECRET_KEY !== undefined && !String(b.S3_SECRET_KEY).includes('•')) setSetting('S3_SECRET_KEY', String(b.S3_SECRET_KEY).trim().slice(0, 255));
+        if (b.S3_KEEP !== undefined) putNum('S3_KEEP', b.S3_KEEP, 0, 365, 14);
+        if (b.S3_AUTO !== undefined) setSetting('S3_AUTO', String(b.S3_AUTO) === '1' || b.S3_AUTO === true ? '1' : '0');
         if (b.BACKUP_HOUR !== undefined) putNum('BACKUP_HOUR', b.BACKUP_HOUR, 0, 23, 3);
         if (b.LOGIN_RATE_LIMIT !== undefined) putNum('LOGIN_RATE_LIMIT', b.LOGIN_RATE_LIMIT, 1, 10000, 12);
         // FRAME_ANCESTORS: только хосты и схемы — иначе ломаем CSP и сам заголовок
