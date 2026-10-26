@@ -1057,3 +1057,22 @@ test('очередь отложенных действий видна, отме�
   assert.equal(orphan[0].orphan, true);
   assert.equal((await call(`/api/automation-queue/${orphan[0].id}`, { method: 'DELETE' })).status, 200, 'его тоже можно отменить');
 });
+
+test('вебхук Wazzup: проверка адреса, счётчик входящих, защита секретом', async () => {
+  assert.equal((await call('/api/settings', { method: 'PUT', body: JSON.stringify({ WAZZUP_WEBHOOK_SECRET: 'hook-secret-1' }) })).status, 200);
+  const hook = (body, secret) => fetch(base + '/webhooks/wazzup' + (secret ? '?secret=' + secret : ''), { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) }).then(r => r.status);
+  const msg = id => ({ messages: [{ messageId: id, channelId: 'ch-hook', chatType: 'whatsapp', chatId: '79000000001', type: 'text', text: 'Здравствуйте, это проверка', contact: { name: 'Счётчик Вебхука', phone: '+7 900 000-00-71' } }] });
+  assert.equal(await hook({ test: true }, 'hook-secret-1'), 200, 'проверочный запрос Wazzup проходит');
+  let st = (await call('/api/settings')).body;
+  assert.ok(st.wazzup.hook_test_at && st.wazzup.hook_test_human, 'отметка проверки видна в настройках: ' + JSON.stringify(st.wazzup).slice(0, 220));
+  const before = (await call('/api/settings')).body.wazzup.hook_msgs;
+  assert.equal(await hook(msg('wz-hook-1'), 'неверный'), 403, 'без секрета сообщения не принимаются');
+  st = (await call('/api/settings')).body;
+  assert.equal(st.wazzup.hook_msgs, before, 'отклонённое сообщение не попадает в счётчик');
+  assert.equal(await hook(msg('wz-hook-2'), 'hook-secret-1'), 200, 'входящее сообщение принято');
+  st = (await call('/api/settings')).body;
+  assert.equal(st.wazzup.hook_msgs, before + 1, 'входящие считаются');
+  assert.match(st.wazzup.hook_last_human, /^\d{2}\.\d{2}\.\d{4} \d{2}:\d{2}$/, 'дата последнего входящего по-человечески: ' + st.wazzup.hook_last_human);
+  const dash = (await call('/api/dashboard')).body;
+  assert.ok(dash.activities.length && /Wazzup: получено сообщений: 1/.test(dash.activities[0].text), 'последнее событие журнала — принятая пачка входящих');
+});
