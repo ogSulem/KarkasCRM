@@ -219,7 +219,12 @@ export function createCompetitors(ctx) {
       const res = await safeFetch(url, opt, ms);
       let data = null; try { data = JSON.parse(res.text); } catch {}
       return { ok: res.ok, status: res.status, text: res.text, data };
-    } catch (e) { return { ok: false, status: 0, text: '', data: null, error: e.message }; }
+    } catch (e) {
+      // таймаут отличается от отказа в соединении: первый случается от нагрузки
+      // на источник и повтор помогает, второй повторится с тем же результатом
+      const timeout = Boolean(e) && (e.name === 'TimeoutError' || e.name === 'AbortError' || /timeout|aborted/i.test(String(e.message)));
+      return { ok: false, status: 0, text: '', data: null, error: e.message, timeout };
+    }
   };
   async function http(url, opt = {}, ms = Number(getSetting('COMPETITOR_TIMEOUT_MS', '12000'))) {
     const first = await httpOnce(url, opt, ms);
@@ -227,7 +232,7 @@ export function createCompetitors(ctx) {
     // периодически отвечают ошибкой на отдельный запрос. Без повтора источник
     // выглядел бы сломанным, а проверка — неполной. Больше одного раза не
     // повторяем: источник может отвечать отказом именно из-за частоты запросов.
-    const transient = first.status === 0 || (first.status >= 500 && first.status <= 599);
+    const transient = first.timeout || (first.status >= 500 && first.status <= 599);
     if (!transient) return first;
     await new Promise(r => setTimeout(r, 400));
     const second = await httpOnce(url, opt, ms);

@@ -552,6 +552,14 @@ try {
     check('после ответа кнопка снова рабочая', Boolean(probe) && probe.disabled === false);
   }
   {
+    // Проверка конкурента не должна зависеть от интернета прогонщика: внешние
+    // источники уводим на недоступный локальный адрес. Иначе поиск ждёт настоящие
+    // сайты до таймаута, и карточка не успевает открыться к проверке.
+    await window.api('/api/competitor-sources', { method: 'PUT', body: JSON.stringify({
+      RUSPROFILE_URL: 'http://127.0.0.1:9', FEDRESURS_API_URL: 'http://127.0.0.1:9', KAD_API_URL: 'http://127.0.0.1:9',
+      FNS_API_URL: 'http://127.0.0.1:9', GOOGLE_API_URL: 'http://127.0.0.1:9', TWOGIS_API_URL: 'http://127.0.0.1:9',
+      YANDEX_API_URL: 'http://127.0.0.1:9', COMPETITOR_TIMEOUT_MS: '1500',
+    }) }).catch(() => {});
     const search = $('#compSearch');
     search.value = 'ООО «Проверка Поиска»';
     const btn = $$('#view button').find(b => /Найти и проверить/.test(b.textContent));
