@@ -692,6 +692,7 @@ export async function upsertIncoming({ channel = 'whatsapp', chatType = '', phon
   const channels = [...new Set([...(conv.channels || '').split(',').filter(Boolean), channel])].join(',');
   try { db.prepare('INSERT INTO messages(conversation_id,channel,direction,body,subject,content_uri,content_name,status,external_id,author,channel_id) VALUES(?,?,?,?,?,?,?,?,?,?,?)').run(conv.id, channel, 'in', body || '[вложение]', subject, contentUri, contentName || null, channel === 'email' ? 'received' : 'inbound', external_id, author, channelId || null); }
   catch (e) { if (/UNIQUE/i.test(e.message)) return conv; console.error('message insert', e); throw e; }
+  queueAttachmentDownload(conv.id, contentUri, external_id);
   db.prepare("UPDATE conversations SET channels=?,channel_id=COALESCE(NULLIF(?,''),channel_id),external_chat_id=COALESCE(NULLIF(?,''),external_chat_id),chat_type=COALESCE(NULLIF(?,''),chat_type),last_at=datetime('now') WHERE id=?").run(channels, channelId, String(chatId || ''), chatType, conv.id);
   // беседу тоже отмечаем за владельцем канала, если она ничья
   if (boundId && !conv.assigned_id) db.prepare('UPDATE conversations SET assigned_id=? WHERE id=?').run(boundId, conv.id);
@@ -704,6 +705,64 @@ export async function upsertIncoming({ channel = 'whatsapp', chatType = '', phon
   const forUser = Number(conv.assigned_id) || Number(contact.responsible_id) || 0;
   broadcast('message', { conversation_id: conv.id, title: contact.name || conv.title || 'Клиент', preview: String(body || '').slice(0, 90), direction: 'in', for_user: forUser || null, channel });
   return conv;
+}
+
+// Исходящее из другой CRM или мобильного приложения вендора: для Wazzup это
+// тот же чат, поэтому сохраняем и у себя — история должна быть полной.
+async function upsertOutgoing(m) {
+  const body = wzBody(m) || '';
+  if (!body && !m.contentUri) return null;
+  const chatType = normChatType(m.chatType);
+  const channel = wzChannel(chatType);
+  let conv = m.chatId ? db.prepare('SELECT * FROM conversations WHERE external_chat_id=?').get(String(m.chatId)) : null;
+  if (!conv) {
+    const phNorm = digits(m.contact?.phone || '');
+    if (phNorm) {
+      const c = db.prepare('SELECT * FROM contacts WHERE phone_norm=?').get(phNorm) || db.prepare('SELECT * FROM contacts WHERE phone_norm=?').get('7' + phNorm.slice(-10));
+      if (c) conv = db.prepare('SELECT * FROM conversations WHERE contact_id=?').get(c.id);
+    }
+  }
+  // беседы нет — клиент написал впервые, а ответили ему из другой CRM:
+  // заводим карточку и беседу обычным механизмом входящих
+  if (!conv) return upsertIncoming({ channel, chatType, phone: m.contact?.phone || '', chatId: m.chatId || '', name: m.contact?.name || m.authorName || '', body, contentUri: m.contentUri || '', contentName: m.fileName || '', external_id: m.messageId || null, channelId: m.channelId || '', author: m.authorName || '' });
+  const st = ['sent', 'delivered', 'read'].includes(m.status) ? m.status : 'sent';
+  try {
+    db.prepare('INSERT INTO messages(conversation_id,channel,direction,body,content_uri,content_name,status,external_id,author,channel_id) VALUES(?,?,?,?,?,?,?,?,?,?)')
+      .run(conv.id, channel, 'out', body || '[вложение]', m.contentUri || '', m.fileName || '', st, m.messageId || null, m.authorName || '', m.channelId || '');
+  } catch (e) { if (/UNIQUE/i.test(e.message)) return conv; throw e; }
+  db.prepare("UPDATE conversations SET last_at=datetime('now') WHERE id=?").run(conv.id);
+  queueAttachmentDownload(conv.id, m.contentUri || '', m.messageId || null);
+  broadcast('message', { conversation_id: conv.id, direction: 'out' });
+  return conv;
+}
+
+// Вложения Wazzup лежат на сервере вендора и со временем перестают открываться —
+// в истории остаётся пустой пузырь. Забираем файл к себе фоном: ответ вебхуку
+// уходит сразу, а когда копия скачана, ссылка подменяется на локальную.
+const ATTACH_EXT = { 'image/png': 'png', 'image/jpeg': 'jpg', 'image/gif': 'gif', 'image/webp': 'webp', 'image/svg+xml': 'svg', 'application/pdf': 'pdf', 'text/plain': 'txt', 'text/csv': 'csv', 'application/zip': 'zip', 'application/msword': 'doc', 'application/vnd.openxmlformats-officedocument.wordprocessingml.document': 'docx', 'application/vnd.ms-excel': 'xls', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet': 'xlsx', 'video/mp4': 'mp4', 'audio/mpeg': 'mp3', 'audio/ogg': 'ogg' };
+async function fetchAttachment(uri) {
+  const res = await fetch(uri, { signal: AbortSignal.timeout(15000), redirect: 'follow' });
+  if (!res.ok) return null;
+  if (Number(res.headers.get('content-length') || 0) > 15 * 1024 * 1024) return null;
+  const buf = Buffer.from(await res.arrayBuffer());
+  if (!buf.length || buf.length > 15 * 1024 * 1024) return null;
+  const ct = String(res.headers.get('content-type') || '').split(';')[0].trim().toLowerCase();
+  const ext = ATTACH_EXT[ct] || (String(uri).match(/\.(png|jpe?g|gif|webp|svg|pdf|txt|csv|zip|docx?|xlsx?|mp4|mp3|ogg)(?:\?|$)/i)?.[1] || 'bin').toLowerCase();
+  const stored = `${localDate().replace(/-/g, '')}-${randomBytes(6).toString('hex')}-wazzup.${ext}`;
+  mkdir(UPLOAD_DIR, { recursive: true });
+  writeFileSync(join(UPLOAD_DIR, stored), buf);
+  return '/uploads/' + stored;
+}
+function queueAttachmentDownload(convId, uri, externalId) {
+  if (!externalId || !/^https?:\/\//i.test(String(uri || ''))) return;
+  setTimeout(async () => {
+    try {
+      const local = await fetchAttachment(uri);
+      if (!local) return;
+      const r = db.prepare('UPDATE messages SET content_uri=? WHERE external_id=? AND content_uri=?').run(local, externalId, uri);
+      if (r.changes) broadcast('message', { conversation_id: convId, direction: 'out' });
+    } catch { /* ссылка вендора осталась — показываем её как есть */ }
+  }, 50);
 }
 
 // ---------- providers ----------
@@ -1349,7 +1408,7 @@ export const server = http.createServer(async (req, res) => {
         // тип чата берём только из данных: подставлять 'whatsapp' вместо отсутствующего
         // нельзя, ответ ушёл бы клиенту не в тот мессенджер, а выглядело бы как доставка
         chatType: m.recipient?.chat_type || m.sender?.chat_type || m.chatType || '',
-        chatId: m.recipient?.chat_id || m.sender?.chat_id || m.chatId, isEcho: (m.direction === 'outbound') || m.isEcho,
+        chatId: m.recipient?.chat_id || m.sender?.chat_id || m.chatId, isEcho: m.isEcho === true, outbound: m.direction === 'outbound',
         text: m.text, type: m.attachment ? 'file' : (WZ_TYPE_BODY[m.type] ? m.type : 'text'), contentUri: m.attachment?.url || m.contentUri, status: m.direction === 'inbound' ? 'inbound' : (m.status || ''),
         fileName: m.attachment?.name || m.attachment?.fileName || m.fileName || '',
         authorName: m.sender?.name, contact: { name: m.sender?.name || m.recipient?.name || m.contact?.name, phone: m.sender?.phone || m.recipient?.phone || m.contact?.phone }
@@ -1357,8 +1416,12 @@ export const server = http.createServer(async (req, res) => {
       const legacy = (b.messages || []).map(mapMsg);
       const modern = (b.data || []).concat(!b.data && (b.message_id || b.messageId) ? [b] : []).map(mapMsg);
       for (const m of legacy.concat(modern)) {
-        if (m.status && m.status !== 'inbound') { db.prepare('UPDATE messages SET status=? WHERE external_id=?').run(m.status, m.messageId); continue; }
-        if (m.isEcho) continue;
+        // чистое статусное событие — без текста и вложения: обновляет статус уже известного сообщения
+        if (m.status && m.status !== 'inbound' && !(m.text || m.contentUri)) { db.prepare('UPDATE messages SET status=? WHERE external_id=?').run(m.status, m.messageId); continue; }
+        // своя отправка возвращается эхом (внешний id начинается с karkas-) — она уже есть в базе;
+        // исходящие из другой CRM или телефона сохраняем: иначе сотрудник видит половину переписки
+        if (m.isEcho || String(m.messageId || '').startsWith('karkas-')) continue;
+        if (m.outbound) { await upsertOutgoing(m); continue; }
         await upsertIncoming({ channel: wzChannel(m.chatType), chatType: normChatType(m.chatType), phone: m.contact?.phone || '', chatId: m.chatId || '', name: m.contact?.name || m.authorName || '', body: wzBody(m), contentUri: m.contentUri || '', contentName: m.fileName || wzNameFromUri(m.contentUri), external_id: m.messageId, channelId: m.channelId, author: m.authorName || '' });
       }
       const fwd = getSetting('WAZZUP_FORWARD_URL');
@@ -1368,7 +1431,7 @@ export const server = http.createServer(async (req, res) => {
         fetch(fwd, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: rawBody, signal: AbortSignal.timeout(8000) })
           .catch(e => log(`Не удалось продублировать входящие на второй адрес: ${e.message}`, null, null, 'Wazzup'));
       }
-      const inbound = legacy.concat(modern).filter(m => !(m.status && m.status !== 'inbound') && !m.isEcho).length;
+      const inbound = legacy.concat(modern).filter(m => !(m.status && m.status !== 'inbound' && !(m.text || m.contentUri)) && !m.isEcho && !String(m.messageId || '').startsWith('karkas-')).length;
       if (inbound) {
         const total = Number(db.prepare("SELECT value FROM settings WHERE key='WZ_HOOK_MSG_TOTAL'").get()?.value || 0) + inbound;
         wzHookMark('WZ_HOOK_MSG_TOTAL', String(total));
@@ -2211,6 +2274,15 @@ ${user?.name || ''}`.trim();
       const conv = db.prepare('SELECT * FROM conversations WHERE id=?').get(r.lastInsertRowid);
       log(`Начата переписка с «${conv.title}» (${chatType})`, 'contacts', cid, user?.name || '');
       return json(res, 201, conv);
+    }
+    // отметить прочитанными несколько бесед сразу: сотрудник выделил список и закрыл хвосты
+    if (p === '/api/conversations/read' && req.method === 'POST') {
+      const b = await readBody(req);
+      const ids = [...new Set((Array.isArray(b.ids) ? b.ids : []).map(Number).filter(n => Number.isInteger(n) && n > 0))].slice(0, 500);
+      const mark = db.prepare("INSERT INTO read_marks(user_id,conversation_id,last_msg_id,updated_at) VALUES(?,?,(SELECT COALESCE(MAX(id),0) FROM messages WHERE conversation_id=?),datetime('now')) ON CONFLICT(user_id,conversation_id) DO UPDATE SET last_msg_id=MAX(read_marks.last_msg_id,excluded.last_msg_id),updated_at=datetime('now')");
+      let done = 0;
+      for (const id of ids) { if (db.prepare('SELECT id FROM conversations WHERE id=?').get(id)) { mark.run(user.id, id, id); done++; } }
+      return json(res, 200, { ok: true, marked: done });
     }
     const mConv = p.match(/^\/api\/conversations\/(\d+)\/messages$/);
     if (mConv) { const id = mConv[1];

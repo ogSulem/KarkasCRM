@@ -357,7 +357,7 @@ let token = '';
 const state = {
   view: 'dashboard', settingsTab: 'integrations', pipeline: 1, conv: null, listOnly: false,
   deals: [], stages: [], pipelines: [], contacts: [], companies: [], channels: [],
-  cache: {}, dealTab: 'details', meta: null, dupes: null, me: null, users: [], convScope: 'all', drafts: {},
+  cache: {}, dealTab: 'details', meta: null, dupes: null, me: null, users: [], convScope: 'all', convSelect: false, drafts: {},
   taskScope: 'mine', taskFilter: '', dealScope: 'all', taskView: 'list', taskSelectMode: false, sel: {}
 };
 
@@ -1484,13 +1484,15 @@ function attachmentHtml(m) {
   if (!m.content_uri || !/^(https?:\/\/|\/uploads\/)/i.test(m.content_uri)) return '';
   const url = esc(m.content_uri);
   const isImage = (m.content_type || '').startsWith('image/') || /\.(png|jpe?g|gif|webp|svg)$/i.test(m.content_uri);
-  if (isImage) return `<a href="${url}" target="_blank" rel="noopener" class="chat-attach img"><img loading="lazy" src="${url}" alt="${esc(m.content_name || 'изображение')}"></a>`;
+  if (isImage) return `<a href="${url}" target="_blank" rel="noopener" class="chat-attach img"><img loading="lazy" src="${url}" alt="${esc(m.content_name || 'изображение')}" onerror="imgFail(this)"></a>`;
   return `<a href="${url}" target="_blank" rel="noopener" class="chat-attach file">${icon('file', 14)}<span>${esc(m.content_name || nameFromUri(url) || 'вложение')}</span></a>`;
 }
 const MSG_STATUS = { sent: 'отправлено', delivered: 'доставлено', read: 'прочитано', inbound: 'входящее', received: 'получено', local: 'сохранено в CRM', error: 'не отправлено' };
 const statusLabel = s => MSG_STATUS[s] || s || '';
 // имя файла из ссылки: пригодится, если файл пришёл без имени
 function nameFromUri(u) { try { const last = String(u || '').split('?')[0].split('/').pop() || ''; const d = decodeURIComponent(last); return d && /\./.test(d) ? d.slice(0, 80) : ''; } catch { return ''; } }
+// ссылка вендора могла протухнуть: вместо битой картинки показываем ссылку на файл
+function imgFail(el) { const span = document.createElement('span'); span.className = 'attach-fallback'; span.textContent = 'Изображение не открылось — нажмите, чтобы скачать'; el.replaceWith(span); }
 // аккаунт Wazzup, через который прошло сообщение: человек видит не только
 // мессенджер, но и конкретный номер или бота из своего кабинета
 // Разделители дат: в длинной переписке без них не понять, к какому дню ответ.
@@ -1524,9 +1526,12 @@ function msgHtml(m) {
   // пузырь и так узнаётся стороной и цветом, а номер аккаунта, имя и полную
   // дату из подписи убрали — они повторяли шапку чата и мешали чтению.
   const chan = own ? '' : esc(channelLabel(m.channel) || m.channel || '');
-  const st = !failed && m.status ? esc(statusLabel(m.status)) : '';
+  // статус подписываем только у своих сообщений: слово «входящее» под сообщением
+  // клиента ничего не добавляло — сторону и так показывает расположение пузыря
+  const st = own && !failed && m.status ? esc(statusLabel(m.status)) : '';
   const meta = [chan, msgTime(m.created_at), st].filter(Boolean).join(' · ') + badge;
-  return `<div class="msg ${own ? 'out' : ''}"><div>${attach}${body}</div><small>${meta}</small></div>`;
+  const content = attach || body ? `${attach}${body}` : '<span class="msg-empty">Сообщение без текста</span>';
+  return `<div class="msg ${own ? 'out' : ''}"><div>${content}</div><small>${meta}</small></div>`;
 }
 function msgTime(s) { const f = dt(s); if (!f) return ''; const i = f.indexOf(' '); return i > 0 ? f.slice(i + 1) : f; }
 // Каналы отправки: сначала те, в которых этот клиент уже писал, затем реально
@@ -1601,10 +1606,9 @@ async function inbox(v) {
     : '';
 
   v.innerHTML = `${wzNudge}<div class="inbox${cur ? '' : ' list-only'}">
-   <div class="convs"><div style="padding:10px;border-bottom:1px solid var(--line)"><div class="tabs" style="margin-bottom:8px;flex-wrap:wrap"><button type="button" class="${state.convScope === 'mine' ? '' : 'active'}" onclick="setConvScope('all')">Все чаты</button><button type="button" class="${state.convScope === 'mine' ? 'active' : ''}" onclick="setConvScope('mine')">Мои</button></div><input id="convSearch" placeholder="Поиск диалогов" oninput="filterConvs(this.value)"></div>
-   <div id="convList">${convScopeList(convs).map(c => `<div class="conv ${c.id === (cur || {}).id ? 'active' : ''}${c.unread ? ' unread' : ''}" onclick="openConv(${c.id})">
-    <b><span>${esc(c.title)}</span>${c.unread ? `<span class="badge">${c.unread}</span>` : ''}</b>
-    <p>${esc(c.last_body || '—')}</p><small>${chan(c.channels)} · ${esc(dt(c.last_at))}</small></div>`).join('') || convEmptyHtml(convs)}</div></div>
+   <div class="convs"><div style="padding:10px;border-bottom:1px solid var(--line)"><div class="tabs" style="margin-bottom:8px;flex-wrap:wrap"><button type="button" class="${state.convScope === 'mine' ? '' : 'active'}" onclick="setConvScope('all')">Все чаты</button><button type="button" class="${state.convScope === 'mine' ? 'active' : ''}" onclick="setConvScope('mine')">Мои</button>${canEdit() ? `<button type="button" class="${state.convSelect ? 'active' : ''}" style="margin-left:auto" onclick="toggleConvSelect()" title="Отметить несколько чатов и пометить их прочитанными">Выбрать</button>` : ''}</div><input id="convSearch" placeholder="Поиск диалогов" oninput="filterConvs(this.value)"></div>
+   ${canEdit() && state.convSelect ? bulkBar('convs', `<button class="btn sm" onclick="markConvsRead()">${icon('check', 14)} Прочитано</button>`) : ''}
+   <div id="convList">${convScopeList(convs).map(c => convRow(c, (cur || {}).id)).join('') || convEmptyHtml(convs)}</div></div>
    <div class="chat">${cur ? `
     <div class="chat-head"><button type="button" class="btn sm chat-back" onclick="closeConv()" aria-label="К списку диалогов">${icon('arrowLeft', 14)}</button><div><b>${esc(cur.title)}</b> <small>${esc(cur.phone || '')}</small></div>
       <div style="display:flex;gap:6px">
@@ -1659,13 +1663,31 @@ const convMine = c => Number(c.assigned_id) === Number(meId()) || Number(c.conta
 const convScopeList = list => (state.convScope === 'mine' ? (list || []).filter(convMine) : list || []);
 const convEmptyHtml = all => (state.convScope === 'mine' && (all || []).length ? '<div class="empty">Моих диалогов нет: переключитесь на «Все чаты» выше.</div>' : '<div class="empty">Чатов пока нет</div>');
 function setConvScope(v) { state.convScope = v; filterConvs($('#convSearch')?.value || ''); }
+// строка беседы: одна на первичный рендер и на фильтрацию, чтобы вид не разъезжался
+function convRow(c, activeId) {
+  const selMode = state.convSelect && canEdit();
+  const sel = selSet('convs').has(c.id);
+  return `<div class="conv ${c.id === activeId ? 'active' : ''}${c.unread ? ' unread' : ''}${sel ? ' selected' : ''}${selMode ? ' sel-mode' : ''}" onclick="${selMode ? `toggleSel('convs',${c.id})` : `openConv(${c.id})`}">${selMode ? `<input type="checkbox" class="conv-check" ${sel ? 'checked' : ''} onclick="event.stopPropagation();toggleSel('convs',${c.id})" title="Отметить чат">` : ''}
+    <b><span>${esc(c.title)}</span>${c.unread ? `<span class="badge">${c.unread}</span>` : ''}</b>
+    <p>${esc(c.last_body || '—')}</p><small>${chan(c.channels)} · ${esc(dt(c.last_at))}</small></div>`;
+}
+function toggleConvSelect() { state.convSelect = !state.convSelect; clearSel('convs'); }
+// отметить выбранные чаты прочитанными одной командой
+async function markConvsRead() {
+  const ids = [...selSet('convs')];
+  if (!ids.length) return;
+  await api('/api/conversations/read', { method: 'POST', body: JSON.stringify({ ids }) });
+  clearSel('convs');
+  state.cache.convs = await api('/api/conversations');
+  toast(`Помечено прочитанным: ${ids.length}`);
+  render();
+  navCounts(await api('/api/dashboard')).catch(() => {});
+}
 function filterConvs(q) {
   const list = convScopeList(state.cache.convs);
   const qL = q.toLowerCase();
   const filtered = list.filter(c => `${c.title} ${c.last_body || ''} ${c.phone || ''}`.toLowerCase().includes(qL));
-  $('#convList').innerHTML = filtered.map(c => `<div class="conv ${c.id === state.conv ? 'active' : ''}${c.unread ? ' unread' : ''}" onclick="openConv(${c.id})">
-    <b><span>${esc(c.title)}</span>${c.unread ? `<span class="badge">${c.unread}</span>` : ''}</b>
-    <p>${esc(c.last_body || '—')}</p><small>${chan(c.channels)} · ${esc(dt(c.last_at))}</small></div>`).join('') || (state.convScope === 'mine' && (state.cache.convs || []).length ? '<div class="empty">Моих диалогов нет: переключитесь на «Все чаты» выше.</div>' : '<div class="empty">Не найдено</div>');
+  $('#convList').innerHTML = filtered.map(c => convRow(c, state.conv)).join('') || (state.convScope === 'mine' && (state.cache.convs || []).length ? '<div class="empty">Моих диалогов нет: переключитесь на «Все чаты» выше.</div>' : '<div class="empty">Не найдено</div>');
 }
 
 async function attachContact(cid) { if (cid) openContactCard(cid); }
@@ -1760,8 +1782,17 @@ function clearSel(key) { selSet(key).clear(); render(); }
 function selCount(key) { return selSet(key).size; }
 function bulkBar(key, actionsHtml = '') {
   const n = selCount(key);
-  if (!n) return '';
-  return `<div class="bulkbar"><b>Выбрано: ${n}</b> <button class="btn sm ghost" onclick="clearSel('${key}')">Снять выбор</button> ${actionsHtml}</div>`;
+  return `<div class="bulkbar"><button class="btn sm ghost" onclick="selectAllVisible('${key}')" title="Отметить все строки на экране">Выбрать все</button>${n ? ` <b>Выбрано: ${n}</b> <button class="btn sm ghost" onclick="clearSel('${key}')">Снять выбор</button> ${actionsHtml}` : ''}</div>`;
+}
+// «Выбрать все» берёт строки, которые сейчас на экране: чекбоксы уже содержат
+// свои id в обработчиках, поэтому отдельный список ids не нужен
+function selectAllVisible(key) {
+  const sel = selSet(key);
+  document.querySelectorAll(`[onchange*="toggleSel('${key}'"],[onclick*="toggleSel('${key}'"]`).forEach(el => {
+    const m = (el.getAttribute('onchange') || el.getAttribute('onclick') || '').match(new RegExp(`toggleSel\\('${key}',(\\d+)\\)`));
+    if (m) sel.add(Number(m[1]));
+  });
+  render();
 }
 async function bulkApply(table, action, patch = {}) {
   const ids = [...selSet(table)];
