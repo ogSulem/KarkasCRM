@@ -63,6 +63,7 @@ Object.assign(window, {
   punyDecodeLabel, humanOrigin, wazzupHookUrl, wzAlive, wzState, wzTitle, closeConv,
   wzAccountLabel, nameFromUri, sendAccountFor, refreshSendAccount, WZ_CHAT_TRANSPORTS,
   setConvScope, convScopeList, convMine, convEmptyHtml, openNotifications,
+  msgsHtml, dayLabel, saveDraft, loadDrafts, autoGrow, msgKey, showJumpNew, scrollChatBottom, chatScrolled,
   WZ_TRANSPORT_TO_CHAT, WZ_DEAD_STATES, WZ_CHAT_SET, WZ_TRANSPORTS, WZ_STATE_LABELS, wzTransportLabel,
   saveChannel, startConv, submitStartConv, scAddrHint, sendDoc, submitSendDoc,
   saveS3, uploadS3, s3line, cancelQueued
@@ -174,6 +175,26 @@ try {
     check('чат: сообщение сохранилось в базе', saved.some(m => m.body === 'Проверка сохранения сообщения' && m.direction === 'out'));
     check('чат: сообщение видно в переписке', /Проверка сохранения сообщения/.test($('#chatMsgs').textContent));
     check('чат: поле ввода очищено после отправки', $('#msgText').value === '');
+    check('сообщение пишется в несколько строк, как в мессенджере', $('#msgText').tagName === 'TEXTAREA' && /Shift\+Enter/.test($('#msgText').placeholder));
+    $('#msgText').value = 'Первая строка\nВторая строка';
+    $('.composer').dispatchEvent(new window.Event('submit', { bubbles: true, cancelable: true }));
+    await wait(700);
+    const saved2 = await (await fetch(BASE + '/api/conversations/' + window.__state.conv + '/messages', { headers: authH() })).json();
+    check('многострочное сообщение сохранено с переносом', saved2.some(m => m.body === 'Первая строка\nВторая строка'));
+    check('в переписке видны разделители дней', /Сегодня/.test($('#chatMsgs').textContent) && cssText.includes('.msg-day{display:flex'));
+    // черновик не пропадает, когда сотрудник ушёл в другой раздел
+    $('#msgText').value = 'черновик ответа клиенту';
+    window.saveDraft(window.__state.conv);
+    window.go('dashboard'); await wait(500);
+    window.go('inbox'); await wait(700);
+    check('черновик вернулся после ухода и возврата', $('#msgText').value === 'черновик ответа клиенту', $('#msgText').value);
+    $('#msgText').value = ''; window.saveDraft(window.__state.conv);
+    // новые сообщения видны в заголовке вкладки, даже когда CRM свёрнута
+    window.navCounts({ unread: 2, myTasksOpen: 0, dealsTotal: 0, tasksOverdue: 0 });
+    check('счётчик непрочитанных виден в заголовке вкладки', window.document.title.startsWith('(2) '), window.document.title);
+    window.navCounts({ unread: 0, myTasksOpen: 0, dealsTotal: 0, tasksOverdue: 0 });
+    check('без непрочитанных заголовок вкладки обычный', !window.document.title.startsWith('('), window.document.title);
+    check('кнопка возврата к новым сообщениям предусмотрена', typeof window.scrollChatBottom === 'function' && typeof window.showJumpNew === 'function' && cssText.includes('.jump-new{position:absolute'));
     window.go('inbox'); await wait(500);
     check('чат: после перерисовки сообщение на месте', /Проверка сохранения сообщения/.test($('#chatMsgs').textContent));
   }
