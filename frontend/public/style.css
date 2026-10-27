@@ -76,7 +76,7 @@ header{display:flex;justify-content:space-between;gap:16px;align-items:flex-star
 header h2{font-size:22px}header p{color:var(--muted);margin:0}
 .head-actions{display:flex;gap:8px;align-items:center;flex-wrap:wrap}
 .searchbox{position:relative;display:flex;align-items:center}
-.searchbox input{width:380px;padding-left:34px}
+.searchbox input{width:350px;padding-left:34px}
 .search-ico{position:absolute;left:10px;top:50%;transform:translateY(-50%);display:inline-flex;color:var(--muted);pointer-events:none;z-index:1}
 .search-results{position:absolute;top:calc(100% + 4px);left:0;right:0;background:#fff;border:1px solid var(--line);border-radius:12px;box-shadow:var(--shadow);z-index:30;max-height:320px;overflow:auto}
 .search-results div{padding:8px 12px;cursor:pointer;font-size:13.5px}.search-results div:hover{background:var(--green-l)}
