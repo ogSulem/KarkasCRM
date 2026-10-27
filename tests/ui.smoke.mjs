@@ -61,7 +61,7 @@ Object.assign(window, {
   ourPriceRows, filterOurPrices, toggleAutomation, openAutomation, noteRow, editNote, lockFormsForViewer, AUTO_TRIGGERS, AUTO_ACTIONS,
   busyButton, priceImportText,
   punyDecodeLabel, humanOrigin, wazzupHookUrl, wzAlive, wzState, wzTitle, closeConv,
-  wzAccountLabel, nameFromUri, sendAccountFor, refreshSendAccount, WZ_CHAT_TRANSPORTS,
+  nameFromUri, sendAccountFor, refreshSendAccount, WZ_CHAT_TRANSPORTS, msgTime,
   setConvScope, convScopeList, convMine, convEmptyHtml, openNotifications,
   msgsHtml, dayLabel, saveDraft, loadDrafts, autoGrow, msgKey, showJumpNew, scrollChatBottom, chatScrolled,
   WZ_TRANSPORT_TO_CHAT, WZ_DEAD_STATES, WZ_CHAT_SET, WZ_TRANSPORTS, WZ_STATE_LABELS, wzTransportLabel,
@@ -175,6 +175,7 @@ try {
     check('чат: сообщение сохранилось в базе', saved.some(m => m.body === 'Проверка сохранения сообщения' && m.direction === 'out'));
     check('чат: сообщение видно в переписке', /Проверка сохранения сообщения/.test($('#chatMsgs').textContent));
     check('чат: поле ввода очищено после отправки', $('#msgText').value === '');
+    check('после отправки курсор остаётся в поле ввода', window.document.activeElement === $('#msgText'));
     check('сообщение пишется в несколько строк, как в мессенджере', $('#msgText').tagName === 'TEXTAREA' && /Shift\+Enter/.test($('#msgText').placeholder));
     $('#msgText').value = 'Первая строка\nВторая строка';
     $('.composer').dispatchEvent(new window.Event('submit', { bubbles: true, cancelable: true }));
@@ -182,6 +183,12 @@ try {
     const saved2 = await (await fetch(BASE + '/api/conversations/' + window.__state.conv + '/messages', { headers: authH() })).json();
     check('многострочное сообщение сохранено с переносом', saved2.some(m => m.body === 'Первая строка\nВторая строка'));
     check('в переписке видны разделители дней', /Сегодня/.test($('#chatMsgs').textContent) && cssText.includes('.msg-day{display:flex'));
+    {
+      const d = new Date(), pad = n => String(n).padStart(2, '0');
+      const todayStr = pad(d.getDate()) + '.' + pad(d.getMonth() + 1) + '.' + d.getFullYear();
+      const hits = ($('#chatMsgs').textContent.match(new RegExp(todayStr.replace(/\./g, '\\.'), 'g')) || []).length;
+      check('полная дата не повторяется в каждом сообщении', hits <= 1, todayStr + ' x' + hits);
+    }
     // черновик не пропадает, когда сотрудник ушёл в другой раздел
     $('#msgText').value = 'черновик ответа клиенту';
     window.saveDraft(window.__state.conv);
@@ -480,6 +487,17 @@ try {
   check('msgHtml рисует изображение-вложение картинкой', imgMsg.includes('chat-attach img') && imgMsg.includes('<img'));
   const fileMsg = window.msgHtml({ direction: 'in', body: 'Документ', content_uri: '/uploads/a.pdf', content_type: 'application/pdf', content_name: 'смета.pdf', channel: 'whatsapp', created_at: '2026-01-01 10:00' });
   check('msgHtml рисует файл-вложение ссылкой с именем', fileMsg.includes('chat-attach file') && fileMsg.includes('смета.pdf'));
+  // пузырь как в нормальном мессенджере: канал один раз, только время, без номера аккаунта и полной даты
+  {
+    const oldChans = window.__state.channels;
+    window.__state.channels = [{ external_id: '777', transport: 'whatsapp', label: '+7 900 000-00-00 · WhatsApp' }];
+    const inMsg = window.msgHtml({ direction: 'in', body: 'вопрос клиента', channel: 'whatsapp', channel_id: '777', created_at: '2026-10-27 10:05:00' });
+    check('входящий пузырь: канал подписан один раз, без номера аккаунта', (inMsg.match(/WhatsApp/g) || []).length === 1 && !inMsg.includes('+7 900'), inMsg);
+    const outMsg = window.msgHtml({ direction: 'out', body: 'ответ', channel: 'whatsapp', channel_id: '777', created_at: '2026-10-27 10:06:00', status: 'delivered' });
+    check('исходящий пузырь: справа, без канала, время и статус', outMsg.includes('msg out') && !outMsg.includes('WhatsApp') && outMsg.includes('доставлено') && /\d{2}:\d{2}/.test(outMsg), outMsg);
+    check('в пузыре нет полной даты — она в разделителе дня', !inMsg.includes('27.10.2026') && !outMsg.includes('27.10.2026'));
+    window.__state.channels = oldChans;
+  }
 
   // ── загрузка файла в чат через API ───────────────────────────────────────
   const up = await (await fetch(BASE + `/api/conversations/${conv.id}/upload`, { method: 'POST', headers: authH(), body: JSON.stringify({ filename: 'прайс.png', contentType: 'image/png', dataBase64: PNG_B64 }) })).json();

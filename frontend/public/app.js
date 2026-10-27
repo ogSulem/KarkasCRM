@@ -1493,7 +1493,6 @@ const statusLabel = s => MSG_STATUS[s] || s || '';
 function nameFromUri(u) { try { const last = String(u || '').split('?')[0].split('/').pop() || ''; const d = decodeURIComponent(last); return d && /\./.test(d) ? d.slice(0, 80) : ''; } catch { return ''; } }
 // аккаунт Wazzup, через который прошло сообщение: человек видит не только
 // мессенджер, но и конкретный номер или бота из своего кабинета
-function wzAccountLabel(id) { const c = (state.channels || []).find(x => x.external_id === id); return c ? (c.label || wzTitle(c)) : ''; }
 // Разделители дат: в длинной переписке без них не понять, к какому дню ответ.
 function dayLabel(key) {
   const now = new Date();
@@ -1520,9 +1519,16 @@ function msgHtml(m) {
   const own = m.direction === 'out';
   const failed = m.status === 'failed';
   const badge = failed ? ' <span class="msg-fail" title="Не доставлено — проверьте подключение канала">не доставлено</span>' : '';
-  const acc = wzAccountLabel(m.channel_id);
-  return `<div class="msg ${own ? 'out' : ''}"><div>${attach}${body}</div><small>${esc(channelLabel(m.channel) || m.channel)}${acc ? ' · ' + esc(acc) : ''} · ${esc(dt(m.created_at))}${!failed && m.status ? ' · ' + esc(statusLabel(m.status)) : ''}${badge}</small></div>`;
+  // Как в обычных мессенджерах: в пузыре только время — дата живёт в
+  // разделителе дня. Канал подписываем один раз и только у входящих: исходящий
+  // пузырь и так узнаётся стороной и цветом, а номер аккаунта, имя и полную
+  // дату из подписи убрали — они повторяли шапку чата и мешали чтению.
+  const chan = own ? '' : esc(channelLabel(m.channel) || m.channel || '');
+  const st = !failed && m.status ? esc(statusLabel(m.status)) : '';
+  const meta = [chan, msgTime(m.created_at), st].filter(Boolean).join(' · ') + badge;
+  return `<div class="msg ${own ? 'out' : ''}"><div>${attach}${body}</div><small>${meta}</small></div>`;
 }
+function msgTime(s) { const f = dt(s); if (!f) return ''; const i = f.indexOf(' '); return i > 0 ? f.slice(i + 1) : f; }
 // Каналы отправки: сначала те, в которых этот клиент уже писал, затем реально
 // подключённые в Wazzup. Зашитый список показывал заказчику WhatsApp, которого
 // у него нет, и прятал Авито с MAX, которые есть. Почты здесь нет намеренно:
@@ -1695,6 +1701,7 @@ async function sendMsg(e, cid) {
     state.cache.convs = await api('/api/conversations');
     filterConvs($('#convSearch')?.value || '');
     refreshSendAccount(state.conv);
+    if (input.isConnected) input.focus();
   } catch (err) {
     // текст не теряем: возвращаем его в поле и ставим курсор в конец
     if (input.isConnected && !input.value) { input.value = body; input.focus(); }
