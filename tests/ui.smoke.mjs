@@ -62,6 +62,7 @@ Object.assign(window, {
   busyButton, priceImportText,
   punyDecodeLabel, humanOrigin, wazzupHookUrl, wzAlive, wzState, wzTitle, closeConv,
   wzAccountLabel, nameFromUri, sendAccountFor, refreshSendAccount, WZ_CHAT_TRANSPORTS,
+  setConvScope, convScopeList, convMine, convEmptyHtml, openNotifications,
   WZ_TRANSPORT_TO_CHAT, WZ_DEAD_STATES, WZ_CHAT_SET, WZ_TRANSPORTS, WZ_STATE_LABELS, wzTransportLabel,
   saveChannel, startConv, submitStartConv, scAddrHint, sendDoc, submitSendDoc,
   saveS3, uploadS3, s3line, cancelQueued
@@ -1168,6 +1169,30 @@ try {
   check('ответ уходит с аккаунта, на который писал клиент', window.sendAccountFor({ channel_id: 'w-alive' }, 'whatsapp') === 'WhatsApp — Ирина');
   check('нерабочий аккаунт не подставляется, и чужой мессенджер тоже', window.sendAccountFor({ channel_id: 'w-dead' }, 'telegram') === '');
   window.__state.channels = [];
+  // область диалогов «Мои»: на большой команде список всех чатов — простыня
+  const realConvs = window.__state.cache.convs;
+  window.__state.cache.convs = [
+    { id: 9101, title: 'Мой клиент', unread: 1, assigned_id: window.__state.me.id, contact_responsible_id: null, last_body: 'привет', phone: '', channels: 'whatsapp', last_at: '2026-10-27 09:00' },
+    { id: 9102, title: 'Чужой клиент', unread: 1, assigned_id: 99901, contact_responsible_id: 99902, last_body: 'здравствуйте', phone: '', channels: 'whatsapp', last_at: '2026-10-27 09:00' }
+  ];
+  window.setConvScope('mine'); await wait(300);
+  let scopeText = $('#convList').textContent;
+  check('в области «Мои» видны только свои диалоги', scopeText.includes('Мой клиент') && !scopeText.includes('Чужой клиент'), scopeText.slice(0, 140));
+  check('переключатель области есть над поиском диалогов', Boolean($('.convs .tabs button')) && /Все чаты/.test($('.convs .tabs').textContent) && /Мои/.test($('.convs .tabs').textContent));
+  window.setConvScope('all'); await wait(300);
+  scopeText = $('#convList').textContent;
+  check('область «Все чаты» возвращает полный список', scopeText.includes('Мой клиент') && scopeText.includes('Чужой клиент'));
+  window.__state.cache.convs = [{ id: 9102, title: 'Чужой клиент', unread: 1, assigned_id: 99901, contact_responsible_id: 99902, last_body: 'здравствуйте', phone: '', channels: 'whatsapp', last_at: '2026-10-27 09:00' }];
+  window.setConvScope('mine'); await wait(300);
+  check('пустая область «Мои» объясняет, что делать', /переключитесь на «Все чаты»/.test($('#convList').textContent), $('#convList').textContent.slice(0, 120));
+  window.setConvScope('all');
+  window.__state.cache.convs = realConvs;
+  await wait(300);
+  // колокол и плашки говорят о личном, а не о всей компании сразу
+  await window.openNotifications(); await wait(500);
+  check('колокол показывает личные списки и объясняет компанию админу', /Мои просроченные задачи/.test($('#modalBody').textContent) && /Мои чаты без ответа/.test($('#modalBody').textContent), $('#modalBody').textContent.replace(/\s+/g, ' ').slice(0, 160));
+  window.closeModal(); await wait(200);
+  check('плашки дашборда считают личное', appJsRaw.includes('Мои непрочитанные чаты') && appJsRaw.includes('d.myTasksToday') && /navTasks.*myTasksOpen/.test(appJsRaw));
   // поле дублирования для второй CRM (параллельная работа с amoCRM)
   check('в карточке есть поле дублирования входящих', appJsRaw.includes('id="wzForward"') && appJsRaw.includes('WAZZUP_FORWARD_URL'));
 

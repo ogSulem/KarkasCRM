@@ -357,7 +357,7 @@ let token = '';
 const state = {
   view: 'dashboard', settingsTab: 'integrations', pipeline: 1, conv: null, listOnly: false,
   deals: [], stages: [], pipelines: [], contacts: [], companies: [], channels: [],
-  cache: {}, dealTab: 'details', meta: null, dupes: null, me: null, users: [],
+  cache: {}, dealTab: 'details', meta: null, dupes: null, me: null, users: [], convScope: 'all',
   taskScope: 'mine', taskFilter: '', dealScope: 'all', taskView: 'list', taskSelectMode: false, sel: {}
 };
 
@@ -967,9 +967,12 @@ async function renderNow() {
 async function openNotifications() {
   const rows = await api('/api/tasks');
   const today = todayISO();
-  const over = rows.filter(t => !t.done && normalizeDue(t.due).slice(0, 10) < today && normalizeDue(t.due) !== '');
-  const now = rows.filter(t => !t.done && normalizeDue(t.due).slice(0, 10) === today);
+  const mineOrFree = t => Number(t.responsible_id) === Number(meId()) || !t.responsible_id;
+  const overAll = rows.filter(t => !t.done && normalizeDue(t.due).slice(0, 10) < today && normalizeDue(t.due) !== '');
+  const over = overAll.filter(mineOrFree);
+  const now = rows.filter(t => !t.done && normalizeDue(t.due).slice(0, 10) === today).filter(mineOrFree);
   const convs = (await api('/api/conversations')).filter(c => c.unread);
+  const companyNote = amAdmin() && overAll.length > over.length ? `<p class="form-hint" style="margin:10px 0 0">Просроченных задач по компании: ${overAll.length} — остальные назначены коллегам, список в задачах с областью «Все».</p>` : '';
   const rowHtml = t => {
     const meta = taskDueMeta(t.due, t.done);
     return `<div class="row"><span><b>${esc(t.title)}</b><br><small>${esc(meta.label)}${t.contact_name ? ' · ' + esc(t.contact_name) : ''}</small></span>${canEdit() ? `<button class="btn sm" onclick="closeModal();openTask(${t.id})">Открыть</button>` : ''}</div>`;
@@ -978,26 +981,26 @@ async function openNotifications() {
   const empty = 'Ничего не ждёт — можно спокойно работать с клиентами.';
   openModal(`<h3>${icon('bell', 18)} Что ждёт реакции</h3>
    <p class="form-hint">Три списка: просроченные задачи, планы на сегодня и чаты, где клиент ещё не получил ответ. Всплывающие карточки о новых сообщениях видят ответственный за клиента и администраторы, остальным растёт счётчик в меню.</p>
-   <h4 class="danger-text" style="margin:12px 0 4px">Просроченные задачи: ${over.length}</h4>
+   <h4 class="danger-text" style="margin:12px 0 4px">Мои просроченные задачи: ${over.length}</h4>
    <p class="form-hint" style="margin:0 0 4px">Срок уже прошёл — лучше заняться этим первым.</p>
    ${over.map(rowHtml).join('') || `<small>${empty}</small>`}
-   <h4 style="margin:16px 0 4px;color:var(--green)">Планы на сегодня: ${now.length}</h4>
+   <h4 style="margin:16px 0 4px;color:var(--green)">Мои планы на сегодня: ${now.length}</h4>
    <p class="form-hint" style="margin:0 0 4px">Звонки, встречи и письма, запланированные на сегодня.</p>
    ${now.map(rowHtml).join('') || '<small>На сегодня задач нет.</small>'}
-   <h4 style="margin:16px 0 4px">${icon('inbox', 15)} Чаты без ответа: ${convs.length}</h4>
+   <h4 style="margin:16px 0 4px">${icon('inbox', 15)} Мои чаты без ответа: ${convs.length}</h4>
    <p class="form-hint" style="margin:0 0 4px">Непрочитанные сообщения клиентов: цифра на оранжевой метке — сколько писем жду́т реакции.</p>
    ${convs.map(chatRow).join('') || '<small>Все переписки прочитаны.</small>'}
    <div style="display:flex;gap:8px;flex-wrap:wrap;margin-top:16px">
      <button class="btn sm" onclick="closeModal();goTasks('all','overdue')">Все задачи</button>
      <button class="btn sm" onclick="closeModal();go('inbox')">Все чаты</button>
      <button class="btn sm" onclick="closeModal()">Закрыть</button>
-   </div>`);
+   </div>${companyNote}`);
 }
 
 const BASE_TITLE = 'КаркасCRM — сделки, клиенты и задачи в единой CRM-системе';
 async function navCounts(d) {
   $('#navUnread').textContent = d.unread || '';
-  $('#navTasks').textContent = d.tasksOpen || '';
+  $('#navTasks').textContent = d.myTasksOpen || '';
   $('#navDeals').textContent = d.dealsTotal || '';
   // Колокольчик показывает всё, что требует внимания: просроченные задачи и
   // непрочитанные чаты. В заголовке вкладки — только новые сообщения: их видно,
@@ -1018,9 +1021,11 @@ async function dashboard(v) {
   navCounts(d);
   __myTasks = (await api('/api/tasks').catch(() => [])).filter(t => !t.done && (t.responsible_id === meId() || !t.responsible_id)).slice(0, 6);
   const max = Math.max(...d.stages.map(s => s.sum), 1);
-  const todayTasks = d.tasksToday ?? 0;
-  const overdueTasks = d.tasksOverdue ?? 0;
+  const todayTasks = d.myTasksToday ?? 0;
+  const overdueTasks = d.myTasksOverdue ?? 0;
   const unreadChats = d.unread ?? 0;
+  const companyLine = amAdmin() && (d.tasksOverdue > overdueTasks || d.tasksToday > todayTasks)
+    ? `По компании целиком: просрочено ${d.tasksOverdue ?? 0}, на сегодня ${d.tasksToday ?? 0}.` : '';
 
   v.innerHTML = `
    <div class="card" style="margin-bottom:12px;padding:12px 16px">
@@ -1028,19 +1033,20 @@ async function dashboard(v) {
       ? `<div class="all-clear">${icon('checkCircle', 16)} <b>Всё под контролем</b> — просроченных задач и непрочитанных чатов нет</div>`
       : `<h3 style="margin-bottom:8px">${icon('alertCircle', 16)} Требует внимания</h3>`}
      <div class="attn-grid" ${!todayTasks && !overdueTasks && !unreadChats ? 'style="display:none"' : ''}>
-       <div class="attn-card today clickable-card" onclick="goTasks('all','today')" title="Открыть задачи на сегодня">
-         <span style="font-size:12.5px">${icon('calendar', 14)} На сегодня</span>
+       <div class="attn-card today clickable-card" onclick="goTasks('mine','today')" title="Открыть мои задачи на сегодня">
+         <span style="font-size:12.5px">${icon('calendar', 14)} Мои на сегодня</span>
          <b>${todayTasks}</b> <small>задач</small>
        </div>
-       <div class="attn-card warn clickable-card" onclick="goTasks('all','overdue')" title="Открыть просроченные задачи">
-         <span style="font-size:12.5px">${icon('clock', 14)} Просрочено</span>
+       <div class="attn-card warn clickable-card" onclick="goTasks('mine','overdue')" title="Открыть мои просроченные задачи">
+         <span style="font-size:12.5px">${icon('clock', 14)} Мои просроченные</span>
          <b>${overdueTasks}</b> <small>задач</small>
        </div>
-       <div class="attn-card chat clickable-card" onclick="go('inbox')" title="Открыть непрочитанные диалоги">
-         <span style="font-size:12.5px">${icon('inbox', 14)} Непрочитанных чатов</span>
+       <div class="attn-card chat clickable-card" onclick="state.convScope='mine';go('inbox')" title="Открыть мои непрочитанные диалоги">
+         <span style="font-size:12.5px">${icon('inbox', 14)} Мои непрочитанные чаты</span>
          <b>${unreadChats}</b>
        </div>
      </div>
+     ${companyLine ? `<p class="form-hint" style="margin:8px 0 0">${companyLine}</p>` : ''}
    </div>
 
    <div class="grid">
@@ -1570,10 +1576,10 @@ async function inbox(v) {
     : '';
 
   v.innerHTML = `${wzNudge}<div class="inbox${cur ? '' : ' list-only'}">
-   <div class="convs"><div style="padding:10px;border-bottom:1px solid var(--line)"><input id="convSearch" placeholder="Поиск диалогов" oninput="filterConvs(this.value)"></div>
-   <div id="convList">${convs.map(c => `<div class="conv ${c.id === (cur || {}).id ? 'active' : ''}${c.unread ? ' unread' : ''}" onclick="openConv(${c.id})">
+   <div class="convs"><div style="padding:10px;border-bottom:1px solid var(--line)"><div class="tabs" style="margin-bottom:8px;flex-wrap:wrap"><button type="button" class="${state.convScope === 'mine' ? '' : 'active'}" onclick="setConvScope('all')">Все чаты</button><button type="button" class="${state.convScope === 'mine' ? 'active' : ''}" onclick="setConvScope('mine')">Мои</button></div><input id="convSearch" placeholder="Поиск диалогов" oninput="filterConvs(this.value)"></div>
+   <div id="convList">${convScopeList(convs).map(c => `<div class="conv ${c.id === (cur || {}).id ? 'active' : ''}${c.unread ? ' unread' : ''}" onclick="openConv(${c.id})">
     <b><span>${esc(c.title)}</span>${c.unread ? `<span class="badge">${c.unread}</span>` : ''}</b>
-    <p>${esc(c.last_body || '—')}</p><small>${chan(c.channels)} · ${esc(dt(c.last_at))}</small></div>`).join('') || '<div class="empty">Чатов пока нет</div>'}</div></div>
+    <p>${esc(c.last_body || '—')}</p><small>${chan(c.channels)} · ${esc(dt(c.last_at))}</small></div>`).join('') || convEmptyHtml(convs)}</div></div>
    <div class="chat">${cur ? `
     <div class="chat-head"><button type="button" class="btn sm chat-back" onclick="closeConv()" aria-label="К списку диалогов">${icon('arrowLeft', 14)}</button><div><b>${esc(cur.title)}</b> <small>${esc(cur.phone || '')}</small></div>
       <div style="display:flex;gap:6px">
@@ -1619,13 +1625,19 @@ async function refreshInbox() {
   } catch { }
 }
 
+// «Мои» — диалоги, где сотрудник ответственный: по беседе или по клиенту.
+// На команде в полсотни человек список всех чатов превращается в простыню.
+const convMine = c => Number(c.assigned_id) === Number(meId()) || Number(c.contact_responsible_id) === Number(meId());
+const convScopeList = list => (state.convScope === 'mine' ? (list || []).filter(convMine) : list || []);
+const convEmptyHtml = all => (state.convScope === 'mine' && (all || []).length ? '<div class="empty">Моих диалогов нет: переключитесь на «Все чаты» выше.</div>' : '<div class="empty">Чатов пока нет</div>');
+function setConvScope(v) { state.convScope = v; filterConvs($('#convSearch')?.value || ''); }
 function filterConvs(q) {
-  const list = state.cache.convs || [];
+  const list = convScopeList(state.cache.convs);
   const qL = q.toLowerCase();
   const filtered = list.filter(c => `${c.title} ${c.last_body || ''} ${c.phone || ''}`.toLowerCase().includes(qL));
   $('#convList').innerHTML = filtered.map(c => `<div class="conv ${c.id === state.conv ? 'active' : ''}${c.unread ? ' unread' : ''}" onclick="openConv(${c.id})">
     <b><span>${esc(c.title)}</span>${c.unread ? `<span class="badge">${c.unread}</span>` : ''}</b>
-    <p>${esc(c.last_body || '—')}</p><small>${chan(c.channels)} · ${esc(dt(c.last_at))}</small></div>`).join('') || '<div class="empty">Не найдено</div>';
+    <p>${esc(c.last_body || '—')}</p><small>${chan(c.channels)} · ${esc(dt(c.last_at))}</small></div>`).join('') || (state.convScope === 'mine' && (state.cache.convs || []).length ? '<div class="empty">Моих диалогов нет: переключитесь на «Все чаты» выше.</div>' : '<div class="empty">Не найдено</div>');
 }
 
 async function attachContact(cid) { if (cid) openContactCard(cid); }

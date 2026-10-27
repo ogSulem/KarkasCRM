@@ -1157,3 +1157,31 @@ test('входящее вложение подписано именем файл
   assert.equal(conv2.unread, 0, 'счётчик непрочитанных после прочтения не растёт от повтора');
   assert.ok(unreadBefore >= 0);
 });
+
+test('непрочитанные личные: чтение одного сотрудника не стирает метку другого', async () => {
+  // отдельный сотрудник: у созданных ранее в сюите пароли уже менялись принудительно
+  await call('/api/users', { method: 'POST', body: JSON.stringify({ name: 'Чтец Меток', email: 'readmark@example.com', password: 'readmark12345', role: 'manager' }) });
+  const mgrLogin = await readyLogin('/api/auth/login', { method: 'POST', body: JSON.stringify({ email: 'readmark@example.com', password: 'readmark12345' }) });
+  const mh = { Authorization: 'Bearer ' + mgrLogin.body.token };
+  const hook = body => fetch(base + '/webhooks/wazzup?secret=hook-secret-1', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) }).then(r => r.status);
+  // базовые значения: в сюите уже были входящие, поэтому считаем дельты
+  const d0a = (await call('/api/dashboard')).body.unread;
+  const d0m = (await call('/api/dashboard', { headers: mh })).body.unread;
+  assert.equal(await hook({ messages: [{ messageId: 'wz-read-1', channelId: 'ch-r', chatType: 'whatsapp', chatId: '79000000004', type: 'text', text: 'Проверка личных счётчиков' }] }), 200);
+  assert.equal((await call('/api/dashboard')).body.unread, d0a + 1, 'входящее добавило единицу администратору');
+  assert.equal((await call('/api/dashboard', { headers: mh })).body.unread, d0m + 1, 'и менеджеру: прочитанность у каждого своя с нуля');
+  const find = (list) => list.find(c => c.external_chat_id === '79000000004');
+  const adminConvs = (await call('/api/conversations')).body;
+  const mgrConvs = (await call('/api/conversations', { headers: mh })).body;
+  assert.equal(find(adminConvs).unread, 1, 'админ видит входящее непрочитанным');
+  assert.equal(find(mgrConvs).unread, 1, 'менеджер видит то же входящее непрочитанным');
+  const id = find(adminConvs).id;
+  await call(`/api/conversations/${id}/messages`);
+  assert.equal(find((await call('/api/conversations')).body).unread, 0, 'админ прочитал — у него ноль');
+  assert.equal(find((await call('/api/conversations', { headers: mh })).body).unread, 1, 'у менеджера метка осталась: чужое чтение не стирает');
+  assert.equal((await call('/api/dashboard')).body.unread, d0a, 'счётчик админа вернулся к базовому: чтение личное');
+  assert.equal((await call('/api/dashboard', { headers: mh })).body.unread, d0m + 1, 'у менеджера единица держится, пока он сам не откроет чат');
+  await fetch(base + `/api/conversations/${id}/messages`, { headers: mh });
+  assert.equal(find((await call('/api/conversations', { headers: mh })).body).unread, 0, 'менеджер прочитал — у него ноль');
+  assert.equal((await call('/api/dashboard', { headers: mh })).body.unread, d0m, 'счётчик менеджера тоже вернулся к базовому');
+});
