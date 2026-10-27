@@ -99,6 +99,8 @@ CREATE TABLE IF NOT EXISTS channels(id INTEGER PRIMARY KEY,provider TEXT DEFAULT
 CREATE TABLE IF NOT EXISTS conversations(id INTEGER PRIMARY KEY,contact_id INTEGER REFERENCES contacts(id) ON DELETE CASCADE,title TEXT,channels TEXT DEFAULT '',channel_id TEXT,external_chat_id TEXT,chat_type TEXT,unread INTEGER DEFAULT 0,assigned_id INTEGER,demo INTEGER DEFAULT 0,last_at TEXT DEFAULT (datetime('now')),UNIQUE(contact_id));
 CREATE TABLE IF NOT EXISTS messages(id INTEGER PRIMARY KEY,conversation_id INTEGER REFERENCES conversations(id) ON DELETE CASCADE,channel TEXT DEFAULT 'whatsapp',direction TEXT DEFAULT 'in',body TEXT,content_uri TEXT,status TEXT,external_id TEXT,author TEXT,subject TEXT,created_at TEXT DEFAULT (datetime('now')));
 CREATE TABLE IF NOT EXISTS settings(key TEXT PRIMARY KEY,value TEXT);
+CREATE TABLE IF NOT EXISTS read_marks(user_id INTEGER NOT NULL,conversation_id INTEGER NOT NULL REFERENCES conversations(id) ON DELETE CASCADE,
+  last_msg_id INTEGER NOT NULL DEFAULT 0,updated_at TEXT DEFAULT (datetime('now')),PRIMARY KEY(user_id,conversation_id));
 CREATE TABLE IF NOT EXISTS activities(id INTEGER PRIMARY KEY,text TEXT,entity_type TEXT,entity_id INTEGER,user_name TEXT,created_at TEXT DEFAULT (datetime('now')));
 CREATE TABLE IF NOT EXISTS automation_queue(id INTEGER PRIMARY KEY,automation_id INTEGER,trigger_type TEXT,deal_id INTEGER,contact_id INTEGER,run_at TEXT,created_at TEXT DEFAULT (datetime('now')));
 `);
@@ -690,7 +692,7 @@ export async function upsertIncoming({ channel = 'whatsapp', chatType = '', phon
   const channels = [...new Set([...(conv.channels || '').split(',').filter(Boolean), channel])].join(',');
   try { db.prepare('INSERT INTO messages(conversation_id,channel,direction,body,subject,content_uri,content_name,status,external_id,author,channel_id) VALUES(?,?,?,?,?,?,?,?,?,?,?)').run(conv.id, channel, 'in', body || '[вложение]', subject, contentUri, contentName || null, channel === 'email' ? 'received' : 'inbound', external_id, author, channelId || null); }
   catch (e) { if (/UNIQUE/i.test(e.message)) return conv; console.error('message insert', e); throw e; }
-  db.prepare("UPDATE conversations SET channels=?,channel_id=COALESCE(NULLIF(?,''),channel_id),external_chat_id=COALESCE(NULLIF(?,''),external_chat_id),chat_type=COALESCE(NULLIF(?,''),chat_type),unread=unread+1,last_at=datetime('now') WHERE id=?").run(channels, channelId, String(chatId || ''), chatType, conv.id);
+  db.prepare("UPDATE conversations SET channels=?,channel_id=COALESCE(NULLIF(?,''),channel_id),external_chat_id=COALESCE(NULLIF(?,''),external_chat_id),chat_type=COALESCE(NULLIF(?,''),chat_type),last_at=datetime('now') WHERE id=?").run(channels, channelId, String(chatId || ''), chatType, conv.id);
   // беседу тоже отмечаем за владельцем канала, если она ничья
   if (boundId && !conv.assigned_id) db.prepare('UPDATE conversations SET assigned_id=? WHERE id=?').run(boundId, conv.id);
   if (!dealId) dealId = await ensureDeal(contact); // клиент вернулся, а открытой сделки нет — заводим новое обращение
@@ -1165,13 +1167,21 @@ ${deal.deadline ? `<p class="muted">Срок действия предложен
 </body></html>`;
 }
 const html = (res, code, body) => { res.writeHead(code, { 'Content-Type': 'text/html; charset=utf-8' }); res.end(body); };
+const GZ_CACHE = new Map(); // тело ответа -> gzip; порядок Map = порядок замены
+const gzCache = body => {
+  const hit = GZ_CACHE.get(body);
+  if (hit) return hit;
+  const gz = gzipSync(body);
+  if (body.length <= 262144) { if (GZ_CACHE.size >= 48) GZ_CACHE.delete(GZ_CACHE.keys().next().value); GZ_CACHE.set(body, gz); }
+  return gz;
+};
 const json = (res, code, obj) => {
   const body = JSON.stringify(obj);
   // списки сделок, чатов и контактов весят десятки килобайт: на медленной
   // сети gzip сокращает ответ в разы, и страница открывается заметно быстрее
   const req = res.req;
   if (body.length > 1024 && req && /gzip/.test(String(req.headers['accept-encoding'] || ''))) {
-    const gz = gzipSync(body);
+    const gz = gzCache(body);
     res.writeHead(code, { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store', 'Content-Encoding': 'gzip', 'Vary': 'Accept-Encoding', 'Content-Length': gz.length });
     return res.end(gz);
   }
@@ -1493,6 +1503,7 @@ export const server = http.createServer(async (req, res) => {
       const sumWhere = w => db.prepare(`SELECT COALESCE(SUM(amount),0) s FROM deals WHERE ${w}`).get().s;
       const cntWhere = w => db.prepare(`SELECT COUNT(*) n FROM deals WHERE ${w}`).get().n;
       const myTasksOpen = db.prepare("SELECT COUNT(*) n FROM tasks WHERE done=0 AND (responsible_id=? OR (responsible_id IS NULL AND ? IS NULL))").get(myId, myId)?.n || 0;
+      const myTasksToday = db.prepare("SELECT COUNT(*) n FROM tasks WHERE done=0 AND due LIKE ? AND (responsible_id=? OR (responsible_id IS NULL AND ? IS NULL))").get(today + '%', myId, myId)?.n || 0;
       const now = localNow();
       const myTasksOverdue = db.prepare("SELECT COUNT(*) n FROM tasks WHERE done=0 AND (responsible_id=? OR (responsible_id IS NULL AND ? IS NULL)) AND due IS NOT NULL AND due != '' AND (CASE WHEN length(due)=10 THEN due || ' 23:59:59' ELSE due END) < ?").get(myId, myId, now)?.n || 0;
       const tasksToday = db.prepare("SELECT COUNT(*) n FROM tasks WHERE done=0 AND due LIKE ?").get(today + '%')?.n || 0;
@@ -1505,12 +1516,13 @@ export const server = http.createServer(async (req, res) => {
         lostSum: sumWhere("stage='lost'"),
         contacts: db.prepare('SELECT COUNT(*) n FROM contacts').get().n,
         companies: db.prepare('SELECT COUNT(*) n FROM companies').get().n,
-        unread: db.prepare('SELECT COALESCE(SUM(unread),0) n FROM conversations').get().n,
+        unread: db.prepare('SELECT COUNT(*) n FROM conversations cv WHERE EXISTS (SELECT 1 FROM messages m WHERE m.conversation_id=cv.id AND m.direction=\'in\' AND m.id > COALESCE((SELECT rm.last_msg_id FROM read_marks rm WHERE rm.conversation_id=cv.id AND rm.user_id=?),0))').get(user.id).n,
         tasksOpen: db.prepare('SELECT COUNT(*) n FROM tasks WHERE done=0').get().n,
         tasksToday,
         tasksOverdue,
         myTasksOpen,
         myTasksOverdue,
+        myTasksToday,
         conversion: (() => { const w = cntWhere("stage='won'"), l = cntWhere("stage='lost'"); return w + l ? Math.round(w / (w + l) * 100) : 0 })(),
         monthRevenue: sumWhere(`stage='won' AND ${DEAL_MONTH_SQL}=substr(datetime('now','localtime'),1,7)`),
         activities: db.prepare('SELECT * FROM activities ORDER BY id DESC LIMIT 10').all(),
@@ -2169,9 +2181,11 @@ ${user?.name || ''}`.trim();
     }
 
     // ===== inbox =====
-    if (p === '/api/conversations' && req.method === 'GET') return json(res, 200, db.prepare(`SELECT cv.*,c.phone,c.email,(SELECT body FROM messages WHERE conversation_id=cv.id ORDER BY id DESC LIMIT 1) last_body,
-      (SELECT d.amount FROM deals d WHERE d.contact_id=cv.contact_id AND d.stage NOT IN ('won','lost') ORDER BY d.id DESC LIMIT 1) deal_amount
-      FROM conversations cv LEFT JOIN contacts c ON c.id=cv.contact_id ORDER BY cv.last_at DESC, cv.id DESC`).all());
+    if (p === '/api/conversations' && req.method === 'GET') return json(res, 200, db.prepare(`SELECT cv.*,c.phone,c.email,c.responsible_id AS contact_responsible_id,
+      (SELECT body FROM messages WHERE conversation_id=cv.id ORDER BY id DESC LIMIT 1) last_body,
+      (SELECT d.amount FROM deals d WHERE d.contact_id=cv.contact_id AND d.stage NOT IN ('won','lost') ORDER BY d.id DESC LIMIT 1) deal_amount,
+      (SELECT COUNT(*) FROM messages m WHERE m.conversation_id=cv.id AND m.direction='in' AND m.id > COALESCE((SELECT rm.last_msg_id FROM read_marks rm WHERE rm.conversation_id=cv.id AND rm.user_id=?),0)) unread
+      FROM conversations cv LEFT JOIN contacts c ON c.id=cv.contact_id ORDER BY cv.last_at DESC, cv.id DESC`).all(user.id).map(r => ({ ...r, unread: r.unread || 0 })));
     // Начать переписку первым. Беседа появлялась только из входящего сообщения,
     // поэтому менеджер не мог написать клиенту, который ещё не обращался.
     if (p === '/api/conversations' && req.method === 'POST') {
@@ -2200,7 +2214,13 @@ ${user?.name || ''}`.trim();
     }
     const mConv = p.match(/^\/api\/conversations\/(\d+)\/messages$/);
     if (mConv) { const id = mConv[1];
-      if (req.method === 'GET') { db.prepare('UPDATE conversations SET unread=0 WHERE id=?').run(id); return json(res, 200, db.prepare('SELECT * FROM messages WHERE conversation_id=? ORDER BY id').all(id)); }
+      if (req.method === 'GET') {
+        const rows = db.prepare('SELECT * FROM messages WHERE conversation_id=? ORDER BY id').all(id);
+        // прочитанность личная: коллега, открывший чат раньше, не стирает метку у ответственного
+        const lastId = rows.length ? rows[rows.length - 1].id : 0;
+        if (user?.id) db.prepare("INSERT INTO read_marks(user_id,conversation_id,last_msg_id,updated_at) VALUES(?,?,?,datetime('now')) ON CONFLICT(user_id,conversation_id) DO UPDATE SET last_msg_id=MAX(last_msg_id,excluded.last_msg_id),updated_at=datetime('now')").run(user.id, Number(id), lastId);
+        return json(res, 200, rows);
+      }
       if (req.method === 'POST') { const b = await readBody(req); const conv = db.prepare('SELECT cv.*,c.phone FROM conversations cv LEFT JOIN contacts c ON c.id=cv.contact_id WHERE cv.id=?').get(id); if (!conv) return json(res, 404, { error: 'Чат не найден' }); if (b.channel_id) conv.channel_id = b.channel_id; if (b.chat_type) conv.chat_type = b.chat_type; if (b.chatId) conv.external_chat_id = b.chatId;
         // ссылка на вложение — только http(s) или наш /uploads/: javascript: и data: не пройдут
         const rawUri = String(b.contentUri || b.fileUrl || '').trim();
