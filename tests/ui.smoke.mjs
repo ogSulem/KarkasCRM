@@ -227,7 +227,7 @@ try {
       check('у каждого своего поля есть понятная кнопка «Изменить»', $$('#cfFields tr').slice(1).every(r => /Изменить/.test(r.textContent)));
       const builtin = $$('#builtinFields tr').slice(1).map(r => r.children[0].textContent.trim());
       check('встроенные поля карточек показаны в настройках', builtin.length >= 6 && builtin.includes('Имя клиента') && builtin.includes('Заметки'), builtin.join(', '));
-      check('для встроенных полей объяснено, где их менять', /Меняются в карточке клиента/.test($('#view').textContent) && /Удалить встроенное поле нельзя/.test($('#view').textContent));
+      check('встроенные поля показаны с обязательностью и назначением', Boolean($('#builtinFields')) && /Обязательное/.test($('#view').textContent) && /Зачем/.test($('#view').textContent));
 
       // Справочник выше пишется руками, и он уже однажды разошёлся с формами
       // («Исполнитель» вместо «Ответственный», «Название» вместо «Что сделать»,
@@ -419,9 +419,9 @@ try {
   check('своё название канала важнее номера в списках', window.wzTitle({ label: 'WhatsApp — Ирина', transport: 'whatsapp', phone: '79991112233' }) === 'WhatsApp — Ирина');
   check('название и сотрудник канала сохраняются одним действием', typeof window.saveChannel === 'function' && /label: name \? name\.value : '', user_id: who && who\.value/.test(appJsRaw.replace(/\s+/g, ' ')));
   // канал Wazzup — это аккаунт, а не сотрудник: привязку задаёт администратор,
-  // и выбирать номер на каждое сообщение менеджеру не нужно
+  // а канал для исходящих по умолчанию выбирают один раз в настройках
   check('у канала в настройках выбирают сотрудника', /id="chUser\$\{c\.id\}"/.test(appJsRaw) && /Кто отвечает с этого аккаунта/.test(appJsRaw));
-  check('объяснено, что ответ уходит с аккаунта клиента', /на который клиент написал/.test(appJsRaw) && /выбирать аккаунт на каждое сообщение не нужно/.test(appJsRaw));
+  check('канал для исходящих по умолчанию выбирают в настройках', /id="wzChannel"/.test(appJsRaw) && appJsRaw.includes("WAZZUP_CHANNEL_ID: $('#wzChannel').value"));
 
   // ── написать клиенту первым ──────────────────────────────────────────────
   check('переписку можно начать без входящего сообщения', typeof window.startConv === 'function' && /method: 'POST'/.test(String(window.submitStartConv)) && /\/api\/conversations/.test(String(window.submitStartConv)));
@@ -844,7 +844,7 @@ try {
   window.__state.settingsTab = 'data'; window.go('settings'); await wait(700);
   {
     check('в разделе данных нет сворачиваемого блока про другой сервер', !$('#view details.settings-more') && !/Копии на другом сервере/.test($('#view').textContent));
-    check('короткая подсказка про вторую копию осталась', /DEPLOY\.md/.test($('#view').textContent));
+    check('срок и час ночной копии настраиваются в разделе данных', /Хранить копии, дней/.test($('#view').textContent) && /Час создания копии/.test($('#view').textContent));
     check('в данных компании нет автоправил — они во вкладке «Автоматизации»', !$('#view select[name=AUTO_DEAL]') && !$('#view select[name=AUTO_ASSIGN]') && /во вкладке «Автоматизации»/.test($('#view').textContent), $('#view').textContent.replace(/\s+/g, ' ').slice(0, 140));
   }
   window.__state.settingsTab = 'team'; window.go('settings'); await wait(500);
@@ -864,7 +864,7 @@ try {
     check('в настройках сказано, что официального API ФССП больше нет', /API ФССП закрыт/.test(st) && /банк исполнительных производств/.test(st));
     check('в настройках нет мёртвого поля токена ФССП', !/Токен ФССП/.test(st) && !/FSSP_TOKEN/.test($('#view').innerHTML));
     check('источники без рабочего API помечены как ручные', /данные по ссылке вручную/.test(st));
-    check('для Google указан действующий Places API (New)', /Places API \(New\)/.test(st));
+    check('для Google сохранена подсказка про действующий Places API (New)', /Places API \(New\)/.test(appJsRaw));
     check('есть проверка доступности источников', /Проверить доступность источников/.test(st));
   }
 
@@ -1101,10 +1101,10 @@ try {
   for (let i = 0; i < 60 && !$('#view').textContent.includes('это называется вебхук'); i++) await wait(100);
   const integText = $('#view').textContent;
   check('интеграции: вместо «Локальный режим» — «не подключено»', !integText.includes('Локальный режим') && integText.includes('не подключено'));
-  // каналов у заказчика бывает по одному на сотрудника, и без объяснения список
-  // номеров выглядит как ошибка
-  check('интеграции объясняют, что канал — это аккаунт, а не сотрудник', integText.includes('Канал — это один подключённый аккаунт') && integText.includes('каналов будет столько же, сколько сотрудников'), integText.slice(0, 80));
-  check('интеграции объясняют, с какого аккаунта уходит ответ', integText.includes('с того аккаунта, на который клиент написал'));
+  // каналов у заказчика бывает по одному на сотрудника: карточка показывает их
+  // число, а в список отправки по умолчанию попадают только работающие
+  check('интеграции показывают число подключённых каналов', /Подключённые каналы \(/.test(integText));
+  check('канал по умолчанию предлагается только из работающих', appJsRaw.includes('chans.filter(c => wzAlive(c) || c.external_id === s.wazzup.channel_id)'));
   check('интеграции: термин webhook объяснён по-русски', integText.includes('(это называется вебхук)') && integText.includes('Адрес, по которому Wazzup присылает сообщения'), integText.slice(0, 120));
 
   // ── адрес вебхука Wazzup: один для показа и для регистрации ──────────────
