@@ -101,7 +101,6 @@ label input,label select,label textarea{margin-top:4px;font-weight:400}
 .kpi b.accent{color:var(--orange)}.kpi b.green{color:var(--green)}
 .kpi small{display:block;color:var(--muted);font-size:12.5px;line-height:1.4}
 .kpi small b{display:inline;font-size:inherit;margin:0}
-.kpi .kpi-fact{color:var(--ink);font-weight:600}
 .cols{display:grid;grid-template-columns:1.6fr 1fr;gap:14px;align-items:start}
 @media(max-width:1100px){.cols{grid-template-columns:1fr}}
 .bar{background:#f1f5f9;border-radius:999px;height:8px;overflow:hidden;margin:2px 0 12px}
@@ -166,6 +165,10 @@ tr:hover td{background:#fafcfb}
 .conv:hover{background:#fafcfb}.conv.active{background:var(--green-l);border-left:3px solid var(--green)}
 .conv b{display:flex;justify-content:space-between;font-size:14px}
 .conv p{margin:2px 0;color:var(--muted);font-size:13px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+/* непрочитанный диалог должен бросаться в глаза: оранжевая метка слева и
+   плотный текст превью, пока сотрудник не открыл переписку */
+.conv.unread{box-shadow:inset 3px 0 0 var(--orange);background:color-mix(in srgb,var(--orange) 6%,transparent)}
+.conv.unread p{color:var(--ink);font-weight:600}
 .chan{background:#f1f5f9;color:#475569;border-radius:6px;padding:1px 6px;font-size:11.5px;text-transform:capitalize}
 .chan.whatsapp,.chan.wapi,.chan.whatsgroup{background:#dcfce7;color:#166534}
 .chan.telegram,.chan.tgapi{background:#e0f2fe;color:#075985}
@@ -266,6 +269,7 @@ html[data-theme=dark] .notice.warn{background:#3a2f10;border-color:#6b5717;color
 .btn:active{transform:translateY(0)}
 .btn.primary:disabled,.btn:disabled{opacity:.6;cursor:not-allowed}
 .msg.out .chan{background:rgba(255,255,255,.28);color:#f0fdf4}
+.msg.out small{color:rgba(255,255,255,.82)}
 .msg .chan{margin-right:4px}
 .msg img{max-width:100%;border-radius:10px;margin-top:6px}
 .kpi i{filter:saturate(1.1)}
@@ -276,7 +280,6 @@ td .btn.sm+.btn.sm{margin-left:4px}
 .tabs button:hover{border-color:var(--green);color:var(--green)}
 .tabs button.active:hover{color:#fff}
 .side-card{line-height:1.45}
-.user b{max-width:130px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .chat-head b{font-size:14px}
 .msgs .empty{margin:auto}
 .profile hr{border:0;border-top:1px dashed var(--line);margin:12px 0}
@@ -352,6 +355,8 @@ html[data-theme=dark] aside{background:linear-gradient(180deg,#061a10,#0b2a18)}
 html[data-theme=dark] .card,html[data-theme=dark] .kpi,html[data-theme=dark] .modal-card,
 html[data-theme=dark] .search-results,html[data-theme=dark] .deal,html[data-theme=dark] .msg,
 html[data-theme=dark] .tabs button{background:var(--card);color:var(--ink);border-color:var(--line)}
+html[data-theme=dark] .tabs button.active{background:var(--green);border-color:var(--green);color:#04170c}
+html[data-theme=dark] .tabs button.active:hover{color:#04170c}
 html[data-theme=dark] input,html[data-theme=dark] select,html[data-theme=dark] textarea{background:#0f171b;color:var(--ink);border-color:var(--line)}
 html[data-theme=dark] .col{background:#101a1e;border-color:var(--line)}
 html[data-theme=dark] .msgs,html[data-theme=dark] .bar{background:#0f171b}
@@ -359,6 +364,8 @@ html[data-theme=dark] .bar i{opacity:.9}
 html[data-theme=dark] th{border-color:var(--line)}
 html[data-theme=dark] td{border-color:#1c262c}
 html[data-theme=dark] tr:hover td{background:#182227}
+html[data-theme=dark] .conv{border-color:var(--line)}
+html[data-theme=dark] .conv.unread{background:rgba(249,115,22,.09)}
 html[data-theme=dark] .conv:hover{background:#182227}
 html[data-theme=dark] .conv.active{background:#123326}
 html[data-theme=dark] .tag{background:#123326;color:#86efac}

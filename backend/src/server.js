@@ -120,7 +120,7 @@ const SCHEMA_COLUMNS = [...SCHEMA,
   ['tasks', 'done', 'INTEGER DEFAULT 0'], ['tasks', 'repeat', "TEXT DEFAULT 'none'"],
   ['messages', 'content_uri', 'TEXT'], ['messages', 'status', 'TEXT'], ['messages', 'external_id', 'TEXT'],
   ['messages', 'channel', "TEXT DEFAULT 'whatsapp'"], ['messages', 'direction', "TEXT DEFAULT 'in'"], ['messages', 'author', 'TEXT'],
-  ['messages', 'content_name', 'TEXT'], ['messages', 'content_type', 'TEXT'],
+  ['messages', 'content_name', 'TEXT'], ['messages', 'content_type', 'TEXT'], ['messages', 'channel_id', 'TEXT'],
   ['conversations', 'channel_id', 'TEXT'], ['conversations', 'external_chat_id', 'TEXT'], ['conversations', 'chat_type', 'TEXT'],
   ['conversations', 'last_at', 'TEXT'], ['conversations', 'assigned_id', 'INTEGER'], ['conversations', 'title', 'TEXT'], ['conversations', 'channels', "TEXT DEFAULT ''"],
   ['contacts', 'phone_norm', 'TEXT'], ['templates', 'user_id', 'INTEGER'],
@@ -645,7 +645,7 @@ export async function ensureDeal(contact) {
   return Number(dr.lastInsertRowid);
 }
 
-export async function upsertIncoming({ channel = 'whatsapp', chatType = '', phone = '', chatId = '', name = '', body = '', external_id = null, channelId = '', contentUri = '', author = '', email = '', subject = '', direction = 'in' }) {
+export async function upsertIncoming({ channel = 'whatsapp', chatType = '', phone = '', chatId = '', name = '', body = '', external_id = null, channelId = '', contentUri = '', contentName = '', author = '', email = '', subject = '', direction = 'in' }) {
   if (!body && !contentUri) return null;
   // ограничиваем длину: вебхук — доверенный, но не бесконечный источник
   const cap = (s, n) => String(s ?? '').slice(0, n);
@@ -688,7 +688,7 @@ export async function upsertIncoming({ channel = 'whatsapp', chatType = '', phon
     dealId = await ensureDeal(contact);
   }
   const channels = [...new Set([...(conv.channels || '').split(',').filter(Boolean), channel])].join(',');
-  try { db.prepare('INSERT INTO messages(conversation_id,channel,direction,body,subject,content_uri,status,external_id,author) VALUES(?,?,?,?,?,?,?,?,?)').run(conv.id, channel, 'in', body || '[вложение]', subject, contentUri, channel === 'email' ? 'received' : 'inbound', external_id, author); }
+  try { db.prepare('INSERT INTO messages(conversation_id,channel,direction,body,subject,content_uri,content_name,status,external_id,author,channel_id) VALUES(?,?,?,?,?,?,?,?,?,?,?)').run(conv.id, channel, 'in', body || '[вложение]', subject, contentUri, contentName || null, channel === 'email' ? 'received' : 'inbound', external_id, author, channelId || null); }
   catch (e) { if (/UNIQUE/i.test(e.message)) return conv; console.error('message insert', e); throw e; }
   db.prepare("UPDATE conversations SET channels=?,channel_id=COALESCE(NULLIF(?,''),channel_id),external_chat_id=COALESCE(NULLIF(?,''),external_chat_id),chat_type=COALESCE(NULLIF(?,''),chat_type),unread=unread+1,last_at=datetime('now') WHERE id=?").run(channels, channelId, String(chatId || ''), chatType, conv.id);
   // беседу тоже отмечаем за владельцем канала, если она ничья
@@ -697,7 +697,10 @@ export async function upsertIncoming({ channel = 'whatsapp', chatType = '', phon
   const openDeal = db.prepare("SELECT id FROM deals WHERE contact_id=? AND stage NOT IN ('won','lost') ORDER BY id DESC").get(contact.id);
   await runAutomations('message_in', { contact_id: contact.id, deal_id: dealId || openDeal?.id, text: body });
   // в событии есть имя и превью: интерфейс показывает понятное уведомление
-  broadcast('message', { conversation_id: conv.id, title: contact.name || conv.title || 'Клиент', preview: String(body || '').slice(0, 90), direction: 'in' });
+  // всплывающее уведомление о чужом клиенте мешало бы остальным: событие
+  // помечается адресатом, а интерфейс сам решит, кому показать
+  const forUser = Number(conv.assigned_id) || Number(contact.responsible_id) || 0;
+  broadcast('message', { conversation_id: conv.id, title: contact.name || conv.title || 'Клиент', preview: String(body || '').slice(0, 90), direction: 'in', for_user: forUser || null, channel });
   return conv;
 }
 
@@ -748,7 +751,11 @@ const wzChannel = t => {
   return normChatType(v) || (WZ_TRANSPORTS.includes(v) ? v : 'site');
 };
 // что писать в историю, если у сообщения нет ни текста, ни файла
-const wzBody = m => m.text || (m.contentUri ? '[вложение: ' + (m.type || 'файл') + ']' : (WZ_TYPE_BODY[m.type] || ''));
+// В истории вложение подписывается именем файла: техническая метка вида
+// «[вложение: document]» человеку ничего не говорит и дублирует значок файла.
+const wzFileLabel = m => m.fileName || wzNameFromUri(m.contentUri) || 'файл';
+const wzNameFromUri = u => { try { const last = String(u || '').split('?')[0].split('/').pop() || ''; const d = decodeURIComponent(last); return d && /\./.test(d) ? d.slice(0, 80) : ''; } catch { return ''; } };
+const wzBody = m => m.text || (m.contentUri ? 'Вложение: ' + wzFileLabel(m) : (WZ_TYPE_BODY[m.type] || ''));
 // GET /channels отдаёт ГОЛЫЙ МАССИВ (wazzup24.ru/help/api-ru/rabota-s-kanalami),
 // обёртка {channels:[…]} встречается только в партнёрском API. Чтение ответа как
 // объекта давало пустой список при рабочем ключе: «синхронизировано: 0».
@@ -827,10 +834,10 @@ export async function sendViaWazzup(conv, text, user, chatTypeOverride = '', fil
       try { await post({ ...base, text, crmMessageId: newId() }); }
       catch (e) { throw new Error(e.message + ' Вложение клиенту ушло, подпись — нет: отправьте текст отдельным сообщением.'); }
     }
-    return { delivered: true, mode: 'wazzup', id: sent.messageId || sent.id };
+    return { delivered: true, mode: 'wazzup', id: sent.messageId || sent.id, channelId };
   }
   const data = await post({ ...base, text, crmMessageId: newId() });
-  return { delivered: true, mode: 'wazzup', id: data.messageId || data.id };
+  return { delivered: true, mode: 'wazzup', id: data.messageId || data.id, channelId };
 }
 // Wazzup объединяет WhatsApp, Telegram, Instagram и Viber в одном ключе —
 // второй провайдер не нужен, отправка идёт только через него.
@@ -1324,20 +1331,25 @@ export const server = http.createServer(async (req, res) => {
       catch { const e = new Error('Некорректный JSON в запросе — проверьте данные формы'); e.statusCode = 400; throw e; }
       wzHookMark('WZ_HOOK_LAST_AT', localNow());
       if (b.test) { wzHookMark('WZ_HOOK_TEST_AT', localNow()); return json(res, 200, { received: true, test: true }); }
-      const legacy = b.messages || [];
-      const modern = (b.data || []).concat(!b.data && (b.message_id || b.messageId) ? [b] : []).map(m => ({
+      // оба формата входа venдора приводим одной картой: в старом messages[]
+      // вложение лежит в attachment.url, и без приведения файл без подписи
+      // молча терялся — история показывала только текстовые сообщения
+      const mapMsg = m => ({
         messageId: m.message_id || m.messageId, channelId: m.channel_id || m.channelId,
         // тип чата берём только из данных: подставлять 'whatsapp' вместо отсутствующего
         // нельзя, ответ ушёл бы клиенту не в тот мессенджер, а выглядело бы как доставка
         chatType: m.recipient?.chat_type || m.sender?.chat_type || m.chatType || '',
         chatId: m.recipient?.chat_id || m.sender?.chat_id || m.chatId, isEcho: (m.direction === 'outbound') || m.isEcho,
-        text: m.text, type: m.attachment ? 'file' : 'text', contentUri: m.attachment?.url || m.contentUri, status: m.direction === 'inbound' ? 'inbound' : (m.status || 'sent'),
-        authorName: m.sender?.name, contact: { name: m.sender?.name || m.recipient?.name, phone: m.sender?.phone || m.recipient?.phone }
-      }));
+        text: m.text, type: m.attachment ? 'file' : (WZ_TYPE_BODY[m.type] ? m.type : 'text'), contentUri: m.attachment?.url || m.contentUri, status: m.direction === 'inbound' ? 'inbound' : (m.status || ''),
+        fileName: m.attachment?.name || m.attachment?.fileName || m.fileName || '',
+        authorName: m.sender?.name, contact: { name: m.sender?.name || m.recipient?.name || m.contact?.name, phone: m.sender?.phone || m.recipient?.phone || m.contact?.phone }
+      });
+      const legacy = (b.messages || []).map(mapMsg);
+      const modern = (b.data || []).concat(!b.data && (b.message_id || b.messageId) ? [b] : []).map(mapMsg);
       for (const m of legacy.concat(modern)) {
         if (m.status && m.status !== 'inbound') { db.prepare('UPDATE messages SET status=? WHERE external_id=?').run(m.status, m.messageId); continue; }
         if (m.isEcho) continue;
-        await upsertIncoming({ channel: wzChannel(m.chatType), chatType: normChatType(m.chatType), phone: m.contact?.phone || '', chatId: m.chatId || '', name: m.contact?.name || m.authorName || '', body: wzBody(m), contentUri: m.contentUri || '', external_id: m.messageId, channelId: m.channelId, author: m.authorName || '' });
+        await upsertIncoming({ channel: wzChannel(m.chatType), chatType: normChatType(m.chatType), phone: m.contact?.phone || '', chatId: m.chatId || '', name: m.contact?.name || m.authorName || '', body: wzBody(m), contentUri: m.contentUri || '', contentName: m.fileName || wzNameFromUri(m.contentUri), external_id: m.messageId, channelId: m.channelId, author: m.authorName || '' });
       }
       const fwd = getSetting('WAZZUP_FORWARD_URL');
       // Wazzup присылает входящие на один адрес: если мессенджеры подключены ещё
@@ -2205,7 +2217,7 @@ ${user?.name || ''}`.trim();
           else { status = 'error'; send = { delivered: false, mode: 'error: ' + e.message }; }
         }
         const body = String(b.body || '').trim() || (file ? '[вложение]' : '');
-        const insertOut = ext => db.prepare('INSERT INTO messages(conversation_id,channel,direction,body,content_uri,content_name,content_type,status,external_id,author) VALUES(?,?,?,?,?,?,?,?,?,?)').run(id, wantChannel, 'out', body, file?.contentUri || null, b.contentName ? safeFileName(b.contentName) : null, b.contentType || null, status, ext, user.name);
+        const insertOut = ext => db.prepare('INSERT INTO messages(conversation_id,channel,direction,body,content_uri,content_name,content_type,status,external_id,author,channel_id) VALUES(?,?,?,?,?,?,?,?,?,?,?)').run(id, wantChannel, 'out', body, file?.contentUri || null, b.contentName ? safeFileName(b.contentName) : null, b.contentType || null, status, ext, user.name, send.channelId || conv.channel_id || null);
         // внешний id уникален (защита от повторной доставки входящих), но если провайдер
         // вернул уже встречавшийся id, сообщение всё равно должно сохраниться в CRM
         let r; try { r = insertOut(send.id || null); }

@@ -1136,3 +1136,24 @@ test('большие ответы API приходят сжатыми', async ()
   const viaFetch = await fetch(base + '/api/contacts', { headers: { ...h, 'Accept-Encoding': 'gzip' } });
   assert.ok((await viaFetch.json()).length >= 40, 'fetch-клиент получает распакованные данные');
 });
+
+test('входящее вложение подписано именем файла, повтор вебхука не дублирует чат', async () => {
+  const hook = body => fetch(base + '/webhooks/wazzup?secret=hook-secret-1', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) }).then(r => r.status);
+  const att = { messages: [{ messageId: 'wz-att-1', channelId: 'ch-att', chatType: 'whatsapp', chatId: '79000000003', type: 'text', attachment: { url: 'https://cdn.example/files/otchet%20pdf.pdf' } }] };
+  assert.equal(await hook(att), 200, 'входящее с вложением принято');
+  const convs = (await call('/api/conversations')).body;
+  const conv = convs.find(c => c.external_chat_id === '79000000003');
+  assert.ok(conv, 'беседа создана по входящему');
+  const msgs = (await call(`/api/conversations/${conv.id}/messages`)).body;
+  const m = msgs[msgs.length - 1];
+  assert.equal(m.body, 'Вложение: otchet pdf.pdf', 'в истории имя файла, а не техническая метка: ' + m.body);
+  assert.equal(m.content_name, 'otchet pdf.pdf', 'имя файла сохранено и попадёт в чип');
+  assert.equal(m.channel_id, 'ch-att', 'сообщение помнит аккаунт Wazzup, через который пришло');
+  const unreadBefore = conv.unread;
+  assert.equal(await hook(att), 200, 'повторная доставка принята без ошибки');
+  const msgs2 = (await call(`/api/conversations/${conv.id}/messages`)).body;
+  assert.equal(msgs2.length, msgs.length, 'то же messageId не создаёт второе сообщение');
+  const conv2 = (await call('/api/conversations')).body.find(c => c.id === conv.id);
+  assert.equal(conv2.unread, 0, 'счётчик непрочитанных после прочтения не растёт от повтора');
+  assert.ok(unreadBefore >= 0);
+});
