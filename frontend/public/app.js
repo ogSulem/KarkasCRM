@@ -2819,7 +2819,7 @@ async function settings(v) {
      </div>
      ${isAdmin ? `<div class="card"><h3>Ключи источников</h3>
       <p class="form-hint">Нужны только источникам, которые отдают данные по ключу. Пусто — источник работает по ссылкам.</p>
-      <form onsubmit="return saveCompetitorKeys(event)">${KEY_FIELDS.map(([k, label, hint]) => `<label>${esc(label)}<input name="${k}" placeholder="${cs.keys[k] ? '•••••• (сохранён)' : 'вставьте ключ или оставьте пустым'}"></label><p class="form-hint" style="margin:-6px 0 10px">${esc(hint)}</p>`).join('')}<button class="btn primary">Сохранить ключи</button></form></div>`
+      <form onsubmit="return saveCompetitorKeys(event)">${KEY_FIELDS.map(([k, label]) => `<label>${esc(label)}<input name="${k}" placeholder="${cs.keys[k] ? '•••••• (сохранён)' : 'вставьте ключ или оставьте пустым'}"></label>`).join('')}<button class="btn primary">Сохранить ключи</button></form></div>`
       : `<div class="card"><h3>Ключи источников</h3><p><small>Ключи задаёт администратор: Настройки → Конкуренты и источники. Отчёты, ссылки и сравнение цен доступны вам и без ключей.</small></p></div>`}
     </div><div>
      <div class="card"><h3>Как работает разведка конкурентов</h3>
@@ -2980,7 +2980,12 @@ async function settings(v) {
        <div style="display:flex;gap:8px;flex-wrap:wrap"><button class="btn primary sm" onclick="makeBackup()">${icon('plus', 13)} Создать копию сейчас</button>
        <button class="btn sm" onclick="download('/api/export/json','karkas-backup.json')" title="Текстовый файл со всеми данными — для переноса в другую программу">${icon('download', 13)} Скачать все данные</button></div>
        <div id="backupList" style="margin-top:10px">Загрузка…</div>
-       <p class="form-hint">Копии лежат на сервере в <code>data/backups</code>; кнопка «Скачать все данные» сохраняет файл на компьютер. Вторая копия в облако — DEPLOY.md, раздел 7.1.</p>
+       <form onsubmit="return saveMaintenance(event)">
+       <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px"><label>Хранить копии, дней<input name="BACKUP_KEEP_DAYS" type="number" min="0" max="3650" value="${esc(String(s.maintenance?.backup_keep_days ?? 7))}"></label>
+       <label>Час создания копии (0–23)<input name="BACKUP_HOUR" type="number" min="0" max="23" value="${esc(String(s.maintenance?.backup_hour ?? 3))}"></label></div>
+       <label>Адрес для уведомлений о просроченных задачах (необязательно)<input name="NOTIFY_WEBHOOK" value="${esc(s.maintenance?.notify_webhook || '')}" placeholder="https://hooks.slack.com/services/…"></label>
+       <button class="btn primary">Сохранить обслуживание</button>
+       </form>
      </div>
      <div class="card"><h3>Резервные копии в хранилище</h3>
       <p><small>Ночная копия остаётся на этом же сервере. Если сервер выйдет из строя или файлы зашифрует вирус, копия пропадёт вместе с базой. Хранилище — это отдельный сервер, куда CRM сама отправляет каждую новую копию. Подходит любое S3-хранилище: Рег.ру, Timeweb, Selectel, Яндекс Облако, VK Cloud. Данные берутся из панели провайдера.</small></p>
@@ -2999,19 +3004,12 @@ async function settings(v) {
        </div>
       </form>
       <div id="s3status">${s3line(s.s3)}</div>
-      <p class="form-hint">Секретный ключ наружу не показывается. Сбой выгрузки не отменяет копию на сервере.</p>
      </div>
      <div class="card"><h3>Обслуживание и уведомления</h3>
       <p><small>Резервные копии создаются автоматически и хранятся указанное число дней. Просроченные задачи можно отправлять и во внешний сервис — например, в Slack или Telegram-бот (если он у вас есть).</small></p>
-      <form onsubmit="return saveMaintenance(event)">
-       <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px"><label>Хранить копии, дней<input name="BACKUP_KEEP_DAYS" type="number" min="0" max="3650" value="${esc(String(s.maintenance?.backup_keep_days ?? 7))}"></label>
-       <label>Час создания копии (0–23)<input name="BACKUP_HOUR" type="number" min="0" max="23" value="${esc(String(s.maintenance?.backup_hour ?? 3))}"></label></div>
-       <label>Адрес для уведомлений о просроченных задачах (необязательно)<input name="NOTIFY_WEBHOOK" value="${esc(s.maintenance?.notify_webhook || '')}" placeholder="https://hooks.slack.com/services/…"></label>
-       <button class="btn primary">Сохранить обслуживание</button>
-      </form>
+      
      </div>
      <div class="card"><h3>Дополнительные параметры</h3>
-      <p><small>Эти настройки хранятся в самой CRM и важнее параметров сервера — править файлы на сервере не нужно.</small></p>
       <form onsubmit="return saveAdvanced(event)">
        <label>Показывать CRM внутри другого сайта<input name="FRAME_ANCESTORS" value="${esc(s.advanced?.frame_ancestors || '')}" placeholder="пусто = запрещено · например https://портал.ru или *"></label>
        <p style="margin:-4px 0 10px"><small>Кому можно показывать CRM внутри своего сайта — например, встроить в портал компании. Пустое поле — никому (безопасно); адрес вида <code>https://портал.ru</code> — только этому сайту; <code>*</code> — любому сайту (не рекомендуется). На обычную работу CRM не влияет.</small></p>
@@ -3019,7 +3017,6 @@ async function settings(v) {
        <p style="margin:-4px 0 10px"><small>Защита от подбора пароля: после указанного числа неудачных попыток вход с этого IP временно блокируется на 5 минут. Для офиса за одним IP ставьте значение повыше, для открытого интернета хватает 10–20.</small></p>
        <button class="btn primary">Сохранить параметры</button>
       </form>
-      <p><small>Начальные данные: <b>${esc(s.seed_mode === 'demo' ? 'демонстрационные примеры' : s.seed_mode === 'base' ? 'базовые (каталог и шаблоны)' : s.seed_mode || 'демо')}</b>. Это влияет только на самую первую установку на пустой базе — потом данные не добавляются и не удаляются.</small></p>
      </div>
     </div></div>`;
   } else if (state.settingsTab === 'profile') {
