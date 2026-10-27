@@ -15,11 +15,11 @@ code,pre{font-family:var(--font-mono)}
 .brand-leaf.big{width:76px;height:71px}
 .brand{display:inline-flex;gap:10px;align-items:center;color:#fff;cursor:pointer;text-decoration:none;user-select:none}
 .brand-text{font-size:20px;font-weight:800;letter-spacing:-0.02em;line-height:1;display:inline-flex;align-items:baseline}
-.brand-part-karkas{color:var(--orange)}
-.brand-part-crm{color:#ffffff;transition:color .2s ease}
-.brand:hover .brand-part-crm{color:var(--orange)}
-.brand-login .brand-part-crm{color:var(--ink);transition:color .2s ease}
-.brand-login:hover .brand-part-crm{color:var(--orange)}
+.brand-part-karkas{color:#ffffff;transition:color .2s ease}
+.brand-part-crm{color:var(--orange)}
+.brand:hover .brand-part-karkas{color:var(--orange)}
+.brand-login .brand-part-karkas{color:var(--ink);transition:color .2s ease}
+.brand-login:hover .brand-part-karkas{color:var(--orange)}
 /* layout */
 .layout{display:grid;grid-template-columns:260px 1fr;min-height:100vh}
 aside{background:linear-gradient(180deg,#052e16,#14532d);color:#dcefe1;padding:18px 14px;display:flex;flex-direction:column;gap:14px;position:sticky;top:0;height:100vh;overflow:auto}
@@ -570,6 +570,14 @@ html[data-theme=dark] .link-btn{color:#86efac}
 .restart-card small{display:block;margin-top:10px;color:var(--muted);line-height:1.5}
 @keyframes restartSlide{0%{margin-left:0}50%{margin-left:65%}100%{margin-left:0}}
 @media (prefers-reduced-motion: reduce){.restart-card .bar i{animation:none;width:100%}}
+/* узкие телефоны: бренд и навигация не должны теснить друг друга */
+@media(max-width:380px){
+  .brand-text{font-size:18px}
+  .brand-leaf{width:26px;height:24px}
+  .brand-leaf.big{width:60px;height:56px}
+  nav button{padding:8px 8px;font-size:13px}
+  .btn{padding:8px 10px}
+}
 
 
 /* ── доработка интерфейса: панели, меню, карточки воронок, роли, тёмная тема ── */

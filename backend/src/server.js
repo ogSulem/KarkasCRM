@@ -1158,7 +1158,18 @@ ${deal.deadline ? `<p class="muted">Срок действия предложен
 </body></html>`;
 }
 const html = (res, code, body) => { res.writeHead(code, { 'Content-Type': 'text/html; charset=utf-8' }); res.end(body); };
-const json = (res, code, obj) => { res.writeHead(code, { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store' }); res.end(JSON.stringify(obj)); };
+const json = (res, code, obj) => {
+  const body = JSON.stringify(obj);
+  // списки сделок, чатов и контактов весят десятки килобайт: на медленной
+  // сети gzip сокращает ответ в разы, и страница открывается заметно быстрее
+  const req = res.req;
+  if (body.length > 1024 && req && /gzip/.test(String(req.headers['accept-encoding'] || ''))) {
+    const gz = gzipSync(body);
+    res.writeHead(code, { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store', 'Content-Encoding': 'gzip', 'Vary': 'Accept-Encoding', 'Content-Length': gz.length });
+    return res.end(gz);
+  }
+  res.writeHead(code, { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store' }); res.end(body);
+};
 // простое ограничение частоты: защита от перебора пароля и от шторма запросов к источникам
 const RL = new Map();
 function rateLimit(key, limit, windowMs) {
@@ -1170,6 +1181,10 @@ function rateLimit(key, limit, windowMs) {
   rec.count++;
   return { ok: rec.count <= limit, left: Math.max(0, limit - rec.count), retryAfter: Math.ceil((rec.resetAt - now) / 1000) };
 }
+const readBodyRaw = async (req, maxBytes = 5e6) => {
+  let s = ''; for await (const ch of req) { s += ch; if (s.length > maxBytes) throw new Error('Слишком большой запрос'); }
+  return s;
+};
 const readBody = async (req, maxBytes = 5e6) => {
   let s = ''; for await (const ch of req) { s += ch; if (s.length > maxBytes) throw new Error('Слишком большой запрос'); }
   try { return s ? JSON.parse(s) : {}; }
@@ -1303,7 +1318,10 @@ export const server = http.createServer(async (req, res) => {
     }
     if (p === '/webhooks/wazzup' && req.method === 'POST') {
       const secret = getSetting('WAZZUP_WEBHOOK_SECRET'); if (secret && u.searchParams.get('secret') !== secret && req.headers['x-webhook-secret'] !== secret) return json(res, 403, { error: 'bad secret' });
-      const b = await readBody(req);
+      const rawBody = await readBodyRaw(req);
+      let b;
+      try { b = rawBody ? JSON.parse(rawBody) : {}; }
+      catch { const e = new Error('Некорректный JSON в запросе — проверьте данные формы'); e.statusCode = 400; throw e; }
       wzHookMark('WZ_HOOK_LAST_AT', localNow());
       if (b.test) { wzHookMark('WZ_HOOK_TEST_AT', localNow()); return json(res, 200, { received: true, test: true }); }
       const legacy = b.messages || [];
@@ -1320,6 +1338,13 @@ export const server = http.createServer(async (req, res) => {
         if (m.status && m.status !== 'inbound') { db.prepare('UPDATE messages SET status=? WHERE external_id=?').run(m.status, m.messageId); continue; }
         if (m.isEcho) continue;
         await upsertIncoming({ channel: wzChannel(m.chatType), chatType: normChatType(m.chatType), phone: m.contact?.phone || '', chatId: m.chatId || '', name: m.contact?.name || m.authorName || '', body: wzBody(m), contentUri: m.contentUri || '', external_id: m.messageId, channelId: m.channelId, author: m.authorName || '' });
+      }
+      const fwd = getSetting('WAZZUP_FORWARD_URL');
+      // Wazzup присылает входящие на один адрес: если мессенджеры подключены ещё
+      // и к другой CRM, копия пачки уходит туда же, и чаты живут в обеих системах
+      if (fwd && !b.test) {
+        fetch(fwd, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: rawBody, signal: AbortSignal.timeout(8000) })
+          .catch(e => log(`Не удалось продублировать входящие на второй адрес: ${e.message}`, null, null, 'Wazzup'));
       }
       const inbound = legacy.concat(modern).filter(m => !(m.status && m.status !== 'inbound') && !m.isEcho).length;
       if (inbound) {
@@ -2338,7 +2363,7 @@ ${user?.name || ''}`.trim();
           advanced: { frame_ancestors: getSetting('FRAME_ANCESTORS'), login_rate_limit: num('LOGIN_RATE_LIMIT', 12) },
           auto_deal: getSetting('AUTO_DEAL', '1'), auto_assign: getSetting('AUTO_ASSIGN', '0'),
           webhook: { secret: getSetting('WEBHOOK_SECRET'), configured: !!getSetting('WEBHOOK_SECRET') },
-          wazzup: { api_key: mask(getSetting('WAZZUP_API_KEY')), api_url: getSetting('WAZZUP_API_URL', 'https://api.wazzup24.com/v3'), channel_id: getSetting('WAZZUP_CHANNEL_ID'), webhook_secret: getSetting('WAZZUP_WEBHOOK_SECRET'), configured: !!getSetting('WAZZUP_API_KEY'), hook_last_at: getSetting('WZ_HOOK_LAST_AT') || '', hook_test_at: getSetting('WZ_HOOK_TEST_AT') || '', hook_last_human: wzHookHuman(getSetting('WZ_HOOK_LAST_AT')), hook_test_human: wzHookHuman(getSetting('WZ_HOOK_TEST_AT')), hook_msgs: Number(getSetting('WZ_HOOK_MSG_TOTAL', '0')) || 0 }
+          wazzup: { api_key: mask(getSetting('WAZZUP_API_KEY')), api_url: getSetting('WAZZUP_API_URL', 'https://api.wazzup24.com/v3'), channel_id: getSetting('WAZZUP_CHANNEL_ID'), webhook_secret: getSetting('WAZZUP_WEBHOOK_SECRET'), configured: !!getSetting('WAZZUP_API_KEY'), hook_last_at: getSetting('WZ_HOOK_LAST_AT') || '', hook_test_at: getSetting('WZ_HOOK_TEST_AT') || '', hook_last_human: wzHookHuman(getSetting('WZ_HOOK_LAST_AT')), hook_test_human: wzHookHuman(getSetting('WZ_HOOK_TEST_AT')), hook_msgs: Number(getSetting('WZ_HOOK_MSG_TOTAL', '0')) || 0, forward_url: getSetting('WAZZUP_FORWARD_URL') || '' }
         });
       }
       if (req.method === 'PUT') {
@@ -2351,6 +2376,19 @@ ${user?.name || ''}`.trim();
           if (v && !/^https?:\/\/[a-z0-9.-]+(:\d+)?(\/.*)?$/i.test(v)) return json(res, 400, { error: 'Адрес CRM должен начинаться с http:// или https:// — например, https://crm.company.ru' });
           // пусто — удаляем настройку, чтобы снова работал CRM_DOMAIN или адрес браузера
           if (v) setSetting('PUBLIC_URL', v.slice(0, 255)); else db.prepare("DELETE FROM settings WHERE key='PUBLIC_URL'").run();
+        }
+        if (b.WAZZUP_FORWARD_URL !== undefined) {
+          const v = String(b.WAZZUP_FORWARD_URL || '').trim();
+          if (v && !/^https?:\/\//i.test(v)) return json(res, 400, { error: 'Адрес дублирования должен начинаться с http:// или https://' });
+          if (v) {
+            let host = '';
+            try { host = new URL(v).host; } catch { return json(res, 400, { error: 'Адрес дублирования не читается' }); }
+            // петля: дублирование на самих себя превратило бы одну пачку в лавину
+            let own = '';
+            try { own = new URL(publicBase(req)).host; } catch {}
+            if (own && host === own) return json(res, 400, { error: 'Адрес дублирования совпадает с этой CRM — получится петля' });
+          }
+          if (v) setSetting('WAZZUP_FORWARD_URL', v.slice(0, 255)); else db.prepare("DELETE FROM settings WHERE key='WAZZUP_FORWARD_URL'").run();
         }
         if (clean(b.WAZZUP_API_KEY)) setSetting('WAZZUP_API_KEY', clean(b.WAZZUP_API_KEY));
         for (const k of ['WAZZUP_API_URL', 'WAZZUP_CHANNEL_ID', 'WAZZUP_WEBHOOK_SECRET', 'COMPANY_NAME', 'CURRENCY', 'AUTO_DEAL', 'AUTO_DEAL_STAGE', 'AUTO_ASSIGN', 'SMTP_HOST', 'SMTP_PORT', 'SMTP_SECURE', 'SMTP_USER', 'MAIL_FROM', 'EMAIL_WEBHOOK_SECRET', 'NOTIFY_WEBHOOK', 'COMPANY_INN', 'COMPANY_KPP', 'COMPANY_OGRN', 'COMPANY_ADDRESS', 'COMPANY_PHONE', 'COMPANY_EMAIL', 'COMPANY_SITE', 'COMPANY_BANK', 'COMPANY_ACCOUNT', 'COMPANY_CORR', 'COMPANY_SIGNER', 'COMPANY_SIGNER_POSITION', 'DOC_PREFIX', 'SMTP_TEST_TO', 'WEBHOOK_SECRET']) if (b[k] !== undefined) setSetting(k, clean(b[k]) ?? String(b[k]).slice(0, 512));

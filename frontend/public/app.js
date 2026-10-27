@@ -1520,8 +1520,19 @@ async function inbox(v) {
   if (cur) { state.conv = cur.id; state.listOnly = false; }
   const msgs = cur ? await api(`/api/conversations/${cur.id}/messages`) : [];
   const templates = (state.cache.templates = state.cache.templates || await api('/api/templates'));
+  // Wazzup подключён, но адрес у вендора не зарегистрирован: чаты будут пустыми,
+  // а причина спрятана в настройках. Баннер ведёт прямо к кнопке, которая чинит.
+  // пока входящих не было, настройки перечитываются: баннер должен исчезнуть
+  // сразу после первого сообщения, а не после ручного захода в настройки
+  if (!state.cache.settings || !(state.cache.settings.wazzup && state.cache.settings.wazzup.hook_msgs)) {
+    state.cache.settings = await api('/api/settings').catch(() => state.cache.settings);
+  }
+  const wzN = state.cache.settings && state.cache.settings.wazzup;
+  const wzNudge = wzN && wzN.configured && !wzN.hook_msgs && !wzN.hook_test_at
+    ? `<div class="card tint-warn" style="margin:0 0 10px"><p><small>Wazzup подключён, но сообщения ещё не приходили: у Wazzup не указан входящий адрес этой CRM. Нажмите «Зарегистрировать адрес автоматически» — и входящие появятся здесь. <button type="button" class="btn sm" onclick="state.settingsTab='integrations';go('settings')">Открыть настройки</button></small></p></div>`
+    : '';
 
-  v.innerHTML = `<div class="inbox${cur ? '' : ' list-only'}">
+  v.innerHTML = `${wzNudge}<div class="inbox${cur ? '' : ' list-only'}">
    <div class="convs"><div style="padding:10px;border-bottom:1px solid var(--line)"><input id="convSearch" placeholder="Поиск диалогов" oninput="filterConvs(this.value)"></div>
    <div id="convList">${convs.map(c => `<div class="conv ${c.id === (cur || {}).id ? 'active' : ''}" onclick="openConv(${c.id})">
     <b><span>${esc(c.title)}</span>${c.unread ? `<span class="badge">${c.unread}</span>` : ''}</b>
@@ -2713,11 +2724,13 @@ async function settings(v) {
      <div class="card"><h3>Мессенджеры через Wazzup</h3>
       <p>Статус: <b class="${s.wazzup.configured ? 'green' : ''}">${s.wazzup.configured ? 'подключено' : 'не подключено'}</b></p>
       <label>Ключ доступа Wazzup<input id="wzKey" placeholder="${esc(s.wazzup.api_key || 'вставьте ключ из личного кабинета Wazzup')}"></label>
-      <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px"><label>Куда отправлять ответы по умолчанию<select id="wzChannel"><option value="">— выберите канал —</option>${chans.map(c => `<option value="${esc(c.external_id)}" ${c.external_id === s.wazzup.channel_id ? 'selected' : ''}>${esc(wzTitle(c))}${wzAlive(c) ? '' : ' — не работает'}</option>`).join('')}</select></label>
+      <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px"><label>Куда отправлять ответы по умолчанию<select id="wzChannel"><option value="">— выберите канал —</option>${chans.filter(c => wzAlive(c) || c.external_id === s.wazzup.channel_id).map(c => `<option value="${esc(c.external_id)}" ${c.external_id === s.wazzup.channel_id ? 'selected' : ''}>${esc(wzTitle(c))}${wzAlive(c) ? '' : ' — не работает'}</option>`).join('')}</select></label>
       <label>Код защиты адреса (необязательно)<input id="wzSecret" value="${esc(s.wazzup.webhook_secret || '')}" placeholder="придумайте длинный код"></label></div>
       <p class="form-hint">Код подставляется в адрес вебхука и защищает от поддельных сообщений.</p>
       <label>Адрес сервера Wazzup<input id="wzUrl" value="${esc(s.wazzup.api_url)}"></label>
       <p class="form-hint">Адрес API Wazzup. Менять обычно не нужно.</p>
+      <label>Дублировать входящие на второй адрес (необязательно)<input id="wzForward" value="${esc(s.wazzup.forward_url || '')}" placeholder="https://вторая-crm.ru/webhooks/wazzup"></label>
+      <p class="form-hint">Wazzup присылает входящие на один адрес. Если те же мессенджеры подключены ещё к одной CRM, укажите её вебхук: каждая пачка входящих будет продублирована туда, чаты живут в обеих системах.</p>
       <div style="display:flex;gap:8px;flex-wrap:wrap"><button class="btn primary" onclick="saveWazzup()">Сохранить</button><button class="btn" onclick="testWazzup()">${icon('sync', 13)} Проверить и синхронизировать каналы</button></div>
       <hr><p><b>Адрес, по которому Wazzup присылает сообщения</b></p>
       ${hookLine(wazzupHookUrl(s))}
@@ -2728,11 +2741,17 @@ async function settings(v) {
         : 'Wazzup ещё не присылал сообщений: зарегистрируйте адрес кнопкой ниже.'}</small></p>` : ''}
       <div style="display:flex;gap:8px;flex-wrap:wrap"><button class="btn sm" onclick="registerWazzupWebhook()">${icon('sync', 13)} Зарегистрировать адрес автоматически</button></div>
       <hr><h3>Подключённые каналы (${chans.length})</h3>
-      ${chans.map(c => { const [st, cls] = wzState(c.state);
+      ${(() => {
+        const alive = chans.filter(wzAlive), dead = chans.filter(c => !wzAlive(c));
+        const list = state.showDeadChannels ? chans : alive;
+        return (dead.length ? `<p><small>В рабочем состоянии: ${alive.length}. Недоступных скрыто: ${dead.length} — они не принимают и не отправляют сообщения.</small></p>` : '')
+        + (list.map(c => { const [st, cls] = wzState(c.state);
         return `<div class="row"><span style="min-width:0;overflow-wrap:anywhere"><b>${esc(c.label || c.name || c.phone || c.external_id || 'Канал')}</b><br><small>${esc(wzTransportLabel(c.transport))}${c.label ? ' · ' + esc(c.name || c.phone || c.external_id || '') : ''}</small></span>
         <span style="display:flex;gap:6px;align-items:center;flex:1 1 320px;min-width:0"><input id="chLabel${c.id}" value="${esc(c.label || '')}" placeholder="своё название, например «WhatsApp — Ирина»" maxlength="60" style="flex:1 1 150px;min-width:0"><select id="chUser${c.id}" title="Кто отвечает с этого аккаунта" style="flex:1 1 150px;min-width:0"><option value="">— сотрудник не указан —</option>${staff.map(u => `<option value="${u.id}" ${Number(c.user_id) === Number(u.id) ? 'selected' : ''}>${esc(u.name)}</option>`).join('')}</select><button type="button" class="btn sm" style="white-space:nowrap" onclick="saveChannel(${c.id})">Сохранить</button></span>
         <span class="tag ${cls}">${esc(st)}</span></div>` }).join('')
-        || '<small>Каналы появятся после сохранения ключа и синхронизации.</small>'}
+        || (chans.length ? '<small>Все подключённые каналы недоступны: причина указана у каждого справа.</small>' : '<small>Каналы появятся после сохранения ключа и синхронизации.</small>'))
+        + (dead.length ? `<div style="margin-top:8px"><button type="button" class="btn sm" onclick="toggleDeadChannels()">${state.showDeadChannels ? 'Скрыть недоступные' : 'Показать недоступные'} (${dead.length})</button></div>` : '');
+      })()}
       ${chans.length && !chans.some(wzAlive) ? '<p class="form-hint">Ни один канал пока не работает — сообщения не отправятся. Причина указана справа от канала: её устраняют в личном кабинете Wazzup.</p>' : ''}</div>
 
      <div class="card"><h3>Заявки с сайта и из других сервисов</h3>
@@ -3053,7 +3072,7 @@ async function saveChannel(id) {
     toast('Канал сохранён'); state.channels = []; render();
   } catch (e) { toast(e.message, 'err'); }
 }
-async function saveWazzup() { await api('/api/settings', { method: 'PUT', body: JSON.stringify({ WAZZUP_API_KEY: $('#wzKey').value, WAZZUP_CHANNEL_ID: $('#wzChannel').value, WAZZUP_WEBHOOK_SECRET: $('#wzSecret').value, WAZZUP_API_URL: $('#wzUrl').value }) }); toast('Ключ сохранён'); render(); }
+async function saveWazzup() { await api('/api/settings', { method: 'PUT', body: JSON.stringify({ WAZZUP_API_KEY: $('#wzKey').value, WAZZUP_CHANNEL_ID: $('#wzChannel').value, WAZZUP_WEBHOOK_SECRET: $('#wzSecret').value, WAZZUP_API_URL: $('#wzUrl').value, WAZZUP_FORWARD_URL: $('#wzForward').value }) }); toast('Ключ сохранён'); render(); }
 let __fields = null;
 async function loadFields() { if (!__fields) __fields = (await api('/api/custom-fields')).fields; return __fields; }
 // Транслитерация названия поля в технический ключ — пользователь его не видит.
@@ -3360,6 +3379,9 @@ function cancelQueued(id) {
     catch (e) { toast(e.message, 'err'); }
   }, { okText: 'Отменить действие' });
 }
+// Недоступные каналы только мешают списку: по умолчанию скрыты, администратор
+// показывает их одним нажатием, чтобы посмотреть причину.
+function toggleDeadChannels() { state.showDeadChannels = !state.showDeadChannels; render(); }
 // Переключатель «Вкл.» в таблице правил: при ошибке галочка возвращается назад.
 async function toggleAutomation(id, el) {
   try {

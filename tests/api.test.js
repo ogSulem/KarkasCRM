@@ -1076,3 +1076,63 @@ test('вебхук Wazzup: проверка адреса, счётчик вхо�
   const dash = (await call('/api/dashboard')).body;
   assert.ok(dash.activities.length && /Wazzup: получено сообщений: 1/.test(dash.activities[0].text), 'последнее событие журнала — принятая пачка входящих');
 });
+
+test('Wazzup: входящие дублируются на второй адрес, петля запрещена', async () => {
+  const { createServer } = await import('node:http');
+  const got = [];
+  const mock = createServer((req, res) => { let d = ''; req.on('data', c => { d += c; }); req.on('end', () => { got.push(d); res.writeHead(200); res.end('ok'); }); });
+  await new Promise(r => mock.listen(18123, '127.0.0.1', r));
+  const fwd = 'http://127.0.0.1:18123/webhooks/wazzup';
+  assert.equal((await call('/api/settings', { method: 'PUT', body: JSON.stringify({ WAZZUP_FORWARD_URL: fwd }) })).status, 200, 'адрес дублирования сохраняется');
+  assert.equal((await call('/api/settings')).body.wazzup.forward_url, fwd, 'адрес виден в карточке интеграций');
+
+  // пересылка на саму себя превратила бы вебхук в вечный цикл
+  const loop = await call('/api/settings', { method: 'PUT', body: JSON.stringify({ WAZZUP_FORWARD_URL: base + '/webhooks/wazzup' }) });
+  assert.equal(loop.status, 400, 'адрес самой CRM не принимается');
+  assert.match(String(loop.body.error), /петл/i, 'текст объясняет причину: ' + loop.body.error);
+
+  const payload = { messages: [{ messageId: 'wz-fwd-1', channelId: 'ch-hook', chatType: 'whatsapp', chatId: '79000000002', type: 'text', text: 'Проверка дублирования' }] };
+  const body = JSON.stringify(payload);
+  const r = await fetch(base + '/webhooks/wazzup?secret=hook-secret-1', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body });
+  assert.equal(r.status, 200, 'пачка принята');
+  for (let i = 0; i < 50 && !got.length; i++) await new Promise(rs => setTimeout(rs, 100));
+  assert.equal(got.length, 1, 'пачка переслана ровно один раз');
+  assert.equal(got[0], body, 'второй адрес получил ту же пачку байт в байт');
+
+  await fetch(base + '/webhooks/wazzup?secret=hook-secret-1', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ test: true }) });
+  await new Promise(rs => setTimeout(rs, 400));
+  assert.equal(got.length, 1, 'проверочный запрос Wazzup не дублируется');
+
+  const bad = await call('/api/settings', { method: 'PUT', body: JSON.stringify({ WAZZUP_FORWARD_URL: 'ftp://second-crm/hook' }) });
+  assert.equal(bad.status, 400, 'адрес не-http не принимается');
+  assert.equal((await call('/api/settings', { method: 'PUT', body: JSON.stringify({ WAZZUP_FORWARD_URL: '' }) })).status, 200);
+  assert.equal((await call('/api/settings')).body.wazzup.forward_url, '', 'поле очищается');
+  mock.close();
+});
+
+test('большие ответы API приходят сжатыми', async () => {
+  const { gunzipSync } = await import('node:zlib');
+  const { get } = await import('node:http');
+  for (let i = 0; i < 40; i++) await call('/api/contacts', { method: 'POST', body: JSON.stringify({ name: 'Компрессия ' + i, phone: '+791100' + String(i).padStart(4, '0') }) });
+  // сырой http-запрос: fetch в Node распаковывает тело сам, и по нему не проверить байты
+  const raw = await new Promise((resolve, reject) => {
+    get(base + '/api/contacts', { headers: { ...h, 'Accept-Encoding': 'gzip' } }, r => {
+      const chunks = []; r.on('data', c => chunks.push(c)); r.on('end', () => resolve({ headers: r.headers, buf: Buffer.concat(chunks) }));
+    }).on('error', reject);
+  });
+  assert.equal(raw.headers['content-encoding'], 'gzip', 'сжатие объявлено в заголовке');
+  assert.equal(raw.headers['vary'], 'Accept-Encoding', 'кэши учитывают заголовок');
+  assert.equal(raw.buf[0], 0x1f); assert.equal(raw.buf[1], 0x8b);
+  const parsed = JSON.parse(gunzipSync(raw.buf).toString('utf8'));
+  assert.ok(Array.isArray(parsed) && parsed.length >= 40, 'после распаковки данные целы');
+  const plain = await new Promise((resolve, reject) => {
+    get(base + '/api/contacts', { headers: h }, r => {
+      const chunks = []; r.on('data', c => chunks.push(c)); r.on('end', () => resolve({ headers: r.headers, buf: Buffer.concat(chunks) }));
+    }).on('error', reject);
+  });
+  assert.notEqual(plain.headers['content-encoding'], 'gzip', 'без запроса сжатия ответ обычный');
+  assert.ok(JSON.parse(plain.buf.toString('utf8')).length >= 40, 'обычный ответ тоже цел');
+  // браузерный fetch видит обычный JSON — сервер распаковывает не на клиенте
+  const viaFetch = await fetch(base + '/api/contacts', { headers: { ...h, 'Accept-Encoding': 'gzip' } });
+  assert.ok((await viaFetch.json()).length >= 40, 'fetch-клиент получает распакованные данные');
+});

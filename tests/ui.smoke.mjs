@@ -54,7 +54,7 @@ Object.assign(window, {
   siteFormCode, bulkApply, openContactCard, openDealCard, api, get token() { return token },
   icon, normalizeDue, taskDueMeta, isAscii, endSession, togglePass,
   toggleUserMenu, closeUserMenu, toggleTaskSelect, ICON_PATHS, msgHtml, channelOptions,
-  uploadChatFile, checkHealth,
+  uploadChatFile, toggleDeadChannels, checkHealth,
   sourceLabel, channelLabel, roleLabel, askConfirm, askInput, translit, SOURCE_LABELS, CHANNEL_LABELS, ROLE_LABELS,
   isoDate, todayISO, fmtDayMonth, kindStage, fld, grid2, formLegend, pushToast, notify, captureFocus, restoreFocus, PALETTE_ACTIONS,
   openMenu, closeMenu, contactsMoreMenu, openOurPrices, comparePrices, setBuiltinTab, BUILTIN_FIELDS, amAdmin, canEdit,
@@ -227,7 +227,7 @@ try {
       check('у каждого своего поля есть понятная кнопка «Изменить»', $$('#cfFields tr').slice(1).every(r => /Изменить/.test(r.textContent)));
       const builtin = $$('#builtinFields tr').slice(1).map(r => r.children[0].textContent.trim());
       check('встроенные поля карточек показаны в настройках', builtin.length >= 6 && builtin.includes('Имя клиента') && builtin.includes('Заметки'), builtin.join(', '));
-      check('для встроенных полей объяснено, где их менять', /Меняются в карточке клиента/.test($('#view').textContent) && /Удалить встроенное поле нельзя/.test($('#view').textContent));
+      check('встроенные поля показаны с обязательностью и назначением', Boolean($('#builtinFields')) && /Обязательное/.test($('#view').textContent) && /Зачем/.test($('#view').textContent));
 
       // Справочник выше пишется руками, и он уже однажды разошёлся с формами
       // («Исполнитель» вместо «Ответственный», «Название» вместо «Что сделать»,
@@ -419,9 +419,9 @@ try {
   check('своё название канала важнее номера в списках', window.wzTitle({ label: 'WhatsApp — Ирина', transport: 'whatsapp', phone: '79991112233' }) === 'WhatsApp — Ирина');
   check('название и сотрудник канала сохраняются одним действием', typeof window.saveChannel === 'function' && /label: name \? name\.value : '', user_id: who && who\.value/.test(appJsRaw.replace(/\s+/g, ' ')));
   // канал Wazzup — это аккаунт, а не сотрудник: привязку задаёт администратор,
-  // и выбирать номер на каждое сообщение менеджеру не нужно
+  // а канал для исходящих по умолчанию выбирают один раз в настройках
   check('у канала в настройках выбирают сотрудника', /id="chUser\$\{c\.id\}"/.test(appJsRaw) && /Кто отвечает с этого аккаунта/.test(appJsRaw));
-  check('объяснено, что ответ уходит с аккаунта клиента', /на который клиент написал/.test(appJsRaw) && /выбирать аккаунт на каждое сообщение не нужно/.test(appJsRaw));
+  check('канал для исходящих по умолчанию выбирают в настройках', /id="wzChannel"/.test(appJsRaw) && appJsRaw.includes("WAZZUP_CHANNEL_ID: $('#wzChannel').value"));
 
   // ── написать клиенту первым ──────────────────────────────────────────────
   check('переписку можно начать без входящего сообщения', typeof window.startConv === 'function' && /method: 'POST'/.test(String(window.submitStartConv)) && /\/api\/conversations/.test(String(window.submitStartConv)));
@@ -714,10 +714,10 @@ try {
   check('прежний /favicon.ico уводит на вектор', favIco.status === 301 && favIco.headers.get('location') === '/favicon.svg');
   check('бренд: Каркас + CRM', $('.brand-part-karkas')?.textContent === 'Каркас' && $('.brand-part-crm')?.textContent === 'CRM');
   check('клик по бренду ведёт на дашборд', ($('aside .brand')?.getAttribute('onclick') || '').includes("go('dashboard')"));
-  check('лист в меню векторный и оранжевый, как слово Каркас', Boolean($('.brand svg.brand-leaf use')) && cssText.includes('.brand-leaf{width:32px;height:30px;color:var(--orange)') && cssText.includes('.brand-part-karkas{color:var(--orange)}'));
+  check('лист и слово CRM оранжевые постоянно', Boolean($('.brand svg.brand-leaf use')) && cssText.includes('.brand-leaf{width:32px;height:30px;color:var(--orange)') && cssText.includes('.brand-part-crm{color:var(--orange)}'));
   check('лист на странице входа тоже векторный, цвет не перебит', Boolean($('.brand-login svg.brand-leaf use')) && !/\.brand-login \.brand-leaf\{color:/.test(cssText));
   check('фото-логотипа в интерфейсе не осталось', !$('img[src*="logo"]'));
-  check('при наведении подсвечивается слово CRM', cssText.includes('.brand:hover .brand-part-crm') && cssText.includes('.brand-login:hover .brand-part-crm'));
+  check('слово Каркас нейтральное и подсвечивается при наведении', cssText.includes('.brand:hover .brand-part-karkas') && cssText.includes('.brand-login:hover .brand-part-karkas') && !cssText.includes('.brand:hover .brand-part-crm'));
 
   check('вход: логотип над названием и подсказка о доступе', cssText.includes('.login-card .brand-login{flex-direction:column') && $('.login-note')?.textContent.includes('администратор'));
   await window.openUser();
@@ -844,7 +844,7 @@ try {
   window.__state.settingsTab = 'data'; window.go('settings'); await wait(700);
   {
     check('в разделе данных нет сворачиваемого блока про другой сервер', !$('#view details.settings-more') && !/Копии на другом сервере/.test($('#view').textContent));
-    check('короткая подсказка про вторую копию осталась', /DEPLOY\.md/.test($('#view').textContent));
+    check('срок и час ночной копии настраиваются в разделе данных', /Хранить копии, дней/.test($('#view').textContent) && /Час создания копии/.test($('#view').textContent));
     check('в данных компании нет автоправил — они во вкладке «Автоматизации»', !$('#view select[name=AUTO_DEAL]') && !$('#view select[name=AUTO_ASSIGN]') && /во вкладке «Автоматизации»/.test($('#view').textContent), $('#view').textContent.replace(/\s+/g, ' ').slice(0, 140));
   }
   window.__state.settingsTab = 'team'; window.go('settings'); await wait(500);
@@ -864,7 +864,7 @@ try {
     check('в настройках сказано, что официального API ФССП больше нет', /API ФССП закрыт/.test(st) && /банк исполнительных производств/.test(st));
     check('в настройках нет мёртвого поля токена ФССП', !/Токен ФССП/.test(st) && !/FSSP_TOKEN/.test($('#view').innerHTML));
     check('источники без рабочего API помечены как ручные', /данные по ссылке вручную/.test(st));
-    check('для Google указан действующий Places API (New)', /Places API \(New\)/.test(st));
+    check('для Google сохранена подсказка про действующий Places API (New)', /Places API \(New\)/.test(appJsRaw));
     check('есть проверка доступности источников', /Проверить доступность источников/.test(st));
   }
 
@@ -1101,10 +1101,10 @@ try {
   for (let i = 0; i < 60 && !$('#view').textContent.includes('это называется вебхук'); i++) await wait(100);
   const integText = $('#view').textContent;
   check('интеграции: вместо «Локальный режим» — «не подключено»', !integText.includes('Локальный режим') && integText.includes('не подключено'));
-  // каналов у заказчика бывает по одному на сотрудника, и без объяснения список
-  // номеров выглядит как ошибка
-  check('интеграции объясняют, что канал — это аккаунт, а не сотрудник', integText.includes('Канал — это один подключённый аккаунт') && integText.includes('каналов будет столько же, сколько сотрудников'), integText.slice(0, 80));
-  check('интеграции объясняют, с какого аккаунта уходит ответ', integText.includes('с того аккаунта, на который клиент написал'));
+  // каналов у заказчика бывает по одному на сотрудника: карточка показывает их
+  // число, а в список отправки по умолчанию попадают только работающие
+  check('интеграции показывают число подключённых каналов', /Подключённые каналы \(/.test(integText));
+  check('канал по умолчанию предлагается только из работающих', appJsRaw.includes('chans.filter(c => wzAlive(c) || c.external_id === s.wazzup.channel_id)'));
   check('интеграции: термин webhook объяснён по-русски', integText.includes('(это называется вебхук)') && integText.includes('Адрес, по которому Wazzup присылает сообщения'), integText.slice(0, 120));
 
   // ── адрес вебхука Wazzup: один для показа и для регистрации ──────────────
@@ -1139,12 +1139,40 @@ try {
     // сайта уходят машинам: им нужен валидный домен, а не красивые буквы.
     // ── входящие из Wazzup: админ видит, доходят ли сообщения ────────────────
   await fetch(BASE + '/api/settings', { method: 'PUT', headers: authH(), body: JSON.stringify({ WAZZUP_API_KEY: 'f'.repeat(32), WAZZUP_WEBHOOK_SECRET: 'smoke-hook' }) });
+  // ключ вставили, а адрес у Wazzup не зарегистрировали: в чатах пусто, и
+  // человек должен видеть причину и выход, а не гадать
+  window.go('inbox'); await wait(700);
+  check('в чатах видна подсказка о незарегистрированном адресе', /входящий адрес этой CRM/.test($('#view').textContent), $('#view').textContent.replace(/\s+/g, ' ').slice(0, 180));
+  check('подсказка ведёт в настройки одной кнопкой', /Открыть настройки/.test($('#view').textContent));
   const whTest = await fetch(BASE + '/webhooks/wazzup?secret=smoke-hook', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{"test":true}' });
   check('проверочный запрос Wazzup проходит', whTest.status === 200);
   const whMsg = await fetch(BASE + '/webhooks/wazzup?secret=smoke-hook', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ messages: [{ messageId: 'smoke-wz-1', channelId: 'c1', chatType: 'whatsapp', chatId: '79000000009', type: 'text', text: 'Здравствуйте', contact: { name: 'Дым Incoming', phone: '+7 900 000-00-09' } }] }) });
   check('входящее сообщение принимается вебхуком', whMsg.status === 200);
   window.__state.settingsTab = 'integrations'; window.go('settings'); await wait(700);
   check('в карточке интеграций виден счётчик входящих', /Входящих получено: 1/.test($('#view').textContent), $('#view').textContent.replace(/\s+/g, ' ').slice(0, 160));
+  window.go('inbox'); await wait(700);
+  check('после первого входящего подсказка исчезает', !/входящий адрес этой CRM/.test($('#view').textContent));
+  // поле дублирования для второй CRM (параллельная работа с amoCRM)
+  check('в карточке есть поле дублирования входящих', appJsRaw.includes('id="wzForward"') && appJsRaw.includes('WAZZUP_FORWARD_URL'));
+
+  // недоступные каналы скрыты, но показываются одной кнопкой
+  window.__state.settingsTab = 'integrations'; window.go('settings'); await wait(700);
+  const realApi = window.api;
+  window.__state.channels = []; // иначе настройка возьмёт список из кэша и подмена не сработает
+  window.api = (pth, opt) => pth === '/api/channels' ? Promise.resolve([
+    { id: 90001, provider: 'wazzup', external_id: 'w-alive', state: 'active', transport: 'whatsapp', name: '+79000000901' },
+    { id: 90002, provider: 'wazzup', external_id: 'w-dead', state: 'blocked', transport: 'whatsapp', name: '+79000000902' }
+  ]) : realApi(pth, opt);
+  window.go('settings'); await wait(700);
+  let chanText = $('#view').textContent.replace(/\s+/g, ' ');
+  check('нерабочие каналы не показаны, а их число названо', chanText.includes('+79000000901') && !chanText.includes('+79000000902') && /Недоступных скрыто: 1/.test(chanText), [chanText.includes('+79000000901'), chanText.includes('+79000000902'), /Недоступных скрыто: 1/.test(chanText), /Показать недоступные/.test(chanText)].join('|'));
+  window.toggleDeadChannels(); await wait(700);
+  chanText = $('#view').textContent.replace(/\s+/g, ' ');
+  check('кнопка показывает скрытые каналы вместе с причиной', chanText.includes('+79000000902') && /Скрыть недоступные \(1\)/.test(chanText), chanText.slice(Math.max(0, chanText.indexOf('Подключённые каналы')), Math.max(0, chanText.indexOf('Подключённые каналы')) + 1600));
+  window.toggleDeadChannels(); await wait(700);
+  chanText = $('#view').textContent.replace(/\s+/g, ' ');
+  check('второе нажатие снова убирает нерабочие каналы', !chanText.includes('+79000000902') && /Показать недоступные \(1\)/.test(chanText), [chanText.includes('+79000000902'), /Показать недоступные \(1\)/.test(chanText), /Скрыть недоступные/.test(chanText)].join('|'));
+  window.api = realApi;
   check('код формы для сайта и адрес вебхука не расшифровываются',
       !/function siteFormCode[\s\S]{0,800}humanOrigin/.test(appJsRaw) && !/function wazzupHookUrl[\s\S]{0,400}humanOrigin/.test(appJsRaw));
     check('человекочитаемый адрес применяется только в данных для входа', (appJsRaw.match(/humanOrigin\(/g) || []).length === 2, String((appJsRaw.match(/humanOrigin\(/g) || []).length));
