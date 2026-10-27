@@ -357,7 +357,7 @@ let token = '';
 const state = {
   view: 'dashboard', settingsTab: 'integrations', pipeline: 1, conv: null, listOnly: false,
   deals: [], stages: [], pipelines: [], contacts: [], companies: [], channels: [],
-  cache: {}, dealTab: 'details', meta: null, dupes: null, me: null, users: [], convScope: 'all',
+  cache: {}, dealTab: 'details', meta: null, dupes: null, me: null, users: [], convScope: 'all', drafts: {},
   taskScope: 'mine', taskFilter: '', dealScope: 'all', taskView: 'list', taskSelectMode: false, sel: {}
 };
 
@@ -787,6 +787,7 @@ $('#passwordChangeForm').onsubmit = async e => {
 };
 
 async function boot() {
+  loadDrafts();
   try {
     // cookie уходит автоматически (same-origin). noSessionEnd — чтобы первый
     // заход без сессии просто показывал форму входа, без «сеанс истёк».
@@ -1000,6 +1001,7 @@ async function openNotifications() {
 const BASE_TITLE = 'КаркасCRM — сделки, клиенты и задачи в единой CRM-системе';
 async function navCounts(d) {
   $('#navUnread').textContent = d.unread || '';
+  document.title = d.unread ? `(${d.unread}) ${BASE_TITLE}` : BASE_TITLE;
   $('#navTasks').textContent = d.myTasksOpen || '';
   $('#navDeals').textContent = d.dealsTotal || '';
   // Колокольчик показывает всё, что требует внимания: просроченные задачи и
@@ -1492,6 +1494,23 @@ function nameFromUri(u) { try { const last = String(u || '').split('?')[0].split
 // аккаунт Wazzup, через который прошло сообщение: человек видит не только
 // мессенджер, но и конкретный номер или бота из своего кабинета
 function wzAccountLabel(id) { const c = (state.channels || []).find(x => x.external_id === id); return c ? (c.label || wzTitle(c)) : ''; }
+// Разделители дат: в длинной переписке без них не понять, к какому дню ответ.
+function dayLabel(key) {
+  const now = new Date();
+  const keyOf = d => dtFmt(d).slice(0, 10);
+  if (key === keyOf(now)) return 'Сегодня';
+  if (key === keyOf(new Date(now.getTime() - 864e5))) return 'Вчера';
+  return key;
+}
+function msgsHtml(list) {
+  let last = '';
+  return (list || []).map(m => {
+    const key = dt(m.created_at).slice(0, 10);
+    const sep = key && key !== last ? `<div class="msg-day"><span>${esc(dayLabel(key))}</span></div>` : '';
+    last = key;
+    return sep + msgHtml(m);
+  }).join('');
+}
 function msgHtml(m) {
   const attach = attachmentHtml(m);
   // подпись «Вложение: имя» дублировала бы чип с тем же именем; текст оставляем
@@ -1586,23 +1605,23 @@ async function inbox(v) {
         <button class="btn sm" onclick="attachContact(${cur.contact_id})">${icon('contact', 13)} Карточка клиента</button>
         ${canEdit() ? `<button class="btn sm" onclick="openEmailComposer(${cur.id})">${icon('email', 13)} Письмо</button>` : ''}
       </div></div>
-    <div class="msgs" id="chatMsgs">${msgs.map(msgHtml).join('') || '<div class="empty">Диалог пуст</div>'}</div>
+    <div class="msgs" id="chatMsgs" onscroll="chatScrolled()">${msgsHtml(msgs) || '<div class="empty">Диалог пуст</div>'}</div>
     ${canEdit() ? `<form class="composer" onsubmit="return sendMsg(event,${cur.id})">
      <div class="composer-row">
        <button type="button" class="btn icon-btn composer-ico" title="Прикрепить фото или файл" onclick="document.getElementById('chatFile').click()">${icon('paperclip', 17)}</button>
        <input type="file" id="chatFile" class="hidden" accept="image/png,image/jpeg,image/gif,image/webp,application/pdf,text/plain,text/csv,application/zip,.doc,.docx,.xls,.xlsx" onchange="uploadChatFile(this,${cur.id})">
-       <input id="msgText" placeholder="Сообщение (Enter — отправить)…" required autocomplete="off">
+       <textarea id="msgText" rows="1" placeholder="Сообщение… Enter — отправить, Shift+Enter — новая строка" required autocomplete="off" oninput="autoGrow(this);saveDraft(${cur.id})" onkeydown="msgKey(event,${cur.id})"></textarea>
        <button class="btn send-btn" title="Отправить сообщение">${icon('arrowUp', 17)}</button>
      </div>
      <div class="composer-row composer-sub">
        <span class="composer-label">Куда отправить</span>
        <select id="msgChannel" class="composer-select" title="Мессенджер отправки" aria-label="Куда отправить" onchange="refreshSendAccount(${cur.id})">${channelOptions(cur)}</select>
-       <select id="msgTmpl" class="composer-select" title="Шаблон ответа" onchange="if(this.value){const t=$('#msgText');t.value=this.value;this.value='';t.focus();t.setSelectionRange(t.value.length,t.value.length)}"><option value="">Шаблоны ответов…</option>${templates.map(t => `<option value="${esc(tmpl(t.name, { body: t.body, name: cur.title, sum: cur.deal_amount ? fmt(cur.deal_amount) : '—', date: new Date().toLocaleDateString('ru-RU') }))}">${esc(t.name)}</option>`).join('')}</select>
+       <select id="msgTmpl" class="composer-select" title="Шаблон ответа" onchange="if(this.value){const t=$('#msgText');t.value=this.value;this.value='';autoGrow(t);saveDraft(${cur.id});t.focus();t.setSelectionRange(t.value.length,t.value.length)}"><option value="">Шаблоны ответов…</option>${templates.map(t => `<option value="${esc(tmpl(t.name, { body: t.body, name: cur.title, sum: cur.deal_amount ? fmt(cur.deal_amount) : '—', date: new Date().toLocaleDateString('ru-RU') }))}">${esc(t.name)}</option>`).join('')}</select>
        <button type="button" class="tmpl-settings" onclick="go('settings','templates')">${icon('settings', 12)} настроить шаблоны</button>
      </div>
      <p class="form-hint" id="sendAccountHint" style="margin:-2px 0 0"></p></form>` : `<div class="composer"><p class="form-hint" style="margin:0">${icon('eye', 14)} Режим просмотра: переписка доступна для чтения, отвечает менеджер или администратор.</p></div>`}` : '<div class="empty">Выберите диалог</div>'}</div>
    <div class="profile">${cur ? `<h3>Клиент</h3><p><b>${esc(cur.title || '')}</b></p><p>${icon('phone', 13)} ${esc(cur.phone || '—')}<br>${icon('email', 13)} ${esc(cur.email || '—')}</p><p>Каналы: ${chan(cur.channels)}${(cur.channels || '').includes('email') ? ' <span class="tag grey">почта подключена</span>' : ''}</p><p><button class="btn sm" onclick="attachContact(${cur.contact_id})">Открыть карточку клиента</button></p><hr><h3>Быстрые действия</h3><div style="display:flex;flex-direction:column;gap:6px">${cur.phone ? `<a class="btn sm" href="tel:${esc(String(cur.phone).replace(/[^+\d]/g, ''))}">${icon('phone', 13)} Позвонить</a>` : ''}${canEdit() ? `<button class="btn sm" onclick="openTask(null,{contact_id:${cur.contact_id}})">+ Задача</button><button class="btn sm" onclick="quickDeal(${cur.contact_id})">+ Сделка</button><button class="btn sm" onclick="quickNote(${cur.contact_id})">+ Заметка</button>` : ''}</div>` : '<div class="empty">Выберите чат</div>'}</div></div>`;
-  if (cur && canEdit()) refreshSendAccount(cur.id);
+  if (cur && canEdit()) { refreshSendAccount(cur.id); const t = $('#msgText'); if (t) { t.value = state.drafts[cur.id] || ''; autoGrow(t); } }
   const mDiv = $('#chatMsgs');
   if (mDiv) mDiv.scrollTop = mDiv.scrollHeight;
 }
@@ -1616,8 +1635,11 @@ async function refreshInbox() {
     const box = $('#chatMsgs');
     if (box) {
       const atBottom = box.scrollHeight - box.scrollTop - box.clientHeight < 60;
-      box.innerHTML = msgs.map(msgHtml).join('') || '<div class="empty">Диалог пуст</div>';
-      if (atBottom || msgs.some(m => m.direction === 'in')) box.scrollTop = box.scrollHeight;
+      box.innerHTML = msgsHtml(msgs) || '<div class="empty">Диалог пуст</div>';
+      // дочитали до низа — лента остаётся внизу; ушли вверх читать историю —
+      // новые сообщения не дёргают прокрутку, а ждут кнопкой
+      if (atBottom) { box.scrollTop = box.scrollHeight; $('#jumpNew')?.remove(); }
+      else if (msgs.some(m => m.direction === 'in')) showJumpNew();
     }
     state.cache.convs = await api('/api/conversations');
     filterConvs($('#convSearch')?.value || '');
@@ -1645,19 +1667,30 @@ async function quickDeal(contactId) { openDeal(contactId); }
 async function quickNote(contactId) { openModal(`<h3>Новая заметка</h3><form onsubmit="return saveQuickNote(event,${contactId})"><textarea name="body" rows="3" required placeholder="Заметка о клиенте…"></textarea><button class="btn primary sm" style="margin-top:8px">Сохранить</button></form>`); }
 async function saveQuickNote(e, cid) { e.preventDefault(); await api('/api/notes', { method: 'POST', body: JSON.stringify({ entity_type: 'contacts', entity_id: cid, body: new FormData(e.target).get('body') }) }); closeModal(); toast('Заметка сохранена'); return false; }
 
+// Черновик живёт между разделами и перезагрузкой страницы: недописанный ответ
+// не пропадает, когда сотрудник убежал смотреть карточку клиента.
+function saveDraft(cid) { const t = $('#msgText'); if (!t) return; const v = t.value; if (v.trim()) state.drafts[cid] = v; else delete state.drafts[cid]; try { localStorage.setItem('karkas-drafts', JSON.stringify(state.drafts)); } catch {} }
+function loadDrafts() { try { state.drafts = JSON.parse(localStorage.getItem('karkas-drafts') || '{}') || {}; } catch { state.drafts = {}; } }
+function autoGrow(el) { el.style.height = 'auto'; el.style.height = Math.min(el.scrollHeight, 140) + 'px'; }
+function msgKey(ev, cid) { if (ev.key === 'Enter' && !ev.shiftKey) { ev.preventDefault(); ev.target.form.requestSubmit(); } }
+function showJumpNew() { const chat = $('.chat'); if (!chat || $('#jumpNew')) return; const b = document.createElement('button'); b.type = 'button'; b.id = 'jumpNew'; b.className = 'jump-new'; b.textContent = 'Новые сообщения ↓'; b.onclick = scrollChatBottom; chat.appendChild(b); }
+function scrollChatBottom() { const m = $('#chatMsgs'); if (m) m.scrollTop = m.scrollHeight; $('#jumpNew')?.remove(); }
+function chatScrolled() { const m = $('#chatMsgs'); if (!m) return; if (m.scrollHeight - m.scrollTop - m.clientHeight < 60) $('#jumpNew')?.remove(); }
 async function sendMsg(e, cid) {
   e.preventDefault();
   const input = $('#msgText'), body = input.value.trim();
   if (!body) return false;
   const channel = $('#msgChannel').value;
   input.value = '';
+  delete state.drafts[cid]; try { localStorage.setItem('karkas-drafts', JSON.stringify(state.drafts)); } catch {}
+  autoGrow(input);
   try {
     const r = await api(`/api/conversations/${cid}/messages`, { method: 'POST', body: JSON.stringify({ body, channel }) });
     if (r.send?.hint) toast(r.send.hint);
     else if (r.send?.delivered) toast('Сообщение отправлено');
     const msgs = await api(`/api/conversations/${cid}/messages`);
-    $('#chatMsgs').innerHTML = msgs.map(msgHtml).join('');
-    const mDiv = $('#chatMsgs'); if (mDiv) mDiv.scrollTop = mDiv.scrollHeight;
+    $('#chatMsgs').innerHTML = msgsHtml(msgs);
+    const mDiv = $('#chatMsgs'); if (mDiv) mDiv.scrollTop = mDiv.scrollHeight; $('#jumpNew')?.remove();
     // обновляем список диалогов: последний текст и счётчик непрочитанных
     state.cache.convs = await api('/api/conversations');
     filterConvs($('#convSearch')?.value || '');
