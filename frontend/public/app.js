@@ -2721,15 +2721,7 @@ async function settings(v) {
     const staff = (users || []).filter(u => u.active !== 0);
     body = `${!isAdmin ? '<div class="card tint-info"><b>Режим просмотра</b><br><small>Ключи и настройки интеграций меняет администратор. Вы можете работать с чатами, сделками и задачами — всё остальное доступно.</small></div>' : ''}
     <div class="settings-cols"><div>
-     <div class="card"><h3>Адрес CRM в интернете</h3>
-      <p><small>По этому адресу CRM открывают сотрудники, и сюда же обращаются Wazzup и формы с сайта. Он подставляется во все ссылки ниже.</small></p>
-      <label>Публичный адрес<input id="publicUrl" value="${esc(s.public_url || '')}" placeholder="https://crm.вашдомен.ру"></label>
-      <p><small>Обычно достаточно оставить пустым — тогда берётся адрес из строки браузера. Заполните, если CRM открывают и по локальной сети, а снаружи она живёт на другом домене.</small></p>
-      <button class="btn sm primary" onclick="savePublicUrl()">Сохранить адрес</button>
-      ${localOrigin ? `<div class="notice warn" style="margin-top:12px"><b>Сейчас открыт локальный адрес</b><br><small>${esc(origin)} виден только на этом компьютере. Wazzup и формы с сайта не смогут сюда достучаться — укажите публичный адрес выше (например, https://crm.вашдомен.ру) или откройте CRM по домену.</small></div>` : ''}
-     </div>
      <div class="card"><h3>Мессенджеры через Wazzup</h3>
-      <p><small>Один ключ Wazzup объединяет все подключённые у вас каналы в одном разделе «Чаты»: WhatsApp и WhatsApp Business, Telegram (личный и бот), Instagram, Viber, Авито, MAX, Циан и ВКонтакте. Отдельно подключать каждый мессенджер в CRM не нужно — состав списка зависит от того, какие каналы оплачены и добавлены в вашем кабинете Wazzup. Ключ берётся в личном кабинете Wazzup: раздел «Интеграция с CRM» → API. Это длинная строка, которая работает как пароль к вашему аккаунту Wazzup, — храните её в секрете.</small></p>
       <p>Статус: <b class="${s.wazzup.configured ? 'green' : ''}">${s.wazzup.configured ? 'подключено' : 'не подключено'}</b></p>
       <label>Ключ доступа Wazzup<input id="wzKey" placeholder="${esc(s.wazzup.api_key || 'вставьте ключ из личного кабинета Wazzup')}"></label>
       <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px"><label>Куда отправлять ответы по умолчанию<select id="wzChannel"><option value="">— выберите канал —</option>${chans.filter(c => wzAlive(c) || c.external_id === s.wazzup.channel_id).map(c => `<option value="${esc(c.external_id)}" ${c.external_id === s.wazzup.channel_id ? 'selected' : ''}>${esc(wzTitle(c))}${wzAlive(c) ? '' : ' — не работает'}</option>`).join('')}</select></label>
@@ -2741,7 +2733,6 @@ async function settings(v) {
       <p class="form-hint">Wazzup присылает входящие на один адрес. Если те же мессенджеры подключены ещё к одной CRM, укажите её вебхук: каждая пачка входящих будет продублирована туда, чаты живут в обеих системах.</p>
       <div style="display:flex;gap:8px;flex-wrap:wrap"><button class="btn primary" onclick="saveWazzup()">Сохранить</button><button class="btn" onclick="testWazzup()">${icon('sync', 13)} Проверить и синхронизировать каналы</button></div>
       <hr><p><b>Адрес, по которому Wazzup присылает сообщения</b></p>
-      <p><small>Это «входная дверь» для сообщений: когда клиент пишет в WhatsApp или Telegram, Wazzup передаёт сообщение на этот адрес, и оно появляется в «Чатах». Вставьте адрес в личном кабинете Wazzup (раздел с адресами уведомлений) или нажмите кнопку ниже — CRM зарегистрирует его сама.</small></p>
       ${hookLine(wazzupHookUrl(s))}
       <p><small>${s.wazzup.webhook_secret ? 'Секрет в адресе — пароль от этой двери: без него чужие люди не смогут присылать поддельные сообщения.' : 'Секрет не задан: адрес примет сообщение от любого, кто его узнает. Для работы в интернете лучше задать секрет выше.'}</small></p>
       ${s.wazzup.configured ? `<p><small>${s.wazzup.hook_msgs
@@ -2750,8 +2741,6 @@ async function settings(v) {
         : 'Wazzup ещё не присылал сообщений: зарегистрируйте адрес кнопкой ниже.'}</small></p>` : ''}
       <div style="display:flex;gap:8px;flex-wrap:wrap"><button class="btn sm" onclick="registerWazzupWebhook()">${icon('sync', 13)} Зарегистрировать адрес автоматически</button></div>
       <hr><h3>Подключённые каналы (${chans.length})</h3>
-      <p><small>Канал — это один подключённый аккаунт: номер WhatsApp, аккаунт Telegram или бот. Если к Wazzup подключено по аккаунту на каждого сотрудника, каналов будет столько же, сколько сотрудников, и это нормально: ключ общий на компанию, а сотрудник назначается каждому каналу списком справа. Имена людей Wazzup не передаёт, только номер или юзернейм, поэтому подпишите каналы своими словами — названия хранятся в CRM и не затираются следующей синхронизацией.</small></p>
-      <p><small>Ответ клиенту уходит с того аккаунта, на который клиент написал: канал запоминается в беседе, выбирать аккаунт на каждое сообщение не нужно. Укажите у канала сотрудника, и тогда обращение, пришедшее на этот аккаунт, назначается на него же, а исходящее письмо клиенту, который ещё не писал, уходит с его аккаунта. Выбор канала по умолчанию ниже нужен только для бесед, заведённых вручную, когда ни привязки, ни входящих сообщений нет.</small></p>
       ${(() => {
         const alive = chans.filter(wzAlive), dead = chans.filter(c => !wzAlive(c));
         const list = state.showDeadChannels ? chans : alive;
@@ -2776,7 +2765,14 @@ async function settings(v) {
       </label>
       <p><small>Если код задан, заявка без него отклоняется. Готовая форма для сайта уже содержит код — её можно вставлять как есть. Другим сервисам добавьте код в адрес: <code>?secret=…</code> (подробность для программиста: можно и заголовком <code>x-webhook-secret</code>).</small></p>
       <div style="display:flex;gap:8px;flex-wrap:wrap"><button class="btn primary sm" onclick="saveWebhookSecret()">Сохранить секрет</button><button class="btn sm" onclick="copySiteFormCode()">${icon('copy', 13)} Скопировать код формы для сайта</button></div></div>
-
+    </div><div>
+     <div class="card"><h3>Проверка связи</h3><button class="btn orange w" onclick="checkHealth()">Проверить работу сервера</button><p style="margin-top:8px"><small>Проверка доступности сервера и базы данных. Диалоги и входящие сообщения появляются автоматически при подключённых каналах связи.</small></p></div>
+     <div class="card"><h3>Адрес CRM в интернете</h3>
+      <p><small>По этому адресу CRM открывают сотрудники, и сюда же обращаются Wazzup и формы с сайта. Он подставляется во все ссылки ниже.</small></p>
+      <label>Публичный адрес<input id="publicUrl" value="${esc(s.public_url || '')}" placeholder="https://crm.вашдомен.ру"></label>
+      <button class="btn sm primary" onclick="savePublicUrl()">Сохранить адрес</button>
+      ${localOrigin ? `<div class="notice warn" style="margin-top:12px"><b>Сейчас открыт локальный адрес</b><br><small>${esc(origin)} виден только на этом компьютере. Wazzup и формы с сайта не смогут сюда достучаться — укажите публичный адрес выше (например, https://crm.вашдомен.ру) или откройте CRM по домену.</small></div>` : ''}
+     </div>  
      <div class="card"><h3>Электронная почта</h3>
       <p><small>После настройки письма клиентам отправляются прямо из карточки чата, а входящие письма попадают в ту же переписку.</small></p>
       <p><small><b>Что такое «пароль приложения».</b> Яндекс Почта, Mail.ru и Gmail не разрешают сторонним программам входить по обычному паролю. В настройках безопасности ящика создаётся отдельный одноразовый пароль для CRM: он выглядит как <code>abcd efgh ijkl mnop</code> и вводится в поле «Пароль приложения» ниже. Обычный пароль от почты останется только у вас.</small></p>
@@ -2793,9 +2789,7 @@ async function settings(v) {
       <div style="display:flex;gap:8px"><input id="emailSecret" value="${esc(s.email.webhook_secret || '')}" placeholder="секрет для входящих писем"><button type="button" class="btn sm" style="white-space:nowrap" onclick="genEmailSecret()">Сгенерировать</button><button type="button" class="btn sm primary" style="white-space:nowrap" onclick="saveEmailSecret()">Сохранить</button></div>
       ${hookLine(origin + '/webhooks/email' + (s.email.webhook_secret ? '?secret=' + encodeURIComponent(s.email.webhook_secret) : ''))}
      </div>
-    </div><div>
-     <div class="card"><h3>Проверка связи</h3><button class="btn orange w" onclick="checkHealth()">Проверить работу сервера</button><p style="margin-top:8px"><small>Проверка доступности сервера и базы данных. Диалоги и входящие сообщения появляются автоматически при подключённых каналах связи.</small></p></div>
-    </div></div>`;
+     </div></div>`;
   } else if (state.settingsTab === 'fields') {
     const cf = await api('/api/custom-fields');
     const rows = cf.fields;
@@ -2838,7 +2832,7 @@ async function settings(v) {
      </div>
      ${isAdmin ? `<div class="card"><h3>Ключи источников</h3>
       <p class="form-hint">Нужны только источникам, которые отдают данные по ключу. Пусто — источник работает по ссылкам.</p>
-      <form onsubmit="return saveCompetitorKeys(event)">${KEY_FIELDS.map(([k, label, hint]) => `<label>${esc(label)}<input name="${k}" placeholder="${cs.keys[k] ? '•••••• (сохранён)' : 'вставьте ключ или оставьте пустым'}"></label><p class="form-hint" style="margin:-6px 0 10px">${esc(hint)}</p>`).join('')}<button class="btn primary">Сохранить ключи</button></form></div>`
+      <form onsubmit="return saveCompetitorKeys(event)">${KEY_FIELDS.map(([k, label]) => `<label>${esc(label)}<input name="${k}" placeholder="${cs.keys[k] ? '•••••• (сохранён)' : 'вставьте ключ или оставьте пустым'}"></label>`).join('')}<button class="btn primary">Сохранить ключи</button></form></div>`
       : `<div class="card"><h3>Ключи источников</h3><p><small>Ключи задаёт администратор: Настройки → Конкуренты и источники. Отчёты, ссылки и сравнение цен доступны вам и без ключей.</small></p></div>`}
     </div><div>
      <div class="card"><h3>Как работает разведка конкурентов</h3>
@@ -2999,7 +2993,12 @@ async function settings(v) {
        <div style="display:flex;gap:8px;flex-wrap:wrap"><button class="btn primary sm" onclick="makeBackup()">${icon('plus', 13)} Создать копию сейчас</button>
        <button class="btn sm" onclick="download('/api/export/json','karkas-backup.json')" title="Текстовый файл со всеми данными — для переноса в другую программу">${icon('download', 13)} Скачать все данные</button></div>
        <div id="backupList" style="margin-top:10px">Загрузка…</div>
-       <p class="form-hint">Копии лежат на сервере в <code>data/backups</code>; кнопка «Скачать все данные» сохраняет файл на компьютер. Вторая копия в облако — DEPLOY.md, раздел 7.1.</p>
+       <form onsubmit="return saveMaintenance(event)">
+       <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px"><label>Хранить копии, дней<input name="BACKUP_KEEP_DAYS" type="number" min="0" max="3650" value="${esc(String(s.maintenance?.backup_keep_days ?? 7))}"></label>
+       <label>Час создания копии (0–23)<input name="BACKUP_HOUR" type="number" min="0" max="23" value="${esc(String(s.maintenance?.backup_hour ?? 3))}"></label></div>
+       <label>Адрес для уведомлений о просроченных задачах (необязательно)<input name="NOTIFY_WEBHOOK" value="${esc(s.maintenance?.notify_webhook || '')}" placeholder="https://hooks.slack.com/services/…"></label>
+       <button class="btn primary">Сохранить</button>
+       </form>
      </div>
      <div class="card"><h3>Резервные копии в хранилище</h3>
       <p><small>Ночная копия остаётся на этом же сервере. Если сервер выйдет из строя или файлы зашифрует вирус, копия пропадёт вместе с базой. Хранилище — это отдельный сервер, куда CRM сама отправляет каждую новую копию. Подходит любое S3-хранилище: Рег.ру, Timeweb, Selectel, Яндекс Облако, VK Cloud. Данные берутся из панели провайдера.</small></p>
@@ -3018,19 +3017,8 @@ async function settings(v) {
        </div>
       </form>
       <div id="s3status">${s3line(s.s3)}</div>
-      <p class="form-hint">Секретный ключ наружу не показывается. Сбой выгрузки не отменяет копию на сервере.</p>
-     </div>
-     <div class="card"><h3>Обслуживание и уведомления</h3>
-      <p><small>Резервные копии создаются автоматически и хранятся указанное число дней. Просроченные задачи можно отправлять и во внешний сервис — например, в Slack или Telegram-бот (если он у вас есть).</small></p>
-      <form onsubmit="return saveMaintenance(event)">
-       <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px"><label>Хранить копии, дней<input name="BACKUP_KEEP_DAYS" type="number" min="0" max="3650" value="${esc(String(s.maintenance?.backup_keep_days ?? 7))}"></label>
-       <label>Час создания копии (0–23)<input name="BACKUP_HOUR" type="number" min="0" max="23" value="${esc(String(s.maintenance?.backup_hour ?? 3))}"></label></div>
-       <label>Адрес для уведомлений о просроченных задачах (необязательно)<input name="NOTIFY_WEBHOOK" value="${esc(s.maintenance?.notify_webhook || '')}" placeholder="https://hooks.slack.com/services/…"></label>
-       <button class="btn primary">Сохранить обслуживание</button>
-      </form>
      </div>
      <div class="card"><h3>Дополнительные параметры</h3>
-      <p><small>Эти настройки хранятся в самой CRM и важнее параметров сервера — править файлы на сервере не нужно.</small></p>
       <form onsubmit="return saveAdvanced(event)">
        <label>Показывать CRM внутри другого сайта<input name="FRAME_ANCESTORS" value="${esc(s.advanced?.frame_ancestors || '')}" placeholder="пусто = запрещено · например https://портал.ru или *"></label>
        <p style="margin:-4px 0 10px"><small>Кому можно показывать CRM внутри своего сайта — например, встроить в портал компании. Пустое поле — никому (безопасно); адрес вида <code>https://портал.ru</code> — только этому сайту; <code>*</code> — любому сайту (не рекомендуется). На обычную работу CRM не влияет.</small></p>
@@ -3038,7 +3026,6 @@ async function settings(v) {
        <p style="margin:-4px 0 10px"><small>Защита от подбора пароля: после указанного числа неудачных попыток вход с этого IP временно блокируется на 5 минут. Для офиса за одним IP ставьте значение повыше, для открытого интернета хватает 10–20.</small></p>
        <button class="btn primary">Сохранить параметры</button>
       </form>
-      <p><small>Начальные данные: <b>${esc(s.seed_mode === 'demo' ? 'демонстрационные примеры' : s.seed_mode === 'base' ? 'базовые (каталог и шаблоны)' : s.seed_mode || 'демо')}</b>. Это влияет только на самую первую установку на пустой базе — потом данные не добавляются и не удаляются.</small></p>
      </div>
     </div></div>`;
   } else if (state.settingsTab === 'profile') {
@@ -3148,11 +3135,10 @@ function builtinFieldsCard() {
   const key = state.builtinTab || 'contacts';
   const set = BUILTIN_FIELDS[key];
   return `<div class="card"><h3>Поля, которые уже есть в карточках</h3>
-   <p class="form-hint" style="margin-top:-2px">Это встроенные поля — они всегда на месте, добавлять их не нужно. Меняются ${esc(set.where)}. Свои поля ниже добавляются к ним и работают так же.</p>
    <div class="tabs" style="margin-bottom:10px">${Object.entries(BUILTIN_FIELDS).map(([k, v]) => `<button class="${k === key ? 'active' : ''}" onclick="setBuiltinTab('${k}')">${esc(v.title)}</button>`).join('')}</div>
    <table class="mini" id="builtinFields"><tr><th>Поле</th><th>Обязательное</th><th>Зачем</th></tr>
     ${set.rows.map(([name, req, why]) => `<tr><td><b>${esc(name)}</b></td><td>${req === 'да' ? '<span class="tag">да</span>' : '<span class="tag grey">нет</span>'}</td><td><small>${esc(why)}</small></td></tr>`).join('')}</table>
-   <p><small>Заметки, теги и историю переписки видно в карточке клиента и сделки: там же заметку можно изменить или удалить. Удалить встроенное поле нельзя — оно часть карточки.</small></p></div>`;
+   </div>`;
 }
 
 async function editField(i) {
