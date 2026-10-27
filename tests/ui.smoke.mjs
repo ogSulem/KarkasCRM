@@ -64,6 +64,7 @@ Object.assign(window, {
   nameFromUri, sendAccountFor, refreshSendAccount, WZ_CHAT_TRANSPORTS, msgTime,
   setConvScope, convScopeList, convMine, convEmptyHtml, openNotifications,
   msgsHtml, dayLabel, saveDraft, loadDrafts, autoGrow, msgKey, showJumpNew, scrollChatBottom, chatScrolled,
+  selectAllVisible, toggleConvSelect, markConvsRead, convRow, imgFail,
   WZ_TRANSPORT_TO_CHAT, WZ_DEAD_STATES, WZ_CHAT_SET, WZ_TRANSPORTS, WZ_STATE_LABELS, wzTransportLabel,
   saveChannel, startConv, submitStartConv, scAddrHint, sendDoc, submitSendDoc,
   saveS3, uploadS3, s3line, cancelQueued
@@ -202,8 +203,36 @@ try {
     window.navCounts({ unread: 0, myTasksOpen: 0, dealsTotal: 0, tasksOverdue: 0 });
     check('без непрочитанных заголовок вкладки обычный', !window.document.title.startsWith('('), window.document.title);
     check('кнопка возврата к новым сообщениям предусмотрена', typeof window.scrollChatBottom === 'function' && typeof window.showJumpNew === 'function' && cssText.includes('.jump-new{position:absolute'));
+    // режим выбора чатов: отметить несколько и пометить прочитанными пачкой
+    window.toggleConvSelect(); await wait(900);
+    check('режим выбора рисует чекбоксы у чатов', $('#convList').innerHTML.includes('conv-check') && /Выбрать все/.test($('#view').innerHTML));
+    window.selectAllVisible('convs'); await wait(900);
+    check('«Выбрать все» отмечает чаты на экране', window.__state.sel.convs.size > 0);
+    check('с выбранными чатами доступна кнопка «Прочитано»', /Прочитано/.test($('#view').innerHTML));
+    window.clearSel('convs');
+    const readId = window.__state.conv || (window.__state.cache.convs[0] || {}).id;
+    window.__state.sel.convs.add(readId);
+    await window.markConvsRead();
+    check('отметка «Прочитано» пачкой прошла и сняла выбор', window.__state.sel.convs.size === 0);
+    window.toggleConvSelect(); await wait(300);
+    check('выход из режима выбора убирает чекбоксы', !$('#convList').innerHTML.includes('conv-check'));
+    // длинное имя клиента не ломает счётчик непрочитанных
+    check('длинное имя обрезается многоточием, счётчик на месте', cssText.includes('.conv b>span:first-child{min-width:0') && cssText.includes('.conv b .badge{flex-shrink:0}'));
     window.go('inbox'); await wait(500);
     check('чат: после перерисовки сообщение на месте', /Проверка сохранения сообщения/.test($('#chatMsgs').textContent));
+  }
+  // «Выбрать все» доступен в списках клиентов и сделок
+  {
+    window.go('contacts'); await wait(700);
+    check('в списке клиентов есть кнопка «Выбрать все»', /Выбрать все/.test($('#view').innerHTML));
+    window.selectAllVisible('contacts');
+    check('«Выбрать все» отмечает видимые строки клиентов', window.__state.sel.contacts.size > 0, 'size=' + window.__state.sel.contacts.size);
+    window.clearSel('contacts');
+    window.go('pipe'); await wait(700);
+    check('в сделках есть кнопка «Выбрать все»', /Выбрать все/.test($('#view').innerHTML));
+    window.selectAllVisible('deals');
+    check('«Выбрать все» отмечает видимые сделки', window.__state.sel.deals.size > 0, 'size=' + window.__state.sel.deals.size);
+    window.clearSel('deals');
   }
 
   // ── шаблоны: только текст ответа, без привязки к каналу ──────────────────
@@ -485,6 +514,12 @@ try {
   check('список каналов различает бота и личный Telegram, а тип чата один', window.wzTransportLabel('telegram') === 'Telegram-бот' && window.wzTransportLabel('tgapi') === 'Telegram' && window.channelLabel('telegram') === 'Telegram');
   const imgMsg = window.msgHtml({ direction: 'out', body: '', content_uri: '/uploads/x.png', content_type: 'image/png', content_name: 'x.png', channel: 'whatsapp', created_at: '2026-01-01 10:00' });
   check('msgHtml рисует изображение-вложение картинкой', imgMsg.includes('chat-attach img') && imgMsg.includes('<img'));
+  check('у картинки есть запасной вариант, если ссылка не открылась', imgMsg.includes('onerror="imgFail(this)"'));
+  const inStat = window.msgHtml({ direction: 'in', body: 'вопрос', status: 'inbound', channel: 'whatsapp', created_at: '2026-10-27 10:00:00' });
+  check('у входящего сообщения нет слова «входящее»', !/входящее/i.test(inStat), inStat);
+  const outStat = window.msgHtml({ direction: 'out', body: 'ответ', status: 'delivered', created_at: '2026-10-27 10:00:00' });
+  check('у исходящего статус подписан', outStat.includes('доставлено'), outStat);
+  check('сообщение без текста показывает понятную заглушку', window.msgHtml({ direction: 'in', body: '', created_at: '2026-10-27 10:00:00' }).includes('Сообщение без текста'));
   const fileMsg = window.msgHtml({ direction: 'in', body: 'Документ', content_uri: '/uploads/a.pdf', content_type: 'application/pdf', content_name: 'смета.pdf', channel: 'whatsapp', created_at: '2026-01-01 10:00' });
   check('msgHtml рисует файл-вложение ссылкой с именем', fileMsg.includes('chat-attach file') && fileMsg.includes('смета.pdf'));
   // пузырь как в нормальном мессенджере: канал один раз, только время, без номера аккаунта и полной даты

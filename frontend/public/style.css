@@ -163,7 +163,19 @@ tr:hover td{background:#fafcfb}
 .inbox>div{background:var(--card);border:1px solid var(--line);border-radius:var(--radius);overflow:auto;box-shadow:var(--shadow)}
 .conv{padding:11px 13px;border-bottom:1px solid #f1f5f9;cursor:pointer}
 .conv:hover{background:#fafcfb}.conv.active{background:var(--green-l);border-left:3px solid var(--green)}
-.conv b{display:flex;justify-content:space-between;font-size:14px}
+.conv b{display:flex;justify-content:space-between;gap:6px;font-size:14px}
+/* длинное имя клиента обрезается многоточием: счётчик непрочитанных
+   всегда на месте и не уезжает за край списка */
+.conv b>span:first-child{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.conv b .badge{flex-shrink:0}
+.conv{position:relative}
+.conv.sel-mode{padding-left:36px}
+.conv-check{position:absolute;left:11px;top:15px;width:16px;height:16px;margin:0}
+.conv.selected{background:var(--green-l)}
+.convs .bulkbar{margin:0;border-radius:0;border-bottom:1px solid var(--line)}
+/* сообщение без текста и вложения не выглядит пустым пузырём */
+.msg-empty{color:var(--muted);font-style:italic}
+.attach-fallback{color:var(--muted);font-size:13px}
 .conv p{margin:2px 0;color:var(--muted);font-size:13px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 /* непрочитанный диалог должен бросаться в глаза: оранжевая метка слева и
    плотный текст превью, пока сотрудник не открыл переписку */

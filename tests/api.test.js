@@ -1185,3 +1185,33 @@ test('непрочитанные личные: чтение одного сот�
   assert.equal(find((await call('/api/conversations', { headers: mh })).body).unread, 0, 'менеджер прочитал — у него ноль');
   assert.equal((await call('/api/dashboard', { headers: mh })).body.unread, d0m, 'счётчик менеджера тоже вернулся к базовому');
 });
+
+test('исходящие из другой CRM видны в чате, эхо своих не дублируется, отметка «прочитано» пачкой', async () => {
+  const hook = body => fetch(base + '/webhooks/wazzup?secret=hook-secret-1', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) }).then(r => r.status);
+  // беседа создаётся обычным входящим
+  assert.equal(await hook({ messages: [{ messageId: 'wz-oc-1', channelId: 'ch-oc', chatType: 'whatsapp', chatId: '79000000005', type: 'text', text: 'Вопрос клиента из другой CRM' }] }), 200);
+  const conv = (await call('/api/conversations')).body.find(c => c.external_chat_id === '79000000005');
+  assert.ok(conv, 'беседа создана по входящему');
+  // ответ коллеги из amoCRM или мобильного приложения: направление исходящее, id не наш
+  assert.equal(await hook({ data: [{ messageId: 'amo-out-9', direction: 'outbound', chatType: 'whatsapp', chatId: '79000000005', text: 'Ответ из другой CRM', status: 'created', sender: { name: 'Коллега' } }] }), 200);
+  let msgs = (await call(`/api/conversations/${conv.id}/messages`)).body;
+  const out = msgs.find(m => m.body === 'Ответ из другой CRM');
+  assert.ok(out, 'исходящее из другой CRM сохранено в истории');
+  assert.equal(out.direction, 'out', 'сообщение видно именно как исходящее');
+  assert.equal(out.status, 'sent', 'служебный статус вендора приведён к понятному');
+  // своя отправка возвращается эхом — второй раз в историю не попадает
+  assert.equal(await hook({ data: [{ messageId: 'karkas-echo-1', direction: 'outbound', chatType: 'whatsapp', chatId: '79000000005', text: 'Эхо своей отправки' }] }), 200);
+  msgs = (await call(`/api/conversations/${conv.id}/messages`)).body;
+  assert.ok(!msgs.some(m => m.body === 'Эхо своей отправки'), 'эхо собственной отправки не дублируется');
+  // отметка «прочитано» сразу для нескольких бесед
+  const d0 = (await call('/api/dashboard')).body.unread;
+  assert.equal(await hook({ messages: [{ messageId: 'wz-oc-2', channelId: 'ch-oc', chatType: 'whatsapp', chatId: '79000000005', type: 'text', text: 'Ещё вопрос' }] }), 200);
+  assert.equal((await call('/api/dashboard')).body.unread, d0 + 1, 'входящее добавило единицу непрочитанных');
+  const r = await call('/api/conversations/read', { method: 'POST', body: JSON.stringify({ ids: [conv.id, 999999] }) });
+  assert.equal(r.body.marked, 1, 'отмечена только существующая беседа');
+  assert.equal((await call('/api/dashboard')).body.unread, d0, 'пачка отметок вернула счётчик к базовому');
+  // внешняя ссылка на вложение сохраняется, даже если файл скачать не удалось
+  assert.equal(await hook({ messages: [{ messageId: 'wz-oc-3', channelId: 'ch-oc', chatType: 'whatsapp', chatId: '79000000005', type: 'text', attachment: { url: 'https://cdn.invalid-host.example/photo.png' } }] }), 200);
+  msgs = (await call(`/api/conversations/${conv.id}/messages`)).body;
+  assert.ok(msgs.some(m => (m.content_uri || '').includes('cdn.invalid-host.example')), 'вложение сохранено со ссылкой вендора как запасной вариант');
+});
