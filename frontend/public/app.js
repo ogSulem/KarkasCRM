@@ -972,20 +972,21 @@ async function openNotifications() {
   const convs = (await api('/api/conversations')).filter(c => c.unread);
   const rowHtml = t => {
     const meta = taskDueMeta(t.due, t.done);
-    return `<div class="row"><span><b>${esc(t.title)}</b><br><small>${esc(meta.label)}${t.contact_name ? ' · ' + esc(t.contact_name) : ''}</small></span>${canEdit() ? `<button class="btn sm mark" onclick="toggleTask(${t.id},1);closeModal()">${icon('check', 13)} Выполнить</button>` : ''}</div>`;
+    return `<div class="row"><span><b>${esc(t.title)}</b><br><small>${esc(meta.label)}${t.contact_name ? ' · ' + esc(t.contact_name) : ''}</small></span>${canEdit() ? `<button class="btn sm" onclick="closeModal();openTask(${t.id})">Открыть</button>` : ''}</div>`;
   };
+  const chatRow = c => `<div class="row"><span style="min-width:0"><b>${esc(c.title)}</b> <span class="badge">${c.unread}</span><br><small>${chan(c.channels)} · ${esc(dt(c.last_at))} · ${esc(String(c.last_body || '').slice(0, 70))}</small></span><button class="btn sm" onclick="closeModal();openConv(${c.id})">Открыть чат</button></div>`;
   const empty = 'Ничего не ждёт — можно спокойно работать с клиентами.';
-  openModal(`<h3>${icon('bell', 18)} Уведомления</h3>
-   <p class="form-hint">Просроченные задачи и новые сообщения клиентов. Сообщения всплывают внизу экрана с кнопкой «Открыть чат».</p>
-   <h4 class="danger-text" style="margin:12px 0 4px">Просрочено: ${over.length}</h4>
+  openModal(`<h3>${icon('bell', 18)} Что ждёт реакции</h3>
+   <p class="form-hint">Три списка: просроченные задачи, планы на сегодня и чаты, где клиент ещё не получил ответ. Всплывающие карточки о новых сообщениях видят ответственный за клиента и администраторы, остальным растёт счётчик в меню.</p>
+   <h4 class="danger-text" style="margin:12px 0 4px">Просроченные задачи: ${over.length}</h4>
    <p class="form-hint" style="margin:0 0 4px">Срок уже прошёл — лучше заняться этим первым.</p>
    ${over.map(rowHtml).join('') || `<small>${empty}</small>`}
-   <h4 style="margin:16px 0 4px;color:var(--green)">Сегодня: ${now.length}</h4>
-   <p class="form-hint" style="margin:0 0 4px">Планы на сегодня — звонки, встречи и письма.</p>
+   <h4 style="margin:16px 0 4px;color:var(--green)">Планы на сегодня: ${now.length}</h4>
+   <p class="form-hint" style="margin:0 0 4px">Звонки, встречи и письма, запланированные на сегодня.</p>
    ${now.map(rowHtml).join('') || '<small>На сегодня задач нет.</small>'}
-   <h4 style="margin:16px 0 4px">${icon('inbox', 15)} Непрочитанные чаты: ${convs.length}</h4>
-   <p class="form-hint" style="margin:0 0 4px">Клиент написал и ждёт ответа.</p>
-   ${convs.map(c => `<div class="row"><span><b>${esc(c.title)}</b><br><small>${esc(c.last_body || '')}</small></span><button class="btn sm" onclick="closeModal();openConv(${c.id})">Открыть чат</button></div>`).join('') || '<small>Все сообщения прочитаны.</small>'}
+   <h4 style="margin:16px 0 4px">${icon('inbox', 15)} Чаты без ответа: ${convs.length}</h4>
+   <p class="form-hint" style="margin:0 0 4px">Непрочитанные сообщения клиентов: цифра на оранжевой метке — сколько писем жду́т реакции.</p>
+   ${convs.map(chatRow).join('') || '<small>Все переписки прочитаны.</small>'}
    <div style="display:flex;gap:8px;flex-wrap:wrap;margin-top:16px">
      <button class="btn sm" onclick="closeModal();goTasks('all','overdue')">Все задачи</button>
      <button class="btn sm" onclick="closeModal();go('inbox')">Все чаты</button>
@@ -1476,21 +1477,57 @@ function attachmentHtml(m) {
   const url = esc(m.content_uri);
   const isImage = (m.content_type || '').startsWith('image/') || /\.(png|jpe?g|gif|webp|svg)$/i.test(m.content_uri);
   if (isImage) return `<a href="${url}" target="_blank" rel="noopener" class="chat-attach img"><img loading="lazy" src="${url}" alt="${esc(m.content_name || 'изображение')}"></a>`;
-  return `<a href="${url}" target="_blank" rel="noopener" class="chat-attach file">${icon('file', 14)}<span>${esc(m.content_name || 'вложение')}</span></a>`;
+  return `<a href="${url}" target="_blank" rel="noopener" class="chat-attach file">${icon('file', 14)}<span>${esc(m.content_name || nameFromUri(url) || 'вложение')}</span></a>`;
 }
 const MSG_STATUS = { sent: 'отправлено', delivered: 'доставлено', read: 'прочитано', inbound: 'входящее', received: 'получено', local: 'сохранено в CRM', error: 'не отправлено' };
 const statusLabel = s => MSG_STATUS[s] || s || '';
+// имя файла из ссылки: пригодится, если файл пришёл без имени
+function nameFromUri(u) { try { const last = String(u || '').split('?')[0].split('/').pop() || ''; const d = decodeURIComponent(last); return d && /\./.test(d) ? d.slice(0, 80) : ''; } catch { return ''; } }
+// аккаунт Wazzup, через который прошло сообщение: человек видит не только
+// мессенджер, но и конкретный номер или бота из своего кабинета
+function wzAccountLabel(id) { const c = (state.channels || []).find(x => x.external_id === id); return c ? (c.label || wzTitle(c)) : ''; }
 function msgHtml(m) {
-  const body = m.body && m.body !== '[вложение]' ? esc(m.body) : '';
+  const attach = attachmentHtml(m);
+  // подпись «Вложение: имя» дублировала бы чип с тем же именем; текст оставляем
+  // только когда это настоящая подпись к файлу или когда файл не открыть
+  const placeholder = /^вложение[:\s]/i.test(String(m.body || '')) || m.body === '[вложение]';
+  const body = m.body && !(placeholder && attach) ? esc(m.body) : '';
   const own = m.direction === 'out';
   const failed = m.status === 'failed';
   const badge = failed ? ' <span class="msg-fail" title="Не доставлено — проверьте подключение канала">не доставлено</span>' : '';
-  return `<div class="msg ${own ? 'out' : ''}"><div>${attachmentHtml(m)}${body}</div><small>${esc(channelLabel(m.channel) || m.channel)} · ${esc(dt(m.created_at))}${!failed && m.status ? ' · ' + esc(statusLabel(m.status)) : ''}${badge}</small></div>`;
+  const acc = wzAccountLabel(m.channel_id);
+  return `<div class="msg ${own ? 'out' : ''}"><div>${attach}${body}</div><small>${esc(channelLabel(m.channel) || m.channel)}${acc ? ' · ' + esc(acc) : ''} · ${esc(dt(m.created_at))}${!failed && m.status ? ' · ' + esc(statusLabel(m.status)) : ''}${badge}</small></div>`;
 }
 // Каналы отправки: сначала те, в которых этот клиент уже писал, затем реально
 // подключённые в Wazzup. Зашитый список показывал заказчику WhatsApp, которого
 // у него нет, и прятал Авито с MAX, которые есть. Почты здесь нет намеренно:
 // письмо отправляется отдельной кнопкой в шапке чата, а не через мессенджер.
+// Какому мессенджеру какие транспорты аккаунтов подходят — зеркало серверной
+// логики выбора: тип чата и аккаунт должны соответствовать друг другу.
+const WZ_CHAT_TRANSPORTS = {
+  whatsapp: ['whatsapp', 'wapi'], whatsgroup: ['whatsgroup'], viber: ['viber'],
+  instagram: ['instagram'], telegram: ['telegram', 'tgapi'], telegroup: ['telegram', 'tgapi'],
+  vk: ['vk'], avito: ['avito'], max: ['max', 'maxbot'], maxgroup: ['max', 'maxbot']
+};
+// С какого аккаунта уйдёт ответ при выбранном мессенджере: порядок тот же, что
+// на сервере — аккаунт клиента, затем свой привязанный, затем любой рабочий.
+function sendAccountFor(conv, chatType) {
+  const fits = t => (WZ_CHAT_TRANSPORTS[chatType] || []).includes(String(t || '').trim().toLowerCase());
+  const rows = state.channels || [];
+  const ownRow = rows.find(c => c.external_id === (conv && conv.channel_id));
+  if (conv && conv.channel_id && (!ownRow || fits(ownRow.transport))) return ownRow ? (ownRow.label || wzTitle(ownRow)) : 'аккаунт, на который писал клиент';
+  const mine = rows.find(c => Number(c.user_id) === Number(meId()) && fits(c.transport) && wzAlive(c));
+  if (mine) return mine.label || wzTitle(mine);
+  const any = rows.find(c => fits(c.transport) && wzAlive(c));
+  return any ? (any.label || wzTitle(any)) : '';
+}
+function refreshSendAccount(convId) {
+  const el = $('#sendAccountHint'); if (!el) return;
+  const conv = (state.cache.convs || []).find(c => Number(c.id) === Number(convId)) || null;
+  const sel = $('#msgChannel');
+  const acc = sendAccountFor(conv, sel ? sel.value : (conv && conv.chat_type) || '');
+  el.textContent = acc ? 'Ответ уйдёт с аккаунта: ' + acc + '. Аккаунт Wazzup подставляется автоматически — тот, на который писал клиент.' : 'Рабочего аккаунта для этого мессенджера нет: проверьте синхронизацию каналов в настройках.';
+}
 function channelOptions(conv) {
   // Почту исключаем: письмо отправляется отдельной кнопкой в шапке чата, а сервер
   // на channel='email' отвечает ошибкой. Пункт, который всегда падает, не нужен.
@@ -1534,7 +1571,7 @@ async function inbox(v) {
 
   v.innerHTML = `${wzNudge}<div class="inbox${cur ? '' : ' list-only'}">
    <div class="convs"><div style="padding:10px;border-bottom:1px solid var(--line)"><input id="convSearch" placeholder="Поиск диалогов" oninput="filterConvs(this.value)"></div>
-   <div id="convList">${convs.map(c => `<div class="conv ${c.id === (cur || {}).id ? 'active' : ''}" onclick="openConv(${c.id})">
+   <div id="convList">${convs.map(c => `<div class="conv ${c.id === (cur || {}).id ? 'active' : ''}${c.unread ? ' unread' : ''}" onclick="openConv(${c.id})">
     <b><span>${esc(c.title)}</span>${c.unread ? `<span class="badge">${c.unread}</span>` : ''}</b>
     <p>${esc(c.last_body || '—')}</p><small>${chan(c.channels)} · ${esc(dt(c.last_at))}</small></div>`).join('') || '<div class="empty">Чатов пока нет</div>'}</div></div>
    <div class="chat">${cur ? `
@@ -1553,11 +1590,13 @@ async function inbox(v) {
      </div>
      <div class="composer-row composer-sub">
        <span class="composer-label">Куда отправить</span>
-       <select id="msgChannel" class="composer-select" title="Канал отправки" aria-label="Куда отправить">${channelOptions(cur)}</select>
+       <select id="msgChannel" class="composer-select" title="Мессенджер отправки" aria-label="Куда отправить" onchange="refreshSendAccount(${cur.id})">${channelOptions(cur)}</select>
        <select id="msgTmpl" class="composer-select" title="Шаблон ответа" onchange="if(this.value){const t=$('#msgText');t.value=this.value;this.value='';t.focus();t.setSelectionRange(t.value.length,t.value.length)}"><option value="">Шаблоны ответов…</option>${templates.map(t => `<option value="${esc(tmpl(t.name, { body: t.body, name: cur.title, sum: cur.deal_amount ? fmt(cur.deal_amount) : '—', date: new Date().toLocaleDateString('ru-RU') }))}">${esc(t.name)}</option>`).join('')}</select>
        <button type="button" class="tmpl-settings" onclick="go('settings','templates')">${icon('settings', 12)} настроить шаблоны</button>
-     </div></form>` : `<div class="composer"><p class="form-hint" style="margin:0">${icon('eye', 14)} Режим просмотра: переписка доступна для чтения, отвечает менеджер или администратор.</p></div>`}` : '<div class="empty">Выберите диалог</div>'}</div>
+     </div>
+     <p class="form-hint" id="sendAccountHint" style="margin:-2px 0 0"></p></form>` : `<div class="composer"><p class="form-hint" style="margin:0">${icon('eye', 14)} Режим просмотра: переписка доступна для чтения, отвечает менеджер или администратор.</p></div>`}` : '<div class="empty">Выберите диалог</div>'}</div>
    <div class="profile">${cur ? `<h3>Клиент</h3><p><b>${esc(cur.title || '')}</b></p><p>${icon('phone', 13)} ${esc(cur.phone || '—')}<br>${icon('email', 13)} ${esc(cur.email || '—')}</p><p>Каналы: ${chan(cur.channels)}${(cur.channels || '').includes('email') ? ' <span class="tag grey">почта подключена</span>' : ''}</p><p><button class="btn sm" onclick="attachContact(${cur.contact_id})">Открыть карточку клиента</button></p><hr><h3>Быстрые действия</h3><div style="display:flex;flex-direction:column;gap:6px">${cur.phone ? `<a class="btn sm" href="tel:${esc(String(cur.phone).replace(/[^+\d]/g, ''))}">${icon('phone', 13)} Позвонить</a>` : ''}${canEdit() ? `<button class="btn sm" onclick="openTask(null,{contact_id:${cur.contact_id}})">+ Задача</button><button class="btn sm" onclick="quickDeal(${cur.contact_id})">+ Сделка</button><button class="btn sm" onclick="quickNote(${cur.contact_id})">+ Заметка</button>` : ''}</div>` : '<div class="empty">Выберите чат</div>'}</div></div>`;
+  if (cur && canEdit()) refreshSendAccount(cur.id);
   const mDiv = $('#chatMsgs');
   if (mDiv) mDiv.scrollTop = mDiv.scrollHeight;
 }
@@ -1576,6 +1615,7 @@ async function refreshInbox() {
     }
     state.cache.convs = await api('/api/conversations');
     filterConvs($('#convSearch')?.value || '');
+    refreshSendAccount(state.conv);
   } catch { }
 }
 
@@ -1583,7 +1623,7 @@ function filterConvs(q) {
   const list = state.cache.convs || [];
   const qL = q.toLowerCase();
   const filtered = list.filter(c => `${c.title} ${c.last_body || ''} ${c.phone || ''}`.toLowerCase().includes(qL));
-  $('#convList').innerHTML = filtered.map(c => `<div class="conv ${c.id === state.conv ? 'active' : ''}" onclick="openConv(${c.id})">
+  $('#convList').innerHTML = filtered.map(c => `<div class="conv ${c.id === state.conv ? 'active' : ''}${c.unread ? ' unread' : ''}" onclick="openConv(${c.id})">
     <b><span>${esc(c.title)}</span>${c.unread ? `<span class="badge">${c.unread}</span>` : ''}</b>
     <p>${esc(c.last_body || '—')}</p><small>${chan(c.channels)} · ${esc(dt(c.last_at))}</small></div>`).join('') || '<div class="empty">Не найдено</div>';
 }
@@ -1609,6 +1649,7 @@ async function sendMsg(e, cid) {
     // обновляем список диалогов: последний текст и счётчик непрочитанных
     state.cache.convs = await api('/api/conversations');
     filterConvs($('#convSearch')?.value || '');
+    refreshSendAccount(state.conv);
   } catch (err) {
     // текст не теряем: возвращаем его в поле и ставим курсор в конец
     if (input.isConnected && !input.value) { input.value = body; input.focus(); }
@@ -3856,7 +3897,10 @@ function connectSSE() {
     // исходящие из другого окна не анонсируем; входящее показываем только если
     // сотрудник не смотрит прямо сейчас этот чат — иначе уведомление мешает
     const sameChat = state.view === 'inbox' && Number(state.conv) === Number(d.conversation_id) && document.hasFocus();
-    if (d.direction !== 'out' && !sameChat) {
+    // чужой клиент не должен отрывать весь офис: уведомление видят ответственный
+    // за беседу или клиента и администраторы; остальные получают только счётчик
+    const mine = !d.for_user || Number(d.for_user) === Number(meId()) || amAdmin();
+    if (d.direction !== 'out' && !sameChat && mine) {
       notify({
         title: 'Новое сообщение', kind: 'message',
         text: `${d.title || 'Клиент'}${d.preview ? ': ' + d.preview : ''}`,

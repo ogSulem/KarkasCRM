@@ -61,6 +61,7 @@ Object.assign(window, {
   ourPriceRows, filterOurPrices, toggleAutomation, openAutomation, noteRow, editNote, lockFormsForViewer, AUTO_TRIGGERS, AUTO_ACTIONS,
   busyButton, priceImportText,
   punyDecodeLabel, humanOrigin, wazzupHookUrl, wzAlive, wzState, wzTitle, closeConv,
+  wzAccountLabel, nameFromUri, sendAccountFor, refreshSendAccount, WZ_CHAT_TRANSPORTS,
   WZ_TRANSPORT_TO_CHAT, WZ_DEAD_STATES, WZ_CHAT_SET, WZ_TRANSPORTS, WZ_STATE_LABELS, wzTransportLabel,
   saveChannel, startConv, submitStartConv, scAddrHint, sendDoc, submitSendDoc,
   saveS3, uploadS3, s3line, cancelQueued
@@ -905,6 +906,8 @@ try {
     const sizes = [...cssText.matchAll(/font-size:(\d+(?:\.\d+)?)px/g)].map(m => +m[1]);
     check('мелкого шрифта не осталось: всё не меньше 11.5px', sizes.length > 20 && Math.min(...sizes) >= 11.5, 'минимум ' + Math.min(...sizes) + 'px из ' + sizes.length);
     check('гарнитура задана переменной и не меняется от темы', cssText.includes('--font-ui') && cssText.includes('font:14px/1.55 var(--font-ui)') && !/data-theme=dark[^{]*\{[^}]*font-family/.test(cssText));
+    check('в тёмной теме видно, какая вкладка настроек активна', cssText.includes('html[data-theme=dark] .tabs button.active{background:var(--green)') && cssText.includes('html[data-theme=dark] .tabs button.active:hover{color:#04170c}'));
+    check('в тёмной теме непрочитанный диалог остаётся заметным', cssText.includes('html[data-theme=dark] .conv.unread{background:rgba(249,115,22,.09)}'));
     check('в тёмной теме докрашены каналы, приоритеты и цветные плашки',
       ['html[data-theme=dark] .chan{', 'html[data-theme=dark] .prio.high{', 'html[data-theme=dark] .card.tint-info{', 'html[data-theme=dark] pre.code-block{'].every(x => cssText.includes(x)));
     check('в интерфейсе не осталось разноцветных inline-плашек', !/background:#f0fdf4|background:#fff7ed|background:#fffbeb/.test(appJsRaw));
@@ -1152,6 +1155,19 @@ try {
   check('в карточке интеграций виден счётчик входящих', /Входящих получено: 1/.test($('#view').textContent), $('#view').textContent.replace(/\s+/g, ' ').slice(0, 160));
   window.go('inbox'); await wait(700);
   check('после первого входящего подсказка исчезает', !/входящий адрес этой CRM/.test($('#view').textContent));
+  check('непрочитанный диалог помечен в списке меткой и фоном', Boolean($('.conv.unread')) && Boolean($('.conv.unread .badge')));
+  check('под списком мессенджеров видно, с какого аккаунта уйдёт ответ', Boolean($('#sendAccountHint')) && /Ответ уйдёт с аккаунта|Рабочего аккаунта/.test($('#sendAccountHint').textContent), $('#sendAccountHint') ? $('#sendAccountHint').textContent : 'нет подсказки');
+  // вложение в пузыре: чип с именем файла без технической подписи рядом
+  check('вложение в пузыре не дублируется подписью «Вложение: …»', !window.msgHtml({ content_uri: 'https://cdn.example/f/otchet.pdf', body: 'Вложение: otchet.pdf', channel: 'maxgroup', direction: 'in' }).includes('Вложение:'));
+  check('вложение без ссылки остаётся понятной строкой', window.msgHtml({ body: 'Вложение: otchet.pdf', channel: 'maxgroup', direction: 'in' }).includes('Вложение: otchet.pdf'));
+  check('имя файла берётся из ссылки, когда имени нет', window.nameFromUri('https://cdn.example/files/prices%20final.pdf?x=1') === 'prices final.pdf');
+  window.__state.channels = [
+    { id: 1, external_id: 'w-alive', transport: 'whatsapp', state: 'active', label: 'WhatsApp — Ирина' },
+    { id: 2, external_id: 'w-dead', transport: 'whatsapp', state: 'blocked', label: 'WhatsApp — склад' }
+  ];
+  check('ответ уходит с аккаунта, на который писал клиент', window.sendAccountFor({ channel_id: 'w-alive' }, 'whatsapp') === 'WhatsApp — Ирина');
+  check('нерабочий аккаунт не подставляется, и чужой мессенджер тоже', window.sendAccountFor({ channel_id: 'w-dead' }, 'telegram') === '');
+  window.__state.channels = [];
   // поле дублирования для второй CRM (параллельная работа с amoCRM)
   check('в карточке есть поле дублирования входящих', appJsRaw.includes('id="wzForward"') && appJsRaw.includes('WAZZUP_FORWARD_URL'));
 
