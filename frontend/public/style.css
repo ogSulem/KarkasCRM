@@ -260,7 +260,7 @@ code{background:#f1f5f9;border-radius:6px;padding:2px 6px;font-size:12.5px;word-
 .toast-item .toast-x{flex:none;border:0;background:none;color:#fff;opacity:.6;cursor:pointer;font-size:16px;line-height:1;padding:0 2px}
 .toast-item .toast-x:hover{opacity:1}
 @keyframes toastIn{from{opacity:0;transform:translateY(8px)}to{opacity:1;transform:none}}
-@media(max-width:560px){#toast{left:12px;right:12px;max-width:none;bottom:12px}}
+@media(max-width:560px){#toast{left:12px;right:12px;max-width:none;bottom:calc(12px + env(safe-area-inset-bottom,0px))}}
 .tpl-row{display:flex;gap:10px;align-items:flex-start;justify-content:space-between;padding:12px 0;border-top:1px solid var(--line)}
 .tpl-row:first-of-type{border-top:0}
 .tpl-main{min-width:0}
@@ -339,6 +339,9 @@ code{background:#eef2f7}
   .inbox.list-only #convList{max-height:none}
   .chat{height:calc(100vh - 190px);height:calc(100dvh - 190px);min-height:360px}
   .chat-back{display:inline-flex;align-items:center;justify-content:center}
+  /* на телефоне боковая панель стоит в самом верху страницы: меню профиля
+     открывается вниз, иначе оно уходило бы за верхний край экрана */
+  .user-menu{bottom:auto;top:calc(100% + 8px)}
   .col{min-width:230px;max-width:230px;max-height:none}
   .modal-card{padding:16px;border-radius:14px}
   .settings-cols{grid-template-columns:1fr}
@@ -353,6 +356,9 @@ code{background:#eef2f7}
   .row{flex-wrap:wrap}
   .head-actions{gap:6px}
   .btn{padding:8px 11px}
+  /* iOS приближает страницу при фокусе поля с мелким текстом — на телефоне
+     шрифт полей ввода не меньше 16px, масштаб не скачет */
+  input,select,textarea{font-size:16px}
   /* по кнопкам попадают пальцем: цель не меньше 40px по высоте, шрифт не мельчает */
   .tabs button{padding:9px 13px;font-size:13.5px;min-height:40px}
   nav button{min-height:40px}
@@ -561,6 +567,9 @@ html[data-theme=dark] label.opt{color:var(--muted)}
 .dropdown-pop{min-width:210px;background:var(--card);border:1px solid var(--line);border-radius:12px;box-shadow:var(--shadow);padding:6px;display:flex;flex-direction:column;gap:2px;z-index:40}
 .dropdown-pop button{all:unset;box-sizing:border-box;display:flex;align-items:center;gap:8px;padding:8px 10px;border-radius:8px;font-size:13.5px;cursor:pointer;color:var(--ink)}
 .dropdown-pop button:hover{background:var(--green-l);color:var(--green-d)}
+/* клавиатурная навигация: у пунктов меню сняты стандартные стили вместе с
+   контуром фокуса — возвращаем его, чтобы было видно, где сейчас выбор */
+.dropdown-pop button:focus-visible,.user-menu-item:focus-visible{outline:2px solid var(--green);outline-offset:1px}
 html[data-theme=dark] .dropdown-pop button:hover{background:#123326;color:#86efac}
 @media(max-width:560px){.dropdown-pop.menu-fixed{max-width:calc(100vw - 16px)}}
 
