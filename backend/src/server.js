@@ -1454,9 +1454,12 @@ export const server = http.createServer(async (req, res) => {
       for (const m of legacy.concat(modern)) {
         // чистое статусное событие — без текста и вложения: обновляет статус уже известного сообщения
         if (m.status && m.status !== 'inbound' && !(m.text || m.contentUri)) { db.prepare('UPDATE messages SET status=? WHERE external_id=?').run(m.status, m.messageId); continue; }
-        // своя отправка возвращается эхом (внешний id начинается с karkas-) — она уже есть в базе;
-        // исходящие из другой CRM или телефона сохраняем: иначе сотрудник видит половину переписки
-        if (m.isEcho || String(m.messageId || '').startsWith('karkas-')) continue;
+        // Свои отправки узнаём по префиксу внешнего id (karkas-) — они уже лежат в базе.
+        // Флагу isEcho на слово не верим: когда обе CRM работают через одну интеграцию
+        // Wazzup (один ключ на всех), ответы менеджеров из amoCRM приходят именно с
+        // isEcho, и история оказывалась половинной — только с сообщениями клиентов.
+        // Повторы гасит уникальный индекс external_id.
+        if (String(m.messageId || '').startsWith('karkas-')) continue;
         if (m.outbound) { await upsertOutgoing(m); continue; }
         await upsertIncoming({ channel: wzChannel(m.chatType), chatType: normChatType(m.chatType), phone: m.contact?.phone || '', chatId: m.chatId || '', name: m.contact?.name || m.authorName || '', body: wzBody(m), contentUri: m.contentUri || '', contentName: m.fileName || wzNameFromUri(m.contentUri), external_id: m.messageId, channelId: m.channelId, author: m.authorName || '' });
       }
@@ -1467,7 +1470,7 @@ export const server = http.createServer(async (req, res) => {
         fetch(fwd, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: rawBody, signal: AbortSignal.timeout(8000) })
           .catch(e => log(`Не удалось продублировать входящие на второй адрес: ${e.message}`, null, null, 'Wazzup'));
       }
-      const inbound = legacy.concat(modern).filter(m => !(m.status && m.status !== 'inbound' && !(m.text || m.contentUri)) && !m.isEcho && !String(m.messageId || '').startsWith('karkas-')).length;
+      const inbound = legacy.concat(modern).filter(m => !(m.status && m.status !== 'inbound' && !(m.text || m.contentUri)) && !String(m.messageId || '').startsWith('karkas-')).length;
       if (inbound) {
         const total = Number(db.prepare("SELECT value FROM settings WHERE key='WZ_HOOK_MSG_TOTAL'").get()?.value || 0) + inbound;
         wzHookMark('WZ_HOOK_MSG_TOTAL', String(total));

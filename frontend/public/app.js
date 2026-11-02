@@ -1529,7 +1529,10 @@ function msgHtml(m) {
   // статус подписываем только у своих сообщений: слово «входящее» под сообщением
   // клиента ничего не добавляло — сторону и так показывает расположение пузыря
   const st = own && !failed && m.status ? esc(statusLabel(m.status)) : '';
-  const meta = [chan, msgTime(m.created_at), st].filter(Boolean).join(' · ') + badge;
+  // исходящее подписал коллега (например, ответил через вторую CRM) — имя в подписи:
+  // сразу видно, кто именно ответил клиенту; свои сообщения именем не помечаем
+  const who = own && m.author && m.author !== (state.me && state.me.name) ? esc(m.author) : '';
+  const meta = [who, chan, msgTime(m.created_at), st].filter(Boolean).join(' · ') + badge;
   const content = attach || body ? `${attach}${body}` : '<span class="msg-empty">Сообщение без текста</span>';
   return `<div class="msg ${own ? 'out' : ''}"><div>${content}</div><small>${meta}</small></div>`;
 }

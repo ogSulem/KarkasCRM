@@ -520,6 +520,12 @@ try {
   const outStat = window.msgHtml({ direction: 'out', body: 'ответ', status: 'delivered', created_at: '2026-10-27 10:00:00' });
   check('у исходящего статус подписан', outStat.includes('доставлено'), outStat);
   check('сообщение без текста показывает понятную заглушку', window.msgHtml({ direction: 'in', body: '', created_at: '2026-10-27 10:00:00' }).includes('Сообщение без текста'));
+  // когда менеджер ответил через вторую CRM, команда видит, кто именно ответил
+  const byColleague = window.msgHtml({ direction: 'out', body: 'ответил коллега', author: 'Коллега из Амо', created_at: '2026-10-27 10:00:00', status: 'delivered' });
+  check('в исходящем от коллеги подписано, кто ответил', byColleague.includes('Коллега из Амо'), byColleague);
+  const myName = (window.__state.me && window.__state.me.name) || '';
+  const byMe = window.msgHtml({ direction: 'out', body: 'мой ответ', author: myName, created_at: '2026-10-27 10:00:00' });
+  check('своё исходящее собственным именем не подписывается', !myName || !byMe.includes(myName));
   const fileMsg = window.msgHtml({ direction: 'in', body: 'Документ', content_uri: '/uploads/a.pdf', content_type: 'application/pdf', content_name: 'смета.pdf', channel: 'whatsapp', created_at: '2026-01-01 10:00' });
   check('msgHtml рисует файл-вложение ссылкой с именем', fileMsg.includes('chat-attach file') && fileMsg.includes('смета.pdf'));
   // пузырь как в нормальном мессенджере: канал один раз, только время, без номера аккаунта и полной даты

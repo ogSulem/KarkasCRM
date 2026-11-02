@@ -1244,3 +1244,27 @@ test('интеграции только для админа, вебхук с с�
   assert.ok(m, 'сообщение сохранено');
   assert.equal(m.content_uri, base + '/api/health', 'внутренний адрес не скачан: ссылка осталась как есть, локальный файл не создан');
 });
+
+test('ответ менеджера через вторую CRM с флагом isEcho виден в истории', async () => {
+  const hook = body => fetch(base + '/webhooks/wazzup?secret=hook-secret-1', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) }).then(r => r.status);
+  assert.equal(await hook({ messages: [{ messageId: 'wz-am-1', channelId: 'ch-am', chatType: 'whatsapp', chatId: '79000000007', type: 'text', text: 'Вопрос клиента при параллельной работе' }] }), 200);
+  const conv = (await call('/api/conversations')).body.find(c => c.external_chat_id === '79000000007');
+  assert.ok(conv, 'беседа создана');
+  // менеджер ответил через amoCRM: для общей интеграции Wazzup такое сообщение
+  // приходит с isEcho — оно обязано остаться в истории исходящим
+  assert.equal(await hook({ data: [{ messageId: 'amo-echo-77', direction: 'outbound', isEcho: true, chatType: 'whatsapp', chatId: '79000000007', text: 'Ответ менеджера из второй CRM', status: 'delivered', sender: { name: 'Коллега из Амо' } }] }), 200);
+  let msgs = (await call(`/api/conversations/${conv.id}/messages`)).body;
+  const out = msgs.find(m => m.body === 'Ответ менеджера из второй CRM');
+  assert.ok(out, 'исходящее с isEcho сохранено: ответы через вторую CRM видны');
+  assert.equal(out.direction, 'out', 'сообщение встало в историю исходящим');
+  assert.equal(out.status, 'delivered', 'статус доставки сохранён');
+  assert.equal(out.author, 'Коллега из Амо', 'имя ответившего сохранено');
+  // собственная отправка узнаётся по префиксу внешнего id и не дублируется
+  assert.equal(await hook({ data: [{ messageId: 'karkas-own-77', direction: 'outbound', isEcho: true, chatType: 'whatsapp', chatId: '79000000007', text: 'Своя отправка эхом' }] }), 200);
+  msgs = (await call(`/api/conversations/${conv.id}/messages`)).body;
+  assert.ok(!msgs.some(m => m.body === 'Своя отправка эхом'), 'эхо собственной отправки не дублируется');
+  // повтор того же события второй строкой не появляется
+  assert.equal(await hook({ data: [{ messageId: 'amo-echo-77', direction: 'outbound', isEcho: true, chatType: 'whatsapp', chatId: '79000000007', text: 'Ответ менеджера из второй CRM', status: 'delivered', sender: { name: 'Коллега из Амо' } }] }), 200);
+  msgs = (await call(`/api/conversations/${conv.id}/messages`)).body;
+  assert.equal(msgs.filter(m => m.body === 'Ответ менеджера из второй CRM').length, 1, 'повтор события не дублирует сообщение');
+});
