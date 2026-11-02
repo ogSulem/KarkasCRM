@@ -1084,6 +1084,12 @@ try {
   check('эмодзи нет в app.js', !hasEmojis(appJsRaw));
   check('эмодзи нет в style.css', !hasEmojis(cssText));
   check('эмодзи нет в server.js', !hasEmojis(serverJsRaw));
+  // мобильная вёрстка: меню профиля не уходит за экран, iOS не зумит поля, тосты выше системной полосы
+  check('на телефоне меню профиля открывается вниз', /@media\(max-width:900px\)/.test(cssText) && cssText.includes('.user-menu{bottom:auto;top:calc(100% + 8px)}'));
+  check('на телефоне поля ввода не мельче 16px — iOS не масштабирует страницу', cssText.includes('input,select,textarea{font-size:16px}'));
+  check('тосты не прячутся под системную полосу телефона', cssText.includes('bottom:calc(12px + env(safe-area-inset-bottom,0px))'));
+  check('пункты меню видны при навигации с клавиатуры', cssText.includes('.dropdown-pop button:focus-visible,.user-menu-item:focus-visible'));
+  check('страница объявлена адаптивной', html.includes('width=device-width') && html.includes('viewport-fit=cover'));
   check('скачивание вложений защищено от внутренних адресов', serverJsRaw.includes('safeRemoteUrl') && serverJsRaw.includes('isPublicIp') && serverJsRaw.includes("redirect: 'manual'"));
   check('регистрация вебхука Wazzup только для администратора', /wazzup\/webhook' && req\.method === 'POST'\) \{ if \(!requireAdmin/.test(serverJsRaw));
   check('вебхук регистрируется только с секретом', serverJsRaw.includes("if (!hookU.searchParams.has('secret')) hookU.searchParams.set('secret', hookSecret)"));
