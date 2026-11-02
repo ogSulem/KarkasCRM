@@ -995,12 +995,12 @@ try {
   }
 
   // ── роли ─────────────────────────────────────────────────────────────────
-  await apiPost('/api/users', { name: 'Менеджер Тест', email: 'mgr_ui@example.com', password: 'password123', role: 'manager' });
-  let mgrLogin = await (await fetch(BASE + '/api/auth/login', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ email: 'mgr_ui@example.com', password: 'password123' }) })).json();
+  await apiPost('/api/users', { name: 'Менеджер Тест', email: 'mgr_ui@example.com', password: 'password12345', role: 'manager' });
+  let mgrLogin = await (await fetch(BASE + '/api/auth/login', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ email: 'mgr_ui@example.com', password: 'password12345' }) })).json();
   // временный пароль обязывает сменить его при первом входе: без этого любой
   // запрос менеджера отвечал 403 и проверки прав теряли смысл
   if (mgrLogin.user?.must_change_password) {
-    const ch = await (await fetch(BASE + '/api/me/password', { method: 'POST', headers: { 'Content-Type': 'application/json', Authorization: 'Bearer ' + mgrLogin.token }, body: JSON.stringify({ old_password: 'password123', new_password: 'password1234' }) })).json();
+    const ch = await (await fetch(BASE + '/api/me/password', { method: 'POST', headers: { 'Content-Type': 'application/json', Authorization: 'Bearer ' + mgrLogin.token }, body: JSON.stringify({ old_password: 'password12345', new_password: 'password1234' }) })).json();
     mgrLogin = { ...mgrLogin, token: ch.token };
   }
   const mgrToken = mgrLogin.token;
@@ -1009,8 +1009,8 @@ try {
   check('менеджеру запрещено менять настройки (403)', set403.status === 403);
   const logoGone = await fetch(BASE + '/api/logo', { method: 'POST', headers: { 'Content-Type': 'application/json', Authorization: 'Bearer ' + mgrToken }, body: JSON.stringify({}) });
   check('загрузка фото-логотипа больше не существует (404)', logoGone.status === 404);
-  await apiPost('/api/users', { name: 'Наблюдатель Тест', email: 'view_ui@example.com', password: 'password123', role: 'viewer' });
-  const viewLogin = await (await fetch(BASE + '/api/auth/login', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ email: 'view_ui@example.com', password: 'password123' }) })).json();
+  await apiPost('/api/users', { name: 'Наблюдатель Тест', email: 'view_ui@example.com', password: 'password12345', role: 'viewer' });
+  const viewLogin = await (await fetch(BASE + '/api/auth/login', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ email: 'view_ui@example.com', password: 'password12345' }) })).json();
   const view403 = await fetch(BASE + '/api/contacts', { method: 'POST', headers: { 'Content-Type': 'application/json', Authorization: 'Bearer ' + viewLogin.token }, body: JSON.stringify({ name: 'Hack' }) });
   check('наблюдатель не может создавать записи (403)', view403.status === 403);
   const auto403 = await fetch(BASE + '/api/automations', { method: 'POST', headers: { 'Content-Type': 'application/json', Authorization: 'Bearer ' + mgrToken }, body: JSON.stringify({ name: 'Правило менеджера' }) });
@@ -1095,6 +1095,8 @@ try {
   check('на телефоне поля ввода не мельче 16px — iOS не масштабирует страницу', cssText.includes('input,select,textarea{font-size:16px}'));
   check('тосты не прячутся под системную полосу телефона', cssText.includes('bottom:calc(12px + env(safe-area-inset-bottom,0px))'));
   check('пункты меню видны при навигации с клавиатуры', cssText.includes('.dropdown-pop button:focus-visible,.user-menu-item:focus-visible'));
+  check('пароль сотрудника — минимум 12 символов, как при смене', appJsRaw.includes('minlength="12"') && appJsRaw.includes('(мин. 12 символов)') && serverJsRaw.includes('b.password.length < 12'));
+  check('массовое «Выполнено» продлевает повторяющиеся задачи', serverJsRaw.includes("if (table === 'tasks' && Number(patch.done) === 1) for (const id of ids) extendRepeatingTask(id, user.name)"));
   check('страница объявлена адаптивной', html.includes('width=device-width') && html.includes('viewport-fit=cover'));
   check('скачивание вложений защищено от внутренних адресов', serverJsRaw.includes('safeRemoteUrl') && serverJsRaw.includes('isPublicIp') && serverJsRaw.includes("redirect: 'manual'"));
   check('регистрация вебхука Wazzup только для администратора', /wazzup\/webhook' && req\.method === 'POST'\) \{ if \(!requireAdmin/.test(serverJsRaw));

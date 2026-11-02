@@ -1334,11 +1334,29 @@ const ADMIN_ONLY_HINT = [
   [/^\/api\/prices\/ours(\/.*)?$/, 'Прайс-лист меняет только администратор. Позицию, которой нет в каталоге, можно добавить прямо в сделку.'],
 ];
 function requireAdmin(user, res) { if (user.role !== 'admin') { json(res, 403, { error: 'Только для администратора' }); return false; } return true; }
+// Закрыли повторяющуюся задачу — сразу создаём следующую по расписанию.
+// Отсчёт от сегодня, а не от просроченной даты: закрытая с опозданием задача
+// не должна порождать новую уже просроченную. Одиночное и массовое «Выполнено»
+// пользуют одну функцию, чтобы поведение не разъезжалось.
+function extendRepeatingTask(id, byName) {
+  const t = db.prepare('SELECT * FROM tasks WHERE id=?').get(id);
+  if (!t || !t.repeat || t.repeat === 'none') return null;
+  const days = { daily: 1, weekly: 7, monthly: 30 }[t.repeat] || 0;
+  if (!days) return null;
+  const base = /^\d{4}-\d{2}-\d{2}/.test(t.due || '') ? new Date(String(t.due).replace(' ', 'T')) : new Date();
+  const next = new Date(Math.max(base.getTime(), Date.now()) + days * 864e5);
+  const time = /\d{2}:\d{2}/.test(t.due || '') ? String(t.due).slice(-5) : '10:00';
+  const due = `${localDate(next)} ${time}`;
+  const r = db.prepare('INSERT INTO tasks(title,type,due,priority,done,deal_id,contact_id,responsible_id,result,repeat) VALUES(?,?,?,?,0,?,?,?,?,?)')
+    .run(t.title, t.type, due, t.priority || 'normal', t.deal_id, t.contact_id, t.responsible_id, t.result, t.repeat);
+  log(`Повторяющаяся задача «${t.title}» продлена до ${due}`, 'tasks', Number(r.lastInsertRowid), byName);
+  return Number(r.lastInsertRowid);
+}
 
 function validateUser(b, creating = false) {
   if ((creating || b.name !== undefined) && (typeof b.name !== 'string' || !b.name.trim())) return 'Укажите имя';
   if ((creating || b.email !== undefined) && (typeof b.email !== 'string' || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(b.email.trim()))) return 'Укажите корректный e-mail';
-  if ((creating || b.password) && (typeof b.password !== 'string' || b.password.length < 8 || b.password.length > 256)) return 'Пароль должен содержать от 8 до 256 символов';
+  if ((creating || b.password) && (typeof b.password !== 'string' || b.password.length < 12 || b.password.length > 256)) return 'Пароль должен содержать от 12 до 256 символов';
   if (b.role !== undefined && !['admin', 'manager', 'viewer'].includes(b.role)) return 'Неизвестная роль';
   if (b.active !== undefined && ![0, 1].includes(b.active)) return 'Некорректный статус';
 }
@@ -1884,19 +1902,8 @@ export const server = http.createServer(async (req, res) => {
         // закрыли повторяющуюся задачу — сразу создаём следующую по расписанию
         let nextTaskId = null;
         if (table === 'tasks' && Number(b.done) === 1) {
-          const t = db.prepare('SELECT * FROM tasks WHERE id=?').get(id);
-          if (t && t.repeat && t.repeat !== 'none') {
-            const days = { daily: 1, weekly: 7, monthly: 30 }[t.repeat] || 0;
-            const base = /^\d{4}-\d{2}-\d{2}/.test(t.due || '') ? new Date(String(t.due).replace(' ', 'T')) : new Date();
-            const next = new Date(Math.max(base.getTime(), Date.now()) + days * 864e5);
-            const time = /\d{2}:\d{2}/.test(t.due || '') ? String(t.due).slice(-5) : '10:00';
-            const due = `${localDate(next)} ${time}`;
-            const r = db.prepare('INSERT INTO tasks(title,type,due,priority,done,deal_id,contact_id,responsible_id,result,repeat) VALUES(?,?,?,?,0,?,?,?,?,?)')
-              .run(t.title, t.type, due, t.priority || 'normal', t.deal_id, t.contact_id, t.responsible_id, t.result, t.repeat);
-            nextTaskId = Number(r.lastInsertRowid);
-            log(`Повторяющаяся задача «${t.title}» продлена до ${due}`, 'tasks', nextTaskId, user.name);
-            broadcast('change', { table: 'tasks' });
-          }
+          nextTaskId = extendRepeatingTask(id, user.name);
+          if (nextTaskId) broadcast('change', { table: 'tasks' });
         }
         broadcast('change', { table });
         const row = db.prepare(`SELECT * FROM ${table} WHERE id=?`).get(id);
@@ -2689,6 +2696,9 @@ ${user?.name || ''}`.trim();
         } else {
           const st = db.prepare(`UPDATE ${table} SET ${ks.map(k => k + '=?').join(',')} WHERE id=?`);
           for (const id of ids) applied += st.run(...ks.map(k => patch[k]), id).changes;
+          // массовое «Выполнено» продлевает повторяющиеся задачи так же, как
+          // одиночное: иначе цепочка ежедневных задач обрывалась бы после отметки списком
+          if (table === 'tasks' && Number(patch.done) === 1) for (const id of ids) extendRepeatingTask(id, user.name);
         }
         if (assignedTo && assignedCount && assignedTo !== Number(user.id)) {
           // одна сводка вместо сотни одинаковых тостов при массовой передаче
