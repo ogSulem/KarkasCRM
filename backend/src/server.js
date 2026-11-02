@@ -2423,22 +2423,29 @@ ${user?.name || ''}`.trim();
       const b = await readBody(req);
       // CSV с кавычками: простой split по ; или , ломается на полях «Иван;Иванов»
       const parseCsvLine = line => { const out = []; let cur = '', q = false; for (let i = 0; i < line.length; i++) { const ch = line[i]; if (ch === '"') { if (q && line[i + 1] === '"') { cur += '"'; i++ } else q = !q } else if ((ch === ';' || ch === ',') && !q) { out.push(cur); cur = '' } else cur += ch } out.push(cur); return out.map(x => x.trim()) };
-      const lines = String(b.csv || '').split(/\r?\n/).filter(l => l.trim());
+      // BOM (невидимый байт порядка байтов) встречается в файлах из Excel —
+      // без снятия он приклеивался к имени первого контакта и ломал поиск
+      const lines = String(b.csv || '').replace(/^\uFEFF/, '').split(/\r?\n/).filter(l => l.trim());
       if (!lines.length) return json(res, 400, { error: 'Пустой CSV — вставьте строки с контактами' });
       if (lines.length > 5001) return json(res, 400, { error: 'За один раз можно импортировать не больше 5000 контактов — разбейте файл на части' });
-      const start = /^(имя|name)\b/i.test(lines[0]) ? 1 : 0; // первая строка — заголовок
+      // \b с кириллицей не работает («я» не входит в \w) — русский заголовок «Имя;…»
+      // не определялся и импортировался контактом; lookahead покрывает оба алфавита
+      const start = /^(имя|name)(?![а-яёa-z])/i.test(lines[0]) ? 1 : 0; // первая строка — заголовок
       let n = 0, skipped = 0;
       const ins = db.prepare('INSERT INTO contacts(name,phone,email,company,source,phone_norm) VALUES(?,?,?,?,?,?)');
       const exists = db.prepare('SELECT id FROM contacts WHERE phone_norm=?');
+      const existsEmail = db.prepare('SELECT id FROM contacts WHERE lower(email)=lower(?)');
       db.exec('BEGIN IMMEDIATE');
       try {
         for (const line of lines.slice(start)) {
           const [name, phone, email, company] = parseCsvLine(line);
           if (!name) continue;
           const norm = digits(phone) || null;
-          // повторный импорт того же файла не плодит дубли
-          if (norm && exists.get(norm)) { skipped++; continue }
-          ins.run(name.slice(0, 120), phone || '', email || '', company || '', 'import', norm); n++;
+          const mail = String(email || '').trim();
+          // повторный импорт того же файла не плодит дубли: сверяем телефон,
+          // а когда его нет — почту (раньше строки без телефона дублировались)
+          if (norm ? exists.get(norm) : (mail && existsEmail.get(mail))) { skipped++; continue }
+          ins.run(name.slice(0, 120), phone || '', mail, company || '', 'import', norm); n++;
         }
         db.exec('COMMIT');
       } catch (e) { db.exec('ROLLBACK'); throw e }
