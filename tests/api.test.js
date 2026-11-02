@@ -235,9 +235,9 @@ test('автоматизации, шаблоны, интеграции, кома
   assert.equal(test.status, 400, 'без реального ключа Wazzup возвращается понятная ошибка');
   // команда и роли
   const mgr = (await call('/api/users', { method: 'POST', body: JSON.stringify({ name: 'Менеджер', email: 'mgr@example.com', password: 'manager12345', role: 'manager' }) })).body;
-  const vw = (await call('/api/users', { method: 'POST', body: JSON.stringify({ name: 'Наблюдатель', email: 'view@example.com', password: 'viewer12345', role: 'viewer' }) })).body;
+  const vw = (await call('/api/users', { method: 'POST', body: JSON.stringify({ name: 'Наблюдатель', email: 'view@example.com', password: 'viewer123456', role: 'viewer' }) })).body;
   const mgrToken = (await readyLogin('/api/auth/login', { method: 'POST', body: JSON.stringify({ email: 'mgr@example.com', password: 'manager12345' }) })).body.token;
-  const vwToken = (await readyLogin('/api/auth/login', { method: 'POST', body: JSON.stringify({ email: 'view@example.com', password: 'viewer12345' }) })).body.token;
+  const vwToken = (await readyLogin('/api/auth/login', { method: 'POST', body: JSON.stringify({ email: 'view@example.com', password: 'viewer123456' }) })).body.token;
   assert.ok(mgrToken && vwToken);
   const adminH = h; h = { Authorization: 'Bearer ' + mgrToken };
   assert.equal((await call('/api/settings', { method: 'PUT', body: JSON.stringify({ COMPANY_NAME: 'x' }) })).status, 403, 'менеджер не меняет настройки');
@@ -1267,4 +1267,23 @@ test('ответ менеджера через вторую CRM с флагом 
   assert.equal(await hook({ data: [{ messageId: 'amo-echo-77', direction: 'outbound', isEcho: true, chatType: 'whatsapp', chatId: '79000000007', text: 'Ответ менеджера из второй CRM', status: 'delivered', sender: { name: 'Коллега из Амо' } }] }), 200);
   msgs = (await call(`/api/conversations/${conv.id}/messages`)).body;
   assert.equal(msgs.filter(m => m.body === 'Ответ менеджера из второй CRM').length, 1, 'повтор события не дублирует сообщение');
+});
+
+test('массовое выполнение повторяющейся задачи продлевает цепочку, пароль короче 12 отклоняется', async () => {
+  const created = await call('/api/tasks', { method: 'POST', body: JSON.stringify({ title: 'Ежедневная планёрка', type: 'call', due: '2026-11-02 10:00', repeat: 'daily' }) });
+  assert.equal(created.status, 201, 'повторяющаяся задача создана');
+  const id = created.body.id;
+  const r = await call('/api/bulk', { method: 'POST', body: JSON.stringify({ table: 'tasks', action: 'update', ids: [id], patch: { done: 1 } }) });
+  assert.equal(r.body.count, 1, 'массовое выполнение сработало');
+  const rows = (await call('/api/tasks')).body;
+  const orig = rows.find(x => x.id === id);
+  assert.equal(Number(orig.done), 1, 'задача выполнена');
+  const next = rows.find(x => x.title === 'Ежедневная планёрка' && x.id !== id && !x.done);
+  assert.ok(next, 'массовое выполнение создало следующий повтор, цепочка не оборвалась');
+  assert.ok(next.due > orig.due, 'новый срок позже закрытого: ' + next.due + ' > ' + orig.due);
+  assert.equal(next.repeat, 'daily', 'повтор унаследован');
+  // пароль сотрудника: единый минимум 12 символов — и при создании, и при смене
+  const weak = await call('/api/users', { method: 'POST', body: JSON.stringify({ name: 'Слабый Пароль', email: 'weakpass@example.com', password: 'short12345', role: 'manager' }) });
+  assert.equal(weak.status, 400, 'пароль короче 12 символов отклонён');
+  assert.match(weak.body.error, /от 12 до 256/, 'сообщение объясняет правило');
 });
