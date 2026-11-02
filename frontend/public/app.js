@@ -2858,7 +2858,7 @@ async function settings(v) {
       <div style="display:flex;gap:8px;flex-wrap:wrap"><button class="btn primary" onclick="saveWazzup()">Сохранить</button><button class="btn" onclick="testWazzup()">${icon('sync', 13)} Проверить и синхронизировать каналы</button></div>
       <hr><p><b>Адрес, по которому Wazzup присылает сообщения</b></p>
       ${hookLine(wazzupHookUrl(s))}
-      <p><small>${s.wazzup.webhook_secret ? 'Секрет в адресе — пароль от этой двери: без него чужие люди не смогут присылать поддельные сообщения.' : 'Секрет не задан: адрес примет сообщение от любого, кто его узнает. Для работы в интернете лучше задать секрет выше.'}</small></p>
+      <p><small>${s.wazzup.webhook_secret ? 'Секрет в адресе — пароль от этой двери: без него чужие люди не смогут присылать поддельные сообщения.' : 'Секрет не задан: адрес примет сообщение от любого, кто его узнает. Нажмите «Зарегистрировать адрес автоматически» — секрет создастся сам и встроится в адрес, либо задайте его вручную выше.'}</small></p>
       ${s.wazzup.configured ? `<p><small>${s.wazzup.hook_msgs
         ? `Входящих получено: ${s.wazzup.hook_msgs}, последнее — ${esc(s.wazzup.hook_last_human)}.`
         : s.wazzup.hook_test_at ? `Проверочный запрос Wazzup прошёл ${esc(s.wazzup.hook_test_human)}, сообщений пока не было.`

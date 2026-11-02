@@ -1084,6 +1084,9 @@ try {
   check('эмодзи нет в app.js', !hasEmojis(appJsRaw));
   check('эмодзи нет в style.css', !hasEmojis(cssText));
   check('эмодзи нет в server.js', !hasEmojis(serverJsRaw));
+  check('скачивание вложений защищено от внутренних адресов', serverJsRaw.includes('safeRemoteUrl') && serverJsRaw.includes('isPublicIp') && serverJsRaw.includes("redirect: 'manual'"));
+  check('регистрация вебхука Wazzup только для администратора', /wazzup\/webhook' && req\.method === 'POST'\) \{ if \(!requireAdmin/.test(serverJsRaw));
+  check('вебхук регистрируется только с секретом', serverJsRaw.includes("if (!hookU.searchParams.has('secret')) hookU.searchParams.set('secret', hookSecret)"));
   check('эмодзи нет в competitors.js', !hasEmojis(competitorsJsRaw));
   const productText = html + appJsRaw + cssText;
   check('в интерфейсе нет технического мусора seed', !/SEED_DEMO|seed-demo/.test(productText));
