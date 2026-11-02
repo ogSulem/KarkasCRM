@@ -295,7 +295,9 @@ test('отправка сообщения клиенту через Wazzup (ск
     assert.equal(chans[0].phone, '79991112233', 'plainId сохранён как номер');
     assert.equal(chans[0].name, '79991112233', 'поля name в API Wazzup нет — название берём из plainId');
     await call('/api/integrations/wazzup/webhook', { method: 'POST', body: JSON.stringify({ url: 'https://crm.example.com/webhooks/wazzup' }) });
-    assert.equal(globalThis.__wzHook.webhooksUri, 'https://crm.example.com/webhooks/wazzup', 'вебхук зарегистрирован в Wazzup');
+    const regUri = new URL(globalThis.__wzHook.webhooksUri);
+    assert.equal(regUri.origin + regUri.pathname, 'https://crm.example.com/webhooks/wazzup', 'вебхук зарегистрирован в Wazzup');
+    assert.ok((regUri.searchParams.get('secret') || '').length >= 16, 'в адрес встроен секрет: поддельные входящие не пройдут');
     // без подписок Wazzup не присылает события вовсе
     assert.equal(globalThis.__wzHook.subscriptions.messagesAndStatuses, true, 'подписка на сообщения и статусы включена');
     assert.equal(globalThis.__wzHook.subscriptions.channelsUpdates, true, 'подписка на изменения каналов включена');
@@ -1214,4 +1216,31 @@ test('исходящие из другой CRM видны в чате, эхо с
   assert.equal(await hook({ messages: [{ messageId: 'wz-oc-3', channelId: 'ch-oc', chatType: 'whatsapp', chatId: '79000000005', type: 'text', attachment: { url: 'https://cdn.invalid-host.example/photo.png' } }] }), 200);
   msgs = (await call(`/api/conversations/${conv.id}/messages`)).body;
   assert.ok(msgs.some(m => (m.content_uri || '').includes('cdn.invalid-host.example')), 'вложение сохранено со ссылкой вендора как запасной вариант');
+});
+
+test('интеграции только для админа, вебхук с секретом, вложения не качаются с внутренних адресов', async () => {
+  await call('/api/users', { method: 'POST', body: JSON.stringify({ name: 'Интегратор', email: 'integrator@example.com', password: 'integrator12345', role: 'manager' }) });
+  const mLogin = await readyLogin('/api/auth/login', { method: 'POST', body: JSON.stringify({ email: 'integrator@example.com', password: 'integrator12345' }) });
+  const mh = { Authorization: 'Bearer ' + mLogin.body.token };
+  // сотрудник не может перенаправить приём входящих или дёргать внешние API
+  const reg = await call('/api/integrations/wazzup/webhook', { method: 'POST', headers: mh, body: JSON.stringify({ url: 'https://crm.example/webhooks/wazzup' }) });
+  assert.equal(reg.status, 403, 'регистрация вебхука доступна только администратору');
+  assert.equal((await call('/api/integrations/wazzup/sync', { method: 'POST', headers: mh })).status, 403, 'синхронизация каналов — только админ');
+  assert.equal((await call('/api/integrations/wazzup/test', { method: 'POST', headers: mh })).status, 403, 'проверка Wazzup — только админ');
+  assert.equal((await call('/api/integrations/email/test', { method: 'POST', headers: mh, body: JSON.stringify({ to: 'x@example.com' }) })).status, 403, 'проверка почты — только админ');
+  // адрес вебхука регистрируется только с секретом: без кода защиты входящие мог бы слать кто угодно
+  const noSecret = await fetch(base + '/webhooks/wazzup', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ messages: [{ messageId: 'evil-1', chatType: 'whatsapp', chatId: '79000000009', type: 'text', text: 'Подделка без секрета' }] }) });
+  assert.equal(noSecret.status, 403, 'вебхук без секрета не принимает сообщения');
+  const evilConvs = (await call('/api/conversations')).body;
+  assert.ok(!evilConvs.some(c => c.external_chat_id === '79000000009'), 'поддельное сообщение не создало беседу');
+  // SSRF: ссылка на внутренний адрес в вебхуке не скачивается и не подменяется локальным файлом
+  const hook = body => fetch(base + '/webhooks/wazzup?secret=hook-secret-1', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) }).then(r => r.status);
+  assert.equal(await hook({ messages: [{ messageId: 'wz-ssrf-1', channelId: 'ch-s', chatType: 'whatsapp', chatId: '79000000006', type: 'text', attachment: { url: base + '/api/health' } }] }), 200);
+  await new Promise(r => setTimeout(r, 500));
+  const conv = (await call('/api/conversations')).body.find(c => c.external_chat_id === '79000000006');
+  assert.ok(conv, 'беседа с вложением создана');
+  const msgs = (await call(`/api/conversations/${conv.id}/messages`)).body;
+  const m = msgs.find(x => x.external_id === 'wz-ssrf-1');
+  assert.ok(m, 'сообщение сохранено');
+  assert.equal(m.content_uri, base + '/api/health', 'внутренний адрес не скачан: ссылка осталась как есть, локальный файл не создан');
 });

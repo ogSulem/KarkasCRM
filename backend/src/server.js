@@ -6,6 +6,7 @@ import { DatabaseSync } from 'node:sqlite';
 import { createHmac, randomBytes, scrypt, scryptSync, timingSafeEqual } from 'node:crypto';
 import { promisify } from 'node:util';
 import { gzipSync } from 'node:zlib';
+import { lookup as dnsLookup } from 'node:dns/promises';
 // подпись запросов к S3-хранилищу — тот же модуль, что использует скрипт выгрузки
 import { signedHeaders } from '../../scripts/s3-sign.mjs';
 import { readFileSync, writeFileSync, existsSync, mkdirSync, chmodSync, statSync, readdirSync, unlinkSync, copyFileSync, mkdirSync as mkdir, createReadStream } from 'node:fs';
@@ -740,9 +741,44 @@ async function upsertOutgoing(m) {
 // в истории остаётся пустой пузырь. Забираем файл к себе фоном: ответ вебхуку
 // уходит сразу, а когда копия скачана, ссылка подменяется на локальную.
 const ATTACH_EXT = { 'image/png': 'png', 'image/jpeg': 'jpg', 'image/gif': 'gif', 'image/webp': 'webp', 'image/svg+xml': 'svg', 'application/pdf': 'pdf', 'text/plain': 'txt', 'text/csv': 'csv', 'application/zip': 'zip', 'application/msword': 'doc', 'application/vnd.openxmlformats-officedocument.wordprocessingml.document': 'docx', 'application/vnd.ms-excel': 'xls', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet': 'xlsx', 'video/mp4': 'mp4', 'audio/mpeg': 'mp3', 'audio/ogg': 'ogg' };
+// Вложение забираем только с публичных адресов: ссылка из вебхука не должна
+// становиться способом заглянуть на внутренние ресурсы сервера (SSRF).
+// Перенаправления проходим вручную и каждый адрес проверяем заново.
+const isPublicIp = ip => {
+  if (!ip || ip.includes(':') || ip.includes('%')) return false;
+  const [a, b] = ip.split('.').map(Number);
+  if (!Number.isFinite(a) || !Number.isFinite(b)) return false;
+  if (a === 0 || a === 10 || a === 127) return false;
+  if (a === 169 && b === 254) return false;
+  if (a === 172 && b >= 16 && b <= 31) return false;
+  if (a === 192 && b === 168) return false;
+  return a < 224;
+};
+async function safeRemoteUrl(raw) {
+  let url; try { url = new URL(String(raw)); } catch { return null; }
+  if (!/^https?:$/.test(url.protocol)) return null;
+  if (/^(localhost|.*\.localhost|.*\.local|.*\.internal)$/i.test(url.hostname)) return null;
+  if (url.hostname.startsWith('[')) return null;
+  const ips = await dnsLookup(url.hostname, { all: true }).catch(() => []);
+  if (!ips.length || !ips.every(i => isPublicIp(i.address))) return null;
+  return url;
+}
 async function fetchAttachment(uri) {
-  const res = await fetch(uri, { signal: AbortSignal.timeout(15000), redirect: 'follow' });
-  if (!res.ok) return null;
+  let url = await safeRemoteUrl(uri);
+  if (!url) return null;
+  let res = null;
+  for (let hop = 0; hop < 3; hop++) {
+    res = await fetch(url, { signal: AbortSignal.timeout(15000), redirect: 'manual' });
+    if ([301, 302, 303, 307, 308].includes(res.status)) {
+      const loc = res.headers.get('location');
+      if (!loc) break;
+      url = await safeRemoteUrl(new URL(loc, url).toString());
+      if (!url) return null;
+      continue;
+    }
+    break;
+  }
+  if (!res || !res.ok) return null;
   if (Number(res.headers.get('content-length') || 0) > 15 * 1024 * 1024) return null;
   const buf = Buffer.from(await res.arrayBuffer());
   if (!buf.length || buf.length > 15 * 1024 * 1024) return null;
@@ -2423,15 +2459,23 @@ ${user?.name || ''}`.trim();
       if (!upd.changes) return json(res, 404, { error: 'Канал не найден' });
       return json(res, 200, db.prepare('SELECT * FROM channels WHERE id=?').get(mChLabel[1]));
     }
-    if (p === '/api/integrations/wazzup/test' && req.method === 'POST') { try { const list = wzChannels(await wazzupFetch('/channels')); return json(res, 200, { ok: true, channels: list }); } catch (e) { return json(res, 400, { ok: false, error: e.message }); } }
+    if (p === '/api/integrations/wazzup/test' && req.method === 'POST') { if (!requireAdmin(user, res)) return; try { const list = wzChannels(await wazzupFetch('/channels')); return json(res, 200, { ok: true, channels: list }); } catch (e) { return json(res, 400, { ok: false, error: e.message }); } }
     // Каналом по умолчанию становится рабочий: первым вендор может вернуть
     // отключённый или заблокированный, и ответы молча не уходили бы вовсе.
-    if (p === '/api/integrations/wazzup/sync' && req.method === 'POST') { try { const list = wzChannels(await wazzupFetch('/channels')); for (const ch of list) db.prepare('INSERT INTO channels(provider,external_id,name,transport,phone,state,raw) VALUES(?,?,?,?,?,?,?) ON CONFLICT(external_id) DO UPDATE SET name=excluded.name,transport=excluded.transport,phone=excluded.phone,state=excluded.state').run('wazzup', ch.channelId || ch.id, ch.name || ch.plainId || '', ch.transport || ch.type || '', ch.plainId || ch.phone || '', ch.state || '', JSON.stringify(ch));
+    if (p === '/api/integrations/wazzup/sync' && req.method === 'POST') { if (!requireAdmin(user, res)) return; try { const list = wzChannels(await wazzupFetch('/channels')); for (const ch of list) db.prepare('INSERT INTO channels(provider,external_id,name,transport,phone,state,raw) VALUES(?,?,?,?,?,?,?) ON CONFLICT(external_id) DO UPDATE SET name=excluded.name,transport=excluded.transport,phone=excluded.phone,state=excluded.state').run('wazzup', ch.channelId || ch.id, ch.name || ch.plainId || '', ch.transport || ch.type || '', ch.plainId || ch.phone || '', ch.state || '', JSON.stringify(ch));
       const usable = list.find(wzUsable) || list[0]; if (usable && !getSetting('WAZZUP_CHANNEL_ID')) setSetting('WAZZUP_CHANNEL_ID', usable.channelId || usable.id); return json(res, 200, { synced: list.length, channels: db.prepare("SELECT * FROM channels WHERE provider='wazzup'").all() }); } catch (e) { return json(res, 400, { error: e.message }); } }
     // Подписки обязательны: без них вендор не присылает события вовсе. Включаем
     // только те, которые наш обработчик разбирает. Лимит адреса — 200 символов,
     // как у вендора: длинный адрес он отклоняет, незачем отправлять отказной запрос.
-    if (p === '/api/integrations/wazzup/webhook' && req.method === 'POST') { const b = await readBody(req); const hookUrl = String(b.url || '').trim(); if (!/^https?:\/\//i.test(hookUrl) || hookUrl.length > 200) return json(res, 400, { error: 'Укажите корректный адрес вебхука: http/https, не длиннее 200 символов' }); try { await wazzupFetch('/webhooks', { method: 'PATCH', body: JSON.stringify({ webhooksUri: hookUrl, subscriptions: { messagesAndStatuses: true, channelsUpdates: true } }) }); setSetting('WAZZUP_WEBHOOK_URL', hookUrl); return json(res, 200, { saved: true }); } catch (e) { return json(res, 400, { error: e.message + ' — можно указать вебхук вручную в кабинете Wazzup' }); } }
+    if (p === '/api/integrations/wazzup/webhook' && req.method === 'POST') { if (!requireAdmin(user, res)) return; const b = await readBody(req); let hookUrl = String(b.url || '').trim(); if (!/^https?:\/\//i.test(hookUrl) || hookUrl.length > 200) return json(res, 400, { error: 'Укажите корректный адрес вебхука: http/https, не длиннее 200 символов' });
+      // адрес регистрируем только с секретом: без кода защиты принимать входящие
+      // мог бы кто угодно; если секрет не задан, создаём его сами
+      let hookSecret = getSetting('WAZZUP_WEBHOOK_SECRET');
+      if (!hookSecret) { hookSecret = randomBytes(16).toString('hex'); setSetting('WAZZUP_WEBHOOK_SECRET', hookSecret); }
+      const hookU = new URL(hookUrl);
+      if (!hookU.searchParams.has('secret')) hookU.searchParams.set('secret', hookSecret);
+      hookUrl = hookU.toString();
+      try { await wazzupFetch('/webhooks', { method: 'PATCH', body: JSON.stringify({ webhooksUri: hookUrl, subscriptions: { messagesAndStatuses: true, channelsUpdates: true } }) }); setSetting('WAZZUP_WEBHOOK_URL', hookUrl); return json(res, 200, { saved: true }); } catch (e) { return json(res, 400, { error: e.message + ' — можно указать вебхук вручную в кабинете Wazzup' }); } }
     if (p === '/api/integrations/email/test' && req.method === 'POST') {
       if (!requireAdmin(user, res)) return;
       const rl = rateLimit('mailtest', 10, 60000); if (!rl.ok) return json(res, 429, { error: 'Слишком часто — подождите минуту' });
