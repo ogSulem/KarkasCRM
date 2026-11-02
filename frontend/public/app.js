@@ -1666,13 +1666,27 @@ const convMine = c => Number(c.assigned_id) === Number(meId()) || Number(c.conta
 const convScopeList = list => (state.convScope === 'mine' ? (list || []).filter(convMine) : list || []);
 const convEmptyHtml = all => (state.convScope === 'mine' && (all || []).length ? '<div class="empty">Моих диалогов нет: переключитесь на «Все чаты» выше.</div>' : '<div class="empty">Чатов пока нет</div>');
 function setConvScope(v) { state.convScope = v; filterConvs($('#convSearch')?.value || ''); }
+// метка времени в списке чатов как в мессенджерах: сегодня — время,
+// на этой неделе — день недели, раньше — короткая дата без века на каждой строке
+function listStamp(s) {
+  if (!s) return '';
+  const m = String(s).trim().match(/^(\d{4})-(\d{2})-(\d{2})[ T](\d{2}):(\d{2})/);
+  if (!m) return dt(s);
+  const d = new Date(`${m[1]}-${m[2]}-${m[3]}T${m[4]}:${m[5]}:00Z`);
+  const now = new Date();
+  const same = (a, b) => a.getFullYear() === b.getFullYear() && a.getMonth() === b.getMonth() && a.getDate() === b.getDate();
+  if (same(d, now)) return `${m[4]}:${m[5]}`;
+  if (same(d, new Date(now.getTime() - 864e5))) return 'Вчера';
+  if (now - d < 6 * 864e5 && d <= now) return ['вс', 'пн', 'вт', 'ср', 'чт', 'пт', 'сб'][d.getDay()];
+  return `${m[3]}.${m[2]}.${m[1].slice(2)}`;
+}
 // строка беседы: одна на первичный рендер и на фильтрацию, чтобы вид не разъезжался
 function convRow(c, activeId) {
   const selMode = state.convSelect && canEdit();
   const sel = selSet('convs').has(c.id);
   return `<div class="conv ${c.id === activeId ? 'active' : ''}${c.unread ? ' unread' : ''}${sel ? ' selected' : ''}${selMode ? ' sel-mode' : ''}" onclick="${selMode ? `toggleSel('convs',${c.id})` : `openConv(${c.id})`}">${selMode ? `<input type="checkbox" class="conv-check" ${sel ? 'checked' : ''} onclick="event.stopPropagation();toggleSel('convs',${c.id})" title="Отметить чат">` : ''}
     <b><span>${esc(c.title)}</span>${c.unread ? `<span class="badge">${c.unread}</span>` : ''}</b>
-    <p>${esc(c.last_body || '—')}</p><small>${chan(c.channels)} · ${esc(dt(c.last_at))}</small></div>`;
+    <p>${esc(c.last_body || '—')}</p><small>${chan(c.channels)} · ${esc(listStamp(c.last_at))}</small></div>`;
 }
 function toggleConvSelect() { state.convSelect = !state.convSelect; clearSel('convs'); }
 // отметить выбранные чаты прочитанными одной командой
@@ -3937,9 +3951,13 @@ function connectSSE() {
   es.addEventListener('notify', e => {
     const d = JSON.parse(e.data);
     if (d.type === 'overdue_tasks') {
-      notify({
+      // чужие просрочки не отрывают от работы: тост видят только те, кого это
+      // касается — свои задачи и неназначенные, как в колокольчике
+      const mine = Array.isArray(d.tasks) ? d.tasks.filter(t => !t.responsible_id || Number(t.responsible_id) === Number(meId())) : null;
+      const n = mine ? mine.length : (d.count || 0);
+      if (n) notify({
         title: 'Есть просроченные задачи', kind: 'task',
-        text: `${d.count} ${plural(d.count, 'задача ждёт', 'задачи ждут', 'задач ждут')} выполнения`,
+        text: `${n} ${plural(n, 'задача ждёт', 'задачи ждут', 'задач ждут')} выполнения`,
         actionLabel: 'Открыть задачи',
         onAction: () => { state.taskScope = 'all'; state.taskFilter = 'overdue'; go('tasks'); },
       });

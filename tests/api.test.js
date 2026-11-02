@@ -1287,3 +1287,16 @@ test('массовое выполнение повторяющейся зада�
   assert.equal(weak.status, 400, 'пароль короче 12 символов отклонён');
   assert.match(weak.body.error, /от 12 до 256/, 'сообщение объясняет правило');
 });
+
+test('импорт CSV: BOM не портит имя, повторный импорт без телефона не дублирует по почте', async () => {
+  const csv1 = '\uFEFFИмя;Телефон;E-mail;Компания\nИван Бом;;ivan-bom@example.com;Ромашка';
+  const r1 = await call('/api/import/contacts', { method: 'POST', body: JSON.stringify({ csv: csv1 }) });
+  assert.equal(r1.body.imported, 1, 'контакт с BOM импортирован');
+  const list = (await call('/api/contacts')).body;
+  const c = list.find(x => x.email === 'ivan-bom@example.com');
+  assert.ok(c, 'импортированный контакт на месте');
+  assert.equal(c.name, 'Иван Бом', 'невидимый BOM не приклеился к имени');
+  const r2 = await call('/api/import/contacts', { method: 'POST', body: JSON.stringify({ csv: 'Имя;Телефон;E-mail;Компания\nИван Бом Второй;;IVAN-BOM@example.com;Ромашка' }) });
+  assert.equal(r2.body.imported, 0, 'повторный импорт той же почты без телефона не плодит дубли');
+  assert.equal(r2.body.skipped, 1, 'строка пропущена как дубль');
+});
