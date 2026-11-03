@@ -1352,3 +1352,16 @@ test('массовый перевод на этап запускает авто�
   assert.equal(tasks.filter(t => t.title === 'Автозадача массовая').length, 2, 'правило сработало для обеих сделок массового перевода');
   await call('/api/automations/' + rule.body.id, { method: 'DELETE' });
 });
+
+test('дашборд считает неназначенные задачи общими: они видны каждому в «Моих»', async () => {
+  const d0 = (await call('/api/dashboard')).body;
+  const t = await call('/api/tasks', { method: 'POST', body: JSON.stringify({ title: 'Общая просроченная задача', due: '01.01.2020 10:00' }) });
+  assert.equal(t.status, 201);
+  assert.ok(!t.body.responsible_id, 'задача создана без ответственного');
+  const d1 = (await call('/api/dashboard')).body;
+  assert.equal(d1.myTasksOpen, d0.myTasksOpen + 1, 'неназначенная задача добавила ровно единицу в «Мои задачи»');
+  assert.equal(d1.myTasksOverdue, d0.myTasksOverdue + 1, 'неназначенная просрочка добавила ровно единицу в личный счётчик');
+  await call('/api/tasks/' + t.body.id, { method: 'PATCH', body: JSON.stringify({ done: 1 }) });
+  const d2 = (await call('/api/dashboard')).body;
+  assert.equal(d2.myTasksOpen, d0.myTasksOpen, 'после выполнения счётчик вернулся к прежнему значению');
+});

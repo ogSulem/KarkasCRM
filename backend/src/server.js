@@ -1640,10 +1640,12 @@ export const server = http.createServer(async (req, res) => {
       const stageStats = new Map(db.prepare('SELECT stage, COUNT(*) n, COALESCE(SUM(amount),0) s FROM deals GROUP BY stage').all().map(r => [r.stage, r]));
       const sumWhere = w => db.prepare(`SELECT COALESCE(SUM(amount),0) s FROM deals WHERE ${w}`).get().s;
       const cntWhere = w => db.prepare(`SELECT COUNT(*) n FROM deals WHERE ${w}`).get().n;
-      const myTasksOpen = db.prepare("SELECT COUNT(*) n FROM tasks WHERE done=0 AND (responsible_id=? OR (responsible_id IS NULL AND ? IS NULL))").get(myId, myId)?.n || 0;
-      const myTasksToday = db.prepare("SELECT COUNT(*) n FROM tasks WHERE done=0 AND due LIKE ? AND (responsible_id=? OR (responsible_id IS NULL AND ? IS NULL))").get(today + '%', myId, myId)?.n || 0;
+      // «мои» = назначенные на меня и без ответственного: вторые кто-то должен
+      // разобрать, и интерфейс (дашборд, колокольчик) показывает их тем же правилом
+      const myTasksOpen = db.prepare("SELECT COUNT(*) n FROM tasks WHERE done=0 AND (responsible_id=? OR responsible_id IS NULL)").get(myId)?.n || 0;
+      const myTasksToday = db.prepare("SELECT COUNT(*) n FROM tasks WHERE done=0 AND due LIKE ? AND (responsible_id=? OR responsible_id IS NULL)").get(today + '%', myId)?.n || 0;
       const now = localNow();
-      const myTasksOverdue = db.prepare("SELECT COUNT(*) n FROM tasks WHERE done=0 AND (responsible_id=? OR (responsible_id IS NULL AND ? IS NULL)) AND due IS NOT NULL AND due != '' AND (CASE WHEN length(due)=10 THEN due || ' 23:59:59' ELSE due END) < ?").get(myId, myId, now)?.n || 0;
+      const myTasksOverdue = db.prepare("SELECT COUNT(*) n FROM tasks WHERE done=0 AND (responsible_id=? OR responsible_id IS NULL) AND due IS NOT NULL AND due != '' AND (CASE WHEN length(due)=10 THEN due || ' 23:59:59' ELSE due END) < ?").get(myId, now)?.n || 0;
       const tasksToday = db.prepare("SELECT COUNT(*) n FROM tasks WHERE done=0 AND due LIKE ?").get(today + '%')?.n || 0;
       const tasksOverdue = db.prepare("SELECT COUNT(*) n FROM tasks WHERE done=0 AND due IS NOT NULL AND due != '' AND (CASE WHEN length(due)=10 THEN due || ' 23:59:59' ELSE due END) < ?").get(now)?.n || 0;
       return json(res, 200, {
