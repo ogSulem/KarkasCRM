@@ -69,6 +69,28 @@ test('поля записей обрезаются до пределов, а с�
   assert.equal(JSON.parse(k.body.custom).test, 'значение', 'объект сохранён строкой JSON');
 });
 
+test('тема оформления личная: хранится на сервере и доступна наблюдателю', async () => {
+  const dark = await call('/api/me/theme', { method: 'PATCH', body: JSON.stringify({ theme: 'dark' }) });
+  assert.equal(dark.status, 200);
+  let me = await call('/api/me');
+  assert.equal(me.body.user.theme, 'dark', 'личный выбор виден в профиле');
+  const bad = await call('/api/me/theme', { method: 'PATCH', body: JSON.stringify({ theme: 'ночь' }) });
+  assert.equal(bad.status, 400, 'неизвестная тема отклоняется');
+  const auto = await call('/api/me/theme', { method: 'PATCH', body: JSON.stringify({ theme: 'auto' }) });
+  assert.equal(auto.status, 200);
+  me = await call('/api/me');
+  assert.equal(me.body.user.theme, '', 'режим «как в системе» хранится пустым значением');
+  // наблюдателю закрыты все изменения, кроме собственных пароля и темы
+  const v = await call('/api/users', { method: 'POST', body: JSON.stringify({ name: 'Наблюдатель темы', email: 'theme-viewer@example.com', password: 'nabludatel123', role: 'viewer' }) });
+  assert.equal(v.status, 201);
+  const vl = await readyLogin('/api/auth/login', { method: 'POST', body: JSON.stringify({ email: 'theme-viewer@example.com', password: 'nabludatel123' }) });
+  const vHeaders = { Authorization: 'Bearer ' + vl.body.token };
+  const vTheme = await call('/api/me/theme', { method: 'PATCH', headers: vHeaders, body: JSON.stringify({ theme: 'dark' }) });
+  assert.equal(vTheme.status, 200, 'наблюдатель выбирает свою тему');
+  const vOther = await call('/api/contacts', { method: 'POST', headers: vHeaders, body: JSON.stringify({ name: 'Не пройдут' }) });
+  assert.equal(vOther.status, 403, 'остальные изменения наблюдателю по-прежнему закрыты');
+});
+
 test('битые процент-последовательности не валят сервер в 500', async () => {
   // Cookie — заголовок целиком во власти клиента: раньше decodeURIComponent бросал
   // исключение на %zz, и любой запрос с битой кукой давал 500 и строку в журнале

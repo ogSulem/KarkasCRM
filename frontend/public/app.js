@@ -300,6 +300,17 @@ function applyTheme(mode = currentThemeMode()) {
     if (mode === 'auto') localStorage.removeItem('karkas_theme');
     else localStorage.setItem('karkas_theme', mode);
   } catch {}
+  // Тема личная, как в amoCRM: выбор уходит в профиль сотрудника, и на общем
+  // компьютере у каждого своя схема. Синхронизация в единой точке — и кнопка
+  // в шапке, и настройка в профиле идут через эту функцию. При входе серверная
+  // тема просто применяется и повторным запросом не дублируется
+  if (state.me && ['light', 'dark', 'auto'].includes(mode)) {
+    const stored = state.me.theme || 'auto';
+    if (mode !== stored) {
+      state.me.theme = mode === 'auto' ? '' : mode;
+      api('/api/me/theme', { method: 'PATCH', body: JSON.stringify({ theme: mode }) }).catch(() => {});
+    }
+  }
   const btn = $('#themeBtn');
   if (btn) {
     btn.innerHTML = icon(res === 'dark' ? 'moon' : 'sun', 16);
@@ -319,8 +330,6 @@ if (window.matchMedia) {
     });
   } catch {}
 }
-applyTheme();
-
 let token = '';
 const state = {
   view: 'dashboard', settingsTab: 'integrations', pipeline: 1, conv: null, listOnly: false,
@@ -328,6 +337,9 @@ const state = {
   cache: {}, dealTab: 'details', meta: null, dupes: null, me: null, users: [], convScope: 'all', convSelect: false, drafts: {},
   taskScope: 'mine', taskFilter: '', dealScope: 'all', taskView: 'list', taskSelectMode: false, sel: {}
 };
+// первичное применение темы — после объявления state: синхронизация личной
+// темы сотрудника обращается к нему и не должна выполняться до инициализации
+applyTheme();
 
 const CUR = () => (state.meta && state.meta.company && state.meta.company.currency) || '₽';
 const fmt = n => new Intl.NumberFormat('ru-RU').format(Math.round(n || 0)) + ' ' + CUR();
@@ -782,7 +794,8 @@ async function boot() {
     // Set bell icon
     const bIcon = $('#bellIcon');
     if (bIcon) bIcon.innerHTML = icon('bell', 16);
-    applyTheme();
+    // после входа побеждает личная тема сотрудника; до входа — тема устройства
+    applyTheme(['light', 'dark'].includes(me.user.theme) ? me.user.theme : currentThemeMode());
     hydrateNavIcons();
     initRealtime();
     await go(state.view);
