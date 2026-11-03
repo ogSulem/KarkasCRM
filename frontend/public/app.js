@@ -973,7 +973,7 @@ async function openNotifications() {
    <p class="form-hint" style="margin:0 0 4px">Непрочитанные сообщения клиентов: цифра на оранжевой метке — сколько писем жду́т реакции.</p>
    ${convs.map(chatRow).join('') || '<small>Все переписки прочитаны.</small>'}
    <div style="display:flex;gap:8px;flex-wrap:wrap;margin-top:16px">
-     <button class="btn sm" onclick="closeModal();goTasks('all','overdue')">Все задачи</button>
+     <button class="btn sm" onclick="closeModal();goTasks('all','')">Все задачи</button>
      <button class="btn sm" onclick="closeModal();go('inbox')">Все чаты</button>
      <button class="btn sm" onclick="closeModal()">Закрыть</button>
    </div>${companyNote}`);
@@ -1851,7 +1851,7 @@ function weekCalendar(tasksList) {
     const list = tasksList.filter(t => normalizeDue(t.due).startsWith(d));
     return `<div class="cal-day ${d === today ? 'today' : ''}"><h4><span>${names[i]}</span><small>${d.slice(8, 10)}.${d.slice(5, 7)}</small></h4>
       ${list.map(t => {
-        const isOver = !t.done && d < today;
+        const isOver = !t.done && (d < today || (d === today && taskDueMeta(t.due).overdue));
         return `<div class="cal-task ${isOver ? 'overdue' : ''} ${t.done ? 'done' : ''}" onclick="openTask(${t.id})"><b>${esc(t.title)}</b><small>${esc(t.due ? t.due.slice(11, 16) : '')} · ${esc(t.contact_name || '')}</small></div>`;
       }).join('') || '<small style="color:var(--muted);padding:4px 0">Свободно</small>'}</div>`;
   }).join('')}</div>`;
@@ -2171,14 +2171,18 @@ async function tasks(v) {
   await team();
   const today = todayISO();
   let rows = state.taskScope === 'mine' ? all.filter(t => t.responsible_id === meId() || !t.responsible_id) : all;
+  // просрочка определяется тем же правилом, что и в колокольчике и в счётчиках
+  // на сервере: дата прошла или прошло сегодняшнее время; задача без времени
+  // считается до конца дня
+  const overNow = t => !t.done && taskDueMeta(t.due).overdue;
   if (state.taskFilter === 'today') rows = rows.filter(t => !t.done && normalizeDue(t.due).slice(0, 10) === today);
-  if (state.taskFilter === 'overdue') rows = rows.filter(t => !t.done && normalizeDue(t.due) !== '' && normalizeDue(t.due).slice(0, 10) < today);
+  if (state.taskFilter === 'overdue') rows = rows.filter(overNow);
   const tq = (state.taskQuery || '').trim().toLowerCase();
   if (tq) rows = rows.filter(t => `${t.title} ${t.contact_name || ''} ${t.deal_title || ''} ${t.responsible_name || ''} ${t.result || ''}`.toLowerCase().includes(tq));
   const groups = [
-    ['Просроченные', rows.filter(t => !t.done && normalizeDue(t.due).slice(0, 10) < today && normalizeDue(t.due) !== '')],
-    ['Сегодня', rows.filter(t => !t.done && normalizeDue(t.due).slice(0, 10) === today)],
-    ['Активные', rows.filter(t => !t.done && (normalizeDue(t.due).slice(0, 10) > today || !t.due))],
+    ['Просроченные', rows.filter(overNow)],
+    ['Сегодня', rows.filter(t => !t.done && !overNow(t) && normalizeDue(t.due).slice(0, 10) === today)],
+    ['Активные', rows.filter(t => !t.done && !overNow(t) && (!t.due || normalizeDue(t.due).slice(0, 10) > today))],
     ['Выполненные', rows.filter(t => t.done)]
   ];
   const types = { call: icon('phone', 14) + ' Звонок', meeting: icon('users', 14) + ' Встреча', message: icon('message', 14) + ' Сообщение', email: icon('email', 14) + ' Письмо', other: icon('task', 14) + ' Дело' };
@@ -3978,7 +3982,7 @@ function connectSSE() {
         title: 'Есть просроченные задачи', kind: 'task',
         text: `${n} ${plural(n, 'задача ждёт', 'задачи ждут', 'задач ждут')} выполнения`,
         actionLabel: 'Открыть задачи',
-        onAction: () => { state.taskScope = 'all'; state.taskFilter = 'overdue'; go('tasks'); },
+        onAction: () => { state.taskScope = 'mine'; state.taskFilter = 'overdue'; go('tasks'); },
       });
     }
     if (d.type === 'deal_assigned') {

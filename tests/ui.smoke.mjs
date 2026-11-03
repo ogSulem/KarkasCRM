@@ -839,6 +839,18 @@ try {
     $$('#view .tabs button').find(b => /^Все \(/.test(b.textContent.trim())).click(); await wait(450);
     check('переключатель «Все» показывает задачи команды', window.__state.taskScope === 'all');
 
+    // сегодняшняя задача с прошедшим временем попадает в «Просроченные» по тому
+    // же правилу, что и колокольчик со счётчиками; пять минут назад — чтобы
+    // проверка не зависела от секунд и работала даже сразу после полуночи
+    const p2s = n => String(n).padStart(2, '0');
+    const past = new Date(Date.now() - 5 * 60000);
+    const duePast = `${past.getFullYear()}-${p2s(past.getMonth() + 1)}-${p2s(past.getDate())} ${p2s(past.getHours())}:${p2s(past.getMinutes())}`;
+    const overTask = await window.api('/api/tasks', { method: 'POST', body: JSON.stringify({ title: 'Проверка просрочки временем', due: duePast }) });
+    window.__state.taskScope = 'all'; window.__state.taskFilter = 'overdue'; window.go('tasks'); await wait(500);
+    check('сегодняшняя задача с прошедшим временем видна в просроченных', $('#view').textContent.includes('Проверка просрочки временем'));
+    await window.api('/api/tasks/' + overTask.id, { method: 'DELETE' });
+    window.__state.taskFilter = ''; window.__state.taskScope = 'mine';
+
     window.go('pipe'); await wait(450);
     $$('#view .tabs button').find(b => /^Мои \(/.test(b.textContent.trim())).click(); await wait(450);
     check('фильтр «Мои» на доске сделок работает кликом', window.__state.dealScope === 'mine');
