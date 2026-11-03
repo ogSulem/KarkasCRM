@@ -1103,6 +1103,7 @@ try {
   check('счётчик колокольчика личный, а не по всей компании', appJsRaw.includes('(d.myTasksOverdue || 0) + (d.unread || 0)'));
   check('палитра не предлагает зрителю действия создания', appJsRaw.includes("if (g.edit && !canEdit()) continue;") && appJsRaw.includes("group: 'Быстрое создание', edit: true"));
   check('зарегистрированный адрес вебхука виден в настройках', appJsRaw.includes('s.wazzup.webhook_url') && serverJsRaw.includes("webhook_url: getSetting('WAZZUP_WEBHOOK_URL')"));
+  check('тема сотрудника личная: выбор уходит на сервер', appJsRaw.includes("'/api/me/theme'") && serverJsRaw.includes('UPDATE users SET theme'));
   check('этапы успеха и отказа защищены в редакторе воронок и на сервере',
     appJsRaw.includes("x.code === 'won'") && appJsRaw.includes('Этап успеха и этап отказа удалять нельзя')
     && serverJsRaw.includes('В воронке нужны этап успеха и этап отказа'));

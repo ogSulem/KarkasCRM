@@ -115,6 +115,7 @@ const SCHEMA_COLUMNS = [...SCHEMA,
   ['users', 'must_change_password', 'INTEGER NOT NULL DEFAULT 0'],
   ['users', 'session_version', 'INTEGER NOT NULL DEFAULT 0'],
   ['users', 'last_login', 'TEXT'],
+  ['users', 'theme', "TEXT DEFAULT ''"],
   ['contacts', 'company_id', 'INTEGER'], ['contacts', 'position', 'TEXT'], ['contacts', 'responsible_id', 'INTEGER'],
   ['contacts', 'tags', "TEXT DEFAULT ''"], ['contacts', 'notes', "TEXT DEFAULT ''"], ['contacts', 'source', "TEXT DEFAULT 'manual'"],
   ['deals', 'pipeline_id', 'INTEGER DEFAULT 1'], ['deals', 'priority', "TEXT DEFAULT 'normal'"], ['deals', 'loss_reason', 'TEXT'],
@@ -187,6 +188,8 @@ CREATE INDEX IF NOT EXISTS idx_conv_last ON conversations(last_at);
 CREATE INDEX IF NOT EXISTS idx_deal_products_deal ON deal_products(deal_id);
 CREATE INDEX IF NOT EXISTS idx_notes_entity ON notes(entity_type, entity_id);
 CREATE INDEX IF NOT EXISTS idx_activities_entity ON activities(entity_type, entity_id);
+CREATE INDEX IF NOT EXISTS idx_contacts_email ON contacts(lower(email));
+CREATE INDEX IF NOT EXISTS idx_conv_external ON conversations(external_chat_id);
 `);
 try { db.exec('CREATE UNIQUE INDEX IF NOT EXISTS idx_msg_ext ON messages(external_id) WHERE external_id IS NOT NULL'); }
 catch (e) { console.error('Не удалось создать уникальный индекс по external_id (в базе есть дубли внешних id):', e.message); }
@@ -338,7 +341,7 @@ function verify(t) {
     if (got.length !== expected.length || !timingSafeEqual(got, expected)) return null;
     const p = JSON.parse(Buffer.from(b, 'base64url'));
     if (p.exp <= Date.now()) return null;
-    const user = db.prepare('SELECT id,name,email,role,must_change_password,session_version FROM users WHERE id=? AND active=1').get(p.id);
+    const user = db.prepare('SELECT id,name,email,role,must_change_password,session_version,theme FROM users WHERE id=? AND active=1').get(p.id);
     return user && (p.sv ?? 0) === user.session_version ? user : null;
   } catch { return null; }
 }
@@ -1451,6 +1454,9 @@ try {
 // Разовая уборка при старте: если старая версия оставила заметки удалённых
 // сделок или ссылки задач на несуществующие записи, они не должны копиться.
 try {
+  // прерванное восстановление могло оставить временный файл копии — убираем,
+  // иначе он лежит в каталоге данных вечно и не попадает под дневную чистку
+  try { const restoreTmp = join(DATA_DIR, '.restore-src.db'); if (existsSync(restoreTmp)) { unlinkSync(restoreTmp); console.log('База: удалён временный файл прерванного восстановления.') } } catch {}
   const cleaned = cleanupOrphans(db);
   const synced = syncDealResponsibleNames(db);
   const n = Object.values(cleaned).reduce((a, b) => a + b, 0);
@@ -1627,6 +1633,15 @@ export const server = http.createServer(async (req, res) => {
       return;
     }
     if (p === '/api/me') return json(res, 200, { user });
+    // тема оформления личная, как в amoCRM: хранится у сотрудника, а не в браузере,
+    // поэтому на общем компьютере у каждого свои светлая/тёмная настройки
+    if (p === '/api/me/theme' && req.method === 'PATCH') {
+      const b = await readBody(req);
+      const t = String(b.theme || '');
+      if (!['light', 'dark', 'auto'].includes(t)) return json(res, 400, { error: 'Неизвестная тема: доступна светлая, тёмная и «как в системе»' });
+      db.prepare('UPDATE users SET theme=? WHERE id=?').run(t === 'auto' ? '' : t, user.id);
+      return json(res, 200, { ok: true, theme: t });
+    }
     if (p === '/api/meta') return json(res, 200, {
       version: VERSION, schema: SCHEMA_VERSION, user,
       company: { name: getSetting('COMPANY_NAME', 'Моя компания'), currency: getSetting('CURRENCY', '₽') },
@@ -1641,7 +1656,7 @@ export const server = http.createServer(async (req, res) => {
       autoDeal: getSetting('AUTO_DEAL', '1') === '1',
       activeUsers: db.prepare('SELECT COUNT(*) n FROM users WHERE active=1').get().n,
     });
-    if (user && p.startsWith('/api/') && user.role === 'viewer' && req.method !== 'GET' && p !== '/api/me/password') return json(res, 403, { error: 'Роль «Наблюдатель» — только просмотр' });
+    if (user && p.startsWith('/api/') && user.role === 'viewer' && req.method !== 'GET' && !['/api/me/password', '/api/me/theme'].includes(p)) return json(res, 403, { error: 'Роль «Наблюдатель» — только просмотр' });
     // настройки, команда, воронки, шаблоны, автоматизации, ключи и обслуживание — только администратор
     if (user && user.role !== 'admin' && req.method !== 'GET' && ADMIN_ONLY.some(re => re.test(p))) {
       const hint = ADMIN_ONLY_HINT.find(([re]) => re.test(p));
