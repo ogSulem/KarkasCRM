@@ -1300,3 +1300,12 @@ test('импорт CSV: BOM не портит имя, повторный имп�
   assert.equal(r2.body.imported, 0, 'повторный импорт той же почты без телефона не плодит дубли');
   assert.equal(r2.body.skipped, 1, 'строка пропущена как дубль');
 });
+
+test('выгрузка копии в S3 отвергает имя с обходом пути', async () => {
+  const r = await call('/api/backups/s3', { method: 'POST', body: JSON.stringify({ name: '../../crm.db' }) });
+  assert.equal(r.status, 400, 'выход из каталога копий запрещён');
+  assert.equal(r.body.error, 'Некорректное имя файла копии', 'посторонний файл в хранилище не уходит');
+  assert.equal((await call('/api/backups/s3', { method: 'POST', body: JSON.stringify({ name: 'кириллица.db' }) })).status, 400, 'подозрительное имя отклонено');
+  const r2 = await call('/api/backups/s3', { method: 'POST', body: JSON.stringify({ name: 'crm-2026-01-01.db' }) });
+  assert.notEqual(r2.body.error, 'Некорректное имя файла копии', 'обычное имя копии проверку имени проходит');
+});

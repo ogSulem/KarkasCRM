@@ -95,9 +95,17 @@ export function checkAttachments(attachments = []) {
 
 export async function sendMail({ host, port = 587, secure, starttls, user, pass, from, fromName, to, toName, subject, text, timeout = 20000, allowInsecure = true, attachments = [] }) {
   if (!host) throw new Error('Не задан SMTP-сервер (Настройки → Интеграции → Почта)');
-  if (!to || !String(to).includes('@')) throw new Error('Некорректный e-mail получателя: ' + (to || '—'));
-  const fromAddr = from || user;
-  if (!fromAddr) throw new Error('Не задан адрес отправителя (MAIL_FROM)');
+  // адрес обязан быть одним и без переводов строк: значение из запроса попало бы
+  // в команды MAIL FROM / RCPT TO как есть, и «a@b.ru\r\nRCPT TO:<кто угодно>»
+  // добавило бы скрытого получателя — классическая CRLF-инъекция в SMTP
+  const oneAddr = (a, what, missing) => {
+    const s = String(a || '').trim();
+    if (!s) throw new Error(missing);
+    if (!/^[^\s@,;<>]+@[^\s@,;<>]+\.[^\s@,;<>]+$/.test(s)) throw new Error(`Некорректный e-mail ${what}: ${s}`);
+    return s;
+  };
+  to = oneAddr(to, 'получателя', 'Некорректный e-mail получателя: —');
+  const fromAddr = oneAddr(from || user, 'отправителя', 'Не задан адрес отправителя (MAIL_FROM)');
   const files = checkAttachments(attachments);
   const implicitTls = secure ?? Number(port) === 465;
   const useStarttls = secure === false ? false : starttls !== false; // SMTP_SECURE=0 — явный отказ от шифрования

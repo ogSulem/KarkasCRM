@@ -1046,6 +1046,13 @@ const s3status = () => {
 };
 
 export async function uploadBackupToS3(name) {
+  // имя копии приходит из запроса: без проверки «../../» позволила бы прочитать
+  // любой файл (crm.db, .env) и отправить его во внешнее хранилище.
+  // Тот же шаблон имени, что у скачивания и восстановления копии.
+  if (!/^[A-Za-z0-9._-]+\.db$/.test(String(name || ''))) {
+    setSetting('S3_LAST_ERROR', 'некорректное имя копии');
+    return { ok: false, error: 'некорректное имя копии' };
+  }
   const c = s3cfg();
   if (!s3ready(c)) {
     const missing = s3missing(c);
@@ -2239,6 +2246,9 @@ ${user?.name || ''}`.trim();
       const dir = join(DATA_DIR, 'backups');
       const name = String(b.name || '') || (existsSync(dir) ? readdirSync(dir).filter(f => f.endsWith('.db')).sort().pop() : '');
       if (!name) return json(res, 400, { error: 'Резервных копий пока нет — сначала создайте копию' });
+      // имя приходит из запроса — проверяем до обращения к файловой системе,
+      // как у скачивания и восстановления копии
+      if (!/^[A-Za-z0-9._-]+\.db$/.test(name)) return json(res, 400, { error: 'Некорректное имя файла копии' });
       const c = s3cfg();
       if (!s3ready(c)) return json(res, 400, { error: 'Хранилище не настроено. Заполните адрес, ведро и ключи доступа: ' + (s3missing(c).join(', ') || '—') });
       const out = await uploadBackupToS3(name);

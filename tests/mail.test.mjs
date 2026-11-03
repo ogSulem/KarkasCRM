@@ -221,3 +221,16 @@ test('без e-mail клиента и без настроенной почты �
   assert.equal(explicit.status, 200, 'адрес можно ввести вручную, если в карточке его нет');
   assert.match(seen.mails[seen.mails.length - 1], /RCPT|To:/);
 });
+
+test('адрес с переводом строки отклоняется: CRLF-инъекция в SMTP не проходит', async () => {
+  const { sendMail } = await import('../backend/src/smtp.js');
+  await assert.rejects(
+    sendMail({ host: '127.0.0.1', port: 1, to: 'a@b.ru\r\nRCPT TO:<evil@example.com>', from: 'crm@test.local', subject: 'x', text: 'y' }),
+    /Некорректный e-mail получателя/, 'скрытого получателя через перевод строки добавить нельзя');
+  await assert.rejects(
+    sendMail({ host: '127.0.0.1', port: 1, to: 'ok@test.local', from: 'crm@test.local\r\nDATA', subject: 'x', text: 'y' }),
+    /Некорректный e-mail отправителя/, 'адрес отправителя проверяется так же строго');
+  await assert.rejects(
+    sendMail({ host: '127.0.0.1', port: 1, to: 'один@адрес.ru,два@адрес.ru', from: 'crm@test.local', subject: 'x', text: 'y' }),
+    /Некорректный e-mail получателя/, 'список адресов вместо одного отклоняется');
+});
