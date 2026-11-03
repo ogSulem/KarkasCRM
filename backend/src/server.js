@@ -2559,7 +2559,7 @@ ${user?.name || ''}`.trim();
           advanced: { frame_ancestors: getSetting('FRAME_ANCESTORS'), login_rate_limit: num('LOGIN_RATE_LIMIT', 12) },
           auto_deal: getSetting('AUTO_DEAL', '1'), auto_assign: getSetting('AUTO_ASSIGN', '0'),
           webhook: { secret: getSetting('WEBHOOK_SECRET'), configured: !!getSetting('WEBHOOK_SECRET') },
-          wazzup: { api_key: mask(getSetting('WAZZUP_API_KEY')), api_url: getSetting('WAZZUP_API_URL', 'https://api.wazzup24.com/v3'), channel_id: getSetting('WAZZUP_CHANNEL_ID'), webhook_secret: getSetting('WAZZUP_WEBHOOK_SECRET'), configured: !!getSetting('WAZZUP_API_KEY'), hook_last_at: getSetting('WZ_HOOK_LAST_AT') || '', hook_test_at: getSetting('WZ_HOOK_TEST_AT') || '', hook_last_human: wzHookHuman(getSetting('WZ_HOOK_LAST_AT')), hook_test_human: wzHookHuman(getSetting('WZ_HOOK_TEST_AT')), hook_msgs: Number(getSetting('WZ_HOOK_MSG_TOTAL', '0')) || 0, forward_url: getSetting('WAZZUP_FORWARD_URL') || '' }
+          wazzup: { api_key: mask(getSetting('WAZZUP_API_KEY')), api_url: getSetting('WAZZUP_API_URL', 'https://api.wazzup24.com/v3'), channel_id: getSetting('WAZZUP_CHANNEL_ID'), webhook_secret: getSetting('WAZZUP_WEBHOOK_SECRET'), configured: !!getSetting('WAZZUP_API_KEY'), hook_last_at: getSetting('WZ_HOOK_LAST_AT') || '', hook_test_at: getSetting('WZ_HOOK_TEST_AT') || '', hook_last_human: wzHookHuman(getSetting('WZ_HOOK_LAST_AT')), hook_test_human: wzHookHuman(getSetting('WZ_HOOK_TEST_AT')), hook_msgs: Number(getSetting('WZ_HOOK_MSG_TOTAL', '0')) || 0, forward_url: getSetting('WAZZUP_FORWARD_URL') || '', webhook_url: getSetting('WAZZUP_WEBHOOK_URL') || '' }
         });
       }
       if (req.method === 'PUT') {

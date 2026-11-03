@@ -1102,6 +1102,13 @@ try {
   check('массовый перевод в «Не реализовано» спрашивает причину отказа', appJsRaw.includes('bulkStageTo') && appJsRaw.includes("if (stage !== 'lost') return;"));
   check('счётчик колокольчика личный, а не по всей компании', appJsRaw.includes('(d.myTasksOverdue || 0) + (d.unread || 0)'));
   check('палитра не предлагает зрителю действия создания', appJsRaw.includes("if (g.edit && !canEdit()) continue;") && appJsRaw.includes("group: 'Быстрое создание', edit: true"));
+  check('зарегистрированный адрес вебхука виден в настройках', appJsRaw.includes('s.wazzup.webhook_url') && serverJsRaw.includes("webhook_url: getSetting('WAZZUP_WEBHOOK_URL')"));
+  // черновики чатов не копятся в браузере вечно: старые выбывают первыми
+  window.__state.drafts = {};
+  for (let i = 1; i <= 60; i++) window.__state.drafts['c' + i] = 'черновик ' + i;
+  window.pruneDrafts();
+  check('черновики чатов ограничены пятьюдесятью, старые выбывают', Object.keys(window.__state.drafts).length === 50 && !('c10' in window.__state.drafts) && window.__state.drafts.c60 === 'черновик 60');
+  window.__state.drafts = {};
   // метка времени в списке чатов как в мессенджерах
   check('сегодня в списке чатов — только время', /^\d{2}:\d{2}$/.test(window.listStamp(new Date().toISOString().slice(0, 19).replace('T', ' '))), window.listStamp(new Date().toISOString().slice(0, 19).replace('T', ' ')));
   check('вчерашний чат подписан «Вчера»', window.listStamp(new Date(Date.now() - 864e5).toISOString().slice(0, 19).replace('T', ' ')) === 'Вчера');
