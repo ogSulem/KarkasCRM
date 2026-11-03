@@ -246,8 +246,13 @@ function normalizeStamp(raw) {
 // не должны попадать в базу — списки и карточки такое всё равно не показывают
 // целиком, а место и скорость поиска расходуются. Пределы с запасом: обычное
 // название компании или задачи в них укладывается многократно.
-const TEXT_LIMITS = { name: 200, title: 300, body: 20000, notes: 20000, phone: 64, email: 254, company: 200, position: 120, unit: 30, sku: 64, inn: 32, ogrn: 32, city: 120, website: 500, tags: 500, source: 60, loss_reason: 500 };
+const TEXT_LIMITS = { name: 200, title: 300, body: 20000, notes: 20000, phone: 64, email: 254, company: 200, position: 120, unit: 30, sku: 64, inn: 32, ogrn: 32, city: 120, website: 500, site: 500, tags: 500, source: 60, loss_reason: 500, deadline: 40, result: 2000, custom: 20000, type: 30, repeat: 20, priority: 10 };
 function clampTexts(b) {
+  // свои поля форма присылает JSON-строкой; объект из прямого запроса к API
+  // приводим к строке здесь, иначе запись в базу упала бы с невнятной ошибкой
+  if (b.custom !== undefined && typeof b.custom !== 'string') {
+    try { b.custom = JSON.stringify(b.custom ?? {}) } catch { b.custom = '{}' }
+  }
   for (const k of Object.keys(b)) {
     const lim = TEXT_LIMITS[k];
     if (lim && typeof b[k] === 'string' && b[k].length > lim) b[k] = b[k].slice(0, lim);
@@ -343,7 +348,11 @@ function sessionCookie(req, token) {
   return `karkas_token=${encodeURIComponent(token)}; HttpOnly; SameSite=Lax; Path=/; Max-Age=${7 * 86400}${isHttps(req) ? '; Secure' : ''}`;
 }
 const clearSessionCookie = req => `karkas_token=; HttpOnly; SameSite=Lax; Path=/; Max-Age=0${isHttps(req) ? '; Secure' : ''}`;
-const cookieOf = req => Object.fromEntries((req.headers.cookie || '').split(';').map(x => x.trim().split('=').map(decodeURIComponent)).filter(([k]) => k));
+// Заголовок Cookie и имена файлов приходят снаружи: битая процент-последовательность
+// (%zz и подобное) не должна ронять запрос в 500 — возвращаем строку как есть,
+// а дальнейшие проверки её отсеют
+const safeDecode = v => { try { return decodeURIComponent(v) } catch { return v } };
+const cookieOf = req => Object.fromEntries((req.headers.cookie || '').split(';').map(x => x.trim().split('=').map(safeDecode)).filter(([k]) => k));
 const digits = s => String(s || '').replace(/\D/g, '').replace(/^8(?=\d{10}$)/, '7');
 // нормализованные телефоны для быстрой связи входящих с карточками (миграция)
 {
@@ -679,7 +688,7 @@ export async function upsertIncoming({ channel = 'whatsapp', chatType = '', phon
   }
   if (!contact && email) contact = db.prepare('SELECT * FROM contacts WHERE lower(email)=lower(?)').get(String(email).trim());
   if (!contact && chatId) { const conv0 = db.prepare('SELECT * FROM conversations WHERE external_chat_id=?').get(String(chatId)); if (conv0) contact = db.prepare('SELECT * FROM contacts WHERE id=?').get(conv0.contact_id); }
-  if (!contact) { const r = db.prepare('INSERT INTO contacts(name,phone,email,source,phone_norm) VALUES(?,?,?,?,?)').run(name || ph || chatId || email || 'Новый клиент', ph, email || '', channel === 'email' ? 'email' : 'wazzup-' + (chatType || channel), phNorm || null); contact = db.prepare('SELECT * FROM contacts WHERE id=?').get(r.lastInsertRowid); log(`Новый контакт (${channel === 'email' ? 'email' : chatType || channel}): ${contact.name}`, 'contacts', contact.id); }
+  if (!contact) { const r = db.prepare('INSERT INTO contacts(name,phone,email,source,phone_norm) VALUES(?,?,?,?,?)').run(String(name || ph || chatId || email || 'Новый клиент').slice(0, 120), String(ph || '').slice(0, 64), String(email || '').slice(0, 254), channel === 'email' ? 'email' : 'wazzup-' + (chatType || channel), phNorm || null); contact = db.prepare('SELECT * FROM contacts WHERE id=?').get(r.lastInsertRowid); log(`Новый контакт (${channel === 'email' ? 'email' : chatType || channel}): ${contact.name}`, 'contacts', contact.id); }
   // Клиент написал на аккаунт конкретного сотрудника — значит, обращением
   // занимается он, а не тот, кому выпало по очереди. Привязку канала к сотруднику
   // задаёт администратор один раз в настройках; без привязки работает прежнее
@@ -1014,7 +1023,9 @@ async function s3prune(c, keep) {
   // Хранилище отдаёт список страницами. Без досборки чистка посчитала бы только
   // первую тысячу объектов, а старые копии продолжали бы лежать и занимать место.
   const prefix = c.prefix ? c.prefix + '/' : '';
-  const unesc = v => decodeURIComponent(String(v).replace(/&amp;/g, '&').replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&quot;/g, '"'));
+  // ключи в списке приходят от внешнего хранилища: битая процент-последовательность
+  // в одном старом ключе не должна ломать всю чистку (иначе копии копятся вечно)
+  const unesc = v => safeDecode(String(v).replace(/&amp;/g, '&').replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&quot;/g, '"'));
   const all = [];
   let marker = '';
   for (let page = 0; page < 10; page++) {
@@ -1099,7 +1110,9 @@ async function overdueTick() {
   if (!overdue.length) return;
   const ids = overdue.map(t => t.id);
   db.prepare(`UPDATE tasks SET notified_at=? WHERE id IN (${ids.map(() => '?').join(',')})`).run(today, ...ids);
-  const list = overdue.map(t => ({ id: t.id, title: t.title, due: t.due, contact: t.contact_name || '' }));
+  // responsible_id нужен в рассылке: клиент показывает тост только тем, кого
+  // задача касается (своя или неназначенная), а не всей компании
+  const list = overdue.map(t => ({ id: t.id, title: t.title, due: t.due, contact: t.contact_name || '', responsible_id: t.responsible_id }));
   log(`Просроченные задачи: ${list.length} (${list.map(t => t.title).slice(0, 3).join('; ')})`);
   broadcast('notify', { type: 'overdue_tasks', count: list.length, tasks: list });
   const hook = getSetting('NOTIFY_WEBHOOK');
@@ -1377,6 +1390,10 @@ function validateUser(b, creating = false) {
   if ((creating || b.password) && (typeof b.password !== 'string' || b.password.length < 12 || b.password.length > 256)) return 'Пароль должен содержать от 12 до 256 символов';
   if (b.role !== undefined && !['admin', 'manager', 'viewer'].includes(b.role)) return 'Неизвестная роль';
   if (b.active !== undefined && ![0, 1].includes(b.active)) return 'Некорректный статус';
+  // длина имени и адреса ограничена: проверка формата пройдена, теперь
+  // мегабайты текста не должны попадать в таблицу сотрудников
+  if (b.name !== undefined) b.name = String(b.name).trim().slice(0, 120);
+  if (b.email !== undefined) b.email = String(b.email).trim().slice(0, 254);
 }
 
 const competitorsApi = createCompetitors({ db, json, readBody, log, broadcast, getSetting, setSetting });
@@ -1485,11 +1502,13 @@ export const server = http.createServer(async (req, res) => {
         fileName: m.attachment?.name || m.attachment?.fileName || m.fileName || '',
         authorName: m.sender?.name, contact: { name: m.sender?.name || m.recipient?.name || m.contact?.name, phone: m.sender?.phone || m.recipient?.phone || m.contact?.phone }
       });
-      const legacy = (b.messages || []).map(mapMsg);
-      const modern = (b.data || []).concat(!b.data && (b.message_id || b.messageId) ? [b] : []).map(mapMsg);
+      // щедрые пределы на число событий в одном запросе: обычный пакет вендора
+      // содержит единицы сообщений, а огромный запрос не должен надолго занимать базу
+      const legacy = (Array.isArray(b.messages) ? b.messages.slice(0, 200) : []).map(mapMsg);
+      const modern = (Array.isArray(b.data) ? b.data.slice(0, 200) : []).concat(!b.data && (b.message_id || b.messageId) ? [b] : []).map(mapMsg);
       for (const m of legacy.concat(modern)) {
         // чистое статусное событие — без текста и вложения: обновляет статус уже известного сообщения
-        if (m.status && m.status !== 'inbound' && !(m.text || m.contentUri)) { db.prepare('UPDATE messages SET status=? WHERE external_id=?').run(m.status, m.messageId); continue; }
+        if (m.status && m.status !== 'inbound' && !(m.text || m.contentUri)) { db.prepare('UPDATE messages SET status=? WHERE external_id=?').run(String(m.status).slice(0, 20), m.messageId); continue; }
         // Свои отправки узнаём по префиксу внешнего id (karkas-) — они уже лежат в базе.
         // Флагу isEcho на слово не верим: когда обе CRM работают через одну интеграцию
         // Wazzup (один ключ на всех), ответы менеджеров из amoCRM приходят именно с
@@ -1512,8 +1531,8 @@ export const server = http.createServer(async (req, res) => {
         wzHookMark('WZ_HOOK_MSG_TOTAL', String(total));
         log(`Wazzup: получено сообщений: ${inbound}`, null, null, 'Wazzup');
       }
-      for (const s of b.statuses || []) db.prepare('UPDATE messages SET status=? WHERE external_id=?').run(s.status, s.messageId);
-      for (const cu of b.channelsUpdates || []) db.prepare('INSERT INTO channels(provider,external_id,state) VALUES(?,?,?) ON CONFLICT(external_id) DO UPDATE SET state=excluded.state').run('wazzup', cu.channelId, cu.state);
+      for (const s of (Array.isArray(b.statuses) ? b.statuses : []).slice(0, 500)) db.prepare('UPDATE messages SET status=? WHERE external_id=?').run(String(s.status || '').slice(0, 20), s.messageId);
+      for (const cu of (Array.isArray(b.channelsUpdates) ? b.channelsUpdates : []).slice(0, 100)) db.prepare('INSERT INTO channels(provider,external_id,state) VALUES(?,?,?) ON CONFLICT(external_id) DO UPDATE SET state=excluded.state').run('wazzup', String(cu.channelId || '').slice(0, 80), String(cu.state || '').slice(0, 40));
       return json(res, 200, { received: true });
     }
     // общий вебхук: форма сайта, свой бот Telegram, любая система, умеющая POST
@@ -1637,7 +1656,9 @@ export const server = http.createServer(async (req, res) => {
       const myId = user?.id;
       // агрегация в SQL: не выгружаем все сделки в память
       const agg = db.prepare("SELECT COUNT(*) n, COALESCE(SUM(amount),0) s FROM deals WHERE stage NOT IN ('won','lost')").get();
-      const stageStats = new Map(db.prepare('SELECT stage, COUNT(*) n, COALESCE(SUM(amount),0) s FROM deals GROUP BY stage').all().map(r => [r.stage, r]));
+      // этапы считаем по выбранной воронке: сводные цифры ниже остаются
+      // общими по компании, а распределение по колонкам — её собственное
+      const stageStats = new Map(db.prepare('SELECT stage, COUNT(*) n, COALESCE(SUM(amount),0) s FROM deals WHERE COALESCE(pipeline_id,1)=? GROUP BY stage').all(pipelineId).map(r => [r.stage, r]));
       const sumWhere = w => db.prepare(`SELECT COALESCE(SUM(amount),0) s FROM deals WHERE ${w}`).get().s;
       const cntWhere = w => db.prepare(`SELECT COUNT(*) n FROM deals WHERE ${w}`).get().n;
       // «мои» = назначенные на меня и без ответственного: вторые кто-то должен
@@ -1693,7 +1714,11 @@ export const server = http.createServer(async (req, res) => {
         bySource: by('SELECT c.source name, COUNT(*) n, COALESCE(SUM(d.amount),0) s FROM deals d LEFT JOIN contacts c ON c.id=d.contact_id GROUP BY c.source'),
         byManager: by('SELECT COALESCE(u.name, NULLIF(d.responsible,\'\'), \'—\') name, COUNT(*) n, COALESCE(SUM(d.amount),0) s FROM deals d LEFT JOIN users u ON u.id=d.responsible_id GROUP BY 1'),
         byLoss: by("SELECT COALESCE(loss_reason,'—') name, COUNT(*) n, COALESCE(SUM(amount),0) s FROM deals WHERE stage='lost' GROUP BY loss_reason"),
-        stages: getStages().map(s => { const r = db.prepare('SELECT COUNT(*) n, COALESCE(SUM(amount),0) s FROM deals WHERE stage=?').get(s.code); return { name: s.name, code: s.code, count: r.n, sum: r.s } }),
+        // распределение по этапам всех воронок: сделка попадает в свой этап по
+        // паре «воронка + код», иначе одноимённые этапы разных воронок сливаются
+        stages: db.prepare(`SELECT s.name, s.code, s.pipeline_id, COUNT(d.id) count, COALESCE(SUM(d.amount),0) sum
+            FROM stages s LEFT JOIN deals d ON d.stage = s.code AND COALESCE(d.pipeline_id,1) = s.pipeline_id
+            GROUP BY s.id ORDER BY s.pipeline_id, s.sort, s.id`).all(),
       });
     }
     if (p === '/api/contacts/duplicates') {
@@ -1817,7 +1842,11 @@ export const server = http.createServer(async (req, res) => {
           const tpl = db.prepare('SELECT * FROM templates WHERE id=?').get(id);
           if (!tpl) return json(res, 404, { error: 'Шаблон не найден' });
           if (tpl.user_id !== user.id) return json(res, 403, { error: 'Это чужой шаблон — можно менять только свои' });
-          if (req.method === 'PATCH') { const b = await readBody(req); const ks = Object.keys(b).filter(k => ['name', 'body'].includes(k)); if (ks.length) db.prepare(`UPDATE templates SET ${ks.map(k => k + '=?')} WHERE id=?`).run(...ks.map(k => k === 'name' ? String(b[k]).slice(0, 80) : String(b[k]).slice(0, 20000)), id); broadcast('change', { table }); return json(res, 200, db.prepare('SELECT * FROM templates WHERE id=?').get(id)); }
+          if (req.method === 'PATCH') { const b = await readBody(req);
+            // те же пределы, что при создании: иначе правка позволила бы раздуть шаблон
+            if (b.name !== undefined) b.name = String(b.name).slice(0, 80);
+            if (b.body !== undefined) b.body = String(b.body).slice(0, 20000);
+            const ks = Object.keys(b).filter(k => ['name', 'body'].includes(k)); if (ks.length) db.prepare(`UPDATE templates SET ${ks.map(k => k + '=?')} WHERE id=?`).run(...ks.map(k => k === 'name' ? String(b[k]).slice(0, 80) : String(b[k]).slice(0, 20000)), id); broadcast('change', { table }); return json(res, 200, db.prepare('SELECT * FROM templates WHERE id=?').get(id)); }
           if (req.method === 'DELETE') { db.prepare('DELETE FROM templates WHERE id=?').run(id); log('Шаблон удалён', 'templates', Number(id), user.name); broadcast('change', { table }); return json(res, 200, { deleted: true }); }
         }
         return json(res, 405, { error: 'Метод не поддерживается' });
@@ -1971,6 +2000,11 @@ export const server = http.createServer(async (req, res) => {
         clean.push({ code: String(st.code || ('s' + Date.now() + i)).replace(/[^a-zA-Z0-9_-]/g, '').slice(0, 40) || ('s' + Date.now() + i), name, color: /^#[0-9a-f]{6}$/i.test(st.color || '') ? st.color : '#16a34a', kind: ['open', 'won', 'lost'].includes(st.kind) ? st.kind : 'open' });
       }
       if (new Set(clean.map(x => x.code)).size !== clean.length) return json(res, 400, { error: 'Этапы не должны повторяться' });
+      // коды won и lost зарезервированы системой: по ним считаются выручка,
+      // конверсия и закрытие сделок, а кнопки «Успех» и «Отказ» на доске
+      // переносят карточку именно в них. Названия и цвета можно менять как угодно.
+      if (!clean.some(x => x.code === 'won') || !clean.some(x => x.code === 'lost'))
+        return json(res, 400, { error: 'В воронке нужны этап успеха и этап отказа: на них закрываются сделки и по ним считается выручка. Переименуйте их как удобно, но удалять нельзя.' });
       // нельзя терять сделки: этап с карточками сначала переносят
       const keep = new Set(clean.map(x => x.code));
       const lost = db.prepare('SELECT stage, COUNT(*) n FROM deals WHERE pipeline_id=? GROUP BY stage').all(pid).filter(r => !keep.has(r.stage));
@@ -2001,7 +2035,17 @@ export const server = http.createServer(async (req, res) => {
 
     // ===== deals =====
     if (p === '/api/deals') {
-      if (req.method === 'GET') return json(res, 200, { pipelines: db.prepare('SELECT * FROM pipelines').all(), stages: getStages(Number(u.searchParams.get('pipeline') || 1)), deals: db.prepare('SELECT d.*,c.name contact_name,c.phone contact_phone,co.name company_name,(SELECT COUNT(*) FROM tasks t WHERE t.deal_id=d.id AND t.done=0) as tasks_open,(SELECT MIN(t.due) FROM tasks t WHERE t.deal_id=d.id AND t.done=0) as next_task_due FROM deals d LEFT JOIN contacts c ON c.id=d.contact_id LEFT JOIN companies co ON co.id=d.company_id ORDER BY d.id DESC').all() });
+      // доска показывает сделки только выбранной воронки: коды этапов в разных
+      // воронках совпадают ('new', 'won'), и без фильтра чужие сделки вставали
+      // бы в колонки этой доски, а счётчики считали бы лишнее
+      if (req.method === 'GET') {
+        const pid = Number(u.searchParams.get('pipeline') || 1);
+        // фильтр по воронке включается только явным параметром (доска сделок);
+        // карточки клиента и компании просят сделки без параметра — там нужен
+        // список по всем воронкам
+        const where = u.searchParams.has('pipeline') ? ' WHERE COALESCE(d.pipeline_id,1)=?' : '';
+        return json(res, 200, { pipelines: db.prepare('SELECT * FROM pipelines').all(), stages: getStages(pid), deals: db.prepare('SELECT d.*,c.name contact_name,c.phone contact_phone,co.name company_name,(SELECT COUNT(*) FROM tasks t WHERE t.deal_id=d.id AND t.done=0) as tasks_open,(SELECT MIN(t.due) FROM tasks t WHERE t.deal_id=d.id AND t.done=0) as next_task_due FROM deals d LEFT JOIN contacts c ON c.id=d.contact_id LEFT JOIN companies co ON co.id=d.company_id' + where + ' ORDER BY d.id DESC').all(...(where ? [pid] : [])) });
+      }
       if (req.method === 'POST') { const b = await readBody(req); if (!String(b.title || '').trim()) return json(res, 400, { error: 'Укажите название сделки' });
         b.title = String(b.title).trim().slice(0, 200);
         const pipelineId = Number(b.pipeline_id) || 1;
@@ -2026,6 +2070,7 @@ export const server = http.createServer(async (req, res) => {
           b.responsible = b.responsible_id ? (db.prepare('SELECT name FROM users WHERE id=?').get(b.responsible_id)?.name || null) : null;
         }
         { const err = missingRequiredCustom('deals', b.custom); if (err) return json(res, 400, { error: err }); }
+        clampTexts(b);
         // сделку можно завести сразу закрытой («продали давно»). Дата закрытия нужна
         // аналитике: без неё выручка привязалась бы к дате создания, а не к продаже.
         // Дату из запроса не затираем — иначе завести закрытую сделку задним числом
@@ -2145,10 +2190,13 @@ ${user?.name || ''}`.trim();
           b.responsible = b.responsible_id ? (db.prepare('SELECT name FROM users WHERE id=?').get(b.responsible_id)?.name || null) : null;
         }
         if (b.custom !== undefined) { const err = missingRequiredCustom('deals', b.custom); if (err) return json(res, 400, { error: err }); }
+        clampTexts(b);
         const fields = ['title', 'amount', 'stage', 'pipeline_id', 'contact_id', 'company_id', 'responsible', 'responsible_id', 'priority', 'loss_reason', 'deadline', 'custom']; const ks = Object.keys(b).filter(k => fields.includes(k));
         // закрытая сделка, которую вернули в работу, не должна хранить дату закрытия:
         // иначе аналитика по месяцам считает её повторно закрытой
-        const closedSetter = b.stage !== undefined ? (['won', 'lost'].includes(b.stage) ? ",closed_at=datetime('now')" : ',closed_at=NULL') : '';
+        // дату закрытия трогаем только если этап действительно сменился:
+        // повторное сохранение «успеха» не должно обновлять дату продажи
+        const closedSetter = b.stage !== undefined && b.stage !== old.stage ? (['won', 'lost'].includes(b.stage) ? ",closed_at=datetime('now')" : ',closed_at=NULL') : '';
         if (ks.length) db.prepare(`UPDATE deals SET ${ks.map(k => k + '=?')},updated_at=datetime('now')${closedSetter} WHERE id=?`).run(...ks.map(k => b[k]), id);
         // сделку передали коллеге — он сразу увидит уведомление, а не узнает случайно
         const newResp = b.responsible_id !== undefined ? (b.responsible_id ? Number(b.responsible_id) : null) : old.responsible_id;
@@ -2316,7 +2364,7 @@ ${user?.name || ''}`.trim();
 
     // ===== inbox =====
     if (p === '/api/conversations' && req.method === 'GET') return json(res, 200, db.prepare(`SELECT cv.*,c.phone,c.email,c.responsible_id AS contact_responsible_id,
-      (SELECT body FROM messages WHERE conversation_id=cv.id ORDER BY id DESC LIMIT 1) last_body,
+      (SELECT substr(body,1,200) FROM messages WHERE conversation_id=cv.id ORDER BY id DESC LIMIT 1) last_body,
       (SELECT d.amount FROM deals d WHERE d.contact_id=cv.contact_id AND d.stage NOT IN ('won','lost') ORDER BY d.id DESC LIMIT 1) deal_amount,
       (SELECT COUNT(*) FROM messages m WHERE m.conversation_id=cv.id AND m.direction='in' AND m.id > COALESCE((SELECT rm.last_msg_id FROM read_marks rm WHERE rm.conversation_id=cv.id AND rm.user_id=?),0)) unread
       FROM conversations cv LEFT JOIN contacts c ON c.id=cv.contact_id ORDER BY cv.last_at DESC, cv.id DESC`).all(user.id).map(r => ({ ...r, unread: r.unread || 0 })));
@@ -2472,11 +2520,13 @@ ${user?.name || ''}`.trim();
           const [name, phone, email, company] = parseCsvLine(line);
           if (!name) continue;
           const norm = digits(phone) || null;
-          const mail = String(email || '').trim();
+          // лимиты те же, что у ручной карточки: файл на миллион строк не должен
+          // попадать в базу целиком, а дубли сверяются уже с обрезанными значениями
+          const mail = String(email || '').trim().slice(0, 254);
           // повторный импорт того же файла не плодит дубли: сверяем телефон,
           // а когда его нет — почту (раньше строки без телефона дублировались)
           if (norm ? exists.get(norm) : (mail && existsEmail.get(mail))) { skipped++; continue }
-          ins.run(name.slice(0, 120), phone || '', mail, company || '', 'import', norm); n++;
+          ins.run(name.slice(0, 200), String(phone || '').slice(0, 64), mail, String(company || '').slice(0, 200), 'import', norm); n++;
         }
         db.exec('COMMIT');
       } catch (e) { db.exec('ROLLBACK'); throw e }
@@ -2667,6 +2717,7 @@ ${user?.name || ''}`.trim();
         const patch = {}; for (const k of Object.keys(b.patch || {})) if (fields.includes(k) && b.patch[k] !== undefined) patch[k] = b.patch[k];
         const ks = Object.keys(patch);
         if (!ks.length) return json(res, 400, { error: 'Не передано ни одного допустимого поля' });
+        clampTexts(patch);
         // проверяем ссылки и значения до записи: массовая операция не должна
         // падать на середине и оставлять часть записей изменёнными
         if (patch.responsible_id) {
@@ -2767,13 +2818,16 @@ ${user?.name || ''}`.trim();
     // загруженные файлы чатов: только для авторизованных (токен в cookie, заголовке или ?token=)
     if (p.startsWith('/uploads/')) {
       if (!user) return json(res, 401, { error: 'Требуется авторизация' });
-      const name = basename(decodeURIComponent(p));
+      const name = basename(safeDecode(p));
       if (!/^[A-Za-z0-9._-]+$/.test(name)) return json(res, 400, { error: 'Некорректное имя файла' });
       const src = join(UPLOAD_DIR, name);
       if (!src.startsWith(UPLOAD_DIR) || !existsSync(src)) return json(res, 404, { error: 'Файл не найден' });
       const st = statSync(src);
       const type = MIME[extname(src).toLowerCase()] || 'application/octet-stream';
-      const inline = type.startsWith('image/') || type === 'application/pdf';
+      // SVG открываем только скачиванием: внутри svg возможен скрипт, а наша CSP
+      // разрешает inline-скрипты для собственного интерфейса — нельзя давать
+      // чужому файлу выполняться в странице CRM
+      const inline = (type.startsWith('image/') && extname(src).toLowerCase() !== '.svg') || type === 'application/pdf';
       res.writeHead(200, { 'Content-Type': type, 'Content-Length': st.size, 'Cache-Control': 'private, max-age=3600', 'Content-Disposition': `${inline ? 'inline' : 'attachment'}; filename*=UTF-8''${encodeURIComponent(name)}` });
       return createReadStream(src).pipe(res);
     }

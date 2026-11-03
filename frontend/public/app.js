@@ -988,7 +988,7 @@ async function navCounts(d) {
 
 /* ---------- dashboard ---------- */
 async function dashboard(v) {
-  const d = await api('/api/dashboard');
+  const d = await api('/api/dashboard?pipeline=' + (state.pipeline || 1));
   navCounts(d);
   __myTasks = (await api('/api/tasks').catch(() => [])).filter(t => !t.done && (t.responsible_id === meId() || !t.responsible_id)).slice(0, 6);
   const max = Math.max(...d.stages.map(s => s.sum), 1);
@@ -3414,6 +3414,11 @@ function addPipeline() { askInput({ title: 'Новая воронка', label: '
 async function openPipelineEditor() { return editPipeline(state.pipeline || 1); }
 async function editPipeline(id) {
   const pl = (await api('/api/pipelines')).find(p => p.id === id); const stages = JSON.parse(JSON.stringify(pl.stages));
+  // этапы «успех» и «отказ» обязательны в каждой воронке: по ним закрываются
+  // сделки и считается выручка. В старой воронке их могло не быть — добавляем
+  // сразу, чтобы сохранение прошло, а админ увидел их и переименовал под себя
+  if (!stages.some(x => x.code === 'won')) stages.push({ code: 'won', name: 'Успешно реализовано', color: '#15803d', kind: 'won' });
+  if (!stages.some(x => x.code === 'lost')) stages.push({ code: 'lost', name: 'Закрыто и не реализовано', color: '#78716c', kind: 'lost' });
   const row = (s, i) => `<div class="st" data-i="${i}"><span>${i + 1}</span><input value="${esc(s.name)}" oninput="pkStage(${i},'name',this.value)"><input type="color" value="${esc(s.color)}" oninput="pkStage(${i},'color',this.value)"><select onchange="pkStage(${i},'kind',this.value)">${['open', 'won', 'lost'].map(k => `<option value="${k}" ${k === (s.kind || 'open') ? 'selected' : ''}>${({ open: 'обычный', won: 'успех', lost: 'отказ' })[k]}</option>`).join('')}</select><button class="btn sm danger" onclick="pkDel(${i})">${icon('close', 13)}</button></div>`;
   window.__pk = { id, name: pl.name, stages };
   openModal(`<h3>Воронка «${esc(pl.name)}»</h3>
@@ -3423,7 +3428,7 @@ async function editPipeline(id) {
    <button class="btn primary w" onclick="pkSave()">Сохранить воронку</button>`);
 }
 function pkStage(i, k, v) { window.__pk.stages[i][k] = v; }
-function pkDel(i) { if (window.__pk.stages.length <= 2) return toast('Нужно минимум 2 этапа'); window.__pk.stages.splice(i, 1); editPipelineRefresh(); }
+function pkDel(i) { const s = window.__pk.stages[i]; if (s && ['won', 'lost'].includes(s.code)) return toast('Этап успеха и этап отказа удалять нельзя: на них закрываются сделки и по ним считается выручка'); if (window.__pk.stages.length <= 2) return toast('Нужно минимум 2 этапа'); window.__pk.stages.splice(i, 1); editPipelineRefresh(); }
 function pkAdd() { window.__pk.stages.push({ code: 's' + Date.now(), name: 'Новый этап', color: '#16a34a', kind: 'open' }); editPipelineRefresh(); }
 function editPipelineRefresh() { const stages = window.__pk.stages; $('#pkList').innerHTML = stages.map((s, i) => `<div class="st"><span>${i + 1}</span><input value="${esc(s.name)}" oninput="pkStage(${i},'name',this.value)"><input type="color" value="${esc(s.color)}" oninput="pkStage(${i},'color',this.value)"><select onchange="pkStage(${i},'kind',this.value)">${['open', 'won', 'lost'].map(k => `<option value="${k}" ${k === (s.kind || 'open') ? 'selected' : ''}>${({ open: 'обычный', won: 'успех', lost: 'отказ' })[k]}</option>`).join('')}</select><button class="btn sm danger" onclick="pkDel(${i})">${icon('close', 13)}</button></div>`).join(''); }
 async function pkSave() {

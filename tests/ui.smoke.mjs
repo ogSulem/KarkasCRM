@@ -1103,6 +1103,9 @@ try {
   check('счётчик колокольчика личный, а не по всей компании', appJsRaw.includes('(d.myTasksOverdue || 0) + (d.unread || 0)'));
   check('палитра не предлагает зрителю действия создания', appJsRaw.includes("if (g.edit && !canEdit()) continue;") && appJsRaw.includes("group: 'Быстрое создание', edit: true"));
   check('зарегистрированный адрес вебхука виден в настройках', appJsRaw.includes('s.wazzup.webhook_url') && serverJsRaw.includes("webhook_url: getSetting('WAZZUP_WEBHOOK_URL')"));
+  check('этапы успеха и отказа защищены в редакторе воронок и на сервере',
+    appJsRaw.includes("x.code === 'won'") && appJsRaw.includes('Этап успеха и этап отказа удалять нельзя')
+    && serverJsRaw.includes('В воронке нужны этап успеха и этап отказа'));
   // черновики чатов не копятся в браузере вечно: старые выбывают первыми
   window.__state.drafts = {};
   for (let i = 1; i <= 60; i++) window.__state.drafts['c' + i] = 'черновик ' + i;

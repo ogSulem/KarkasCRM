@@ -218,6 +218,8 @@ test('просроченная задача: общее уведомление �
   assert.ok(note, 'уведомление о просроченной задаче пришло');
   assert.ok(note.count >= 1);
   assert.ok(Array.isArray(note.tasks) && note.tasks[0].title && note.tasks[0].due);
+  const mine = note.tasks.find(t => t.id === task.data.id);
+  assert.equal(mine.responsible_id, b.id, 'в рассылке виден ответственный: клиент отсекает чужие просрочки из тоста');
   await sleep(700);
   const repeats = bStream.events.filter(e => e.ev === 'notify' && e.data?.type === 'overdue_tasks' && (e.data.tasks || []).some(t => t.id === task.data.id)).length;
   assert.equal(repeats, 1, 'повторный тик не дублирует уведомление');

@@ -265,3 +265,22 @@ test('ошибка хранилища не прячется: код возвра
     await new Promise(r => server.close(r));
   }
 });
+
+test('старый ключ с битой кодировкой не мешает чистке хранилища', async () => {
+  const s3 = fakeS3(); await s3.start();
+  try {
+    await call('/api/settings', { method: 'PUT', token: admin, body: {
+      S3_ENDPOINT: `http://127.0.0.1:${s3.port()}`, S3_BUCKET: 'karkas-backups', S3_ACCESS_KEY: 'AKIATEST',
+      S3_SECRET_KEY: 'secret-test', S3_PREFIX: 'karkascrm', S3_REGION: 'ru-1', S3_KEEP: '1', S3_AUTO: '1',
+    } });
+    // в реальном ведре может лежать файл, загруженный другой программой,
+    // с именем, которое decodeURIComponent не разбирает
+    s3.store.set('/karkas-backups/karkascrm/crm-2019%E0%A4broken.db', Buffer.from('old'));
+    s3.store.set('/karkas-backups/karkascrm/crm-2020-01-01.db', Buffer.from('old'));
+    const made = await call('/api/backups', { method: 'POST', token: admin, body: {} });
+    assert.equal(made.status, 200);
+    assert.equal(made.data.s3.ok, true, JSON.stringify(made.data.s3));
+    assert.equal(made.data.s3.removed, 2, 'обе старые копии удалены, несмотря на битый ключ');
+    assert.equal(s3.store.size, 1, 'в хранилище осталась только свежая копия');
+  } finally { await new Promise(r => s3.srv.close(r)) }
+});
