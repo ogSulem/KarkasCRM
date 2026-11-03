@@ -153,7 +153,14 @@ export function migrateOurPricesToCatalog(db) {
 }
 
 export function createCompetitors(ctx) {
-  const { db, json, readBody, log, broadcast, getSetting, setSetting } = ctx;
+  const { db, json, readBody, log, broadcast, getSetting, setSetting, rateLimit } = ctx;
+  // проверки идут во внешние платные сервисы (ФНС, карты, отзывы): серия частых
+  // запусков одним сотрудником не должна сжигать квоту заказчика
+  const checkLimit = (res, user) => {
+    const rl = rateLimit('compcheck:' + user.id, 30, 300000);
+    if (!rl.ok) { json(res, 429, { error: 'Слишком много проверок за пять минут: внешние источники платные. Подождите немного и повторите.' }); return false }
+    return true;
+  };
   ensureCompetitorsSchema(db);
 
   const SOURCE_URL_DEFAULTS = {
@@ -906,7 +913,7 @@ export function createCompetitors(ctx) {
         const f = ['name', 'inn', 'ogrn', 'city', 'website', 'phone', 'notes', 'price_url']; const ks = Object.keys(b).filter(k => f.includes(k)); if (ks.length) db.prepare(`UPDATE competitors SET ${ks.map(k => k + '=?')} WHERE id=?`).run(...ks.map(k => b[k]), id); return json(res, 200, competitorFull(id)); }
       if (!action && req.method === 'DELETE') { db.prepare('DELETE FROM competitors WHERE id=?').run(id); return json(res, 200, { deleted: true }); }
       if (action === 'report' && req.method === 'GET') return json(res, 200, competitorFull(id));
-      if (action === 'check' && req.method === 'POST') { const b = await readBody(req).catch(() => ({})); if (b.inn && !comp.inn) { db.prepare('UPDATE competitors SET inn=? WHERE id=?').run(digits(b.inn), id); comp.inn = digits(b.inn) } const out = await runCheck(comp, { sources: b.sources, pullTable: b.pullTable !== false }); return json(res, 200, { ...out, competitor: competitorFull(id) }); }
+      if (action === 'check' && req.method === 'POST') { const b = await readBody(req).catch(() => ({})); if (b.inn && !comp.inn) { db.prepare('UPDATE competitors SET inn=? WHERE id=?').run(digits(b.inn), id); comp.inn = digits(b.inn) } if (!checkLimit(res, user)) return; const out = await runCheck(comp, { sources: b.sources, pullTable: b.pullTable !== false }); return json(res, 200, { ...out, competitor: competitorFull(id) }); }
       if (action === 'reviews' && req.method === 'POST') { const b = await readBody(req); const r = db.prepare('INSERT INTO reviews(competitor_id,source,rating,text,author,url) VALUES(?,?,?,?,?,?)').run(id, b.source || 'вручную', b.rating ?? null, b.text || '', b.author || user.name, b.url || ''); return json(res, 201, { id: r.lastInsertRowid }); }
       if (action === 'prices' && req.method === 'POST') {
         const b = await readBody(req);
@@ -971,6 +978,7 @@ export function createCompetitors(ctx) {
       let created = false;
       if (!comp) { const r = db.prepare('INSERT INTO competitors(name,inn,city,website) VALUES(?,?,?,?)').run(name.replace(/\s*ИНН\s*\d+.*/i, '').trim() || name, inn || null, b.city || '', b.website || ''); comp = db.prepare('SELECT * FROM competitors WHERE id=?').get(r.lastInsertRowid); created = true; log(`Новый конкурент для проверки: ${comp.name}`, 'competitors', comp.id, user.name); }
       else if (inn && !comp.inn) { db.prepare('UPDATE competitors SET inn=? WHERE id=?').run(inn, comp.id); comp.inn = inn }
+      if (!checkLimit(res, user)) return;
       const out = await runCheck(comp, { sources: b.sources });
       return json(res, 200, { created, ...out, competitor: competitorFull(comp.id) });
     }

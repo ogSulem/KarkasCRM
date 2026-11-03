@@ -1399,7 +1399,7 @@ function validateUser(b, creating = false) {
   if (b.email !== undefined) b.email = String(b.email).trim().slice(0, 254);
 }
 
-const competitorsApi = createCompetitors({ db, json, readBody, log, broadcast, getSetting, setSetting });
+const competitorsApi = createCompetitors({ db, json, readBody, log, broadcast, getSetting, setSetting, rateLimit });
 
 // «Наш прайс» прошлых версий переезжает в каталог: это один и тот же список
 // (что продаём и по какой цене), вести его в двух местах больше не нужно.
