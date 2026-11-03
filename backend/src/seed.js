@@ -141,18 +141,18 @@ export function seedDemo(db, adminId, adminName) {
 
   // ── конкуренты: карточки, проверки, отчёт, отзывы, прайсы ──
   const qk = 'INSERT INTO competitors(name,inn,ogrn,city,website,phone,notes,price_url,demo) VALUES(?,?,?,?,?,?,?,?,?)';
-  const k1 = db.prepare(qk).run('ООО «БрусДом»', '7709876543', '1147746234567', 'Москва', 'brusdom.ru', '+7 495 123-45-67', 'Сильные отзывы, но цена выше нашей на 8%', '', demo).lastInsertRowid;
-  const k2 = db.prepare(qk).run('ИП «СтройУют»', '500111223345', '314500000123456', 'Подольск', 'stroystroy.ru', '', 'Мелкий игрок, работает без договора', '', demo).lastInsertRowid;
+  const k1 = db.prepare(qk).run('ООО «БрусДом»', '7709876545', '1147746234567', 'Москва', 'brusdom.ru', '+7 495 123-45-67', 'Сильные отзывы, но цена выше нашей на 8%', '', demo).lastInsertRowid;
+  const k2 = db.prepare(qk).run('ИП «СтройУют»', '500111223302', '314500000123456', 'Подольск', 'stroystroy.ru', '', 'Мелкий игрок, работает без договора', '', demo).lastInsertRowid;
 
   // проверки и отчёты каскадно удаляются с карточкой конкурента
   const qch = 'INSERT INTO competitor_checks(competitor_id,source,status,summary,payload) VALUES(?,?,?,?,?)';
   const ich = db.prepare(qch);
-  ich.run(k1, 'rusprofile', 'ok', 'Найдено: ООО «БрусДом» · действующая', JSON.stringify({ source: 'rusprofile', title: 'Rusprofile', status: 'ok', summary: 'Найдено: ООО «БрусДом» · действующая', data: { card: { name: 'ООО «БрусДом»', inn: '7709876543', ogrn: '1147746234567', status: 'действующая', address: 'г Москва, ул Строителей, 12' } }, links: [] }));
+  ich.run(k1, 'rusprofile', 'ok', 'Найдено: ООО «БрусДом» · действующая', JSON.stringify({ source: 'rusprofile', title: 'Rusprofile', status: 'ok', summary: 'Найдено: ООО «БрусДом» · действующая', data: { card: { name: 'ООО «БрусДом»', inn: '7709876545', ogrn: '1147746234567', status: 'действующая', address: 'г Москва, ул Строителей, 12' } }, links: [] }));
   // официального API ФССП нет с марта 2022 года — источник работает как ссылка
   ich.run(k1, 'fssp', 'skipped', 'Официальный API ФССП закрыт с марта 2022 года — суммы долгов смотрите по ссылке «ФССП: банк исполнительных производств»', JSON.stringify({ source: 'fssp', title: 'ФССП (долги)', status: 'skipped', summary: 'Официальный API ФССП закрыт с марта 2022 года', data: { productions: [], total: null, manual: true }, links: [] }));
   ich.run(k1, 'kad', 'ok', 'Найдено дел: 2', JSON.stringify({ source: 'kad', title: 'Арбитражные суды', status: 'ok', summary: 'Найдено дел: 2', data: { cases: [{ number: 'А40-123456/2025', date: '2025-11-04', type: 'А', court: 'АС города Москвы', judge: 'Соколова Е.П.', url: '', role: 'ответчик' }, { number: 'А40-789012/2024', date: '2024-06-18', type: 'А', court: 'АС Московской области', judge: 'Павлов И.Н.', url: '', role: 'истец' }], total: 2 }, links: [] }));
   ich.run(k1, 'google', 'ok', 'Рейтинг 4.2 · 37 отзывов · г Москва', JSON.stringify({ source: 'google', title: 'Google Карты', status: 'ok', summary: 'Рейтинг 4.2 · 37 отзывов', data: { card: { name: 'БрусДом', address: 'г Москва', phone: '+7 495 123-45-67', rating: 4.2, count: 37 }, reviews: [{ author: 'Кирилл М.', rating: 5, text: 'Дом построили за 5 месяцев, бригада вежливая', url: '' }, { author: 'Анна С.', rating: 3, text: 'Смета выросла на 15% в процессе, но дом качественный', url: '' }] }, links: [] }));
-  ich.run(k2, 'rusprofile', 'ok', 'Найдено: ИП «СтройУют» · действующая', JSON.stringify({ source: 'rusprofile', title: 'Rusprofile', status: 'ok', summary: 'Найдено: ИП «СтройУют»', data: { card: { name: 'ИП СтройУют', inn: '500111223345', status: 'действующая' } }, links: [] }));
+  ich.run(k2, 'rusprofile', 'ok', 'Найдено: ИП «СтройУют» · действующая', JSON.stringify({ source: 'rusprofile', title: 'Rusprofile', status: 'ok', summary: 'Найдено: ИП «СтройУют»', data: { card: { name: 'ИП СтройУют', inn: '500111223302', status: 'действующая' } }, links: [] }));
 
   const qr = 'INSERT INTO competitor_reports(competitor_id,risk,level,verdict,payload) VALUES(?,?,?,?,?)';
   db.prepare(qr).run(k1, 42, 'умеренный',
@@ -165,9 +165,9 @@ export function seedDemo(db, adminId, adminName) {
       talking_points: ['Аргумент: Арбитражные дела: 2 — используйте в переговорах', 'Аргумент: Сильная репутация — усильте преимуществом сервиса'],
       pricing: { pairs: [{ item: 'Каркасный дом 8×10', ours: 2950000, theirs: 3200000 }], avgDiff: -8, cheaper: 1, expensive: 0, ourSum: 2950000, theirSum: 3200000 },
       reviews: { avgRating: 4.2, totalReviews: 37, sources: {} },
-      summary: ['Проверено источников: 3 из 4'], links: [], found: { inn: '7709876543', name: 'ООО «БрусДом»', address: 'г Москва, ул Строителей, 12' } }));
+      summary: ['Проверено источников: 3 из 4'], links: [], found: { inn: '7709876545', name: 'ООО «БрусДом»', address: 'г Москва, ул Строителей, 12' } }));
   db.prepare(qr).run(k2, 18, 'низкий', 'Мелкий игрок без задолженностей и судебных дел. Основной аргумент против — работа без договора и гарантии.',
-    JSON.stringify({ risk: 18, level: 'низкий', noData: false, factors: [{ type: 'plus', text: 'Исполнительных производств нет', weight: -6, source: 'fssp' }], verdict: 'Мелкий игрок без долгов и судов.', talking_points: [], pricing: null, reviews: { avgRating: null, totalReviews: 0, sources: {} }, summary: ['Проверено источников: 1 из 4'], links: [], found: { inn: '500111223345', name: 'ИП СтройУют' } }));
+    JSON.stringify({ risk: 18, level: 'низкий', noData: false, factors: [{ type: 'plus', text: 'Исполнительных производств нет', weight: -6, source: 'fssp' }], verdict: 'Мелкий игрок без долгов и судов.', talking_points: [], pricing: null, reviews: { avgRating: null, totalReviews: 0, sources: {} }, summary: ['Проверено источников: 1 из 4'], links: [], found: { inn: '500111223302', name: 'ИП СтройУют' } }));
 
   // отзывы каскадно удаляются с карточкой конкурента
   db.prepare("INSERT INTO reviews(competitor_id,source,rating,text,author,url) VALUES(?,?,?,?,?,?)")

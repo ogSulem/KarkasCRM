@@ -153,7 +153,7 @@ try {
   check('обращение с сайта создало чат и сделку', convs.length === 1 && convs[0].title === 'Ирина Соколова', JSON.stringify(convs.map(c => c.title)));
   const conv = convs[0];
   await apiPost('/api/tasks', { title: 'Позвонить Ирине', type: 'call', due: '2030-01-15 09:30', contact_id: conv.contact_id });
-  const competitor = await apiPost('/api/competitors', { name: 'ООО Тестовый конкурент', inn: '7700111222', city: 'Москва' });
+  const competitor = await apiPost('/api/competitors', { name: 'ООО Тестовый конкурент', inn: '7700111220', city: 'Москва' });
   check('конкурент создаётся через API', !!competitor.id);
 
   // ── все разделы и вкладки настроек отрисовываются без ошибок ─────────────
@@ -700,10 +700,10 @@ try {
   // Ссылки для ручной проверки приходят с сервера (ФНС, ГИР БО, ФССП, Федресурс,
   // арбитраж, карты, отзывы, Авито, Госзакупки), а не зашиты в интерфейс парой штук.
   {
-    const html = window.reportLinks({ links: [{ label: 'Росстат', url: 'https://example.gov/a' }, { label: 'ФССП', url: 'https://example.gov/b' }] }, { name: 'ООО Тест', inn: '7700111222' });
+    const html = window.reportLinks({ links: [{ label: 'Росстат', url: 'https://example.gov/a' }, { label: 'ФССП', url: 'https://example.gov/b' }] }, { name: 'ООО Тест', inn: '7700111220' });
     check('в отчёт попадают ссылки из ответа сервера, а не две зашитые', /Росстат/.test(html) && /ФССП/.test(html) && /target="_blank"/.test(html) && /rel="noopener"/.test(html));
-    const fallback = window.reportLinks({}, { name: 'ООО Тест', inn: '7700111222' });
-    check('без готового отчёта остаются хотя бы поисковые ссылки', /rusprofile\.ru\/search/.test(fallback) && /7700111222/.test(fallback));
+    const fallback = window.reportLinks({}, { name: 'ООО Тест', inn: '7700111220' });
+    check('без готового отчёта остаются хотя бы поисковые ссылки', /rusprofile\.ru\/search/.test(fallback) && /7700111220/.test(fallback));
   }
   // наша таблица цен: загружена — значит кнопка показывает её, а не просит файл
   await fetch(BASE + '/api/prices', { method: 'POST', headers: authH(), body: JSON.stringify({ scope: 'ours', text: 'Каркасный дом 8×10;2950000;шт\nБаня 4×6;890000;шт' }) });
