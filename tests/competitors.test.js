@@ -510,3 +510,26 @@ test('сбой источника 5xx повторяется один раз и 
   assert.ok(g2.links.length >= 5, 'ссылки ручной проверки на месте');
   assert.ok(r2.body.report, 'отчёт собран, несмотря на сбой одного источника');
 });
+
+test('ссылка на прайс проверяется: javascript: не проходит, адрес без схемы дополняется', async () => {
+  const bad = await call('/api/competitors', { method: 'POST', body: JSON.stringify({ name: 'ООО «Опасная ссылка»', price_url: 'javascript:alert(document.cookie)' }) });
+  assert.equal(bad.status, 400, 'схема javascript: отклоняется уже при создании');
+  const ok = await call('/api/competitors', { method: 'POST', body: JSON.stringify({ name: 'ООО «Таблица без схемы»', price_url: 'docs.google.com/spreadsheets/d/ABC123/edit' }) });
+  assert.equal(ok.status, 201, 'обычная ссылка принимается');
+  const comp = (await call('/api/competitors')).body.find(c => c.name === 'ООО «Таблица без схемы»');
+  assert.equal(comp.price_url, 'https://docs.google.com/spreadsheets/d/ABC123/edit', 'адрес без схемы дополнен до https');
+  const badPatch = await call(`/api/competitors/${comp.id}`, { method: 'PATCH', body: JSON.stringify({ price_url: 'javascript:alert(1)' }) });
+  assert.equal(badPatch.status, 400, 'та же проверка при сохранении карточки');
+});
+
+test('выгрузка прайса конкурента гасит формулы Excel', async () => {
+  const comp = (await call('/api/competitors')).body.find(c => c.name === 'ООО «Таблица без схемы»');
+  const imp = await call(`/api/competitors/${comp.id}/prices`, { method: 'POST', body: JSON.stringify({ csv: 'Наименование;Цена\n=1+1;100\n-2;200\nОбычная позиция;300' }) });
+  assert.equal(imp.status, 201, 'таблица импортирована');
+  const res = await fetch(base + `/api/prices/export?scope=competitor&competitor=${comp.id}`, { headers: h });
+  assert.equal(res.status, 200);
+  const text = await res.text();
+  assert.ok(text.includes("\"'=1+1\""), 'ячейка, начинающаяся с =, экранирована апострофом');
+  assert.ok(text.includes("\"'-2\""), 'ячейка, начинающаяся с -, экранирована апострофом');
+  assert.ok(text.includes('Обычная позиция'), 'обычные позиции выгружаются без изменений');
+});

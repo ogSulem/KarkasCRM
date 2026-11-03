@@ -1725,6 +1725,8 @@ async function sendMsg(e, cid) {
   e.preventDefault();
   const input = $('#msgText'), body = input.value.trim();
   if (!body) return false;
+  // предел как у мессенджеров и у сервера: текст остаётся в поле, чтобы его разбили на части
+  if (body.length > 4096) { toast('Сообщение длиннее 4096 символов: мессенджеры такие не принимают. Разбейте текст на части.', 'err'); input.focus(); return false; }
   const channel = $('#msgChannel').value;
   input.value = '';
   delete state.drafts[cid]; try { localStorage.setItem('karkas-drafts', JSON.stringify(state.drafts)); } catch {}
@@ -1827,7 +1829,30 @@ function bulkOwner(table) {
   return `<select style="width:auto" onchange="if(this.value){bulkApply('${table}','update',{responsible_id:+this.value});this.value=''}"><option value="">Сменить ответственного…</option>${__team.map(u => `<option value="${u.id}">${esc(u.name)}</option>`).join('')}</select>`;
 }
 function bulkStage() {
-  return `<select style="width:auto" onchange="if(this.value){bulkApply('deals','update',{stage:this.value});this.value=''}"><option value="">Перевести на этап…</option>${(state.stages || []).map(s => `<option value="${s.code}">${esc(s.name)}</option>`).join('')}</select>`;
+  return `<select style="width:auto" onchange="if(this.value){bulkStageTo(this.value);this.value=''}"><option value="">Перевести на этап…</option>${(state.stages || []).map(s => `<option value="${s.code}">${esc(s.name)}</option>`).join('')}</select>`;
+}
+
+// Массовый перевод в «Не реализовано» спрашивает причину, как перетаскивание
+// карточки: без неё в аналитике причин отказа росли бы сделки «Не указана».
+// Причина необязательна: «Отмена» оставляет сделки просто закрытыми.
+async function bulkStageTo(stage) {
+  const ids = [...selSet('deals')];
+  if (!ids.length || !stage) return;
+  await bulkApplyNow('deals', 'update', ids, { stage });
+  if (stage !== 'lost') return;
+  askInput({
+    title: 'Причина отказа',
+    label: `Почему ${ids.length} ${plural(ids.length, 'сделка не реализована', 'сделки не реализованы', 'сделок не реализованы')}? Это видно в аналитике`,
+    value: '', okText: 'Сохранить',
+  }, async reason => {
+    const r = String(reason || '').trim();
+    if (!r) return;
+    try {
+      await api('/api/bulk', { method: 'POST', body: JSON.stringify({ table: 'deals', action: 'update', ids, patch: { loss_reason: r } }) });
+      toast('Причина отказа сохранена');
+      render();
+    } catch (e) { toast(e.message, 'err'); }
+  });
 }
 
 /* ---------- week calendar ---------- */
@@ -2651,7 +2676,7 @@ function reportLinks(rep, c) {
     { label: 'ФНС: Прозрачный бизнес', url: 'https://pb.nalog.ru/search.html?query=' + encodeURIComponent(c.inn || c.name || '') },
   ];
   return `<p class="form-hint" style="margin-bottom:6px">Ссылки для ручной проверки — каждая открывается в новой вкладке:</p>
-   <div class="report-links">${links.map(l => `<a href="${esc(l.url)}" target="_blank" rel="noopener">${esc(l.label)}</a>`).join('')}</div>`;
+   <div class="report-links">${links.filter(l => /^https?:\/\//i.test(l.url || '')).map(l => `<a href="${esc(l.url)}" target="_blank" rel="noopener">${esc(l.label)}</a>`).join('')}</div>`;
 }
 
 function competitorTab(c) {

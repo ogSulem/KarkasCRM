@@ -242,6 +242,17 @@ function normalizeStamp(raw) {
   return out.slice(0, 19).replace('T', ' ');
 }
 
+// Единый предел длины текстов в карточках: мегабайтное название или заметка
+// не должны попадать в базу — списки и карточки такое всё равно не показывают
+// целиком, а место и скорость поиска расходуются. Пределы с запасом: обычное
+// название компании или задачи в них укладывается многократно.
+const TEXT_LIMITS = { name: 200, title: 300, body: 20000, notes: 20000, phone: 64, email: 254, company: 200, position: 120, unit: 30, sku: 64, inn: 32, ogrn: 32, city: 120, website: 500, tags: 500, source: 60, loss_reason: 500 };
+function clampTexts(b) {
+  for (const k of Object.keys(b)) {
+    const lim = TEXT_LIMITS[k];
+    if (lim && typeof b[k] === 'string' && b[k].length > lim) b[k] = b[k].slice(0, lim);
+  }
+}
 function normalizeDue(raw) {
   if (!raw || typeof raw !== 'string') return '';
   const s = raw.trim();
@@ -1860,6 +1871,7 @@ export const server = http.createServer(async (req, res) => {
           if (b[field] && !db.prepare(`SELECT 1 x FROM ${target} WHERE id=?`).get(b[field])) return json(res, 400, { error: 'Связанная запись не найдена — обновите страницу и выберите из списка' });
         }
         if (table === 'tasks' && b.due) b.due = normalizeDue(String(b.due));
+        clampTexts(b);
         const ks = fields.filter(f => b[f] !== undefined), vals = ks.map(k => b[k]);
         if (table === 'contacts' && b.phone !== undefined) { ks.push('phone_norm'); vals.push(digits(b.phone) || null); }
         const r = db.prepare(`INSERT INTO ${table}(${ks}) VALUES(${ks.map(() => '?')})`).run(...vals);
@@ -1884,6 +1896,7 @@ export const server = http.createServer(async (req, res) => {
           if (b.due && !norm) return json(res, 400, { error: 'Не поняли срок. Укажите дату как 25.10.2026 14:00 или «завтра 10:00».' });
           b.due = norm;
         }
+        clampTexts(b);
         const ks = Object.keys(b).filter(k => fields.includes(k));
         if (table === 'contacts' && b.custom !== undefined) { const err = missingRequiredCustom('contacts', b.custom); if (err) return json(res, 400, { error: err }); }
         if (table === 'contacts' && b.name !== undefined && !String(b.name || '').trim()) return json(res, 400, { error: 'Имя клиента не может быть пустым' });
@@ -2048,7 +2061,7 @@ export const server = http.createServer(async (req, res) => {
       const link = `${base}/d/${docToken(id, doc)}`;
       const kind = doc === 'invoice' ? 'Счёт' : 'Коммерческое предложение';
       const sum = items.reduce((a, x) => a + Number(x.price) * Number(x.qty), 0);
-      const text = `${String(b.body || '').trim() || `${deal.contact_name || 'Добрый день'}!`}
+      const text = `${String(b.body || '').trim().slice(0, 20000) || `${deal.contact_name || 'Добрый день'}!`}
 
 ${kind} по заявке «${deal.title}» на сумму ${money(sum, company.currency)} — по ссылке:
 ${link}
@@ -2355,16 +2368,20 @@ ${user?.name || ''}`.trim();
         if (rawUri && !/^(https?:\/\/|\/uploads\/)/i.test(rawUri)) return json(res, 400, { error: 'Ссылка на файл должна начинаться с http://, https:// или /uploads/' });
         const file = rawUri ? { contentUri: rawUri.slice(0, 2048) } : null;
         if (!String(b.body || '').trim() && !file) return json(res, 400, { error: 'Пустое сообщение: введите текст или приложите ссылку на файл' });
+        // предел длины — как у мессенджеров: огромное сообщение вендор всё равно
+        // не принял бы, а в базе и в ленте чата оно занимало бы мегабайты
+        const msgText = String(b.body || '');
+        if (msgText.length > 4096) return json(res, 400, { error: 'Сообщение длиннее 4096 символов: мессенджеры такие не принимают. Разбейте текст на несколько частей или приложите файл.' });
         let send = { delivered: false, mode: 'local' }, status = 'local'; const wantChannel = b.chat_type || b.channel || conv.chat_type || 'whatsapp';
         // письма идут через SMTP отдельным действием: мессенджер их не отправляет
         if (wantChannel === 'email') return json(res, 400, { error: 'Письмо отправляется кнопкой «Письмо» в шапке чата — через настроенный почтовый сервер' });
-        try { send = await deliver(conv, wantChannel, b.body || '', user, file); status = send.delivered ? 'sent' : 'local'; }
+        try { send = await deliver(conv, wantChannel, msgText, user, file); status = send.delivered ? 'sent' : 'local'; }
         catch (e) {
           // без подключённого Wazzup сообщение сохраняется только в CRM
           if (String(e.message) === 'WAZZUP_NOT_CONFIGURED') { status = 'local'; send = { delivered: false, mode: 'local-only', hint: 'Wazzup не подключён — сообщение сохранено в CRM. Настройки → Интеграции: вставьте API-ключ Wazzup, и ответ уйдёт клиенту.' }; }
           else { status = 'error'; send = { delivered: false, mode: 'error: ' + e.message }; }
         }
-        const body = String(b.body || '').trim() || (file ? '[вложение]' : '');
+        const body = msgText.trim() || (file ? '[вложение]' : '');
         const insertOut = ext => db.prepare('INSERT INTO messages(conversation_id,channel,direction,body,content_uri,content_name,content_type,status,external_id,author,channel_id) VALUES(?,?,?,?,?,?,?,?,?,?,?)').run(id, wantChannel, 'out', body, file?.contentUri || null, b.contentName ? safeFileName(b.contentName) : null, b.contentType || null, status, ext, user.name, send.channelId || conv.channel_id || null);
         // внешний id уникален (защита от повторной доставки входящих), но если провайдер
         // вернул уже встречавшийся id, сообщение всё равно должно сохраниться в CRM
@@ -2380,12 +2397,14 @@ ${user?.name || ''}`.trim();
       const to = b.to || conv.email;
       if (!to) return json(res, 400, { error: 'У контакта не указан e-mail — добавьте его в карточке клиента' });
       if (!getSetting('SMTP_HOST')) return json(res, 400, { error: 'Почта не настроена: Настройки → Интеграции → Почта (SMTP)' });
+      const mailText = String(b.body || '');
+      if (mailText.length > 100000) return json(res, 400, { error: 'Письмо слишком длинное: предел 100 000 символов. Сократите текст или приложите документ ссылкой.' });
       let send = { delivered: false, mode: 'not-configured' }, status = 'error';
       try {
-        const r = await sendMail({ host: getSetting('SMTP_HOST'), port: Number(getSetting('SMTP_PORT', '587')), secure: getSetting('SMTP_SECURE') === '1' ? true : getSetting('SMTP_SECURE') === '0' ? false : undefined, user: getSetting('SMTP_USER'), pass: getSetting('SMTP_PASS'), from: getSetting('MAIL_FROM') || getSetting('SMTP_USER'), fromName: getSetting('COMPANY_NAME', 'CRM'), to, toName: conv.title || '', subject: b.subject || 'Письмо от ' + getSetting('COMPANY_NAME', 'CRM'), text: b.body || '' });
+        const r = await sendMail({ host: getSetting('SMTP_HOST'), port: Number(getSetting('SMTP_PORT', '587')), secure: getSetting('SMTP_SECURE') === '1' ? true : getSetting('SMTP_SECURE') === '0' ? false : undefined, user: getSetting('SMTP_USER'), pass: getSetting('SMTP_PASS'), from: getSetting('MAIL_FROM') || getSetting('SMTP_USER'), fromName: getSetting('COMPANY_NAME', 'CRM'), to, toName: conv.title || '', subject: String(b.subject || '').slice(0, 200) || 'Письмо от ' + getSetting('COMPANY_NAME', 'CRM'), text: mailText });
         send = { delivered: true, mode: 'smtp', id: r.messageId }; status = 'sent';
       } catch (e) { send = { delivered: false, mode: 'error: ' + e.message } }
-      const ins = db.prepare('INSERT INTO messages(conversation_id,channel,direction,body,subject,status,author) VALUES(?,?,?,?,?,?,?)').run(conv.id, 'email', 'out', b.body || '', b.subject || '', status, user.name);
+      const ins = db.prepare('INSERT INTO messages(conversation_id,channel,direction,body,subject,status,author) VALUES(?,?,?,?,?,?,?)').run(conv.id, 'email', 'out', mailText, String(b.subject || '').slice(0, 200), status, user.name);
       db.prepare("UPDATE conversations SET channels=?, last_at=datetime('now') WHERE id=?").run([...new Set([...(conv.channels || '').split(',').filter(Boolean), 'email'])].join(','), conv.id);
       broadcast('message', { conversation_id: conv.id });
       return json(res, 201, { message: db.prepare('SELECT * FROM messages WHERE id=?').get(ins.lastInsertRowid), send });
@@ -2710,6 +2729,15 @@ ${user?.name || ''}`.trim();
           db.exec('BEGIN IMMEDIATE');
           try { for (const n of next) applied += st.run(n.title, n.amount, n.stage, n.pipeline_id, n.contact_id, n.company_id, n.responsible, n.responsible_id, n.priority, n.loss_reason, n.deadline, n.custom, n.closed_at, n.id).changes; db.exec('COMMIT'); }
           catch (e) { db.exec('ROLLBACK'); throw e }
+          // правила «сделку перевели на этап» срабатывают и при массовом переводе —
+          // как при перетаскивании карточки и в одиночной карточке сделки
+          if (patch.stage !== undefined) {
+            for (let i = 0; i < next.length; i++) {
+              if (rows[i].stage !== next[i].stage) {
+                await runAutomations('stage_changed', { deal_id: next[i].id, stage: next[i].stage, contact_id: next[i].contact_id, actor_id: user.id });
+              }
+            }
+          }
         } else {
           const st = db.prepare(`UPDATE ${table} SET ${ks.map(k => k + '=?').join(',')} WHERE id=?`);
           for (const id of ids) applied += st.run(...ks.map(k => patch[k]), id).changes;
