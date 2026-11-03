@@ -1001,13 +1001,14 @@ async function openNotifications() {
 const BASE_TITLE = 'КаркасCRM — сделки, клиенты и задачи в единой CRM-системе';
 async function navCounts(d) {
   $('#navUnread').textContent = d.unread || '';
-  document.title = d.unread ? `(${d.unread}) ${BASE_TITLE}` : BASE_TITLE;
   $('#navTasks').textContent = d.myTasksOpen || '';
   $('#navDeals').textContent = d.dealsTotal || '';
-  // Колокольчик показывает всё, что требует внимания: просроченные задачи и
-  // непрочитанные чаты. В заголовке вкладки — только новые сообщения: их видно,
-  // даже когда CRM свёрнута.
-  const attention = (d.tasksOverdue || 0) + (d.unread || 0);
+  // Колокольчик считает только причастное сотруднику: его просроченные задачи
+  // (включая неназначенные — то же правило, что у списков внутри колокольчика)
+  // и непрочитанные чаты. Цифры по всей компании в счётчик не попадают:
+  // администратор видит их отдельной сноской внутри колокольчика.
+  // В заголовке вкладки — только новые сообщения: их видно, даже когда CRM свёрнута.
+  const attention = (d.myTasksOverdue || 0) + (d.unread || 0);
   const b = $('#bellCount');
   if (b) b.textContent = attention || '';
   const bell = $('#bellBtn');
@@ -3829,7 +3830,9 @@ const PALETTE_ACTIONS = [
     { ico: 'competitors', title: 'Конкуренты', hint: 'разведка и проверка', run: () => go('competitors') },
     { ico: 'settings', title: 'Настройки', hint: 'интеграции и права', run: () => go('settings') }
   ]},
-  { group: 'Быстрое создание', items: [
+  // edit: группу видят только роли с правом изменений — зрителю сервер всё
+  // равно ответил бы 403, предлагать запрещённое действие нелогично
+  { group: 'Быстрое создание', edit: true, items: [
     { ico: 'plus', title: 'Новая сделка', hint: 'открыть форму', run: () => openDeal() },
     { ico: 'plus', title: 'Новый контакт', hint: 'добавить клиента', run: () => openContact() },
     { ico: 'plus', title: 'Новая задача', hint: 'поставить дело', run: () => openTask() },
@@ -3852,6 +3855,7 @@ function paletteCommands(query = '') {
   const q = query.trim().toLowerCase();
   const res = [];
   for (const g of PALETTE_ACTIONS) {
+    if (g.edit && !canEdit()) continue;
     const matched = g.items.filter(it => !q || (it.title + ' ' + (it.hint || '')).toLowerCase().includes(q));
     if (matched.length) res.push({ group: g.group, items: matched });
   }
