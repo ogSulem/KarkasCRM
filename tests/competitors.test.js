@@ -12,7 +12,7 @@ process.env.PORT = '18088';
 process.env.ALLOW_PRIVATE_FETCH = '1';
 const { server } = await import('../backend/src/server.js');
 const base = 'http://127.0.0.1:18088';
-const INN = '7700000001', OGRN = '1027700000001';
+const INN = '7700000009', OGRN = '1027700000001';
 let h, mocks = {}, calls = [];
 const call = (p, opt = {}) => fetch(base + p, { ...opt, headers: { 'Content-Type': 'application/json', ...(h || {}), ...(opt.headers || {}) } }).then(async r => ({ status: r.status, body: (r.headers.get('content-type') || '').includes('json') ? await r.json() : await r.text() }));
 
@@ -159,7 +159,7 @@ test('повторная проверка показывает изменени�
 test('без ключей источники помечаются «skipped»', async () => {
   // ключи были заданы ранее для других тестов — проверяем поведение при пустых значениях
   await call('/api/competitor-sources', { method: 'PUT', body: JSON.stringify({ GOOGLE_PLACES_KEY: '' }) });
-  const r2 = await call('/api/competitors/find', { method: 'POST', body: JSON.stringify({ name: 'ИП Без Канала 2', inn: '770000000998', sources: ['fssp', 'google'] }) });
+  const r2 = await call('/api/competitors/find', { method: 'POST', body: JSON.stringify({ name: 'ИП Без Канала 2', inn: '770000000935', sources: ['fssp', 'google'] }) });
   const s = r2.body.results.find(x => x.source === 'fssp');
   assert.equal(s.status, 'skipped');
   assert.match(s.summary, /API ФССП закрыт/, 'в сводке сказано, что официального API больше нет');
@@ -362,7 +362,7 @@ test('диагностика источников: видно, кто отвеч
 
 test('источник без соединения помечается «blocked», а отчёт сообщает о нехватке данных', async () => {
   await call('/api/competitor-sources', { method: 'PUT', body: JSON.stringify({ RUSPROFILE_URL: 'http://127.0.0.1:9', FEDRESURS_API_URL: 'http://127.0.0.1:9', KAD_API_URL: 'http://127.0.0.1:9', COMPETITOR_TIMEOUT_MS: '1500', FNS_API_KEY: '', GOOGLE_PLACES_KEY: '', TWOGIS_KEY: '', YANDEX_API_KEY: '' }) });
-  const r = await call('/api/competitors/find', { method: 'POST', body: JSON.stringify({ name: 'ООО Без Связи', inn: '6600000000' }) });
+  const r = await call('/api/competitors/find', { method: 'POST', body: JSON.stringify({ name: 'ООО Без Связи', inn: '6600000003' }) });
   const st = r.body.results.map(x => x.status);
   assert.ok(st.includes('blocked'), 'недоступные сайты помечены blocked: ' + JSON.stringify(st));
   assert.ok(st.includes('skipped'), 'источники без ключей помечены skipped');
@@ -442,7 +442,7 @@ test('убранные адреса не отвечают, а мёртвая н�
 });
 
 test('ручная находка записывается, попадает в отчёт и учитывается в риске', async () => {
-  const created = await call('/api/competitors', { method: 'POST', body: JSON.stringify({ name: 'ООО «Ручная проверка»', inn: '7700000002' }) });
+  const created = await call('/api/competitors', { method: 'POST', body: JSON.stringify({ name: 'ООО «Ручная проверка»', inn: '7700000016' }) });
   assert.equal(created.status, 201);
   const comp = { id: created.body.id };
 
@@ -534,13 +534,26 @@ test('выгрузка прайса конкурента гасит формул
   assert.ok(text.includes('Обычная позиция'), 'обычные позиции выгружаются без изменений');
 });
 
+test('ИНН с ошибкой не принимается и не тратит платные запросы', async () => {
+  // контрольная цифра не сходится — карточка не создаётся, запросы к платным
+  // источникам не уходят; вставленный телефон не превращается в ИНН
+  const bad = await call('/api/competitors', { method: 'POST', body: JSON.stringify({ name: 'ООО «Опечатка»', inn: '7700000001' }) });
+  assert.equal(bad.status, 400, 'карточка с неверной контрольной цифрой не создаётся');
+  assert.match(String(bad.body.error), /контрольная цифра/i, 'отказ объясняет, что не так с номером');
+  const badFind = await call('/api/competitors/find', { method: 'POST', body: JSON.stringify({ name: 'ООО «Явный»', inn: '1234567890' }) });
+  assert.equal(badFind.status, 400, 'явно переданный неверный ИНН отклонён');
+  const phone = await call('/api/competitors/find', { method: 'POST', body: JSON.stringify({ name: '79001234567' }) });
+  assert.equal(phone.status, 200, 'строка цифр без верной контрольной обрабатывается как название');
+  assert.equal(phone.body.competitor.inn, null, 'телефон не записан в ИНН');
+});
+
 test('частые проверки конкурентов упираются в предел: внешние источники платные', async () => {
   // проверка стоит запросов к платным сервисам: серия запусков одним
   // сотрудником упирается в лимит 30 за пять минут с понятным отказом.
   // Тест намеренно последний: он выбирает бюджет проверок до конца.
   let limited = null;
   for (let i = 0; i < 45 && !limited; i++) {
-    const r = await call('/api/competitors/find', { method: 'POST', body: JSON.stringify({ name: 'ООО «Лимит ' + i + '»', inn: '77000000' + String(1000 + i) }) });
+    const r = await call('/api/competitors/find', { method: 'POST', body: JSON.stringify({ name: 'ООО «Лимит ' + i + '»'}) });
     if (r.status === 429) limited = r;
     else assert.equal(r.status, 200, 'обычная проверка проходит: ' + JSON.stringify(r.body && r.body.error));
   }

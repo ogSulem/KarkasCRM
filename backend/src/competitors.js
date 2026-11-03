@@ -6,6 +6,26 @@ import zlib from 'node:zlib';
 import dns from 'node:dns';
 
 const digits = s => String(s || '').replace(/\D/g, '');
+// Контрольная цифра ИНН (10 знаков у юрлица, 12 у ИП). Опечатка в номере раньше
+// стоила денег: источники честно спрашивали несуществующую компанию и отвечали
+// «не найдено». Теперь номер, который не проходит проверку, отклоняется сразу.
+export function validInn(s) {
+  const d = digits(s);
+  if (d.length === 10) {
+    const c = [2, 4, 10, 3, 5, 9, 4, 6, 8];
+    let sum = 0; for (let i = 0; i < 9; i++) sum += Number(d[i]) * c[i];
+    return sum % 11 % 10 === Number(d[9]);
+  }
+  if (d.length === 12) {
+    const c1 = [7, 2, 4, 10, 3, 5, 9, 4, 6, 8], c2 = [3, 7, 2, 4, 10, 3, 5, 9, 4, 6, 8];
+    let s1 = 0; for (let i = 0; i < 10; i++) s1 += Number(d[i]) * c1[i];
+    if (s1 % 11 % 10 !== Number(d[10])) return false;
+    let s2 = 0; for (let i = 0; i < 11; i++) s2 += Number(d[i]) * c2[i];
+    return s2 % 11 % 10 === Number(d[11]);
+  }
+  return false;
+}
+const INN_ERR = 'ИНН выглядит неверно: нужно 10 или 12 цифр, контрольная цифра не сходится. Проверьте номер.';
 const clamp = (v, a, b) => Math.max(a, Math.min(b, v));
 const money = n => Number(n || 0);
 const LEVELS = [[25, 'низкий', '#16a34a'], [50, 'умеренный', '#eab308'], [75, 'повышенный', '#f97316'], [101, 'высокий', '#dc2626']];
@@ -331,7 +351,10 @@ export function createCompetitors(ctx) {
     const out = { source: 'fns', title: 'ФНС (ЕГРЮЛ)', links: linksFor({ name, inn }) };
     if (!key) return { ...out, status: 'skipped', summary: 'Не задан ключ api-fns.ru — данные доступны по ссылкам ручной проверки', data: {} };
     const base = srcUrl('FNS_API_URL');
-    const q = digits(inn).length >= 10 ? digits(inn) : name;
+    const dInn = digits(inn);
+    // платный запрос в ЕГРЮЛ уходит только с номером, прошедшим проверку
+    if (dInn && !validInn(dInn)) return { ...out, status: 'error', summary: 'ИНН не прошёл проверку контрольной цифрой — исправьте номер, запрос к ЕГРЮЛ не отправлялся', data: {} };
+    const q = dInn.length === 10 || dInn.length === 12 ? dInn : name;
     const res = await http(`${base}/egr?req=${encodeURIComponent(q)}&key=${encodeURIComponent(key)}`);
     if (!res.ok || !res.data) {
       // при сбое сначала наше объяснение с кодом ответа, потом текст источника:
@@ -625,7 +648,9 @@ export function createCompetitors(ctx) {
       const lNameLen = buf.readUInt16LE(localOff + 26), lExtraLen = buf.readUInt16LE(localOff + 28);
       const start = localOff + 30 + lNameLen + lExtraLen;
       const raw = buf.subarray(start, start + compSize);
-      try { entries[name] = method === 0 ? raw : zlib.inflateRawSync(raw) } catch { entries[name] = Buffer.alloc(0) }
+      // распаковка с потолком: специально собранный .xlsx способен развернуться
+      // из килобайт в гигабайты и съесть память сервера
+      try { entries[name] = method === 0 ? raw : zlib.inflateRawSync(raw, { maxOutputLength: 64 * 1024 * 1024 }) } catch { entries[name] = Buffer.alloc(0) }
       p += 46 + nameLen + extraLen + commentLen;
     }
     return entries;
@@ -671,7 +696,9 @@ export function createCompetitors(ctx) {
     const hasHeader = idx.item !== undefined || idx.price !== undefined;
     const body = hasHeader ? grid.slice(1) : grid;
     const out = [];
+    const MAX_ROWS = 20000;
     for (const r of body) {
+      if (out.length >= MAX_ROWS) throw new Error('В таблице больше 20 000 строк — разделите файл на части: огромный прайс тормозит сравнение и карточки');
       const pickv = k => (idx[k] !== undefined ? String(r[idx[k]] ?? '').trim() : '');
       const item = pickv('item') || String(r[0] ?? '').trim();
       const rawPrice = pickv('price') || String(r[1] ?? '').trim();
@@ -752,8 +779,10 @@ export function createCompetitors(ctx) {
   function importPriceRows(b, defaultCompId) {
     const scope = b.scope === 'ours' ? 'ours' : 'competitor';
     let rows = [];
-    if (b.base64) rows = importBuffer(Buffer.from(String(b.base64).split(',').pop(), 'base64'), b.filename || 'загруженный файл');
-    else if (b.csv || b.text) rows = rowsToPrices(parseTable(b.csv || b.text), b.filename || 'вставленная таблица');
+    try {
+      if (b.base64) rows = importBuffer(Buffer.from(String(b.base64).split(',').pop(), 'base64'), b.filename || 'загруженный файл');
+      else if (b.csv || b.text) rows = rowsToPrices(parseTable(b.csv || b.text), b.filename || 'вставленная таблица');
+    } catch (e) { return { error: e.message } }
     if (!rows.length) return { error: 'Не удалось распознать ни одной строки. Нужны колонки «наименование» и «цена».' };
     if (scope === 'ours') {
       // наш прайс-лист = каталог: обновляем цены у знакомых позиций, новые добавляем.
@@ -838,6 +867,8 @@ export function createCompetitors(ctx) {
     // Ничего не сохраняет — показывает, кто отвечает, кто требует ключ, кто закрыт антиботом.
     if (p === '/api/competitor-sources/check' && req.method === 'POST') {
       if (!await admin()) return;
+      const rld = rateLimit('compdiag:' + user.id, 10, 300000);
+      if (!rld.ok) return json(res, 429, { error: 'Диагностика запускается слишком часто: она обращается сразу ко всем источникам, включая платные. Подождите немного и повторите.' });
       const probe = { name: 'ПАО Сбербанк', inn: '7707083893', ogrn: '1027700132195', city: 'Москва' };
       const started = Date.now();
       const timed = (promise, ms) => Promise.race([promise, new Promise((_, rej) => setTimeout(() => rej(new Error(`не ответил за ${Math.round(ms / 1000)} с`)), ms))]);
@@ -867,7 +898,9 @@ export function createCompetitors(ctx) {
       if (req.method === 'POST') { const b = await readBody(req);
         const purl = normPriceUrl(b.price_url);
         if (purl === null) return json(res, 400, { error: 'Ссылка на прайс должна вести на сайт: http:// или https://' });
-        const r = db.prepare('INSERT INTO competitors(name,inn,ogrn,city,website,phone,notes,price_url) VALUES(?,?,?,?,?,?,?,?)').run(b.name || 'Конкурент', digits(b.inn) || null, digits(b.ogrn) || null, b.city || '', b.website || '', b.phone || '', b.notes || '', purl); log(`Добавлен конкурент: ${b.name}`, 'competitors', Number(r.lastInsertRowid), user.name); return json(res, 201, { id: r.lastInsertRowid }); }
+        const innD = digits(b.inn);
+        if (innD && !validInn(innD)) return json(res, 400, { error: INN_ERR });
+        const r = db.prepare('INSERT INTO competitors(name,inn,ogrn,city,website,phone,notes,price_url) VALUES(?,?,?,?,?,?,?,?)').run(b.name || 'Конкурент', innD || null, digits(b.ogrn) || null, b.city || '', b.website || '', b.phone || '', b.notes || '', purl); log(`Добавлен конкурент: ${b.name}`, 'competitors', Number(r.lastInsertRowid), user.name); return json(res, 201, { id: r.lastInsertRowid }); }
     }
     // Ручные находки: то, что менеджер посмотрел сам по ссылкам и записал.
     const mFind = p.match(/^\/api\/competitors\/(\d+)\/findings(?:\/(\d+))?$/);
@@ -910,10 +943,15 @@ export function createCompetitors(ctx) {
           if (purl === null) return json(res, 400, { error: 'Ссылка на прайс должна вести на сайт: http:// или https://' });
           b.price_url = purl;
         }
+        if (b.inn !== undefined) {
+          const innD = digits(b.inn);
+          if (innD && !validInn(innD)) return json(res, 400, { error: INN_ERR });
+          b.inn = innD || null;
+        }
         const f = ['name', 'inn', 'ogrn', 'city', 'website', 'phone', 'notes', 'price_url']; const ks = Object.keys(b).filter(k => f.includes(k)); if (ks.length) db.prepare(`UPDATE competitors SET ${ks.map(k => k + '=?')} WHERE id=?`).run(...ks.map(k => b[k]), id); return json(res, 200, competitorFull(id)); }
       if (!action && req.method === 'DELETE') { db.prepare('DELETE FROM competitors WHERE id=?').run(id); return json(res, 200, { deleted: true }); }
       if (action === 'report' && req.method === 'GET') return json(res, 200, competitorFull(id));
-      if (action === 'check' && req.method === 'POST') { const b = await readBody(req).catch(() => ({})); if (b.inn && !comp.inn) { db.prepare('UPDATE competitors SET inn=? WHERE id=?').run(digits(b.inn), id); comp.inn = digits(b.inn) } if (!checkLimit(res, user)) return; const out = await runCheck(comp, { sources: b.sources, pullTable: b.pullTable !== false }); return json(res, 200, { ...out, competitor: competitorFull(id) }); }
+      if (action === 'check' && req.method === 'POST') { const b = await readBody(req).catch(() => ({})); if (b.inn && !comp.inn) { const innD = digits(b.inn); if (!validInn(innD)) return json(res, 400, { error: INN_ERR }); db.prepare('UPDATE competitors SET inn=? WHERE id=?').run(innD, id); comp.inn = innD } if (!checkLimit(res, user)) return; const out = await runCheck(comp, { sources: b.sources, pullTable: b.pullTable !== false }); return json(res, 200, { ...out, competitor: competitorFull(id) }); }
       if (action === 'reviews' && req.method === 'POST') { const b = await readBody(req); const r = db.prepare('INSERT INTO reviews(competitor_id,source,rating,text,author,url) VALUES(?,?,?,?,?,?)').run(id, b.source || 'вручную', b.rating ?? null, b.text || '', b.author || user.name, b.url || ''); return json(res, 201, { id: r.lastInsertRowid }); }
       if (action === 'prices' && req.method === 'POST') {
         const b = await readBody(req);
@@ -973,12 +1011,22 @@ export function createCompetitors(ctx) {
       const b = await readBody(req);
       const name = String(b.query || b.name || '').trim().slice(0, 200);
       if (!name) return json(res, 400, { error: 'Укажите название или ИНН конкурента' });
-      const inn = digits(name).length >= 10 ? digits(name) : (digits(b.inn) || '');
+      // Строка цифр считается ИНН, только если контрольная цифра сходится:
+      // вставленный телефон или номер с опечаткой не должен превращаться
+      // в карточку с мусорным ИНН и уходить в платные запросы
+      const nd = digits(name);
+      let inn = (nd.length === 10 || nd.length === 12) && validInn(nd) ? nd : '';
+      if (!inn && b.inn !== undefined && String(b.inn).trim()) {
+        const bd = digits(b.inn);
+        if (!validInn(bd)) return json(res, 400, { error: INN_ERR });
+        inn = bd;
+      }
+      // лимит проверяется до создания карточки: отклонённый запрос не оставляет следов
+      if (!checkLimit(res, user)) return;
       let comp = inn ? db.prepare('SELECT * FROM competitors WHERE inn=?').get(inn) : db.prepare('SELECT * FROM competitors WHERE lower(name)=lower(?)').get(name);
       let created = false;
       if (!comp) { const r = db.prepare('INSERT INTO competitors(name,inn,city,website) VALUES(?,?,?,?)').run(name.replace(/\s*ИНН\s*\d+.*/i, '').trim() || name, inn || null, b.city || '', b.website || ''); comp = db.prepare('SELECT * FROM competitors WHERE id=?').get(r.lastInsertRowid); created = true; log(`Новый конкурент для проверки: ${comp.name}`, 'competitors', comp.id, user.name); }
       else if (inn && !comp.inn) { db.prepare('UPDATE competitors SET inn=? WHERE id=?').run(inn, comp.id); comp.inn = inn }
-      if (!checkLimit(res, user)) return;
       const out = await runCheck(comp, { sources: b.sources });
       return json(res, 200, { created, ...out, competitor: competitorFull(comp.id) });
     }
