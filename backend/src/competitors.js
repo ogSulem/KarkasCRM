@@ -797,6 +797,17 @@ export function createCompetitors(ctx) {
     return out;
   }
 
+  // Ссылка на прайс попадает в отчёт кликабельной и используется для
+  // автоматической загрузки: javascript: и прочие схемы недопустимы.
+  // Адрес без схемы дополняем https:// — так же, как сайт в списке конкурентов.
+  const normPriceUrl = v => {
+    const s = String(v ?? '').trim();
+    if (!s) return '';
+    if (/^https?:\/\//i.test(s)) return s;
+    if (/^[a-z0-9.-]+\.[a-z]{2,}(\/\S*)?$/i.test(s)) return 'https://' + s;
+    return null;
+  };
+
   async function handle(req, res, { p, u, user }) {
     const admin = async () => { if (user.role !== 'admin') { json(res, 403, { error: 'Только для администратора' }); return false } return true };
     // список источников и их статус
@@ -846,7 +857,10 @@ export function createCompetitors(ctx) {
           return { ...c, risk: r?.risk ?? null, level: r?.level ?? null, verdict: r?.verdict ?? '', checked_at: r?.created_at ?? null, reviews: cnt.n, avg_rating: cnt.a ? Math.round(cnt.a * 10) / 10 : null, prices };
         }));
       }
-      if (req.method === 'POST') { const b = await readBody(req); const r = db.prepare('INSERT INTO competitors(name,inn,ogrn,city,website,phone,notes,price_url) VALUES(?,?,?,?,?,?,?,?)').run(b.name || 'Конкурент', digits(b.inn) || null, digits(b.ogrn) || null, b.city || '', b.website || '', b.phone || '', b.notes || '', b.price_url || ''); log(`Добавлен конкурент: ${b.name}`, 'competitors', Number(r.lastInsertRowid), user.name); return json(res, 201, { id: r.lastInsertRowid }); }
+      if (req.method === 'POST') { const b = await readBody(req);
+        const purl = normPriceUrl(b.price_url);
+        if (purl === null) return json(res, 400, { error: 'Ссылка на прайс должна вести на сайт: http:// или https://' });
+        const r = db.prepare('INSERT INTO competitors(name,inn,ogrn,city,website,phone,notes,price_url) VALUES(?,?,?,?,?,?,?,?)').run(b.name || 'Конкурент', digits(b.inn) || null, digits(b.ogrn) || null, b.city || '', b.website || '', b.phone || '', b.notes || '', purl); log(`Добавлен конкурент: ${b.name}`, 'competitors', Number(r.lastInsertRowid), user.name); return json(res, 201, { id: r.lastInsertRowid }); }
     }
     // Ручные находки: то, что менеджер посмотрел сам по ссылкам и записал.
     const mFind = p.match(/^\/api\/competitors\/(\d+)\/findings(?:\/(\d+))?$/);
@@ -883,7 +897,13 @@ export function createCompetitors(ctx) {
       const comp = db.prepare('SELECT * FROM competitors WHERE id=?').get(id);
       if (!comp) return json(res, 404, { error: 'Конкурент не найден' });
       if (!action && req.method === 'GET') return json(res, 200, competitorFull(id));
-      if (!action && req.method === 'PATCH') { const b = await readBody(req); const f = ['name', 'inn', 'ogrn', 'city', 'website', 'phone', 'notes', 'price_url']; const ks = Object.keys(b).filter(k => f.includes(k)); if (ks.length) db.prepare(`UPDATE competitors SET ${ks.map(k => k + '=?')} WHERE id=?`).run(...ks.map(k => b[k]), id); return json(res, 200, competitorFull(id)); }
+      if (!action && req.method === 'PATCH') { const b = await readBody(req);
+        if (b.price_url !== undefined) {
+          const purl = normPriceUrl(b.price_url);
+          if (purl === null) return json(res, 400, { error: 'Ссылка на прайс должна вести на сайт: http:// или https://' });
+          b.price_url = purl;
+        }
+        const f = ['name', 'inn', 'ogrn', 'city', 'website', 'phone', 'notes', 'price_url']; const ks = Object.keys(b).filter(k => f.includes(k)); if (ks.length) db.prepare(`UPDATE competitors SET ${ks.map(k => k + '=?')} WHERE id=?`).run(...ks.map(k => b[k]), id); return json(res, 200, competitorFull(id)); }
       if (!action && req.method === 'DELETE') { db.prepare('DELETE FROM competitors WHERE id=?').run(id); return json(res, 200, { deleted: true }); }
       if (action === 'report' && req.method === 'GET') return json(res, 200, competitorFull(id));
       if (action === 'check' && req.method === 'POST') { const b = await readBody(req).catch(() => ({})); if (b.inn && !comp.inn) { db.prepare('UPDATE competitors SET inn=? WHERE id=?').run(digits(b.inn), id); comp.inn = digits(b.inn) } const out = await runCheck(comp, { sources: b.sources, pullTable: b.pullTable !== false }); return json(res, 200, { ...out, competitor: competitorFull(id) }); }
@@ -923,7 +943,10 @@ export function createCompetitors(ctx) {
       const rows = scope === 'ours'
         ? catalogPrices(db)
         : db.prepare('SELECT item,price,unit,sku,note FROM price_rows WHERE scope=? AND competitor_id=? ORDER BY item').all(scope, compId);
-      const q = v => `"${String(v ?? '').replace(/"/g, '""')}"`;
+      // Excel выполняет ячейки, начинающиеся с = + - @, как формулы: позиции
+      // приходят из чужих таблиц и не должны запускать вычисления у того,
+      // кто открыл выгрузку — экранируем апострофом, как в основной выгрузке контактов
+      const q = v => { let t = String(v ?? ''); if (/^[=+\-@\t\r]/.test(t)) t = "'" + t; return `"${t.replace(/"/g, '""')}"`; };
       const csv = ['Наименование;Цена;Ед;Артикул;Примечание', ...rows.map(r => [r.item, r.price, r.unit, r.sku, r.note].map(q).join(';'))].join('\r\n');
       const name = scope === 'ours' ? 'our-prices.csv' : `competitor-${compId || 'prices'}.csv`;
       res.writeHead(200, { 'Content-Type': 'text/csv; charset=utf-8', 'Content-Disposition': `attachment; filename=${name}` });

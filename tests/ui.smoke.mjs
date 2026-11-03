@@ -1098,6 +1098,8 @@ try {
   check('пароль сотрудника — минимум 12 символов, как при смене', appJsRaw.includes('minlength="12"') && appJsRaw.includes('(мин. 12 символов)') && serverJsRaw.includes('b.password.length < 12'));
   check('массовое «Выполнено» продлевает повторяющиеся задачи', serverJsRaw.includes("if (table === 'tasks' && Number(patch.done) === 1) for (const id of ids) extendRepeatingTask(id, user.name)"));
   check('тост о просрочке видят только причастные', appJsRaw.includes('d.tasks.filter(t => !t.responsible_id || Number(t.responsible_id) === Number(meId()))'));
+  check('предел длины сообщения проверяется и в интерфейсе', appJsRaw.includes('body.length > 4096'));
+  check('массовый перевод в «Не реализовано» спрашивает причину отказа', appJsRaw.includes('bulkStageTo') && appJsRaw.includes("if (stage !== 'lost') return;"));
   // метка времени в списке чатов как в мессенджерах
   check('сегодня в списке чатов — только время', /^\d{2}:\d{2}$/.test(window.listStamp(new Date().toISOString().slice(0, 19).replace('T', ' '))), window.listStamp(new Date().toISOString().slice(0, 19).replace('T', ' ')));
   check('вчерашний чат подписан «Вчера»', window.listStamp(new Date(Date.now() - 864e5).toISOString().slice(0, 19).replace('T', ' ')) === 'Вчера');

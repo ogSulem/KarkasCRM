@@ -1309,3 +1309,46 @@ test('выгрузка копии в S3 отвергает имя с обход�
   const r2 = await call('/api/backups/s3', { method: 'POST', body: JSON.stringify({ name: 'crm-2026-01-01.db' }) });
   assert.notEqual(r2.body.error, 'Некорректное имя файла копии', 'обычное имя копии проверку имени проходит');
 });
+
+test('сообщение длиннее лимита мессенджера отклоняется, обычное отправляется', async () => {
+  const convs = (await call('/api/conversations')).body;
+  assert.ok(convs.length, 'к этому моменту в базе есть диалог');
+  const conv = convs[0];
+  const long = await call(`/api/conversations/${conv.id}/messages`, { method: 'POST', body: JSON.stringify({ body: 'а'.repeat(5000) }) });
+  assert.equal(long.status, 400, 'текст на 5000 символов не принимается');
+  assert.match(long.body.error, /4096/, 'ошибка называет предел');
+  const ok = await call(`/api/conversations/${conv.id}/messages`, { method: 'POST', body: JSON.stringify({ body: 'обычное сообщение' }) });
+  assert.equal(ok.status, 201, 'сообщение в пределах лимита отправляется');
+});
+
+test('длинные тексты в карточках обрезаются до разумного предела', async () => {
+  const c = await call('/api/contacts', { method: 'POST', body: JSON.stringify({ name: 'К'.repeat(500), phone: '+7 999 000-11-22', notes: 'Н'.repeat(30000) }) });
+  assert.equal(c.status, 201);
+  assert.equal(c.body.name.length, 200, 'имя обрезано до 200 символов');
+  assert.equal(c.body.notes.length, 20000, 'заметка обрезана до 20000 символов');
+  const t = await call('/api/tasks', { method: 'POST', body: JSON.stringify({ title: 'З'.repeat(600), due: 'завтра 10:00' }) });
+  assert.equal(t.status, 201);
+  assert.equal(t.body.title.length, 300, 'название задачи обрезано до 300 символов');
+  const p = await call(`/api/contacts/${c.body.id}`, { method: 'PATCH', body: JSON.stringify({ position: 'Д'.repeat(400) }) });
+  assert.equal(p.body.position.length, 120, 'должность обрезана и при обновлении');
+});
+
+test('массовый перевод на этап запускает автоматизацию «сделку перевели»', async () => {
+  const pl = (await call('/api/pipelines')).body;
+  const stages = pl[0].stages;
+  const target = stages.find(s => !['won', 'lost'].includes(s.code) && s.code !== stages[0].code) || stages[1];
+  const rule = await call('/api/automations', { method: 'POST', body: JSON.stringify({ name: 'Тест массового перевода', trigger_type: 'stage_changed', trigger_value: target.code, action_type: 'create_task', action_value: 'Автозадача массовая', active: 1 }) });
+  assert.equal(rule.status, 201, 'правило создано: ' + JSON.stringify(rule.body));
+  const d1 = await call('/api/deals', { method: 'POST', body: JSON.stringify({ title: 'Сделка массовая А', stage: stages[0].code }) });
+  const d2 = await call('/api/deals', { method: 'POST', body: JSON.stringify({ title: 'Сделка массовая Б', stage: stages[0].code }) });
+  assert.equal(d1.status, 201); assert.equal(d2.status, 201);
+  const list = (await call('/api/deals')).body.deals;
+  const ids = list.filter(x => ['Сделка массовая А', 'Сделка массовая Б'].includes(x.title)).map(x => x.id);
+  assert.equal(ids.length, 2, 'обе сделки найдены');
+  const bulk = await call('/api/bulk', { method: 'POST', body: JSON.stringify({ table: 'deals', action: 'update', ids, patch: { stage: target.code } }) });
+  assert.equal(bulk.status, 200);
+  assert.equal(bulk.body.count, 2, 'обе сделки переведены');
+  const tasks = (await call('/api/tasks')).body;
+  assert.equal(tasks.filter(t => t.title === 'Автозадача массовая').length, 2, 'правило сработало для обеих сделок массового перевода');
+  await call('/api/automations/' + rule.body.id, { method: 'DELETE' });
+});
