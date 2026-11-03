@@ -40,6 +40,45 @@ test('health и вход', async () => {
   assert.equal((await fetch(base + '/api/contacts?token=' + encodeURIComponent(h.Authorization.split(' ')[1]), { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}' })).status, 401, 'токен в адресной строке не даёт менять данные');
 });
 
+test('файлы вложений отдаются с правильным способом открытия', async () => {
+  // svg из вложения вебхука может содержать скрипт — открывать его страницей нельзя
+  const { mkdirSync, writeFileSync } = await import('node:fs');
+  const dir = process.env.DATA_DIR + '/uploads';
+  mkdirSync(dir, { recursive: true });
+  writeFileSync(dir + '/20260101-abcdef-test.svg', '<svg xmlns="http://www.w3.org/2000/svg"><script>alert(1)</script></svg>');
+  writeFileSync(dir + '/20260101-abcdef-test.png', Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg==', 'base64'));
+  const svg = await fetch(base + '/uploads/20260101-abcdef-test.svg', { headers: h });
+  assert.equal(svg.status, 200);
+  assert.match(svg.headers.get('content-disposition') || '', /attachment/, 'svg открывается только скачиванием');
+  assert.equal(svg.headers.get('content-type'), 'image/svg+xml');
+  const png = await fetch(base + '/uploads/20260101-abcdef-test.png', { headers: h });
+  assert.match(png.headers.get('content-disposition') || '', /inline/, 'обычная картинка показывается на месте');
+});
+
+test('поля записей обрезаются до пределов, а свои поля принимаются объектом', async () => {
+  const long = 'x'.repeat(3000);
+  const c = await call('/api/companies', { method: 'POST', body: JSON.stringify({ name: 'Компания с длинным сайтом', site: long }) });
+  assert.equal(c.status, 201);
+  assert.equal(String(c.body.site).length, 500, 'сайт обрезан до 500 символов, а не лёг в базу куском на 3000');
+  const d = await call('/api/deals', { method: 'POST', body: JSON.stringify({ title: 'Сделка с длинным сроком', deadline: long }) });
+  assert.equal(d.status, 201);
+  const row = (await call('/api/deals/' + d.body.id)).body.deal;
+  assert.equal(String(row.deadline).length, 40, 'срок сделки обрезан');
+  const k = await call('/api/contacts', { method: 'POST', body: JSON.stringify({ name: 'Контакт с объектом custom', custom: { test: 'значение' } }) });
+  assert.equal(k.status, 201, 'свои поля, присланные объектом, принимаются');
+  assert.equal(JSON.parse(k.body.custom).test, 'значение', 'объект сохранён строкой JSON');
+});
+
+test('битые процент-последовательности не валят сервер в 500', async () => {
+  // Cookie — заголовок целиком во власти клиента: раньше decodeURIComponent бросал
+  // исключение на %zz, и любой запрос с битой кукой давал 500 и строку в журнале
+  const cookie = await fetch(base + '/api/contacts', { headers: { Cookie: 'karkas_token=%zz; x=%E0%A4' } });
+  assert.equal(cookie.status, 401, 'запрос с битой кукой обработан штатно: 401 без авторизации, не 500');
+  // имя файла с битым процентом — ошибка клиента, ответ 400
+  const file = await call('/uploads/%zz');
+  assert.equal(file.status, 400, 'битое имя файла — 400, не 500');
+});
+
 test('объединение чатов WhatsApp + Telegram в один диалог клиента', async () => {
   await call('/webhooks/wazzup', { method: 'POST', body: JSON.stringify({ messages: [{ messageId: 'wz-1', channelId: 'ch-1', chatType: 'whatsapp', chatId: '79115550101', status: 'inbound', text: 'Здравствуйте, нужен дом!', contact: { name: 'Клиент Wazzup', phone: '+79115550101' } }] }) });
   // новый формат вебхука Wazzup (message.add / data[])
@@ -199,10 +238,35 @@ test('резервные копии базы: создать, скачать, з
 
 test('настройка воронки и этапов из интерфейса', async () => {
   const pipe = (await call('/api/pipelines', { method: 'POST', body: JSON.stringify({ name: 'Воронка сервиса' }) })).body;
-  await call('/api/pipelines/' + pipe.id, { method: 'PUT', body: JSON.stringify({ name: 'Сервис и монтаж', stages: [{ code: 'in', name: 'Заявка', color: '#f97316' }, { code: 'work', name: 'В работе', color: '#16a34a' }, { code: 'won', name: 'Готово', color: '#15803d', kind: 'won' }] }) });
+  await call('/api/pipelines/' + pipe.id, { method: 'PUT', body: JSON.stringify({ name: 'Сервис и монтаж', stages: [{ code: 'in', name: 'Заявка', color: '#f97316' }, { code: 'work', name: 'В работе', color: '#16a34a' }, { code: 'won', name: 'Готово', color: '#15803d', kind: 'won' }, { code: 'lost', name: 'Не сделали', color: '#78716c', kind: 'lost' }] }) });
   const pl = (await call('/api/pipelines')).body.find(p => p.id === pipe.id);
   assert.equal(pl.name, 'Сервис и монтаж');
-  assert.deepEqual(pl.stages.map(s => s.name), ['Заявка', 'В работе', 'Готово']);
+  assert.deepEqual(pl.stages.map(s => s.name), ['Заявка', 'В работе', 'Готово', 'Не сделали']);
+  // без этапа успеха и этапа отказа воронка не сохраняется: по этим кодам
+  // система считает выручку и закрывает сделки кнопками на доске
+  const bad = await call('/api/pipelines/' + pipe.id, { method: 'PUT', body: JSON.stringify({ name: 'Без успеха', stages: [{ code: 'a', name: 'А' }, { code: 'b', name: 'Б' }] }) });
+  assert.equal(bad.status, 400, 'воронка без этапов успеха и отказа не сохраняется');
+  assert.match(String(bad.body.error), /успех/, 'ошибка объясняет, каких этапов не хватает');
+});
+
+test('доска воронки показывает только её сделки, даже когда коды этапов совпадают', async () => {
+  const pipe = (await call('/api/pipelines', { method: 'POST', body: JSON.stringify({ name: 'Вторая воронка' }) })).body;
+  const d1 = await call('/api/deals', { method: 'POST', body: JSON.stringify({ title: 'Сделка первой воронки', stage: 'new' }) });
+  const d2 = await call('/api/deals', { method: 'POST', body: JSON.stringify({ title: 'Сделка второй воронки', stage: 'new', pipeline_id: pipe.id }) });
+  assert.equal(d1.status, 201); assert.equal(d2.status, 201);
+  const board1 = (await call('/api/deals?pipeline=1')).body.deals.map(x => x.id);
+  const board2 = (await call('/api/deals?pipeline=' + pipe.id)).body.deals.map(x => x.id);
+  assert.ok(board1.includes(d1.body.id) && !board1.includes(d2.body.id), 'на доске первой воронки нет чужой сделки');
+  assert.ok(board2.includes(d2.body.id) && !board2.includes(d1.body.id), 'на доске второй воронки нет чужой сделки');
+  // карточки клиента и компании запрашивают сделки без параметра — там нужны все воронки
+  const all = (await call('/api/deals')).body.deals.map(x => x.id);
+  assert.ok(all.includes(d1.body.id) && all.includes(d2.body.id), 'без параметра список содержит сделки всех воронок');
+  // распределение по этапам в аналитике не сливает одноимённые этапы разных воронок
+  const an = (await call('/api/analytics')).body.stages;
+  const newP1 = an.find(x => x.code === 'new' && Number(x.pipeline_id) === 1);
+  const newP2 = an.find(x => x.code === 'new' && Number(x.pipeline_id) === Number(pipe.id));
+  assert.ok(newP1 && newP2, 'этап «new» виден в аналитике для обеих воронок раздельно');
+  assert.ok(newP1.count >= 1 && newP2.count >= 1, 'сделки посчитаны каждая в своей воронке');
 });
 
 test('автоматизации, шаблоны, интеграции, команда и права', async () => {
