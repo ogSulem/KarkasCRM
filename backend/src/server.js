@@ -1648,6 +1648,11 @@ export const server = http.createServer(async (req, res) => {
     if (user?.must_change_password && (p.startsWith('/api/') || p.startsWith('/uploads/')) && !['/api/me', '/api/me/password'].includes(p)) return json(res, 403, { code: 'PASSWORD_CHANGE_REQUIRED', error: 'Сначала смените временный пароль' });
     if (user && user.role !== 'admin' && ['/api/settings', '/api/competitor-sources', '/api/backup', '/api/export/json', '/api/backups'].includes(p)) return json(res, 403, { error: 'Только для администратора' });
     if (p === '/api/events') {
+      // Потолок одновременных живых соединений на учётную запись: скрипт или
+      // зависшая вкладка, не закрывающая потоки, не должны исчерпывать
+      // дескрипторы сервера. Лишние прежние соединения закрываются, новое живёт.
+      let n = 0;
+      for (const r of clients) if (r.userId === Number(user.id) && ++n >= 10) { clients.delete(r); try { r.end(); } catch {} }
       res.writeHead(200, { 'Content-Type': 'text/event-stream', 'Cache-Control': 'no-cache', Connection: 'keep-alive' });
       res.write('event: ready\ndata: {}\n\n');
       res.userId = user.id; clients.add(res);
@@ -2449,8 +2454,10 @@ ${user?.name || ''}`.trim();
         // тянуть мегабайты на каждое открытие. Без параметров — вся история
         // (прежнее поведение для совместимости), с limit — последние N,
         // с before — N сообщений до указанного id.
-        const lim = Math.min(1000, Number(u.searchParams.get('limit')) || 0);
-        const before = Number(u.searchParams.get('before')) || 0;
+        // только целые 0..1000: дробный или отрицательный limit уехал бы в SQL
+        // как есть, а LIMIT -1 в SQLite означает «без ограничения»
+        const lim = Math.max(0, Math.min(1000, Math.trunc(Number(u.searchParams.get('limit')) || 0)));
+        const before = Math.max(0, Math.trunc(Number(u.searchParams.get('before')) || 0));
         const rows = lim
           ? (before
             ? db.prepare('SELECT * FROM (SELECT * FROM messages WHERE conversation_id=? AND id<? ORDER BY id DESC LIMIT ?) ORDER BY id').all(id, before, lim)

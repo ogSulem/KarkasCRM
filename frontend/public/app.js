@@ -1615,13 +1615,23 @@ async function loadOlderMsgs() {
   const rows = hasMore ? rows0.slice(1) : rows0;
   if (rows.length) { w.msgs = rows.concat(w.msgs); w.oldest = rows[0].id; w.hasMore = hasMore; }
   else w.hasMore = false;
-  if (box) {
-    box.innerHTML = olderBtnHtml(w) + (msgsHtml(w.msgs) || '<div class="empty">Диалог пуст</div>');
-    // позиция чтения сохраняется: прокрутка сдвигается на высоту дописанного
-    box.scrollTop = box.scrollHeight - oldH + oldT;
+  if (state.conv === cid) {
+    // за время запроса ленту могло подменить живое обновление — работаем с
+    // актуальным элементом; на нём же считаем поправку прокрутки
+    const cur = $('#chatMsgs');
+    if (cur) {
+      cur.innerHTML = olderBtnHtml(w) + (msgsHtml(w.msgs) || '<div class="empty">Диалог пуст</div>');
+      // позиция чтения сохраняется: прокрутка сдвигается на высоту дописанного
+      cur.scrollTop = cur === box ? cur.scrollHeight - oldH + oldT : cur.scrollHeight;
+    }
   }
 }
+// Счётчик рендеров чатов: пока запрос истории в полёте, сотрудник может
+// открыть другой диалог. Новый рендер завершится позже, и устаревший не
+// должен его перезаписать чужой перепиской.
+let inboxSeq = 0;
 async function inbox(v) {
+  const seq = ++inboxSeq;
   const convs = await api('/api/conversations');
   state.cache.convs = convs;
   // подключённые каналы нужны списку «Куда отправить»: без них там только те
@@ -1643,6 +1653,7 @@ async function inbox(v) {
     ? `<div class="card tint-warn" style="margin:0 0 10px"><p><small>Wazzup подключён, но сообщения ещё не приходили: у Wazzup не указан входящий адрес этой CRM. Нажмите «Зарегистрировать адрес автоматически» — и входящие появятся здесь. <button type="button" class="btn sm" onclick="state.settingsTab='integrations';go('settings')">Открыть настройки</button></small></p></div>`
     : '';
 
+  if (seq !== inboxSeq) return;
   v.innerHTML = `${wzNudge}<div class="inbox${cur ? '' : ' list-only'}">
    <div class="convs"><div style="padding:10px;border-bottom:1px solid var(--line)"><div class="tabs" style="margin-bottom:8px;flex-wrap:wrap"><button type="button" class="${state.convScope === 'mine' ? '' : 'active'}" onclick="setConvScope('all')">Все чаты</button><button type="button" class="${state.convScope === 'mine' ? 'active' : ''}" onclick="setConvScope('mine')">Мои</button>${canEdit() ? `<button type="button" class="${state.convSelect ? 'active' : ''}" style="margin-left:auto" onclick="toggleConvSelect()" title="Отметить несколько чатов и пометить их прочитанными">Выбрать</button>` : ''}</div><input id="convSearch" placeholder="Поиск диалогов" oninput="filterConvs(this.value)"></div>
    ${canEdit() && state.convSelect ? bulkBar('convs', `<button class="btn sm" onclick="markConvsRead()">${icon('check', 14)} Прочитано</button>`) : ''}
@@ -1679,7 +1690,10 @@ async function inbox(v) {
 async function refreshInbox() {
   try {
     if (!state.conv) return;
-    const msgs = await syncMsgs(state.conv);
+    const cid = state.conv;
+    const msgs = await syncMsgs(cid);
+    // сотрудник переключился на другой чат — эта лента уже не нужна
+    if (state.conv !== cid) return;
     const box = $('#chatMsgs');
     if (box) {
       const atBottom = box.scrollHeight - box.scrollTop - box.clientHeight < 60;
@@ -1789,8 +1803,10 @@ async function sendMsg(e, cid) {
     if (r.send?.hint) toast(r.send.hint);
     else if (r.send?.delivered) toast('Сообщение отправлено');
     const msgs = await syncMsgs(cid);
-    $('#chatMsgs').innerHTML = olderBtnHtml(state.msgWin && state.msgWin[cid]) + msgsHtml(msgs);
-    const mDiv = $('#chatMsgs'); if (mDiv) mDiv.scrollTop = mDiv.scrollHeight; $('#jumpNew')?.remove();
+    if (state.conv === cid) {
+      $('#chatMsgs').innerHTML = olderBtnHtml(state.msgWin && state.msgWin[cid]) + msgsHtml(msgs);
+      const mDiv = $('#chatMsgs'); if (mDiv) mDiv.scrollTop = mDiv.scrollHeight; $('#jumpNew')?.remove();
+    }
     // обновляем список диалогов: последний текст и счётчик непрочитанных
     state.cache.convs = await api('/api/conversations');
     filterConvs($('#convSearch')?.value || '');

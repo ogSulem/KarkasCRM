@@ -191,6 +191,12 @@ try {
       check('история чата отдаётся окнами: limit возвращает хвост', Array.isArray(win) && win.length === 1 && win[0].id === lastAll.id, JSON.stringify(win));
       const older = await (await fetch(BASE + '/api/conversations/' + window.__state.conv + '/messages?limit=1&before=' + lastAll.id, { headers: authH() })).json();
       check('окно с before возвращает прежнее сообщение', Array.isArray(older) && older.length === 1 && older[0].id < lastAll.id, JSON.stringify(older));
+      // дробный и отрицательный limit раньше уезжали в SQL как есть: LIMIT -1
+      // в SQLite означает «без ограничения», а дробь ломала запрос
+      const w1 = await fetch(BASE + '/api/conversations/' + window.__state.conv + '/messages?limit=0.5', { headers: authH() });
+      const w2 = await fetch(BASE + '/api/conversations/' + window.__state.conv + '/messages?limit=-5&before=-3', { headers: authH() });
+      const b1 = await w1.json(), b2 = await w2.json();
+      check('нечисловые параметры окна не ломают выдачу истории', w1.status === 200 && w2.status === 200 && Array.isArray(b1) && Array.isArray(b2) && b2.length === saved2.length, w1.status + '/' + w2.status);
     }
     check('в переписке видны разделители дней', /Сегодня/.test($('#chatMsgs').textContent) && cssText.includes('.msg-day{display:flex'));
     {
@@ -1377,7 +1383,7 @@ try {
   check('колонка с кнопками занимает столько места, сколько нужно кнопкам', !/<th style="width:210px"/.test(appJsRaw) && cssText.includes('.act{width:1%'));
   check('длинные почта, ссылка или ИНН не растягивают таблицу', cssText.includes('th,td{overflow-wrap:break-word}'));
   check('на телефоне список диалогов и чат не толкаются на одном экране', cssText.includes('.inbox .convs{display:none}') && cssText.includes('.inbox.list-only .chat{display:none}'));
-  check('цели для касания на телефоне не меньше 40px, шрифт не мельчает', /\.tabs button\{padding:9px 13px;font-size:13\.5px;min-height:40px\}/.test(cssText));
+  check('цели для касания на телефоне не меньше 40px, шрифт не мельчает', /\.tabs button\{padding:9px 13px;font-size:13\.5px;min-height:40px\}/.test(cssText) && cssText.includes('.btn.sm{padding:9px 12px;font-size:13px;min-height:40px}'));
   check('низ страницы не прячется под системную полосу телефона', cssText.includes('env(safe-area-inset-bottom') && html.includes('viewport-fit=cover'));
   check('редактор воронок раскладывается на телефоне в две строки', /\.stages-editor \.st\{grid-template-columns:22px 1fr 40px/.test(cssText));
 

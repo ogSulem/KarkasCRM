@@ -362,6 +362,9 @@ code{background:#eef2f7}
   /* по кнопкам попадают пальцем: цель не меньше 40px по высоте, шрифт не мельчает */
   .tabs button{padding:9px 13px;font-size:13.5px;min-height:40px}
   nav button{min-height:40px}
+  /* мелкие кнопки — догрузка истории в чате, «Показать ещё» в канбане,
+     массовые действия — тоже должны попадаться пальцем: цель 40px */
+  .btn.sm{padding:9px 12px;font-size:13px;min-height:40px}
   .composer-select{min-width:0;max-width:46%}
   .chat-attach.img img{max-width:170px;max-height:170px}
   .modal{padding:8px}
