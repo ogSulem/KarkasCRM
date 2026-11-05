@@ -58,7 +58,7 @@ Object.assign(window, {
   sourceLabel, channelLabel, roleLabel, askConfirm, askInput, translit, SOURCE_LABELS, CHANNEL_LABELS, ROLE_LABELS,
   isoDate, todayISO, fmtDayMonth, kindStage, fld, grid2, formLegend, pushToast, notify, captureFocus, restoreFocus, PALETTE_ACTIONS,
   openMenu, closeMenu, contactsMoreMenu, openOurPrices, comparePrices, setBuiltinTab, BUILTIN_FIELDS, amAdmin, canEdit,
-  ourPriceRows, filterOurPrices, toggleAutomation, openAutomation, noteRow, editNote, lockFormsForViewer, AUTO_TRIGGERS, AUTO_ACTIONS,
+  ourPriceRows, filterOurPrices, toggleAutomation, openAutomation, autoWarn, noteRow, editNote, lockFormsForViewer, AUTO_TRIGGERS, AUTO_ACTIONS,
   busyButton, priceImportText,
   punyDecodeLabel, humanOrigin, wazzupHookUrl, wzAlive, wzState, wzTitle, closeConv,
   nameFromUri, sendAccountFor, refreshSendAccount, WZ_CHAT_TRANSPORTS, msgTime,
@@ -952,6 +952,16 @@ try {
     $('#modalBody select[name=action_type]').value = 'change_stage';
     $('#modalBody select[name=action_type]').dispatchEvent(new window.Event('change', { bubbles: true })); await wait(80);
     check('при выборе «перевести на этап» появляется список этапов', Boolean($('#autoActionValue select[name=action_value]')) && $$('#autoActionValue option').length >= 2);
+    // правило «отвечать на любое входящее» без ключевого слова — готовая
+    // рассылка каждому клиенту: редактор обязан предупредить об этом заметно
+    $('#modalBody select[name=trigger_type]').value = 'message_in';
+    $('#modalBody select[name=trigger_type]').dispatchEvent(new window.Event('change', { bubbles: true })); await wait(60);
+    $('#modalBody select[name=action_type]').value = 'send_message';
+    $('#modalBody select[name=action_type]').dispatchEvent(new window.Event('change', { bubbles: true })); await wait(60);
+    check('правило «отвечать на всё» предупреждает о рассылке', /каждому клиенту на каждое входящее/.test($('#autoWarn').textContent));
+    $('#modalBody [name=trigger_value]').value = 'смета';
+    window.autoWarn($('#modalBody form'));
+    check('с ключевым словом предупреждение о рассылке исчезает', $('#autoWarn').textContent.trim() === '');
     window.closeModal();
     // правило с выдержкой: действие должно попасть в список запланированных,
     // иначе сотрудник не узнает, что CRM собирается сделать через три дня

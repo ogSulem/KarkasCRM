@@ -354,6 +354,24 @@ test('общий вебхук: любые каналы сливаются в о�
   assert.equal(msgs.length, 3, 'три сообщения в единой переписке');
 });
 
+test('автоответ без ключевого слова не превращается в рассылку', async () => {
+  // правило «отвечать на любое входящее» — частая ошибка настройки: без
+  // ограничения клиент получал бы сообщение на каждую строчку переписки
+  const rule = (await call('/api/automations', { method: 'POST', body: JSON.stringify({ name: 'Автоответ-поток', trigger_type: 'message_in', trigger_value: '', action_type: 'send_message', action_value: 'Спасибо, что написали нам!', active: 1, delay_days: 0 }) })).body;
+  assert.ok(rule.id, 'правило создано');
+  await call('/webhooks/generic', { method: 'POST', body: JSON.stringify({ channel: 'site', phone: '79229990011', name: 'Поток Клиент', body: 'Первый вопрос' }) });
+  await call('/webhooks/generic', { method: 'POST', body: JSON.stringify({ channel: 'site', phone: '79229990011', name: 'Поток Клиент', body: 'Второй вопрос подряд' }) });
+  const conv = (await call('/api/conversations')).body.find(c => (c.phone || '').includes('9229990011'));
+  assert.ok(conv, 'чат клиента создан');
+  const msgs = (await call(`/api/conversations/${conv.id}/messages`)).body;
+  const replies = msgs.filter(m => m.body === 'Спасибо, что написали нам!');
+  assert.equal(replies.length, 1, 'на два сообщения подряд автоответ сохранён один раз');
+  assert.equal(replies[0].direction, 'out', 'автоответ сохранён исходящим');
+  // правило удаляется, чтобы не влиять на остальные проверки
+  const del = await call('/api/automations/' + rule.id, { method: 'DELETE' });
+  assert.equal(del.status, 200, 'тестовое правило удалено');
+});
+
 test('отправка сообщения клиенту через Wazzup (сквозная проверка запроса к API)', async () => {
   // локальная заглушка API Wazzup — проверяем точный формат запроса и что оно «доставлено»
   const mock = (await import('node:http')).createServer(async (req, res) => {
