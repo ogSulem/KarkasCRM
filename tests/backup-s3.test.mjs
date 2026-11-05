@@ -110,6 +110,19 @@ test('новая копия сама уходит в хранилище, а ст
     assert.match(key, /^\/karkas-backups\/karkascrm\/crm-\d{4}-\d{2}-\d{2}\.db$/, 'путь содержит ведро и папку: ' + key);
     assert.ok(bytes.length > 4096, 'файл ушёл целиком, ' + bytes.length + ' байт');
 
+    // копия — это цельная база, а не огрызок файла: полученные байты
+    // открываем отдельным подключением и проверяем целостность
+    const { DatabaseSync } = await import('node:sqlite');
+    const snapPath = join(process.env.DATA_DIR, 'snap-check.db');
+    writeFileSync(snapPath, bytes);
+    const snap = new DatabaseSync(snapPath, { readOnly: true });
+    try {
+      const integrity = snap.prepare('PRAGMA integrity_check').get();
+      assert.equal(integrity.integrity_check, 'ok', 'копия открывается без повреждений');
+      const n = snap.prepare('SELECT COUNT(*) n FROM users').get().n;
+      assert.ok(n >= 1, 'таблица сотрудников скопирована целиком: ' + n);
+    } finally { try { snap.close() } catch {} }
+
     const status = (await call('/api/settings', { token: admin })).data.s3 || (await call('/api/backups', { token: admin })).data.s3;
     assert.ok(status.last_ok, 'время последней выгрузки сохранено');
     assert.equal(status.last_file, made.data.created, 'имя выгруженной копии сохранено');
