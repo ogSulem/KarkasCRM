@@ -9,7 +9,7 @@ import { gzipSync } from 'node:zlib';
 import { lookup as dnsLookup } from 'node:dns/promises';
 // подпись запросов к S3-хранилищу — тот же модуль, что использует скрипт выгрузки
 import { signedHeaders } from '../../scripts/s3-sign.mjs';
-import { readFileSync, writeFileSync, existsSync, mkdirSync, chmodSync, statSync, readdirSync, unlinkSync, copyFileSync, mkdirSync as mkdir, createReadStream } from 'node:fs';
+import { readFileSync, writeFileSync, existsSync, mkdirSync, chmodSync, statSync, readdirSync, unlinkSync, copyFileSync, renameSync, mkdirSync as mkdir, createReadStream } from 'node:fs';
 import { extname, join, normalize, basename } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { createCompetitors, migrateOurPricesToCatalog } from './competitors.js';
@@ -972,17 +972,36 @@ async function deliver(conv, channel, text, user, file = null) {
 }
 
 // ---------- обслуживание: бэкапы и напоминания ----------
+// Снимок базы, безопасный при параллельных записях: VACUUM INTO создаёт
+// атомарный согласованный файл. Прямое копирование crm.db таким свойством
+// не обладает: автоматический checkpoint может писать в основной файл во
+// время копирования, и снимок получится рваным.
+function snapshotDb(target) {
+  const tmp = target + '.part';
+  try {
+    try { unlinkSync(tmp) } catch {}
+    db.exec(`VACUUM INTO '${String(tmp).replace(/'/g, "''")}'`);
+    renameSync(tmp, target);
+  } catch {
+    // запасной путь прежний: checkpoint и прямое копирование
+    try { unlinkSync(tmp) } catch {}
+    try { db.exec('PRAGMA wal_checkpoint(TRUNCATE)') } catch {}
+    copyFileSync(join(DATA_DIR, 'crm.db'), target);
+  }
+  return target;
+}
 function makeBackup(force = false) {
   const dir = join(DATA_DIR, 'backups'); mkdir(dir, { recursive: true });
   const name = `crm-${localDate()}.db`;
   const target = join(dir, name);
   if (!force && existsSync(target)) return null;
-  try { db.exec('PRAGMA wal_checkpoint(TRUNCATE)') } catch {}
-  copyFileSync(join(DATA_DIR, 'crm.db'), target);
+  snapshotDb(target);
   const keep = Number(getSetting('BACKUP_KEEP_DAYS', '7')) || 0;
   if (keep > 0) {
     const limit = Date.now() - keep * 864e5;
     for (const f of readdirSync(dir).filter(x => x.endsWith('.db'))) { try { if (statSync(join(dir, f)).mtimeMs < limit) unlinkSync(join(dir, f)) } catch {} }
+    // обрывок прерванного снимка не должен лежать вечно: чистим старые .part
+    for (const f of readdirSync(dir).filter(x => x.endsWith('.part'))) { try { if (statSync(join(dir, f)).mtimeMs < Date.now() - 864e5) unlinkSync(join(dir, f)) } catch {} }
   }
   log(`Резервная копия базы создана: ${name}`);
   return name;
@@ -2359,7 +2378,7 @@ ${user?.name || ''}`.trim();
       const tmp = join(DATA_DIR, '.restore-src.db');
       copyFileSync(src, tmp);
       const safety = `before-restore-${localStamp()}.db`;
-      try { db.exec('PRAGMA wal_checkpoint(TRUNCATE)'); copyFileSync(join(DATA_DIR, 'crm.db'), join(DATA_DIR, 'backups', safety)) } catch (e) { console.error('restore: страховочная копия', e.message) }
+      try { snapshotDb(join(DATA_DIR, 'backups', safety)) } catch (e) { console.error('restore: страховочная копия', e.message) }
       try { db.close() } catch {}
       copyFileSync(tmp, join(DATA_DIR, 'crm.db'));
       unlinkSync(tmp);
