@@ -1305,6 +1305,16 @@ try {
   window.setConvScope('all'); await wait(300);
   scopeText = $('#convList').textContent;
   check('область «Все чаты» возвращает полный список', scopeText.includes('Мой клиент') && scopeText.includes('Чужой клиент'));
+  // список диалогов рисуется порциями: тысячи чатов не тормозят страницу,
+  // а кнопка «Показать ещё» догружает следующую сотню
+  {
+    const fake = Array.from({ length: 250 }, (_, i) => ({ id: 900000 + i, title: 'Чат ' + (i + 1), channels: 'whatsapp', unread: 0, last_body: '', phone: '', last_at: '' }));
+    window.__state.convLimit = 100;
+    const html = window.convListHtml(fake, 0, fake, '');
+    const rows = (html.match(/class="conv /g) || []).length;
+    window.__state.convLimit = undefined;
+    check('список диалогов рисуется порциями и предлагает догрузку', rows === 100 && html.includes('Показать ещё 150'), 'rows=' + rows);
+  }
   window.__state.cache.convs = [{ id: 9102, title: 'Чужой клиент', unread: 1, assigned_id: 99901, contact_responsible_id: 99902, last_body: 'здравствуйте', phone: '', channels: 'whatsapp', last_at: '2026-10-27 09:00' }];
   window.setConvScope('mine'); await wait(300);
   check('пустая область «Мои» объясняет, что делать', /переключитесь на «Все чаты»/.test($('#convList').textContent), $('#convList').textContent.slice(0, 120));
