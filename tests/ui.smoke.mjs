@@ -198,6 +198,21 @@ try {
       const b1 = await w1.json(), b2 = await w2.json();
       check('нечисловые параметры окна не ломают выдачу истории', w1.status === 200 && w2.status === 200 && Array.isArray(b1) && Array.isArray(b2) && b2.length === saved2.length, w1.status + '/' + w2.status);
     }
+    // двойной клик по «Сохранить» не должен создавать вторую запись: пока
+    // запрос в полёте, форма заблокирована, а после ошибки снова готова к работе
+    {
+      const f = window.document.createElement('form');
+      let n = 0;
+      f.onsubmit = ev => { ev.preventDefault(); n++; };
+      window.document.body.appendChild(f);
+      f.dispatchEvent(new window.Event('submit', { bubbles: true, cancelable: true }));
+      f.dispatchEvent(new window.Event('submit', { bubbles: true, cancelable: true }));
+      check('двойное нажатие на сохранение не отправляет форму дважды', n === 1 && f.dataset.busy === '1', 'n=' + n);
+      window.unlockForm(f);
+      f.dispatchEvent(new window.Event('submit', { bubbles: true, cancelable: true }));
+      check('после ошибки форма разблокирована и её можно повторить', n === 2, 'n=' + n);
+      f.remove();
+    }
     check('в переписке видны разделители дней', /Сегодня/.test($('#chatMsgs').textContent) && cssText.includes('.msg-day{display:flex'));
     {
       const d = new Date(), pad = n => String(n).padStart(2, '0');

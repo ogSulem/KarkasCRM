@@ -432,6 +432,7 @@ async function api(path, opt = {}) {
       }
     });
   } catch (e) {
+    unlockBusyForms();
     if (e.name === 'TimeoutError' || e.name === 'AbortError') throw new Error('Сервер не ответил вовремя — возможно, внешние источники работают медленно. Повторите попытку чуть позже.');
     throw new Error('Нет связи с сервером. Проверьте подключение к интернету и обновите страницу.');
   }
@@ -441,6 +442,7 @@ async function api(path, opt = {}) {
     const err = new Error(d.error || 'Нужно войти в систему.');
     err.unauthorized = true;
     if (!opt.noSessionEnd && path !== '/api/auth/login') endSession('Сеанс завершён. Войдите, пожалуйста, заново.');
+    unlockBusyForms();
     throw err;
   }
   if (String(opt.raw ? 0 : 1) && !(r.headers.get('content-type') || '').includes('json')) return r;
@@ -448,10 +450,29 @@ async function api(path, opt = {}) {
   if (!r.ok) {
     const err = new Error(d.error || (`Не удалось выполнить запрос (код ${r.status}). Обратитесь к администратору, если проблема повторяется.`));
     err.status = r.status; err.data = d;
+    unlockBusyForms();
     throw err;
   }
   return d;
 }
+
+// Защита от двойной отправки: пока запрос сохранения в полёте, форма
+// заблокирована и повторный клик игнорируется. Без этого на медленной связи
+// двойное нажатие «Сохранить» создаёт две сделки или два контакта. Успех
+// закрывает модальное окно вместе с формой; ошибку сопровождает api(),
+// который снимает замок, — человек может исправить данные и повторить.
+// Страховка на случай зависшего запроса снимает замок сама через 15 секунд.
+// У формы входа собственный замок с индикатором, она здесь исключена.
+function unlockForm(f) { if (!f || !f.dataset) return; delete f.dataset.busy; f.querySelectorAll('button').forEach(b => { b.disabled = false; }); }
+function unlockBusyForms() { document.querySelectorAll('form[data-busy]').forEach(unlockForm); }
+document.addEventListener('submit', ev => {
+  const f = ev.target;
+  if (!f || f.tagName !== 'FORM' || f.id === 'loginForm') return;
+  if (f.dataset.busy === '1') { ev.preventDefault(); ev.stopImmediatePropagation(); return; }
+  f.dataset.busy = '1';
+  f.querySelectorAll('button').forEach(b => { b.disabled = true; });
+  setTimeout(() => unlockForm(f), 15000);
+}, true);
 
 const download = async (path, name) => {
   let r;
@@ -1791,15 +1812,16 @@ function chatScrolled() { const m = $('#chatMsgs'); if (!m) return; if (m.scroll
 async function sendMsg(e, cid) {
   e.preventDefault();
   const input = $('#msgText'), body = input.value.trim();
-  if (!body) return false;
+  if (!body) { unlockForm(e.target); return false; }
   // предел как у мессенджеров и у сервера: текст остаётся в поле, чтобы его разбили на части
-  if (body.length > 4096) { toast('Сообщение длиннее 4096 символов: мессенджеры такие не принимают. Разбейте текст на части.', 'err'); input.focus(); return false; }
+  if (body.length > 4096) { toast('Сообщение длиннее 4096 символов: мессенджеры такие не принимают. Разбейте текст на части.', 'err'); unlockForm(e.target); input.focus(); return false; }
   const channel = $('#msgChannel').value;
   input.value = '';
   delete state.drafts[cid]; try { localStorage.setItem('karkas-drafts', JSON.stringify(state.drafts)); } catch {}
   autoGrow(input);
   try {
     const r = await api(`/api/conversations/${cid}/messages`, { method: 'POST', body: JSON.stringify({ body, channel }) });
+    unlockForm(e.target); // сообщение принято — композитор готов к следующему
     if (r.send?.hint) toast(r.send.hint);
     else if (r.send?.delivered) toast('Сообщение отправлено');
     const msgs = await syncMsgs(cid);
