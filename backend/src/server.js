@@ -139,6 +139,8 @@ const SCHEMA_COLUMNS = [...SCHEMA,
   ['channels', 'user_id', 'INTEGER'],
   // выдержка правила: действие срабатывает не сразу, а через N дней
   ['automations', 'delay_days', 'INTEGER'],
+  // каким правилом отправлено сообщение: по нему работает защита от потоковой рассылки
+  ['messages', 'automation_id', 'INTEGER'],
 ];
 
 // чего не хватает в этой базе: если она из старой версии — сначала копия, потом изменения
@@ -477,6 +479,12 @@ function keywordHit(text, rule) {
   return String(rule || '').split(/[,;]/).map(w => w.trim().toLowerCase()).filter(Boolean)
     .some(w => haystack.includes(w) || (w.length >= 5 && haystack.includes(w.slice(0, -1))));
 }
+// Защита от потоковой рассылки: ошибочно созданное правило без ключевого слова
+// («отвечать на каждое входящее») не должно засыпать клиента сообщениями на
+// каждую строчку переписки. Одно правило отправляет в одну беседу не чаще раза
+// за три часа; пропуск записывается в ленту активности, чтобы администратор
+// видел причину молчания правила и мог поправить настройку.
+const autoSentRecently = (a, convId) => db.prepare("SELECT id FROM messages WHERE conversation_id=? AND automation_id=? AND direction='out' AND created_at > datetime('now','-3 hours')").get(convId, a.id);
 // Настройки почты собраны в одном месте: раньше они повторялись в трёх маршрутах,
 // и расхождение означало бы, что письмо из одного места уходит, а из другого нет.
 const smtpSettings = () => ({
@@ -564,6 +572,7 @@ async function applyAction(a, ctx) {
         if (!body) return;
         const conv = ctx.contact_id ? db.prepare('SELECT cv.*,c.phone FROM conversations cv LEFT JOIN contacts c ON c.id=cv.contact_id WHERE cv.contact_id=?').get(ctx.contact_id) : null;
         if (!conv) { log(`Автоматизация «${a.name}»: переписки с клиентом нет, сообщение не отправлено`, 'contacts', ctx.contact_id || null); return; }
+        if (autoSentRecently(a, conv.id)) { log(`Автоматизация «${a.name}»: клиенту уже уходило сообщение этого правила меньше трёх часов назад — повтор пропущен`, 'contacts', ctx.contact_id || null); return; }
         const channel = conv.chat_type || '';
         let status = 'error';
         try {
@@ -574,8 +583,8 @@ async function applyAction(a, ctx) {
           status = String(e.message) === 'WAZZUP_NOT_CONFIGURED' ? 'local' : 'error';
           log(`Автоматизация «${a.name}»: сообщение клиенту не ушло — ${e.message}`, 'contacts', ctx.contact_id || null);
         }
-        db.prepare('INSERT INTO messages(conversation_id,channel,direction,body,status,author) VALUES(?,?,?,?,?,?)')
-          .run(conv.id, channel || 'whatsapp', 'out', body, status, 'Автоматизация');
+        db.prepare('INSERT INTO messages(conversation_id,channel,direction,body,status,author,automation_id) VALUES(?,?,?,?,?,?,?)')
+          .run(conv.id, channel || 'whatsapp', 'out', body, status, 'Автоматизация', a.id);
         db.prepare("UPDATE conversations SET last_at=datetime('now') WHERE id=?").run(conv.id);
         broadcast('message', { conversation_id: conv.id, direction: 'out' });
         if (status === 'sent') log(`Автоматизация «${a.name}»: клиенту отправлено сообщение`, 'contacts', ctx.contact_id || null);
@@ -586,13 +595,14 @@ async function applyAction(a, ctx) {
         if (!c?.email) { log(`Автоматизация «${a.name}»: у клиента нет e-mail, письмо не отправлено`, 'contacts', ctx.contact_id || null); return; }
         if (!getSetting('SMTP_HOST')) { log(`Автоматизация «${a.name}»: почта не настроена, письмо не отправлено`, 'contacts', c.id); return; }
         const body = fillVars(a.action_value, autoVars(ctx)).trim();
+        const conv = db.prepare('SELECT id FROM conversations WHERE contact_id=?').get(c.id);
+        if (conv && autoSentRecently(a, conv.id)) { log(`Автоматизация «${a.name}»: клиенту уже уходило письмо этого правила меньше трёх часов назад — повтор пропущен`, 'contacts', c.id); return; }
         let status = 'sent';
         try { await sendMail({ ...smtpSettings(), to: c.email, toName: c.name || undefined, subject: a.name, text: body }); }
         catch (e) { status = 'error'; log(`Автоматизация «${a.name}»: письмо не ушло — ${e.message}`, 'contacts', c.id); }
-        const conv = db.prepare('SELECT id FROM conversations WHERE contact_id=?').get(c.id);
         if (conv) {
-          db.prepare("INSERT INTO messages(conversation_id,channel,direction,body,subject,status,author) VALUES(?,?,?,?,?,?,?)")
-            .run(conv.id, 'email', 'out', body, a.name, status, 'Автоматизация');
+          db.prepare("INSERT INTO messages(conversation_id,channel,direction,body,subject,status,author,automation_id) VALUES(?,?,?,?,?,?,?,?)")
+            .run(conv.id, 'email', 'out', body, a.name, status, 'Автоматизация', a.id);
           db.prepare("UPDATE conversations SET last_at=datetime('now') WHERE id=?").run(conv.id);
           broadcast('message', { conversation_id: conv.id, direction: 'out' });
         }

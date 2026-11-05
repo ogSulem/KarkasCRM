@@ -3606,7 +3606,7 @@ function autoTriggerField(a) {
   const t = a.trigger_type || 'deal_created';
   if (t === 'stage_changed') return `<label>На какой этап перевели<select name="trigger_value"><option value="">Любой этап</option>${autoStageOptions(a.trigger_value)}</select></label>
    <p class="form-hint" style="margin:-6px 0 10px">«Любой этап» — правило сработает на каждом переходе. Выберите конкретный этап, чтобы правило не повторялось лишний раз.</p>`;
-  if (t === 'message_in') return `<label>Слово или фраза в сообщении (необязательно)<input name="trigger_value" value="${esc(a.trigger_value || '')}" placeholder="смета, цена, ипотека"></label>
+  if (t === 'message_in') return `<label>Слово или фраза в сообщении (необязательно)<input name="trigger_value" value="${esc(a.trigger_value || '')}" placeholder="смета, цена, ипотека" oninput="autoWarn(this.form)"></label>
    <p class="form-hint" style="margin:-6px 0 10px">Пусто — правило срабатывает на любое входящее сообщение. Можно несколько слов через запятую — хватит любого из них. Слово ищется по основе: «смета» находит и «смету», и «сметы», регистр не важен.</p>`;
   return `<input type="hidden" name="trigger_value" value="">`;
 }
@@ -3631,6 +3631,17 @@ function autoFields(form) {
   const draft = { trigger_type: form.elements.trigger_type.value, action_type: form.elements.action_type.value, trigger_value: '', action_value: '' };
   const tv = $('#autoTriggerValue'); if (tv) tv.innerHTML = autoTriggerField(draft);
   const av = $('#autoActionValue'); if (av) av.innerHTML = autoActionField(draft);
+  autoWarn(form);
+}
+// Живое предупреждение о рассылке: правило «отвечать на любое входящее»
+// без ключевого слова будет писать каждому клиенту на каждую строчку —
+// это почти всегда не то, чего хотел администратор
+function autoWarn(form) {
+  const box = $('#autoWarn'); if (!box) return;
+  const t = form.elements.trigger_type?.value, a = form.elements.action_type?.value;
+  const kw = (form.elements.trigger_value?.value || '').trim();
+  const risky = t === 'message_in' && (a === 'send_message' || a === 'send_email') && !kw;
+  box.innerHTML = risky ? `<div class="card err" style="box-shadow:none;margin:0 0 12px"><b>Правило будет отправлять ${a === 'send_email' ? 'письмо' : 'сообщение'} каждому клиенту на каждое входящее сообщение.</b> Так легко устроить рассылку, которая клиентам не нужна. Укажите слово или фразу (например «смета, цена») — правило сработает только на подходящие обращения. Дополнительно CRM ограничивает частоту: одно правило пишет в одну беседу не чаще раза за три часа.</div>` : '';
 }
 async function openAutomation(id) {
   // список сотрудников нужен действию «передать сделку»: выбирать из живых,
@@ -3647,10 +3658,12 @@ async function openAutomation(id) {
    <div id="autoTriggerValue">${autoTriggerField(a)}</div>
    ${fld('Что сделать', `<select name="action_type" onchange="autoFields(this.form)">${Object.entries(AUTO_ACTIONS).map(([k, n]) => `<option value="${k}" ${k === (a.action_type || 'create_task') ? 'selected' : ''}>${n}</option>`).join('')}</select>`, true)}
    <div id="autoActionValue">${autoActionField(a)}</div>
+   <div id="autoWarn"></div>
    ${fld('Когда выполнить', `<select name="delay_days">${[0, 1, 2, 3, 5, 7, 14, 30].map(n => `<option value="${n}" ${Number(a.delay_days || 0) === n ? 'selected' : ''}>${n === 0 ? 'Сразу' : 'Через ' + n + ' дн.'}</option>`).join('')}</select>`)}
    <p class="form-hint" style="margin:-6px 0 10px">«Через N дн.» — CRM запомнит действие и выполнит его в срок, даже если страницу закрыли. Отсчёт идёт от момента события, дата указывается в истории сделки.</p>
    <label class="check-line"><input type="checkbox" name="active" style="width:auto" ${a.active === 0 ? '' : 'checked'}><span>Правило включено <small>(можно сохранить выключенным и включить позже)</small></span></label>
    <button class="btn primary w">${id ? 'Сохранить правило' : 'Создать правило'}</button></form>`);
+  const wf = $('#modalBody form'); if (wf) autoWarn(wf);
 }
 async function saveAutomation(e, id) {
   e.preventDefault();
