@@ -144,6 +144,28 @@ test('входящее из группового чата сохраняет tel
   assert.ok(!grp.phone, 'id группы не записан в телефон клиента: иначе карточка склеилась бы с чужой');
 });
 
+test('вложение из вебхука с опасной схемой не сохраняется', async () => {
+  // вебхук — внешний источник: javascript:-адрес в contentUri не должен попасть
+  // в базу ни в каком виде, иначе ссылка могла бы выполнить скрипт в странице CRM
+  const r = await hook({
+    messages: [{
+      messageId: 'wz-in-badscheme-1', channelId: WA_CHANNEL, chatType: 'whatsapp', chatId: WA_PHONE,
+      dateTime: '2026-10-23T12:05:00.000', type: 'text', isEcho: false, status: 'inbound',
+      text: 'Смотрите файл', contentUri: 'javascript:alert(1)', contact: { name: 'Проверка схемы', phone: WA_PHONE },
+    }],
+  });
+  assert.equal(r.status, 200, 'вебхук принят');
+  const convs = (await call('/api/conversations', { token: admin })).data;
+  const conv = convs.find(c => String(c.external_chat_id || '') === WA_PHONE);
+  assert.ok(conv, 'беседа создана');
+  const msgs = (await call(`/api/conversations/${conv.id}/messages`, { token: admin })).data;
+  const m = msgs.find(x => x.external_id === 'wz-in-badscheme-1');
+  assert.ok(m, 'сообщение сохранено');
+  assert.equal(m.body, 'Смотрите файл', 'текст на месте');
+  assert.ok(!m.content_uri || /^https?:\/\//i.test(m.content_uri) || m.content_uri.startsWith('/uploads/'),
+    'опасная схема вложения не сохранена: ' + JSON.stringify(m.content_uri));
+});
+
 test('ответ в групповой чат уходит с chatType telegroup и адресатом из вебхука', async () => {
   const convs = (await call('/api/conversations', { token: admin })).data;
   const grp = convs.find(c => String(c.external_chat_id || '') === GROUP_CHAT);
