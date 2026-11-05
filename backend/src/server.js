@@ -671,7 +671,12 @@ export async function ensureDeal(contact) {
   return Number(dr.lastInsertRowid);
 }
 
+// Адрес вложения приходит и из внешних вебхуков: в базу пишем только http(s)
+// или наш /uploads/. Другие схемы интерфейс и так не рисует, а мусор в
+// хранении не нужен — пустая строка вместо javascript:-адреса.
+const safeContentUri = v => (/^(https?:\/\/|\/uploads\/)/i.test(String(v || '')) ? String(v) : '');
 export async function upsertIncoming({ channel = 'whatsapp', chatType = '', phone = '', chatId = '', name = '', body = '', external_id = null, channelId = '', contentUri = '', contentName = '', author = '', email = '', subject = '', direction = 'in' }) {
+  contentUri = safeContentUri(contentUri);
   if (!body && !contentUri) return null;
   // ограничиваем длину: вебхук — доверенный, но не бесконечный источник
   const cap = (s, n) => String(s ?? '').slice(0, n);
@@ -752,10 +757,10 @@ async function upsertOutgoing(m) {
   const st = ['sent', 'delivered', 'read'].includes(m.status) ? m.status : 'sent';
   try {
     db.prepare('INSERT INTO messages(conversation_id,channel,direction,body,content_uri,content_name,status,external_id,author,channel_id) VALUES(?,?,?,?,?,?,?,?,?,?)')
-      .run(conv.id, channel, 'out', body || '[вложение]', m.contentUri || '', m.fileName || '', st, m.messageId || null, m.authorName || '', m.channelId || '');
+      .run(conv.id, channel, 'out', body || '[вложение]', safeContentUri(m.contentUri), m.fileName || '', st, m.messageId || null, m.authorName || '', m.channelId || '');
   } catch (e) { if (/UNIQUE/i.test(e.message)) return conv; throw e; }
   db.prepare("UPDATE conversations SET last_at=datetime('now') WHERE id=?").run(conv.id);
-  queueAttachmentDownload(conv.id, m.contentUri || '', m.messageId || null);
+  queueAttachmentDownload(conv.id, safeContentUri(m.contentUri), m.messageId || null);
   broadcast('message', { conversation_id: conv.id, direction: 'out' });
   return conv;
 }
@@ -1495,7 +1500,7 @@ export const server = http.createServer(async (req, res) => {
       catch { const e = new Error('Некорректный JSON в запросе — проверьте данные формы'); e.statusCode = 400; throw e; }
       wzHookMark('WZ_HOOK_LAST_AT', localNow());
       if (b.test) { wzHookMark('WZ_HOOK_TEST_AT', localNow()); return json(res, 200, { received: true, test: true }); }
-      // оба формата входа venдора приводим одной картой: в старом messages[]
+      // оба формата входа вендора приводим одной картой: в старом messages[]
       // вложение лежит в attachment.url, и без приведения файл без подписи
       // молча терялся — история показывала только текстовые сообщения
       const mapMsg = m => ({
@@ -1593,7 +1598,7 @@ export const server = http.createServer(async (req, res) => {
       const limit = Math.max(1, Number(getSetting('LOGIN_RATE_LIMIT', '12')) || 12);
       const b = await readBody(req);
       const emailKey = String(b.email || '').trim().toLowerCase().slice(0, 160);
-      const user = db.prepare('SELECT * FROM users WHERE email=? AND active=1').get(String(b.email || '').toLowerCase());
+      const user = db.prepare('SELECT * FROM users WHERE email=? AND active=1').get(String(b.email || '').trim().toLowerCase());
       // проверяем пароль даже для несуществующего e-mail: время ответа не выдаёт, зарегистрирован ли адрес
       const passOk = await checkPassAsync(String(b.password || ''), user ? user.pass : 'fake-salt:00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000');
       if (!user || !passOk) {
