@@ -1121,6 +1121,23 @@ function dragDealEnd() {
 }
 
 /* ---------- deals / kanban ---------- */
+// Колонки канбана рендерятся порциями: в зрелой воронке закрытых сделок
+// бывают тысячи, а доска должна открываться мгновенно. Счётчики и суммы
+// колонки считаются по всем сделкам, а не по видимой порции.
+const dealCardHtml = (x, s) => `<article class="deal ${selSet('deals').has(x.id) ? 'selected' : ''}" ${canEdit() ? `draggable="true" ondragstart="dragDealStart(event,${x.id})" ondragend="dragDealEnd()"` : ''} onclick="openDealCard(${x.id})" style="border-left-color:${esc(s.color)}${selSet('deals').has(x.id) ? ';box-shadow:0 0 0 2px var(--green)' : ''}">
+    <b>${esc(x.title)}</b>${canEdit() ? `<input type="checkbox" title="Выбрать для массового действия" style="position:absolute;top:8px;right:8px" ${selSet('deals').has(x.id) ? 'checked' : ''} onclick="event.stopPropagation()" onchange="toggleSel('deals',${x.id})">` : ''}<span class="sum">${fmt(x.amount)}</span>
+    <small>${icon('contact', 13)} ${esc(x.contact_name || 'Без контакта')}${x.deadline ? ' · ' + icon('clock', 13) + ' ' + esc(dateText(x.deadline)) : ''}</small>
+    <div>${dealTaskBadge(x)}</div>
+    <div class="deal-foot"><span class="prio ${esc(x.priority)}">${x.priority === 'high' ? 'высокий' : x.priority === 'low' ? 'низкий' : 'обычный'}</span>${canEdit() ? `<span><button class="btn sm" title="Передвинуть на следующий этап" onclick="event.stopPropagation();moveDeal(${x.id},1)">→</button></span>` : ''}</div></article>`;
+function dealColHtml(list, s) {
+  state.colLimits = state.colLimits || {};
+  const lim = state.colLimits[s.code] || 50;
+  const rest = list.length - lim;
+  const cards = list.slice(0, lim).map(x => dealCardHtml(x, s)).join('');
+  const more = rest > 0 ? `<button type="button" class="btn sm" style="width:100%;margin:6px 0 2px" onclick="showMoreCol('${esc(s.code)}')">Показать ещё ${rest}</button>` : '';
+  return (cards + more) || '<small style="padding:6px;color:var(--muted)">Пусто — перетащите сюда карточку</small>';
+}
+function showMoreCol(code) { state.colLimits = state.colLimits || {}; state.colLimits[code] = (state.colLimits[code] || 50) + 50; render(); }
 async function pipe(v) {
   const d = await api('/api/deals?pipeline=' + state.pipeline);
   Object.assign(state, { deals: d.deals, stages: d.stages, pipelines: d.pipelines });
@@ -1146,11 +1163,7 @@ async function pipe(v) {
     const colSum = colDeals.reduce((a, x) => a + x.amount, 0);
     return `<div class="col" ${canEdit() ? `ondragover="dragOver(event,this)" ondragleave="this.classList.remove('drag-over')" ondrop="dropDeal(event,'${s.code}',this)"` : ''}>
    <h3><span style="color:${esc(s.color)}">● ${esc(s.name)}</span><span style="display:inline-flex;align-items:center;gap:6px"><small style="font-weight:normal;color:var(--muted)">${fmt(colSum)}</small><span>${colDeals.length}</span>${canEdit() ? `<button type="button" class="btn-col-add" onclick="openDeal(null,'${s.code}')" title="Добавить сделку в этап «${esc(s.name)}»">${icon('plus', 12)}</button>` : ''}</span></h3>
-   <div class="deals">${colDeals.map(x => `<article class="deal ${selSet('deals').has(x.id) ? 'selected' : ''}" ${canEdit() ? `draggable="true" ondragstart="dragDealStart(event,${x.id})" ondragend="dragDealEnd()"` : ''} onclick="openDealCard(${x.id})" style="border-left-color:${esc(s.color)}${selSet('deals').has(x.id) ? ';box-shadow:0 0 0 2px var(--green)' : ''}">
-    <b>${esc(x.title)}</b>${canEdit() ? `<input type="checkbox" title="Выбрать для массового действия" style="position:absolute;top:8px;right:8px" ${selSet('deals').has(x.id) ? 'checked' : ''} onclick="event.stopPropagation()" onchange="toggleSel('deals',${x.id})">` : ''}<span class="sum">${fmt(x.amount)}</span>
-    <small>${icon('contact', 13)} ${esc(x.contact_name || 'Без контакта')}${x.deadline ? ' · ' + icon('clock', 13) + ' ' + esc(dateText(x.deadline)) : ''}</small>
-    <div>${dealTaskBadge(x)}</div>
-    <div class="deal-foot"><span class="prio ${esc(x.priority)}">${x.priority === 'high' ? 'высокий' : x.priority === 'low' ? 'низкий' : 'обычный'}</span>${canEdit() ? `<span><button class="btn sm" title="Передвинуть на следующий этап" onclick="event.stopPropagation();moveDeal(${x.id},1)">→</button></span>` : ''}</div></article>`).join('') || '<small style="padding:6px;color:var(--muted)">Пусто — перетащите сюда карточку</small>'}</div></div>`;
+   <div class="deals">${dealColHtml(colDeals, s)}</div></div>`;
   }).join('')}</div>
   <div id="dropCloseBar" class="drop-close-bar hidden">
     <div class="drop-zone won" ondragover="event.preventDefault();this.classList.add('drag-target')" ondragleave="this.classList.remove('drag-target')" ondrop="dropDeal(event,'won',this);dragDealEnd()">${icon('checkCircle', 16)} Успешно реализовано</div>
@@ -1568,6 +1581,46 @@ function channelOptions(conv) {
   }
   return list.map(c => `<option value="${esc(c)}" ${c === String(conv?.chat_type || '').toLowerCase() ? 'selected' : ''}>${esc(channelLabel(c))}</option>`).join('');
 }
+// История чата грузится окнами по 200 сообщений: диалог длиной в несколько
+// лет открывается мгновенно, а прежние сообщения догружаются кнопкой
+// «Загрузить прежние сообщения». Окно живёт в state и обновляется постепенно:
+// новые сообщения прилипают в конец; если хвост окна съехал (в чат пришло
+// больше 200 новых), окно перечитывается целиком — без дыр в истории.
+const MSG_PAGE = 200;
+async function syncMsgs(cid) {
+  state.msgWin = state.msgWin || {};
+  // запрашиваем на одно сообщение больше окна: так точно известно, есть ли
+  // прежняя история, и кнопка догрузки не показывается впустую
+  const rows0 = await api(`/api/conversations/${cid}/messages?limit=${MSG_PAGE + 1}`);
+  const hasMore = rows0.length > MSG_PAGE;
+  const rows = hasMore ? rows0.slice(1) : rows0;
+  const w = state.msgWin[cid];
+  if (!w || !w.msgs.length || (rows.length && rows[0].id > w.msgs[w.msgs.length - 1].id)) {
+    state.msgWin[cid] = { msgs: rows, oldest: rows.length ? rows[0].id : 0, hasMore };
+  } else {
+    const last = w.msgs[w.msgs.length - 1].id;
+    const fresh = rows.filter(m => m.id > last);
+    if (fresh.length) w.msgs = w.msgs.concat(fresh);
+  }
+  return state.msgWin[cid].msgs;
+}
+const olderBtnHtml = w => (w && w.hasMore ? '<div style="text-align:center;padding:6px"><button type="button" class="btn sm" onclick="loadOlderMsgs()">Загрузить прежние сообщения</button></div>' : '');
+async function loadOlderMsgs() {
+  const cid = state.conv; const w = state.msgWin && state.msgWin[cid];
+  if (!cid || !w || !w.hasMore) return;
+  const box = $('#chatMsgs');
+  const oldH = box ? box.scrollHeight : 0, oldT = box ? box.scrollTop : 0;
+  const rows0 = await api(`/api/conversations/${cid}/messages?limit=${MSG_PAGE + 1}&before=${w.oldest}`);
+  const hasMore = rows0.length > MSG_PAGE;
+  const rows = hasMore ? rows0.slice(1) : rows0;
+  if (rows.length) { w.msgs = rows.concat(w.msgs); w.oldest = rows[0].id; w.hasMore = hasMore; }
+  else w.hasMore = false;
+  if (box) {
+    box.innerHTML = olderBtnHtml(w) + (msgsHtml(w.msgs) || '<div class="empty">Диалог пуст</div>');
+    // позиция чтения сохраняется: прокрутка сдвигается на высоту дописанного
+    box.scrollTop = box.scrollHeight - oldH + oldT;
+  }
+}
 async function inbox(v) {
   const convs = await api('/api/conversations');
   state.cache.convs = convs;
@@ -1576,7 +1629,7 @@ async function inbox(v) {
   if (!state.channels.length) state.channels = await api('/api/channels').catch(() => []);
   const cur = state.listOnly ? null : (convs.find(c => c.id === state.conv) || convs[0]);
   if (cur) { state.conv = cur.id; state.listOnly = false; }
-  const msgs = cur ? await api(`/api/conversations/${cur.id}/messages`) : [];
+  const msgs = cur ? await syncMsgs(cur.id) : [];
   const templates = (state.cache.templates = state.cache.templates || await api('/api/templates'));
   // Wazzup подключён, но адрес у вендора не зарегистрирован: чаты будут пустыми,
   // а причина спрятана в настройках. Баннер ведёт прямо к кнопке, которая чинит.
@@ -1600,7 +1653,7 @@ async function inbox(v) {
         <button class="btn sm" onclick="attachContact(${cur.contact_id})">${icon('contact', 13)} Карточка клиента</button>
         ${canEdit() ? `<button class="btn sm" onclick="openEmailComposer(${cur.id})">${icon('email', 13)} Письмо</button>` : ''}
       </div></div>
-    <div class="msgs" id="chatMsgs" onscroll="chatScrolled()">${msgsHtml(msgs) || '<div class="empty">Диалог пуст</div>'}</div>
+    <div class="msgs" id="chatMsgs" onscroll="chatScrolled()">${olderBtnHtml(state.msgWin && state.msgWin[cur.id])}${msgsHtml(msgs) || '<div class="empty">Диалог пуст</div>'}</div>
     ${canEdit() ? `<form class="composer" onsubmit="return sendMsg(event,${cur.id})">
      <div class="composer-row">
        <button type="button" class="btn icon-btn composer-ico" title="Прикрепить фото или файл" onclick="document.getElementById('chatFile').click()">${icon('paperclip', 17)}</button>
@@ -1626,11 +1679,11 @@ async function inbox(v) {
 async function refreshInbox() {
   try {
     if (!state.conv) return;
-    const msgs = await api(`/api/conversations/${state.conv}/messages`);
+    const msgs = await syncMsgs(state.conv);
     const box = $('#chatMsgs');
     if (box) {
       const atBottom = box.scrollHeight - box.scrollTop - box.clientHeight < 60;
-      box.innerHTML = msgsHtml(msgs) || '<div class="empty">Диалог пуст</div>';
+      box.innerHTML = olderBtnHtml(state.msgWin && state.msgWin[state.conv]) + (msgsHtml(msgs) || '<div class="empty">Диалог пуст</div>');
       // дочитали до низа — лента остаётся внизу; ушли вверх читать историю —
       // новые сообщения не дёргают прокрутку, а ждут кнопкой
       if (atBottom) { box.scrollTop = box.scrollHeight; $('#jumpNew')?.remove(); }
@@ -1735,8 +1788,8 @@ async function sendMsg(e, cid) {
     const r = await api(`/api/conversations/${cid}/messages`, { method: 'POST', body: JSON.stringify({ body, channel }) });
     if (r.send?.hint) toast(r.send.hint);
     else if (r.send?.delivered) toast('Сообщение отправлено');
-    const msgs = await api(`/api/conversations/${cid}/messages`);
-    $('#chatMsgs').innerHTML = msgsHtml(msgs);
+    const msgs = await syncMsgs(cid);
+    $('#chatMsgs').innerHTML = olderBtnHtml(state.msgWin && state.msgWin[cid]) + msgsHtml(msgs);
     const mDiv = $('#chatMsgs'); if (mDiv) mDiv.scrollTop = mDiv.scrollHeight; $('#jumpNew')?.remove();
     // обновляем список диалогов: последний текст и счётчик непрочитанных
     state.cache.convs = await api('/api/conversations');

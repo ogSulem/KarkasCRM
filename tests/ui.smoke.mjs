@@ -183,6 +183,15 @@ try {
     await wait(700);
     const saved2 = await (await fetch(BASE + '/api/conversations/' + window.__state.conv + '/messages', { headers: authH() })).json();
     check('многострочное сообщение сохранено с переносом', saved2.some(m => m.body === 'Первая строка\nВторая строка'));
+    // история чата отдаётся окнами: limit возвращает только хвост, before —
+    // прежнее сообщение; диалог длиной в годы открывается мгновенно
+    {
+      const win = await (await fetch(BASE + '/api/conversations/' + window.__state.conv + '/messages?limit=1', { headers: authH() })).json();
+      const lastAll = saved2[saved2.length - 1];
+      check('история чата отдаётся окнами: limit возвращает хвост', Array.isArray(win) && win.length === 1 && win[0].id === lastAll.id, JSON.stringify(win));
+      const older = await (await fetch(BASE + '/api/conversations/' + window.__state.conv + '/messages?limit=1&before=' + lastAll.id, { headers: authH() })).json();
+      check('окно с before возвращает прежнее сообщение', Array.isArray(older) && older.length === 1 && older[0].id < lastAll.id, JSON.stringify(older));
+    }
     check('в переписке видны разделители дней', /Сегодня/.test($('#chatMsgs').textContent) && cssText.includes('.msg-day{display:flex'));
     {
       const d = new Date(), pad = n => String(n).padStart(2, '0');
@@ -1314,6 +1323,16 @@ try {
     const rows = (html.match(/class="conv /g) || []).length;
     window.__state.convLimit = undefined;
     check('список диалогов рисуется порциями и предлагает догрузку', rows === 100 && html.includes('Показать ещё 150'), 'rows=' + rows);
+  }
+  // колонки канбана тоже рисуются порциями: закрытых сделок за годы
+  // бывают тысячи, доска открывается мгновенно
+  {
+    const deals = Array.from({ length: 60 }, (_, i) => ({ id: 800000 + i, title: 'Сделка ' + (i + 1), amount: 0, priority: 'обычный', stage: 'won', tasks_open: 0 }));
+    window.__state.colLimits = {};
+    const html = window.dealColHtml(deals, { code: 'won', color: '#3b82f6' });
+    const cards = (html.match(/<article class="deal /g) || []).length;
+    window.__state.colLimits = {};
+    check('колонки канбана рисуются порциями и предлагают догрузку', cards === 50 && /Показать ещё 10</.test(html), 'cards=' + cards);
   }
   window.__state.cache.convs = [{ id: 9102, title: 'Чужой клиент', unread: 1, assigned_id: 99901, contact_responsible_id: 99902, last_body: 'здравствуйте', phone: '', channels: 'whatsapp', last_at: '2026-10-27 09:00' }];
   window.setConvScope('mine'); await wait(300);

@@ -2445,9 +2445,19 @@ ${user?.name || ''}`.trim();
     const mConv = p.match(/^\/api\/conversations\/(\d+)\/messages$/);
     if (mConv) { const id = mConv[1];
       if (req.method === 'GET') {
-        const rows = db.prepare('SELECT * FROM messages WHERE conversation_id=? ORDER BY id').all(id);
+        // Длинные диалоги отдаются окном: чат с историей на годы не должен
+        // тянуть мегабайты на каждое открытие. Без параметров — вся история
+        // (прежнее поведение для совместимости), с limit — последние N,
+        // с before — N сообщений до указанного id.
+        const lim = Math.min(1000, Number(u.searchParams.get('limit')) || 0);
+        const before = Number(u.searchParams.get('before')) || 0;
+        const rows = lim
+          ? (before
+            ? db.prepare('SELECT * FROM (SELECT * FROM messages WHERE conversation_id=? AND id<? ORDER BY id DESC LIMIT ?) ORDER BY id').all(id, before, lim)
+            : db.prepare('SELECT * FROM (SELECT * FROM messages WHERE conversation_id=? ORDER BY id DESC LIMIT ?) ORDER BY id').all(id, lim))
+          : db.prepare('SELECT * FROM messages WHERE conversation_id=? ORDER BY id').all(id);
         // прочитанность личная: коллега, открывший чат раньше, не стирает метку у ответственного
-        const lastId = rows.length ? rows[rows.length - 1].id : 0;
+        const lastId = db.prepare('SELECT MAX(id) m FROM messages WHERE conversation_id=?').get(id)?.m || 0;
         if (user?.id) db.prepare("INSERT INTO read_marks(user_id,conversation_id,last_msg_id,updated_at) VALUES(?,?,?,datetime('now')) ON CONFLICT(user_id,conversation_id) DO UPDATE SET last_msg_id=MAX(last_msg_id,excluded.last_msg_id),updated_at=datetime('now')").run(user.id, Number(id), lastId);
         return json(res, 200, rows);
       }
