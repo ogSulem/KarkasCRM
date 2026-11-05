@@ -1804,9 +1804,13 @@ function saveDraft(cid) { const t = $('#msgText'); if (!t) return; const v = t.v
 // держим последние 50, первыми выбываем самые старые
 function pruneDrafts(max = 50) { const keys = Object.keys(state.drafts); while (keys.length > max) delete state.drafts[keys.shift()]; }
 function loadDrafts() { try { state.drafts = JSON.parse(localStorage.getItem('karkas-drafts') || '{}') || {}; } catch { state.drafts = {}; } }
-function autoGrow(el) { el.style.height = 'auto'; el.style.height = Math.min(el.scrollHeight, 140) + 'px'; }
+function autoGrow(el) { el.style.height = 'auto'; el.style.height = Math.min(el.scrollHeight, 140) + 'px'; placeJumpNew(); }
 function msgKey(ev, cid) { if (ev.key === 'Enter' && !ev.shiftKey) { ev.preventDefault(); ev.target.form.requestSubmit(); } }
-function showJumpNew() { const chat = $('.chat'); if (!chat || $('#jumpNew')) return; const b = document.createElement('button'); b.type = 'button'; b.id = 'jumpNew'; b.className = 'jump-new'; b.textContent = 'Новые сообщения ↓'; b.onclick = scrollChatBottom; chat.appendChild(b); }
+function showJumpNew() { const chat = $('.chat'); if (!chat || $('#jumpNew')) return; const b = document.createElement('button'); b.type = 'button'; b.id = 'jumpNew'; b.className = 'jump-new'; b.textContent = 'Новые сообщения ↓'; b.onclick = scrollChatBottom; chat.appendChild(b); placeJumpNew(); }
+// Кнопка центрирована прямо над строкой ввода: с фиксированным отступом она
+// налезала на кнопку «Отправить», когда композитор вырастал от длинного текста
+function placeJumpNew() { const b = $('#jumpNew'), c = $('.composer'); if (b && c) b.style.bottom = (c.offsetHeight + 12) + 'px'; }
+window.addEventListener('resize', placeJumpNew);
 function scrollChatBottom() { const m = $('#chatMsgs'); if (m) m.scrollTop = m.scrollHeight; $('#jumpNew')?.remove(); }
 function chatScrolled() { const m = $('#chatMsgs'); if (!m) return; if (m.scrollHeight - m.scrollTop - m.clientHeight < 60) $('#jumpNew')?.remove(); }
 async function sendMsg(e, cid) {
@@ -2537,29 +2541,25 @@ async function competitorsView(v) {
   const shown = q ? list.filter(c => `${c.name} ${c.inn || ''} ${c.city || ''} ${c.website || ''} ${c.phone || ''}`.toLowerCase().includes(q)) : list;
   v.innerHTML = `${viewerNote()}
   <div class="card toolbar">
-    <input id="compSearch" style="flex:1;min-width:240px" placeholder="Название или ИНН конкурента — найдём и проверим по открытым источникам" onkeydown="if(event.key==='Enter')findCompetitor(this.value)">
-    ${canEdit() ? `<button class="btn primary" onclick="findCompetitor(document.getElementById('compSearch').value)">${icon('search', 14)} Найти и проверить</button>
-    <button class="btn" onclick="openCompetitor()">+ Добавить вручную</button>` : ''}
+    <h3 style="margin:0">Конкуренты на контроле (${shown.length}${shown.length !== list.length ? ` из ${list.length}` : ''})</h3>
+    <input id="compFilter" style="max-width:260px;margin-left:auto" placeholder="Поиск: название, ИНН, город" value="${esc(state.compQuery || '')}" oninput="liveSearch('compList',()=>setCompQuery(this.value))">
+    ${state.compQuery ? `<button class="btn sm ghost" onclick="clearCompQuery()">Сбросить</button>` : ''}
+    ${canEdit() ? `<button class="btn primary" onclick="openCompetitor()">${icon('plus', 14)} Добавить конкурента</button>` : ''}
     <button class="btn" title="Наш прайс-лист — это раздел «Каталог»: те же позиции и цены" onclick="openOurPrices()">${icon('excel', 14)} Наш прайс-лист${ours.rows.length ? ` (${ours.rows.length})` : ''}</button>
   </div>
   <div class="card">
-   <div class="row" style="border:0;flex-wrap:wrap;gap:8px">
-     <h3>Конкуренты на контроле (${shown.length}${shown.length !== list.length ? ` из ${list.length}` : ''})</h3>
-     <input id="compFilter" style="max-width:250px" placeholder="Поиск по списку: название, ИНН, город" value="${esc(state.compQuery || '')}" oninput="liveSearch('compList',()=>setCompQuery(this.value))">
-     ${state.compQuery ? `<button class="btn sm ghost" onclick="clearCompQuery()">Сбросить</button>` : ''}
-   <div class="tbl-scroll"><table><tr><th>Конкурент</th><th>ИНН</th><th>Город / сайт</th><th>Риск</th><th>Проверка</th><th>Цены</th><th></th></tr>
+   <div class="tbl-scroll"><table><tr><th>Конкурент</th><th>ИНН</th><th>Риск и проверка</th><th>Цены</th><th></th></tr>
     ${shown.map(c => `<tr>
-     <td><a href="#" onclick="openCompetitorCard(${c.id});return false"><b>${esc(c.name)}</b></a></td>
-     <td><code>${esc(c.inn || '—')}</code></td><td>${esc(c.city || '—')}<br><small>${siteHref(c.website) ? `<a href="${esc(siteHref(c.website))}" target="_blank" rel="noopener">${esc(c.website)}</a>` : ''}</small></td>
-     <td>${c.risk === null || c.risk === undefined ? '<span class="tag grey">не проверялся</span>' : `<span class="tag risk-tag" style="--risk:${esc(riskColor(c.level))}" title="Риск-оценка от 0 до 100 по открытым источникам">риск ${c.risk} · ${esc(RISK_LABELS[String(c.level || '').toLowerCase()] || c.level || '—')}</span>`}</td>
-     <td><small>${esc(dt(c.checked_at) || 'не проверялся')}</small></td>
+     <td><a href="#" onclick="openCompetitorCard(${c.id});return false"><b>${esc(c.name)}</b></a><br><small>${esc(c.city || '')}${c.city && siteHref(c.website) ? ' · ' : ''}${siteHref(c.website) ? `<a href="${esc(siteHref(c.website))}" target="_blank" rel="noopener">${esc(c.website)}</a>` : ''}</small></td>
+     <td><code>${esc(c.inn || '—')}</code></td>
+     <td>${c.risk === null || c.risk === undefined ? '<span class="tag grey">не проверялся</span>' : `<span class="tag risk-tag" style="--risk:${esc(riskColor(c.level))}" title="Риск-оценка от 0 до 100 по открытым источникам">риск ${c.risk} · ${esc(RISK_LABELS[String(c.level || '').toLowerCase()] || c.level || '—')}</span>`}<br><small>${esc(dt(c.checked_at) || '')}</small></td>
      <td><small>позиций: ${c.prices || 0}</small></td>
      <td style="white-space:nowrap">
        <button class="btn sm" onclick="openCompetitorCard(${c.id})">Отчёт</button>
        ${canEdit() ? `<button class="btn sm" onclick="checkCompetitor(${c.id})">${icon('refresh', 13)} Проверить</button>
        <button class="btn sm" title="Изменить карточку конкурента" onclick="openCompetitor(${c.id})">${icon('edit', 13)}</button>
        <button class="btn sm danger" title="Удалить конкурента" onclick="delCompetitor(${c.id})">${icon('close', 13)}</button>` : ''}
-     </td></tr>`).join('') || `<tr><td colspan="7"><div class="empty">${q ? 'Ничего не найдено — измените поиск' : 'Конкурентов пока нет — введите название выше'}</div></td></tr>`}
+     </td></tr>`).join('') || `<tr><td colspan="5"><div class="empty">${q ? 'Ничего не найдено — измените поиск' : 'Конкурентов пока нет — добавьте первого кнопкой выше'}</div></td></tr>`}
    </table></div>
   </div>`;
 }
@@ -2638,7 +2638,7 @@ async function findCompetitor(query) {
   const q = String(query || '').trim();
   if (!q) {
     toast('Введите название или ИНН конкурента');
-    const field = $('#compSearch');
+    const field = $('#compFind');
     if (field) field.focus();
     return;
   }
@@ -2674,7 +2674,14 @@ function delCompetitor(id) {
 
 async function openCompetitor(id) {
   const c = id ? await api('/api/competitors/' + id) : {};
-  openModal(`<h3>${id ? 'Конкурент' : 'Новый конкурент'}</h3><form onsubmit="return saveCompetitor(event,${id || 'null'})">
+  openModal(`<h3>${id ? 'Конкурент' : 'Новый конкурент'}</h3>
+   ${id ? '' : `<div class="card" style="box-shadow:none;border-color:var(--line);margin-bottom:14px">
+     <h4>Найти и проверить автоматически</h4>
+     <p class="form-hint">Введите название организации или ИНН — CRM создаст карточку и запустит проверку по открытым источникам. Части источников нужен ключ (его добавляет администратор в разделе «Настройки → Интеграции»): без ключей работают ссылки для ручной проверки, а карточка заполнится тем, что введёте ниже.</p>
+     <div style="display:flex;gap:8px;flex-wrap:wrap"><input id="compFind" placeholder="Название или ИНН, например ООО «БрусДом»" style="flex:1;min-width:200px" onkeydown="if(event.key==='Enter'){event.preventDefault();findCompetitor(this.value)}"><button type="button" class="btn primary" onclick="findCompetitor(document.getElementById('compFind').value)">${icon('search', 14)} Найти и проверить</button></div>
+   </div>
+   <h4>Заполнить вручную</h4>`}
+   <form onsubmit="return saveCompetitor(event,${id || 'null'})">
    <label>Название организации*<input name="name" required value="${esc(c.name || '')}" placeholder="ООО «БрусДом»"></label>
    <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px"><label>ИНН<input name="inn" value="${esc(c.inn || '')}"></label><label>ОГРН<input name="ogrn" value="${esc(c.ogrn || '')}"></label></div>
    <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px"><label>Город<input name="city" value="${esc(c.city || '')}"></label><label>Сайт<input name="website" value="${esc(c.website || '')}" placeholder="brusdom.ru"></label></div>
@@ -2802,8 +2809,25 @@ function competitorTab(c) {
      </div>`;
   }
   if (state.compTab === 'sources') {
-    return `<table><tr><th>Источник</th><th>Статус</th><th>Данные</th><th>Обновлено</th></tr>
-     ${checks.map(s => `<tr><td><b>${esc(s.title || s.source)}</b></td><td><span class="tag ${s.status === 'ok' ? '' : 'orange'}">${esc(s.status)}</span></td><td><small>${esc(s.summary || '—')}</small></td><td><small>${esc(dt(s.checked_at))}</small></td></tr>`).join('') || '<tr><td colspan="4"><small>Источники ещё не опрашивались</small></td></tr>'}</table>`;
+    // Три понятные группы вместо стены статусов: что ответило само, что
+    // заработает с ключом, и что всегда проверяется вручную по ссылкам
+    const links = s => (s.links || []).map(l => `<a class="btn sm" href="${esc(l.url)}" target="_blank" rel="noopener">${icon('search', 13)} ${esc(l.title || 'Открыть источник')}</a>`).join(' ');
+    const ok = checks.filter(s => s.status === 'ok');
+    const noKey = checks.filter(s => s.status !== 'ok' && /ключ/i.test(s.summary || ''));
+    const manual = checks.filter(s => s.status !== 'ok' && !/ключ/i.test(s.summary || ''));
+    const row = s => `<div class="row" style="align-items:center"><span><b>${esc(s.title || s.source)}</b><br><small>${esc(s.summary || '')}</small></span><span style="display:flex;gap:6px;flex-wrap:wrap;justify-content:flex-end">${links(s)}</span></div>`;
+    return `
+     ${ok.length ? `<h4>Автоматическая проверка ответила</h4>
+      <table><tr><th>Источник</th><th>Данные</th><th>Обновлено</th></tr>
+      ${ok.map(s => `<tr><td><b>${esc(s.title || s.source)}</b></td><td><small>${esc(s.summary || '—')}</small></td><td><small>${esc(dt(s.checked_at))}</small></td></tr>`).join('')}</table>`
+      : '<p class="form-hint">Автоматические источники пока не ответили данными. Посмотрите карточку по ссылкам ниже и запишите увиденное в блок «Найдено вручную» — записи попадут в отчёт и риск-оценку.</p>'}
+     ${noKey.length ? `<hr><h4>Заработает автоматически с ключом</h4>
+      <p class="form-hint">Ключи добавляет администратор в разделе «Настройки → Интеграции». Пока ключа нет, данные смотрятся по ссылкам.</p>
+      <div class="list">${noKey.map(row).join('')}</div>` : ''}
+     ${manual.length ? `<hr><h4>Проверяется вручную по официальным ссылкам</h4>
+      <p class="form-hint">Эти реестры не отдают данные программам: нет открытого API или сайт закрыт от роботов. Откройте ссылку и запишите найденное в блок «Найдено вручную».</p>
+      <div class="list">${manual.map(row).join('')}</div>` : ''}
+     ${checks.length ? '' : '<p class="form-hint">Источники ещё не опрашивались — нажмите «Проверить сейчас».</p>'}`;
   }
   if (state.compTab === 'debts') {
     // «Проверили — чисто» и «проверить не удалось» показываем по-разному:
@@ -4132,7 +4156,10 @@ function connectSSE() {
     const sameChat = state.view === 'inbox' && Number(state.conv) === Number(d.conversation_id) && document.hasFocus();
     // чужой клиент не должен отрывать весь офис: уведомление видят ответственный
     // за беседу или клиента и администраторы; остальные получают только счётчик
-    const mine = !d.for_user || Number(d.for_user) === Number(meId()) || amAdmin();
+    // как в amoCRM: сообщение уведомляет ответственного за беседу или клиента
+    // и администраторов; чат, который ещё никто не взял, админу — весь офис
+    // отрывать уведомлением о каждой строчке переписки нельзя
+    const mine = Number(d.for_user) === Number(meId()) || (!d.for_user && amAdmin());
     if (d.direction !== 'out' && !sameChat && mine) {
       notify({
         title: 'Новое сообщение', kind: 'message',

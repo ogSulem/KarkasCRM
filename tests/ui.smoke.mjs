@@ -675,9 +675,16 @@ try {
       FNS_API_URL: 'http://127.0.0.1:9', GOOGLE_API_URL: 'http://127.0.0.1:9', TWOGIS_API_URL: 'http://127.0.0.1:9',
       YANDEX_API_URL: 'http://127.0.0.1:9', COMPETITOR_TIMEOUT_MS: '1500',
     }) }).catch(() => {});
-    const search = $('#compSearch');
+    // поиск с проверкой живёт в окне «Добавить конкурента»: на странице
+    // остался один фильтр списка — два поля поиска подряд читались непонятно
+    check('на странице конкурентов нет второго поля поиска', !$('#compSearch') && Boolean($('#compFilter')));
+    const addBtn = $$('#view button').find(b => /Добавить конкурента/.test(b.textContent));
+    check('на странице конкурентов одна кнопка добавления', Boolean(addBtn));
+    addBtn.click(); await wait(300);
+    const search = $('#compFind');
+    check('в окне добавления есть автоматический поиск', Boolean(search));
     search.value = 'ООО «Проверка Поиска»';
-    const btn = $$('#view button').find(b => /Найти и проверить/.test(b.textContent));
+    const btn = $$('#modalBody button').find(b => /Найти и проверить/.test(b.textContent));
     check('в конкурентах есть кнопка «Найти и проверить»', Boolean(btn));
     pageErrors.length = 0;
     btn.click();
@@ -1065,7 +1072,10 @@ try {
   const mSet = $('#view').innerHTML;
   check('менеджер видит только доступные вкладки настроек', /Мой профиль/.test(mSet) && !/Интеграции и каналы/.test(mSet) && !/>Команда</.test(mSet) && !/>Воронки и этапы</.test(mSet));
   window.go('competitors'); await wait(400);
-  check('менеджер видит прайс-лист и может проверять конкурентов', /Наш прайс-лист/.test($('#view').textContent) && /Найти и проверить/.test($('#view').textContent));
+  check('менеджер видит прайс-лист и может проверять конкурентов', /Наш прайс-лист/.test($('#view').textContent) && /Добавить конкурента/.test($('#view').textContent));
+  await window.openCompetitor(); await wait(250);
+  check('менеджеру доступен автоматический поиск конкурента', /Найти и проверить/.test($('#modalBody').textContent));
+  window.closeModal(); await wait(150);
   const mgrOurs = await fetch(BASE + '/api/prices', { method: 'POST', headers: { 'Content-Type': 'application/json', Authorization: 'Bearer ' + mgrToken }, body: JSON.stringify({ scope: 'ours', text: 'Дом;1000000;шт' }) });
   check('менеджер не может менять прайс-лист (403)', mgrOurs.status === 403);
   window.go('products'); await wait(420);
@@ -1399,6 +1409,7 @@ try {
   check('длинные почта, ссылка или ИНН не растягивают таблицу', cssText.includes('th,td{overflow-wrap:break-word}'));
   check('на телефоне список диалогов и чат не толкаются на одном экране', cssText.includes('.inbox .convs{display:none}') && cssText.includes('.inbox.list-only .chat{display:none}'));
   check('цели для касания на телефоне не меньше 40px, шрифт не мельчает', /\.tabs button\{padding:9px 13px;font-size:13\.5px;min-height:40px\}/.test(cssText) && cssText.includes('.btn.sm{padding:9px 12px;font-size:13px;min-height:40px}'));
+  check('кнопка «Новые сообщения» центрирована и не налезает на отправку', cssText.includes('.jump-new{position:absolute;left:50%;transform:translateX(-50%)') && /\.jump-new\{min-height:40px/.test(cssText));
   check('низ страницы не прячется под системную полосу телефона', cssText.includes('env(safe-area-inset-bottom') && html.includes('viewport-fit=cover'));
   check('редактор воронок раскладывается на телефоне в две строки', /\.stages-editor \.st\{grid-template-columns:22px 1fr 40px/.test(cssText));
 

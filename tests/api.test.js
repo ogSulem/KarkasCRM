@@ -1355,6 +1355,25 @@ test('ответ менеджера через вторую CRM с флагом 
   assert.equal(msgs.filter(m => m.body === 'Ответ менеджера из второй CRM').length, 1, 'повтор события не дублирует сообщение');
 });
 
+test('эхо старого формата сохраняется исходящим, а ретрай вендора без id не дублирует сообщение', async () => {
+  const hook = body => fetch(base + '/webhooks/wazzup?secret=hook-secret-1', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) }).then(r => r.status);
+  // клиент пишет; в событии нет messageId — так выглядят ретраи вендора
+  assert.equal(await hook({ messages: [{ channelId: 'ch-lg', chatType: 'whatsapp', chatId: '79000000091', type: 'text', text: 'Вопрос из старого формата', status: 'inbound' }] }), 200);
+  const conv = (await call('/api/conversations')).body.find(c => c.external_chat_id === '79000000091');
+  assert.ok(conv, 'беседа создана');
+  // вендор повторил то же событие: вторая копия не появляется
+  assert.equal(await hook({ messages: [{ channelId: 'ch-lg', chatType: 'whatsapp', chatId: '79000000091', type: 'text', text: 'Вопрос из старого формата', status: 'inbound' }] }), 200);
+  let msgs = (await call(`/api/conversations/${conv.id}/messages`)).body;
+  assert.equal(msgs.filter(m => m.body === 'Вопрос из старого формата').length, 1, 'ретрай без id не дублирует входящее');
+  // менеджер ответил через вторую CRM: старый формат, isEcho, без поля direction —
+  // ответ обязан встать в историю исходящим, а не входящим от клиента
+  assert.equal(await hook({ messages: [{ messageId: 'amo-legacy-1', channelId: 'ch-lg', chatType: 'whatsapp', chatId: '79000000091', type: 'text', text: 'Ответ из старого формата', isEcho: true, status: 'outbound' }] }), 200);
+  msgs = (await call(`/api/conversations/${conv.id}/messages`)).body;
+  const out = msgs.find(m => m.body === 'Ответ из старого формата');
+  assert.ok(out, 'эхо старого формата сохранено');
+  assert.equal(out.direction, 'out', 'ответ менеджера виден исходящим, а не входящим');
+});
+
 test('массовое выполнение повторяющейся задачи продлевает цепочку, пароль короче 12 отклоняется', async () => {
   const created = await call('/api/tasks', { method: 'POST', body: JSON.stringify({ title: 'Ежедневная планёрка', type: 'call', due: '2026-11-02 10:00', repeat: 'daily' }) });
   assert.equal(created.status, 201, 'повторяющаяся задача создана');
