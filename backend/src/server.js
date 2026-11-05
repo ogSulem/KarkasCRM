@@ -719,13 +719,26 @@ export async function upsertIncoming({ channel = 'whatsapp', chatType = '', phon
     dealId = await ensureDeal(contact);
   }
   const channels = [...new Set([...(conv.channels || '').split(',').filter(Boolean), channel])].join(',');
-  try { db.prepare('INSERT INTO messages(conversation_id,channel,direction,body,subject,content_uri,content_name,status,external_id,author,channel_id) VALUES(?,?,?,?,?,?,?,?,?,?,?)').run(conv.id, channel, 'in', body || '[вложение]', subject, contentUri, contentName || null, channel === 'email' ? 'received' : 'inbound', external_id, author, channelId || null); }
+  // Ретраи вендора без идентификатора: Wazzup повторяет событие, если ответ
+  // задержался или потерялся. Сообщение с external_id защищено уникальным
+  // индексом, а событие без id проверяем по содержимому за последние две минуты.
+  if (!external_id) {
+    const recent = db.prepare("SELECT id FROM messages WHERE conversation_id=? AND direction=? AND body=? AND COALESCE(content_uri,'')=? AND created_at > datetime('now','-120 seconds')").get(conv.id, direction, body || '[вложение]', contentUri);
+    if (recent) return conv;
+  }
+  try { db.prepare('INSERT INTO messages(conversation_id,channel,direction,body,subject,content_uri,content_name,status,external_id,author,channel_id) VALUES(?,?,?,?,?,?,?,?,?,?,?)').run(conv.id, channel, direction, body || '[вложение]', subject, contentUri, contentName || null, direction === 'out' ? 'sent' : (channel === 'email' ? 'received' : 'inbound'), external_id, author, channelId || null); }
   catch (e) { if (/UNIQUE/i.test(e.message)) return conv; console.error('message insert', e); throw e; }
   queueAttachmentDownload(conv.id, contentUri, external_id);
   db.prepare("UPDATE conversations SET channels=?,channel_id=COALESCE(NULLIF(?,''),channel_id),external_chat_id=COALESCE(NULLIF(?,''),external_chat_id),chat_type=COALESCE(NULLIF(?,''),chat_type),last_at=datetime('now') WHERE id=?").run(channels, channelId, String(chatId || ''), chatType, conv.id);
   // беседу тоже отмечаем за владельцем канала, если она ничья
   if (boundId && !conv.assigned_id) db.prepare('UPDATE conversations SET assigned_id=? WHERE id=?').run(boundId, conv.id);
   if (!dealId) dealId = await ensureDeal(contact); // клиент вернулся, а открытой сделки нет — заводим новое обращение
+  // Ответ из второй CRM сохранён: автоматизации входящих не запускаются и
+  // уведомление не показывается — это сообщение своей команды, не клиента
+  if (direction === 'out') {
+    broadcast('message', { conversation_id: conv.id, direction: 'out' });
+    return conv;
+  }
   const openDeal = db.prepare("SELECT id FROM deals WHERE contact_id=? AND stage NOT IN ('won','lost') ORDER BY id DESC").get(contact.id);
   await runAutomations('message_in', { contact_id: contact.id, deal_id: dealId || openDeal?.id, text: body });
   // в событии есть имя и превью: интерфейс показывает понятное уведомление
@@ -745,7 +758,7 @@ async function upsertOutgoing(m) {
   const channel = wzChannel(chatType);
   let conv = m.chatId ? db.prepare('SELECT * FROM conversations WHERE external_chat_id=?').get(String(m.chatId)) : null;
   if (!conv) {
-    const phNorm = digits(m.contact?.phone || '');
+    const phNorm = digits(m.recipient?.phone || '');
     if (phNorm) {
       const c = db.prepare('SELECT * FROM contacts WHERE phone_norm=?').get(phNorm) || db.prepare('SELECT * FROM contacts WHERE phone_norm=?').get('7' + phNorm.slice(-10));
       if (c) conv = db.prepare('SELECT * FROM conversations WHERE contact_id=?').get(c.id);
@@ -753,8 +766,13 @@ async function upsertOutgoing(m) {
   }
   // беседы нет — клиент написал впервые, а ответили ему из другой CRM:
   // заводим карточку и беседу обычным механизмом входящих
-  if (!conv) return upsertIncoming({ channel, chatType, phone: m.contact?.phone || '', chatId: m.chatId || '', name: m.contact?.name || m.authorName || '', body, contentUri: m.contentUri || '', contentName: m.fileName || '', external_id: m.messageId || null, channelId: m.channelId || '', author: m.authorName || '' });
+  if (!conv) return upsertIncoming({ channel, chatType, phone: m.recipient?.phone || '', chatId: m.recipient?.chat_id || m.chatId || '', name: m.recipient?.name || '', body, contentUri: m.contentUri || '', contentName: m.fileName || '', external_id: m.messageId || null, channelId: m.channelId || '', author: m.authorName || '', direction: 'out' });
   const st = ['sent', 'delivered', 'read'].includes(m.status) ? m.status : 'sent';
+  // ретраи без идентификатора: та же защита, что у входящих
+  if (!m.messageId) {
+    const recent = db.prepare("SELECT id FROM messages WHERE conversation_id=? AND direction='out' AND body=? AND created_at > datetime('now','-120 seconds')").get(conv.id, body || '[вложение]');
+    if (recent) return conv;
+  }
   try {
     db.prepare('INSERT INTO messages(conversation_id,channel,direction,body,content_uri,content_name,status,external_id,author,channel_id) VALUES(?,?,?,?,?,?,?,?,?,?)')
       .run(conv.id, channel, 'out', body || '[вложение]', safeContentUri(m.contentUri), m.fileName || '', st, m.messageId || null, m.authorName || '', m.channelId || '');
@@ -1528,6 +1546,9 @@ export const server = http.createServer(async (req, res) => {
         // нельзя, ответ ушёл бы клиенту не в тот мессенджер, а выглядело бы как доставка
         chatType: m.recipient?.chat_type || m.sender?.chat_type || m.chatType || '',
         chatId: m.recipient?.chat_id || m.sender?.chat_id || m.chatId, isEcho: m.isEcho === true, outbound: m.direction === 'outbound',
+        // в исходящем событии клиент — получатель: карточка и поиск беседы
+        // идут по его данным, а не по данным отправившего сотрудника
+        recipient: m.recipient,
         text: m.text, type: m.attachment ? 'file' : (WZ_TYPE_BODY[m.type] ? m.type : 'text'), contentUri: m.attachment?.url || m.contentUri, status: m.direction === 'inbound' ? 'inbound' : (m.status || ''),
         fileName: m.attachment?.name || m.attachment?.fileName || m.fileName || '',
         authorName: m.sender?.name, contact: { name: m.sender?.name || m.recipient?.name || m.contact?.name, phone: m.sender?.phone || m.recipient?.phone || m.contact?.phone }
@@ -1545,7 +1566,11 @@ export const server = http.createServer(async (req, res) => {
         // isEcho, и история оказывалась половинной — только с сообщениями клиентов.
         // Повторы гасит уникальный индекс external_id.
         if (String(m.messageId || '').startsWith('karkas-')) continue;
-        if (m.outbound) { await upsertOutgoing(m); continue; }
+        // В старом формате (messages[]) нет поля direction: ответ менеджера из
+        // второй CRM узнаётся по isEcho. Без этой ветки собственные ответы
+        // сохранялись входящими — вставали слева, уведомляли всю команду и
+        // даже заводили карточку «клиента» из данных сотрудника.
+        if (m.outbound || m.isEcho) { await upsertOutgoing(m); continue; }
         await upsertIncoming({ channel: wzChannel(m.chatType), chatType: normChatType(m.chatType), phone: m.contact?.phone || '', chatId: m.chatId || '', name: m.contact?.name || m.authorName || '', body: wzBody(m), contentUri: m.contentUri || '', contentName: m.fileName || wzNameFromUri(m.contentUri), external_id: m.messageId, channelId: m.channelId, author: m.authorName || '' });
       }
       const fwd = getSetting('WAZZUP_FORWARD_URL');
@@ -1555,7 +1580,7 @@ export const server = http.createServer(async (req, res) => {
         fetch(fwd, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: rawBody, signal: AbortSignal.timeout(8000) })
           .catch(e => log(`Не удалось продублировать входящие на второй адрес: ${e.message}`, null, null, 'Wazzup'));
       }
-      const inbound = legacy.concat(modern).filter(m => !(m.status && m.status !== 'inbound' && !(m.text || m.contentUri)) && !String(m.messageId || '').startsWith('karkas-')).length;
+      const inbound = legacy.concat(modern).filter(m => !(m.status && m.status !== 'inbound' && !(m.text || m.contentUri)) && !String(m.messageId || '').startsWith('karkas-') && !m.outbound && !m.isEcho).length;
       if (inbound) {
         const total = Number(db.prepare("SELECT value FROM settings WHERE key='WZ_HOOK_MSG_TOTAL'").get()?.value || 0) + inbound;
         wzHookMark('WZ_HOOK_MSG_TOTAL', String(total));
