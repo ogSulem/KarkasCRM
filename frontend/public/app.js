@@ -1593,7 +1593,7 @@ async function inbox(v) {
   v.innerHTML = `${wzNudge}<div class="inbox${cur ? '' : ' list-only'}">
    <div class="convs"><div style="padding:10px;border-bottom:1px solid var(--line)"><div class="tabs" style="margin-bottom:8px;flex-wrap:wrap"><button type="button" class="${state.convScope === 'mine' ? '' : 'active'}" onclick="setConvScope('all')">Все чаты</button><button type="button" class="${state.convScope === 'mine' ? 'active' : ''}" onclick="setConvScope('mine')">Мои</button>${canEdit() ? `<button type="button" class="${state.convSelect ? 'active' : ''}" style="margin-left:auto" onclick="toggleConvSelect()" title="Отметить несколько чатов и пометить их прочитанными">Выбрать</button>` : ''}</div><input id="convSearch" placeholder="Поиск диалогов" oninput="filterConvs(this.value)"></div>
    ${canEdit() && state.convSelect ? bulkBar('convs', `<button class="btn sm" onclick="markConvsRead()">${icon('check', 14)} Прочитано</button>`) : ''}
-   <div id="convList">${convScopeList(convs).map(c => convRow(c, (cur || {}).id)).join('') || convEmptyHtml(convs)}</div></div>
+   <div id="convList">${convListHtml(convScopeList(convs), (cur || {}).id, convs)}</div></div>
    <div class="chat">${cur ? `
     <div class="chat-head"><button type="button" class="btn sm chat-back" onclick="closeConv()" aria-label="К списку диалогов">${icon('arrowLeft', 14)}</button><div><b>${esc(cur.title)}</b> <small>${esc(cur.phone || '')}</small></div>
       <div style="display:flex;gap:6px">
@@ -1647,6 +1647,20 @@ async function refreshInbox() {
 const convMine = c => Number(c.assigned_id) === Number(meId()) || Number(c.contact_responsible_id) === Number(meId());
 const convScopeList = list => (state.convScope === 'mine' ? (list || []).filter(convMine) : list || []);
 const convEmptyHtml = all => (state.convScope === 'mine' && (all || []).length ? '<div class="empty">Моих диалогов нет: переключитесь на «Все чаты» выше.</div>' : '<div class="empty">Чатов пока нет</div>');
+// Список диалогов рисуется порциями: за годы работы чатов накапливаются
+// тысячи, а огромный DOM тормозит страницу на ровном месте. Список отсортирован
+// по времени, поэтому всё свежее и всё непрочитанное всегда в первой порции.
+function convListHtml(list, curId, all, q) {
+  const lim = state.convLimit || 100;
+  const rows = (list || []).slice(0, lim).map(c => convRow(c, curId)).join('');
+  if (rows) {
+    const rest = (list || []).length - lim;
+    return rows + (rest > 0 ? `<div style="text-align:center;padding:8px"><button class="btn sm" onclick="showMoreConvs()">Показать ещё ${rest}</button></div>` : '');
+  }
+  if (q) return '<div class="empty">Не найдено</div>';
+  return convEmptyHtml(all);
+}
+function showMoreConvs() { state.convLimit = (state.convLimit || 100) + 100; filterConvs($('#convSearch')?.value || '', true); }
 function setConvScope(v) { state.convScope = v; filterConvs($('#convSearch')?.value || ''); }
 // метка времени в списке чатов как в мессенджерах: сегодня — время,
 // на этой неделе — день недели, раньше — короткая дата без века на каждой строке
@@ -1682,11 +1696,12 @@ async function markConvsRead() {
   render();
   navCounts(await api('/api/dashboard')).catch(() => {});
 }
-function filterConvs(q) {
+function filterConvs(q, keepLimit) {
+  if (!keepLimit) state.convLimit = 100;
   const list = convScopeList(state.cache.convs);
   const qL = q.toLowerCase();
   const filtered = list.filter(c => `${c.title} ${c.last_body || ''} ${c.phone || ''}`.toLowerCase().includes(qL));
-  $('#convList').innerHTML = filtered.map(c => convRow(c, state.conv)).join('') || (state.convScope === 'mine' && (state.cache.convs || []).length ? '<div class="empty">Моих диалогов нет: переключитесь на «Все чаты» выше.</div>' : '<div class="empty">Не найдено</div>');
+  $('#convList').innerHTML = convListHtml(filtered, state.conv, state.cache.convs, qL);
 }
 
 async function attachContact(cid) { if (cid) openContactCard(cid); }
@@ -4044,7 +4059,11 @@ function connectSSE() {
     clearTimeout(__changeTimer);
     __changeTimer = setTimeout(() => {
       const modalOpen = !$('#modal').classList.contains('hidden');
-      if (!modalOpen && ['pipe', 'dashboard', 'contacts', 'companies', 'tasks', 'products', 'analytics'].includes(state.view)) render();
+      if (modalOpen) return;
+      // чаты обновляем и при чужих сообщениях-событиях: коллега взял диалог
+      // или ответил — список «Мои/Все» должен это отражать без F5
+      if (state.view === 'inbox') { refreshInbox(); return; }
+      if (['pipe', 'dashboard', 'contacts', 'companies', 'tasks', 'products', 'analytics', 'competitors'].includes(state.view)) render();
     }, 400);
   });
   return es;
