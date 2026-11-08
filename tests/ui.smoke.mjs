@@ -1365,6 +1365,16 @@ try {
     window.__state.convLimit = undefined;
     check('список диалогов рисуется порциями и предлагает догрузку', rows === 100 && html.includes('Показать ещё 150'), 'rows=' + rows);
   }
+  // превью списка диалогов: ответ менеджера не должен выглядеть словами клиента
+  {
+    const meName = window.__state.me.name;
+    const mine = window.convRow({ id: 91031, title: 'Клиент А', unread: 0, channels: 'whatsapp', last_body: 'Отвечаю клиенту', last_direction: 'out', last_author: meName, last_at: '' }, 0);
+    const theirs = window.convRow({ id: 91032, title: 'Клиент Б', unread: 0, channels: 'whatsapp', last_body: 'Ответ из второй CRM', last_direction: 'out', last_author: 'Коллега', last_at: '' }, 0);
+    const inb = window.convRow({ id: 91033, title: 'Клиент В', unread: 0, channels: 'whatsapp', last_body: 'Вопрос клиента', last_direction: 'in', last_at: '' }, 0);
+    check('своё последнее сообщение помечено «Вы:»', mine.includes('Вы: Отвечаю клиенту'), mine);
+    check('ответ коллеги помечен его именем', theirs.includes('Коллега: Ответ из второй CRM'), theirs);
+    check('сообщение клиента показано без пометки', !inb.includes('Вы: ') && inb.includes('Вопрос клиента'), inb);
+  }
   // колонки канбана тоже рисуются порциями: закрытых сделок за годы
   // бывают тысячи, доска открывается мгновенно
   {

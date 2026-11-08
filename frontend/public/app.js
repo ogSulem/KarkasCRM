@@ -1768,9 +1768,14 @@ function listStamp(s) {
 function convRow(c, activeId) {
   const selMode = state.convSelect && canEdit();
   const sel = selSet('convs').has(c.id);
+  // Чья последняя строка: ответ менеджера (свой, из второй CRM или от правила)
+  // не должен выглядеть словами клиента — как в мессенджерах, превью помечается
+  const lastPre = c.last_body && c.last_direction === 'out'
+    ? (c.last_author && c.last_author !== ((state.me && state.me.name) || '') ? esc(c.last_author) + ': ' : 'Вы: ')
+    : '';
   return `<div class="conv ${c.id === activeId ? 'active' : ''}${c.unread ? ' unread' : ''}${sel ? ' selected' : ''}${selMode ? ' sel-mode' : ''}" onclick="${selMode ? `toggleSel('convs',${c.id})` : `openConv(${c.id})`}">${selMode ? `<input type="checkbox" class="conv-check" ${sel ? 'checked' : ''} onclick="event.stopPropagation();toggleSel('convs',${c.id})" title="Отметить чат">` : ''}
     <b><span>${esc(c.title)}</span>${c.unread ? `<span class="badge">${c.unread}</span>` : ''}</b>
-    <p>${esc(c.last_body || '—')}</p><small>${chan(c.channels)} · ${esc(listStamp(c.last_at))}</small></div>`;
+    <p>${c.last_body ? lastPre + esc(c.last_body) : '—'}</p><small>${chan(c.channels)} · ${esc(listStamp(c.last_at))}</small></div>`;
 }
 function toggleConvSelect() { state.convSelect = !state.convSelect; clearSel('convs'); }
 // отметить выбранные чаты прочитанными одной командой

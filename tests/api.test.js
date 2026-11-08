@@ -1392,6 +1392,27 @@ test('эхо старого формата сохраняется исходящ
   assert.equal(out.direction, 'out', 'ответ менеджера виден исходящим, а не входящим');
 });
 
+test('эхо старого формата находит клиента по номеру и не плодит карточки из id чата', async () => {
+  const hook = body => fetch(base + '/webhooks/wazzup?secret=hook-secret-1', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) }).then(r => r.status);
+  // клиент уже известен: раньше он написал в другой чат того же аккаунта
+  assert.equal(await hook({ messages: [{ messageId: 'wz-echo-src-9', channelId: 'ch-lg', chatType: 'whatsapp', chatId: 'chat-echo-src', type: 'text', text: 'Вопрос по дому из другого чата', status: 'inbound', contact: { name: 'Клиент Эхо', phone: '79000000093' } }] }), 200);
+  const before = (await call('/api/contacts')).body.filter(c => c.name === 'Клиент Эхо');
+  assert.equal(before.length, 1, 'карточка клиента одна');
+  // менеджер ответил через вторую CRM: старый формат, другой id чата, клиент указан в contact.
+  // Без номера из contact ответ завёл бы вторую карточку с именем «chat-echo-dst»
+  assert.equal(await hook({ messages: [{ messageId: 'amo-legacy-9', channelId: 'ch-lg', chatType: 'whatsapp', chatId: 'chat-echo-dst', type: 'text', text: 'Ответ тому же клиенту из второй CRM', isEcho: true, status: 'outbound', contact: { name: 'Клиент Эхо', phone: '79000000093' } }] }), 200);
+  const after = (await call('/api/contacts')).body.filter(c => c.name === 'Клиент Эхо');
+  assert.equal(after.length, 1, 'вторая карточка клиента не появилась');
+  assert.ok(!(await call('/api/contacts')).body.some(c => c.name === 'chat-echo-dst'), '«клиент» из id чата не создан');
+  const conv = (await call(`/api/contacts/${after[0].id}`)).body.conversations?.[0] || (await call('/api/conversations')).body.find(c => Number(c.contact_id) === Number(after[0].id));
+  const msgs = (await call(`/api/conversations/${conv.id}/messages`)).body;
+  const out = msgs.find(m => m.body === 'Ответ тому же клиенту из второй CRM');
+  assert.ok(out, 'ответ из второй CRM лёг в беседу существующего клиента');
+  assert.equal(out.direction, 'out', 'ответ виден исходящим');
+  const listRow = (await call('/api/conversations')).body.find(c => Number(c.id) === Number(conv.id));
+  assert.equal(listRow.last_direction, 'out', 'список бесед знает, чьё последнее сообщение');
+});
+
 test('массовое выполнение повторяющейся задачи продлевает цепочку, пароль короче 12 отклоняется', async () => {
   const created = await call('/api/tasks', { method: 'POST', body: JSON.stringify({ title: 'Ежедневная планёрка', type: 'call', due: '2026-11-02 10:00', repeat: 'daily' }) });
   assert.equal(created.status, 201, 'повторяющаяся задача создана');

@@ -768,7 +768,7 @@ async function upsertOutgoing(m) {
   const channel = wzChannel(chatType);
   let conv = m.chatId ? db.prepare('SELECT * FROM conversations WHERE external_chat_id=?').get(String(m.chatId)) : null;
   if (!conv) {
-    const phNorm = digits(m.recipient?.phone || '');
+    const phNorm = digits(m.cli?.phone || '');
     if (phNorm) {
       const c = db.prepare('SELECT * FROM contacts WHERE phone_norm=?').get(phNorm) || db.prepare('SELECT * FROM contacts WHERE phone_norm=?').get('7' + phNorm.slice(-10));
       if (c) conv = db.prepare('SELECT * FROM conversations WHERE contact_id=?').get(c.id);
@@ -776,7 +776,7 @@ async function upsertOutgoing(m) {
   }
   // беседы нет — клиент написал впервые, а ответили ему из другой CRM:
   // заводим карточку и беседу обычным механизмом входящих
-  if (!conv) return upsertIncoming({ channel, chatType, phone: m.recipient?.phone || '', chatId: m.recipient?.chat_id || m.chatId || '', name: m.recipient?.name || '', body, contentUri: m.contentUri || '', contentName: m.fileName || '', external_id: m.messageId || null, channelId: m.channelId || '', author: m.authorName || '', direction: 'out' });
+  if (!conv) return upsertIncoming({ channel, chatType, phone: m.cli?.phone || '', chatId: m.recipient?.chat_id || m.chatId || '', name: m.cli?.name || '', body, contentUri: m.contentUri || '', contentName: m.fileName || '', external_id: m.messageId || null, channelId: m.channelId || '', author: m.authorName || '', direction: 'out' });
   const st = ['sent', 'delivered', 'read'].includes(m.status) ? m.status : 'sent';
   // ретраи без идентификатора: та же защита, что у входящих
   if (!m.messageId) {
@@ -1559,6 +1559,9 @@ export const server = http.createServer(async (req, res) => {
         // в исходящем событии клиент — получатель: карточка и поиск беседы
         // идут по его данным, а не по данным отправившего сотрудника
         recipient: m.recipient,
+        // клиент исходящего события лежит в recipient (новый формат) или contact
+        // (старый); sender — сотрудник, и его номер для поиска клиента не годится
+        cli: { name: m.recipient?.name || m.contact?.name || '', phone: m.recipient?.phone || m.contact?.phone || '' },
         text: m.text, type: m.attachment ? 'file' : (WZ_TYPE_BODY[m.type] ? m.type : 'text'), contentUri: m.attachment?.url || m.contentUri, status: m.direction === 'inbound' ? 'inbound' : (m.status || ''),
         fileName: m.attachment?.name || m.attachment?.fileName || m.fileName || '',
         authorName: m.sender?.name, contact: { name: m.sender?.name || m.recipient?.name || m.contact?.name, phone: m.sender?.phone || m.recipient?.phone || m.contact?.phone }
@@ -1569,7 +1572,7 @@ export const server = http.createServer(async (req, res) => {
       const modern = (Array.isArray(b.data) ? b.data.slice(0, 200) : []).concat(!b.data && (b.message_id || b.messageId) ? [b] : []).map(mapMsg);
       for (const m of legacy.concat(modern)) {
         // чистое статусное событие — без текста и вложения: обновляет статус уже известного сообщения
-        if (m.status && m.status !== 'inbound' && !(m.text || m.contentUri)) { db.prepare('UPDATE messages SET status=? WHERE external_id=?').run(String(m.status).slice(0, 20), m.messageId); continue; }
+        if (m.status && m.status !== 'inbound' && !(m.text || m.contentUri)) { if (m.messageId) db.prepare('UPDATE messages SET status=? WHERE external_id=?').run(String(m.status).slice(0, 20), m.messageId); continue; }
         // Свои отправки узнаём по префиксу внешнего id (karkas-) — они уже лежат в базе.
         // Флагу isEcho на слово не верим: когда обе CRM работают через одну интеграцию
         // Wazzup (один ключ на всех), ответы менеджеров из amoCRM приходят именно с
@@ -1596,7 +1599,8 @@ export const server = http.createServer(async (req, res) => {
         wzHookMark('WZ_HOOK_MSG_TOTAL', String(total));
         log(`Wazzup: получено сообщений: ${inbound}`, null, null, 'Wazzup');
       }
-      for (const s of (Array.isArray(b.statuses) ? b.statuses : []).slice(0, 500)) db.prepare('UPDATE messages SET status=? WHERE external_id=?').run(String(s.status || '').slice(0, 20), s.messageId);
+      // пустой статус не записываем: он стирал бы подпись о доставке у сообщения
+      for (const s of (Array.isArray(b.statuses) ? b.statuses : []).slice(0, 500)) if (s.status && s.messageId) db.prepare('UPDATE messages SET status=? WHERE external_id=?').run(String(s.status).slice(0, 20), s.messageId);
       for (const cu of (Array.isArray(b.channelsUpdates) ? b.channelsUpdates : []).slice(0, 100)) db.prepare('INSERT INTO channels(provider,external_id,state) VALUES(?,?,?) ON CONFLICT(external_id) DO UPDATE SET state=excluded.state').run('wazzup', String(cu.channelId || '').slice(0, 80), String(cu.state || '').slice(0, 40));
       return json(res, 200, { received: true });
     }
@@ -2444,6 +2448,8 @@ ${user?.name || ''}`.trim();
     // ===== inbox =====
     if (p === '/api/conversations' && req.method === 'GET') return json(res, 200, db.prepare(`SELECT cv.*,c.phone,c.email,c.responsible_id AS contact_responsible_id,
       (SELECT substr(body,1,200) FROM messages WHERE conversation_id=cv.id ORDER BY id DESC LIMIT 1) last_body,
+      (SELECT direction FROM messages WHERE conversation_id=cv.id ORDER BY id DESC LIMIT 1) last_direction,
+      (SELECT author FROM messages WHERE conversation_id=cv.id ORDER BY id DESC LIMIT 1) last_author,
       (SELECT d.amount FROM deals d WHERE d.contact_id=cv.contact_id AND d.stage NOT IN ('won','lost') ORDER BY d.id DESC LIMIT 1) deal_amount,
       (SELECT COUNT(*) FROM messages m WHERE m.conversation_id=cv.id AND m.direction='in' AND m.id > COALESCE((SELECT rm.last_msg_id FROM read_marks rm WHERE rm.conversation_id=cv.id AND rm.user_id=?),0)) unread
       FROM conversations cv LEFT JOIN contacts c ON c.id=cv.contact_id ORDER BY cv.last_at DESC, cv.id DESC`).all(user.id).map(r => ({ ...r, unread: r.unread || 0 })));
