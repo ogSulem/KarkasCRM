@@ -306,7 +306,10 @@ test('своё название канала сохраняется и пере�
   assert.equal(denied.status, 403, 'менеджер не переименовывает каналы');
   const stillThere = (await call('/api/channels', { token: admin })).data.find(c => c.external_id === WA_CHANNEL);
   assert.equal(stillThere.label, 'WhatsApp — Ирина', 'подпись администратора не изменена');
-  assert.ok((await call('/api/channels', { token: mgr })).data.length >= 4, 'читать список каналов менеджеру можно: он нужен списку отправки в чате');
+  const mgrChans = (await call('/api/channels', { token: mgr })).data;
+  assert.ok(mgrChans.length >= 4, 'читать список каналов менеджеру можно: он нужен списку отправки в чате');
+  assert.ok(mgrChans.every(c => c.raw === undefined), 'технический ответ вендора менеджеру не отдаётся');
+  assert.ok((await call('/api/channels', { token: admin })).data.some(c => c.raw !== undefined), 'администратору сырые данные доступны для диагностики');
 });
 
 // ── привязка аккаунта к сотруднику ──────────────────────────────────────────

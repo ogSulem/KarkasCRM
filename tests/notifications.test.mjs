@@ -208,7 +208,7 @@ test('массовая передача: одна сводка получате�
   assert.equal(card.data.deal.responsible_id, b.id);
 });
 
-test('просроченная задача: общее уведомление приходит один раз', async () => {
+test('просроченная задача: уведомление адресное и приходит один раз', async () => {
   const { adminStream, bStream, cStream, b } = ctx;
   const yesterday = new Date(Date.now() - 864e5).toISOString().slice(0, 10);
   const task = await call('/api/tasks', { token: admin, method: 'POST', body: { title: 'Просроченный звонок', due: yesterday + ' 09:00', responsible_id: b.id } });
@@ -219,10 +219,16 @@ test('просроченная задача: общее уведомление �
   assert.ok(note.count >= 1);
   assert.ok(Array.isArray(note.tasks) && note.tasks[0].title && note.tasks[0].due);
   const mine = note.tasks.find(t => t.id === task.data.id);
-  assert.equal(mine.responsible_id, b.id, 'в рассылке виден ответственный: клиент отсекает чужие просрочки из тоста');
+  assert.equal(mine.responsible_id, b.id, 'задача приходит с ответственным');
   await sleep(700);
   const repeats = bStream.events.filter(e => e.ev === 'notify' && e.data?.type === 'overdue_tasks' && (e.data.tasks || []).some(t => t.id === task.data.id)).length;
   assert.equal(repeats, 1, 'повторный тик не дублирует уведомление');
-  assert.ok(adminStream.events.some(e => e.ev === 'notify' && e.data?.type === 'overdue_tasks'), 'напоминание видят все сотрудники');
-  assert.ok(cStream.events.some(e => e.ev === 'notify' && e.data?.type === 'overdue_tasks'));
+  // чужие просрочки больше не текут в потоки остальных сотрудников
+  assert.ok(!adminStream.events.some(e => e.ev === 'notify' && e.data?.type === 'overdue_tasks' && (e.data.tasks || []).some(t => t.id === task.data.id)), 'чужая просрочка не приходит администратору');
+  assert.ok(!cStream.events.some(e => e.ev === 'notify' && e.data?.type === 'overdue_tasks' && (e.data.tasks || []).some(t => t.id === task.data.id)), 'чужая просрочка не приходит коллеге');
+  // неназначенная просрочка видна всем: её должен кто-то взять
+  const orphan = await call('/api/tasks', { token: admin, method: 'POST', body: { title: 'Просроченная без ответственного', due: yesterday + ' 10:00' } });
+  const ev = await waitFor(cStream, 'notify', d => d.type === 'overdue_tasks' && (d.tasks || []).some(t => t.id === orphan.data.id), 4000);
+  assert.ok(ev, 'неназначенная просрочка приходит сотруднику');
+  assert.ok(!ev.tasks.some(t => t.id === task.data.id), 'чужая назначенная задача в рассылке коллеги не появляется');
 });

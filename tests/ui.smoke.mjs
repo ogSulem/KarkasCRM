@@ -49,11 +49,12 @@ const serverJsRaw = readFileSync(join(ROOT, 'backend/src/server.js'), 'utf8');
 const competitorsJsRaw = readFileSync(join(ROOT, 'backend/src/competitors.js'), 'utf8');
 const appJs = appJsRaw + `
 window.__state = state;
+window.__setTeam = t => { __team.length = 0; __team.push(...t); };
 Object.assign(window, {
   SKELETONS, toggleTheme, applyTheme, openPalette, closePalette, toggleSel, clearSel,
   siteFormCode, bulkApply, openContactCard, openDealCard, api, get token() { return token },
   icon, normalizeDue, taskDueMeta, isAscii, endSession, togglePass,
-  toggleUserMenu, closeUserMenu, ICON_PATHS, msgHtml, channelOptions,
+  toggleUserMenu, closeUserMenu, userOptions, bulkOwner, ICON_PATHS, msgHtml, channelOptions,
   uploadChatFile, toggleDeadChannels, checkHealth,
   sourceLabel, channelLabel, roleLabel, askConfirm, askInput, translit, SOURCE_LABELS, CHANNEL_LABELS, ROLE_LABELS,
   isoDate, todayISO, fmtDayMonth, kindStage, fld, grid2, formLegend, pushToast, notify, captureFocus, restoreFocus, PALETTE_ACTIONS,
@@ -679,6 +680,19 @@ try {
   window.clearSel('competitors'); await wait(150);
   await window.api('/api/competitors/' + selRival.id, { method: 'DELETE' });
   window.go('contacts'); await wait(500);
+  // ответственным нельзя назначить сотрудника с закрытым доступом
+  {
+    window.__setTeam([
+      { id: 901, name: 'Действующий Менеджер', role: 'manager', active: 1 },
+      { id: 902, name: 'Заблокированный Сотрудник', role: 'manager', active: 0 },
+    ]);
+    const opts = window.userOptions(null);
+    check('заблокированный сотрудник не предлагается для новых назначений', !/Заблокированный Сотрудник/.test(opts) && /Действующий Менеджер/.test(opts));
+    const kept = window.userOptions(902);
+    check('текущий ответственный остаётся в списке, даже если доступ закрыт', /Заблокированный Сотрудник/.test(kept) && /доступ закрыт/.test(kept) && /selected/.test(kept));
+    check('панель массовых действий предлагает только действующих сотрудников', !/Заблокированный Сотрудник/.test(window.bulkOwner('contacts')) && /Действующий Менеджер/.test(window.bulkOwner('contacts')));
+    window.__setTeam([]);
+  }
   {
     const moreBtn = $$('#view button').find(b => /Ещё/.test(b.textContent));
     check('в контактах есть меню «Ещё»', Boolean(moreBtn));
@@ -1150,6 +1164,24 @@ try {
   check('наблюдатель читает чаты без поля отправки', !$('#msgText') && /Режим просмотра/.test($('#view').textContent));
   check('в шапке наблюдателя кнопки создания скрыты', cssText.includes('body.role-viewer .head-create{display:none}') && cssText.includes('body.role-viewer .head-readonly{display:inline-block}'));
   window.closeModal();
+  // карточки сделки и клиента глазами наблюдателя: смотреть можно, менять нечего
+  window.go('pipe'); await wait(600);
+  {
+    const dm = $('#view').innerHTML.match(/openDealCard\((\d+)\)/);
+    check('доска сделок открывается наблюдателю', Boolean(dm));
+    await window.openDealCard(Number(dm[1])); await wait(400);
+    const mb = $('#modalBody').innerHTML;
+    check('в карточке сделки наблюдателю остались только просмотр и печать', !/card-actions/.test(mb) && !/sendDoc/.test(mb) && !/quickDealStage/.test(mb) && /КП/.test($('#modalBody').textContent) && /Счёт/.test($('#modalBody').textContent));
+    window.__state.dealTab = 'tasks'; await window.openDealCard(Number(dm[1])); await wait(400);
+    check('во вкладках карточки сделки нет кнопок изменения', !/toggleTask/.test($('#modalBody').innerHTML) && !/delRow/.test($('#modalBody').innerHTML) && !/addDealProduct/.test($('#modalBody').innerHTML));
+    window.closeModal(); await wait(120);
+    window.go('contacts'); await wait(500);
+    const cm = $('#view').innerHTML.match(/openContactCard\((\d+)\)/);
+    await window.openContactCard(Number(cm[1])); await wait(400);
+    const cb = $('#modalBody').innerHTML;
+    check('в карточке клиента наблюдателю не предлагаются создание и правка', !/startConv/.test(cb) && !/openDeal\(/.test(cb) && !/openTask\(/.test(cb) && !/openContact\(/.test(cb));
+    window.closeModal(); await wait(120);
+  }
   window.go('settings'); await wait(350);
   check('в настройках наблюдателю доступен только профиль', /Профиль/.test($('#view').textContent) && !/Шаблоны сообщений/.test($('#view').innerHTML) && !/Интеграции и каналы/.test($('#view').innerHTML));
   window.__state.me = admin; window.document.body.classList.remove('role-viewer');
