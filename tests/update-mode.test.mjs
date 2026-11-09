@@ -52,7 +52,7 @@ exit 0`);
     encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'], timeout: 30000,
   });
   const calls = existsSync(log) ? readFileSync(log, 'utf8').split('\n').filter(Boolean) : [];
-  return { out, up: calls.filter(c => c.includes('up -d --build')) };
+  return { out, up: calls.filter(c => c.includes('up -d --build')), calls };
 }
 
 const TLS = 'CRM_DOMAIN=crm.xn--80aaamzedb7cml.xn--p1ai\nCRM_BIND=127.0.0.1\nCRM_TLS=1\n';
@@ -88,6 +88,16 @@ test('без .env обновление не падает и профиль не 
   const r = runUpdate({ envFile: null });
   assert.equal(r.up.length, 1);
   assert.equal(r.up[0], 'compose up -d --build');
+});
+
+test('после пересборки висячие образы и кэш сборки убираются', () => {
+  // годы обновлений не должны забивать диск: каждый compose up --build оставляет
+  // образ без тега, а кэш сборки растёт; update.sh убирает и то и другое
+  const r = runUpdate({ envFile: PROXY });
+  assert.ok(r.calls.includes('image prune -f'), 'висячие образы удалены');
+  assert.ok(r.calls.some(c => c.startsWith('builder prune -f')), 'кэш сборки подчищен');
+  const upIdx = r.calls.findIndex(c => c.includes('up -d --build'));
+  assert.ok(r.calls.indexOf('image prune -f') > upIdx, 'уборка идёт после перезапуска');
 });
 
 test('обновление сообщает версию и не теряет данные', () => {

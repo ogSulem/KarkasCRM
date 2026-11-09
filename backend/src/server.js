@@ -2319,7 +2319,7 @@ ${user?.name || ''}`.trim();
         } catch (e) { db.exec('ROLLBACK'); throw e }
         log(`Сделка удалена: ${d.title}`, 'deals', Number(id), user.name);
         broadcast('change', { table: 'deals' });
-        return json(res, 200, { deleted: true, tasks_kept: db.prepare('SELECT COUNT(*) n FROM tasks WHERE deal_id IS NULL AND contact_id IS NOT NULL').get().n ? true : false });
+        return json(res, 200, { deleted: true });
       }
     }
     const mDp = p.match(/^\/api\/deal_products\/(\d+)$/);

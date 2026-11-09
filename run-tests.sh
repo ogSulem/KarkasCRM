@@ -21,6 +21,11 @@ node --check tests/mail.test.mjs
 for sh in install.sh run-local.sh run-tests.sh scripts/update.sh scripts/pack.sh deploy/start-caddy.sh; do
   bash -n "$sh" || { echo "  ОШИБКА: синтаксис $sh"; exit 1; }
 done
+# Скрипты сопровождения: db-check не запускает ни один тест, а выгрузка копии
+# и подпись S3 выполняются только внутри тестов — синтаксис проверяем здесь.
+node --check scripts/db-check.mjs
+node --check scripts/upload-backup.mjs
+node --check scripts/s3-sign.mjs
 
 echo "[2/4] Интеграционные тесты (API, конкуренты, уведомления, гигиена базы, контракт Wazzup, почта, маршруты, часовой пояс, установщик, обновление, миграции, S3)"
 node --experimental-sqlite --test tests/api.test.js tests/competitors.test.js tests/notifications.test.mjs tests/db-hygiene.test.mjs
