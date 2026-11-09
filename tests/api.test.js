@@ -1286,6 +1286,19 @@ test('входящее вложение подписано именем файл
   assert.ok(unreadBefore >= 0);
 });
 
+test('файл в сообщении хранит имя, тип и размер, превью списка читается', async () => {
+  const conv = (await call('/api/conversations')).body[0];
+  assert.ok(conv, 'есть чат для проверки');
+  const sent = await call(`/api/conversations/${conv.id}/messages`, { method: 'POST', body: JSON.stringify({ body: '', contentUri: '/uploads/20260101-abcdef-test.pdf', contentName: 'смета.pdf', contentType: 'application/pdf', contentSize: 2516582 }) });
+  assert.equal(sent.status, 201, 'сообщение с файлом сохранено');
+  const m = sent.body.message;
+  assert.equal(m.content_name, 'смета.pdf', 'имя файла с кириллицей сохранено как есть');
+  assert.equal(m.content_type, 'application/pdf', 'тип файла сохранён');
+  assert.equal(m.content_size, 2516582, 'размер сохранён — чип покажет «2,4 МБ»');
+  const list = (await call('/api/conversations')).body.find(c => c.id === conv.id);
+  assert.match(String(list.last_body), /^Файл: смета\.pdf/, 'в списке чатов вместо пустоты видно имя файла: ' + list.last_body);
+});
+
 test('непрочитанные личные: чтение одного сотрудника не стирает метку другого', async () => {
   // отдельный сотрудник: у созданных ранее в сюите пароли уже менялись принудительно
   await call('/api/users', { method: 'POST', body: JSON.stringify({ name: 'Чтец Меток', email: 'readmark@example.com', password: 'readmark12345', role: 'manager' }) });

@@ -1570,13 +1570,38 @@ function attachmentHtml(m) {
   if (!m.content_uri || !/^(https?:\/\/|\/uploads\/)/i.test(m.content_uri)) return '';
   const url = esc(m.content_uri);
   const isImage = (m.content_type || '').startsWith('image/') || /\.(png|jpe?g|gif|webp|svg)$/i.test(m.content_uri);
-  if (isImage) return `<a href="${url}" target="_blank" rel="noopener" class="chat-attach img"><img loading="lazy" src="${url}" alt="${esc(m.content_name || 'изображение')}" onerror="imgFail(this)"></a>`;
-  return `<a href="${url}" target="_blank" rel="noopener" class="chat-attach file">${icon('file', 14)}<span>${esc(m.content_name || nameFromUri(m.content_uri) || 'вложение')}</span></a>`;
+  const imgName = m.content_name || nameFromUri(m.content_uri) || '';
+  const imgCap = imgName || m.content_size
+    ? `<small class="attach-cap">${esc(imgName || 'изображение')}${m.content_size ? ' · ' + esc(fmtBytes(m.content_size)) : ''}</small>` : '';
+  if (isImage) return `<a href="${url}" target="_blank" rel="noopener" class="chat-attach img"><img loading="lazy" src="${url}" alt="${esc(m.content_name || 'изображение')}" onerror="imgFail(this)">${imgCap}</a>`;
+  const nm = m.content_name || nameFromUri(m.content_uri) || 'вложение';
+  const ext = (String(nm).match(/\.([A-Za-z0-9]{1,5})$/) || [, ''])[1].toUpperCase();
+  const sub = [ext, fmtBytes(m.content_size)].filter(Boolean).join(' · ');
+  return `<a href="${url}" target="_blank" rel="noopener" class="chat-attach file">${icon('file', 14)}<span><span class="attach-name">${esc(nm)}</span>${sub ? `<small class="attach-meta">${esc(sub)}</small>` : ''}</span></a>`;
 }
 const MSG_STATUS = { sent: 'отправлено', delivered: 'доставлено', read: 'прочитано', inbound: 'входящее', received: 'получено', local: 'сохранено в CRM', error: 'не отправлено' };
 const statusLabel = s => MSG_STATUS[s] || s || '';
 // имя файла из ссылки: пригодится, если файл пришёл без имени
 function nameFromUri(u) { try { const last = String(u || '').split('?')[0].split('/').pop() || ''; const d = decodeURIComponent(last); return d && /\./.test(d) ? d.slice(0, 80) : ''; } catch { return ''; } }
+// Размер файла по-человечески: чип в чате показывает «2,4 МБ», а не байты
+function fmtBytes(n) {
+  const v = Number(n);
+  if (!Number.isFinite(v) || v <= 0) return '';
+  if (v < 1024) return v + ' Б';
+  if (v < 1048576) return Math.round(v / 1024) + ' КБ';
+  if (v < 1073741824) return (v / 1048576).toFixed(1).replace('.', ',') + ' МБ';
+  return (v / 1073741824).toFixed(1).replace('.', ',') + ' ГБ';
+}
+// Сырой номер вместо имени читается как мусор: показываем такие «имена»
+// нормальным телефонным номером, а обычные имена не трогаем
+function prettyPhone(s) {
+  const d = String(s || '').replace(/\D/g, '');
+  if (d.length === 11 && (d[0] === '7' || d[0] === '8')) return `+7 ${d.slice(1, 4)} ${d.slice(4, 7)}-${d.slice(7, 9)}-${d.slice(9)}`;
+  return String(s || '');
+}
+function displayTitle(t) { return /^\+?\d[\d\s()-]{8,}$/.test(String(t || '').trim()) ? prettyPhone(t) : String(t || ''); }
+// Короткое имя источника для ссылки без заголовка: домен без www
+const hostOf = u => { try { return new URL(String(u)).hostname.replace(/^www\./, ''); } catch { return 'источник'; } };
 // ссылка вендора могла протухнуть: вместо битой картинки показываем ссылку на файл
 function imgFail(el) { const span = document.createElement('span'); span.className = 'attach-fallback'; span.textContent = 'Изображение не открылось — нажмите, чтобы скачать'; el.replaceWith(span); }
 // аккаунт Wazzup, через который прошло сообщение: человек видит не только
@@ -1618,9 +1643,13 @@ function msgHtml(m) {
   // исходящее подписал коллега (например, ответил через вторую CRM) — имя в подписи:
   // сразу видно, кто именно ответил клиенту; свои сообщения именем не помечаем
   const who = own && m.author && m.author !== (state.me && state.me.name) ? esc(m.author) : '';
-  const meta = [who, chan, msgTime(m.created_at), st].filter(Boolean).join(' · ') + badge;
+  // Ответ коллеги или автоматизации виден сразу: имя стоит над текстом, а не
+  // в тонкой строке меты. Одна правая сторона не говорит «это не моё» —
+  // отсюда путаница «вроде от меня, вроде мне»
+  const authorLine = who ? `<div class="msg-author">${who}</div>` : '';
+  const meta = [chan, msgTime(m.created_at), st].filter(Boolean).join(' · ') + badge;
   const content = attach || body ? `${attach}${body}` : '<span class="msg-empty">Сообщение без текста</span>';
-  return `<div class="msg ${own ? 'out' : ''}"><div>${content}</div><small>${meta}</small></div>`;
+  return `<div class="msg ${own ? 'out' : ''}"><div>${authorLine}${content}</div><small>${meta}</small></div>`;
 }
 function msgTime(s) { const f = dt(s); if (!f) return ''; const i = f.indexOf(' '); return i > 0 ? f.slice(i + 1) : f; }
 // Каналы отправки: сначала те, в которых этот клиент уже писал, затем реально
@@ -1753,7 +1782,7 @@ async function inbox(v) {
    ${state.convSelect ? bulkBar('convs', `<button class="btn sm" onclick="markConvsRead()">${icon('check', 14)} Прочитано</button>`) : ''}
    <div id="convList">${convListHtml(convScopeList(convs), (cur || {}).id, convs)}</div></div>
    <div class="chat">${cur ? `
-    <div class="chat-head"><button type="button" class="btn sm chat-back" onclick="closeConv()" aria-label="К списку диалогов">${icon('arrowLeft', 14)}</button><div><b>${esc(cur.title)}</b> <small>${esc(cur.phone || '')}</small></div>
+    <div class="chat-head"><button type="button" class="btn sm chat-back" onclick="closeConv()" aria-label="К списку диалогов">${icon('arrowLeft', 14)}</button><div><b>${esc(displayTitle(cur.title))}</b> <small>${esc(cur.phone ? prettyPhone(cur.phone) : '')}</small></div>
       <div style="display:flex;gap:6px">
         <button class="btn sm" onclick="attachContact(${cur.contact_id})">${icon('contact', 13)} Карточка клиента</button>
         ${canEdit() ? `<button class="btn sm" onclick="openEmailComposer(${cur.id})">${icon('email', 13)} Письмо</button>` : ''}
@@ -1773,7 +1802,7 @@ async function inbox(v) {
        <button type="button" class="tmpl-settings" onclick="go('settings','templates')">${icon('settings', 12)} настроить шаблоны</button>
      </div>
      <p class="form-hint" id="sendAccountHint" style="margin:-2px 0 0"></p></form>` : `<div class="composer"><p class="form-hint" style="margin:0">${icon('eye', 14)} Режим просмотра: переписка доступна для чтения, отвечает менеджер или администратор.</p></div>`}` : '<div class="empty">Выберите диалог</div>'}</div>
-   <div class="profile">${cur ? `<h3>Клиент</h3><p><b>${esc(cur.title || '')}</b></p><p>${icon('phone', 13)} ${esc(cur.phone || '—')}<br>${icon('email', 13)} ${esc(cur.email || '—')}</p><p>Каналы: ${chan(cur.channels)}${(cur.channels || '').includes('email') ? ' <span class="tag grey">почта подключена</span>' : ''}</p><p><button class="btn sm" onclick="attachContact(${cur.contact_id})">Открыть карточку клиента</button></p><hr><h3>Быстрые действия</h3><div style="display:flex;flex-direction:column;gap:6px">${cur.phone ? `<a class="btn sm" href="tel:${esc(String(cur.phone).replace(/[^+\d]/g, ''))}">${icon('phone', 13)} Позвонить</a>` : ''}${canEdit() ? `<button class="btn sm" onclick="openTask(null,{contact_id:${cur.contact_id}})">+ Задача</button><button class="btn sm" onclick="quickDeal(${cur.contact_id})">+ Сделка</button><button class="btn sm" onclick="quickNote(${cur.contact_id})">+ Заметка</button>` : ''}</div>` : '<div class="empty">Выберите чат</div>'}</div></div>`;
+   <div class="profile">${cur ? `<h3>Клиент</h3><p><b>${esc(displayTitle(cur.title))}</b>${cur.position ? `<br><small>${esc(cur.position)}</small>` : ''}</p><p>${icon('phone', 13)} ${esc(cur.phone ? prettyPhone(cur.phone) : '—')}<br>${icon('email', 13)} ${esc(cur.email || '—')}${cur.company ? `<br>${icon('company', 13)} ${esc(cur.company)}` : ''}${cur.source ? `<br>${icon('info', 13)} Источник: ${esc(sourceLabel(cur.source))}` : ''}${cur.contact_responsible_name ? `<br>${icon('user', 13)} Ответственный: ${esc(cur.contact_responsible_name)}` : ''}</p><p>Каналы: ${chan(cur.channels)}${(cur.channels || '').includes('email') ? ' <span class="tag grey">почта подключена</span>' : ''}</p><p><button class="btn sm" onclick="attachContact(${cur.contact_id})">Открыть карточку клиента</button></p><hr><h3>Быстрые действия</h3><div style="display:flex;flex-direction:column;gap:6px">${cur.phone ? `<a class="btn sm" href="tel:${esc(String(cur.phone).replace(/[^+\d]/g, ''))}">${icon('phone', 13)} Позвонить</a>` : ''}${canEdit() ? `<button class="btn sm" onclick="openTask(null,{contact_id:${cur.contact_id}})">+ Задача</button><button class="btn sm" onclick="quickDeal(${cur.contact_id})">+ Сделка</button><button class="btn sm" onclick="quickNote(${cur.contact_id})">+ Заметка</button>` : ''}</div>` : '<div class="empty">Выберите чат</div>'}</div></div>`;
   if (cur && canEdit()) { refreshSendAccount(cur.id); const t = $('#msgText'); if (t) { t.value = state.drafts[cur.id] || ''; autoGrow(t); } }
   const mDiv = $('#chatMsgs');
   if (mDiv) mDiv.scrollTop = mDiv.scrollHeight;
@@ -1853,7 +1882,7 @@ function convRow(c, activeId) {
   const selMode = state.convSelect;
   const sel = selSet('convs').has(c.id);
   return `<div class="conv ${c.id === activeId ? 'active' : ''}${c.unread ? ' unread' : ''}${sel ? ' selected' : ''}${selMode ? ' sel-mode' : ''}" onclick="${selMode ? `toggleSel('convs',${c.id})` : `openConv(${c.id})`}">${selMode ? `<input type="checkbox" class="conv-check" data-selkey="convs" data-selid="${c.id}" ${sel ? 'checked' : ''} onclick="event.stopPropagation();toggleSel('convs',${c.id})" title="Отметить чат">` : ''}
-    <b><span>${esc(c.title)}</span>${c.unread ? `<span class="badge">${c.unread}</span>` : ''}</b>
+    <b><span>${esc(displayTitle(c.title))}</span>${c.unread ? `<span class="badge">${c.unread}</span>` : ''}</b>
     <p>${c.last_body ? lastWho(c) + esc(c.last_body) : '—'}</p><small>${chan(c.channels)} · ${esc(listStamp(c.last_at))}</small></div>`;
 }
 function toggleConvSelect() { state.convSelect = !state.convSelect; clearSel('convs'); }
@@ -1972,7 +2001,7 @@ async function uploadChatFile(input, cid) {
     try {
       const dataBase64 = String(reader.result).split(',').pop();
       const up = await api(`/api/conversations/${cid}/upload`, { method: 'POST', body: JSON.stringify({ filename: file.name, contentType: file.type || 'application/octet-stream', dataBase64 }) });
-      await api(`/api/conversations/${cid}/messages`, { method: 'POST', body: JSON.stringify({ body: (file.type || '').startsWith('image/') ? '' : (file.name || 'Файл'), contentUri: up.url, contentName: up.name, contentType: up.contentType, channel: $('#msgChannel')?.value || 'whatsapp' }) });
+      await api(`/api/conversations/${cid}/messages`, { method: 'POST', body: JSON.stringify({ body: (file.type || '').startsWith('image/') ? '' : (file.name || 'Файл'), contentUri: up.url, contentName: up.name, contentType: up.contentType, contentSize: up.size, channel: $('#msgChannel')?.value || 'whatsapp' }) });
       toast('Файл отправлен'); refreshInbox();
     } catch (err) { toast(err.message, 'err'); }
   };
@@ -2992,13 +3021,30 @@ function competitorTab(c) {
        <p>${esc(rep.verdict || 'Запустите проверку конкурента для получения сводки.')}</p>
        <h4 style="margin-top:12px">Аргументы для менеджера в переговорах:</h4>
        <div class="list">${(rep.talking_points || []).map(p => `<div class="row"><span>• ${esc(p)}</span></div>`).join('') || '<small>Факторы риска не выявлены — аргументов пока нет</small>'}</div>
+       <h4 style="margin-top:12px">Откуда отчёт</h4>
+       <p class="form-hint">${(() => {
+         const dq = rep.dataQuality || {};
+         const parts = [];
+         if (dq.ok) parts.push(dq.ok + ' ' + plural(dq.ok, 'источник ответил данными', 'источника ответили данными', 'источников ответили данными'));
+         if (dq.skipped) parts.push(dq.skipped + ' ждут ключ API');
+         if (dq.blocked) parts.push(dq.blocked + ' закрыты от роботов');
+         if (dq.error) parts.push(dq.error + ' ответили ошибкой');
+         const checkedAt = checks.map(x => x.checked_at).filter(Boolean).sort().pop();
+         const when = rep.created_at ? 'составлен ' + dt(rep.created_at) : (checkedAt ? 'по проверкам от ' + dt(checkedAt) : 'по сохранённым данным');
+         return `Отчёт ${when}${parts.length ? ': ' + parts.join(', ') : ''}. Состояние каждого источника и ссылки — на вкладке «Источники»; прайс, отзывы и находки можно добавить вручную.`;
+       })()}</p>
+       ${rep.noData ? '<p class="form-hint">Реестры не отдали данные автоматически: без ключей API и при защите сайтов от роботов это нормальное поведение. Прочерки заполнятся, когда источники ответят.</p>' : ''}
        <hr>${reportLinks(rep, c)}
      </div>`;
   }
   if (state.compTab === 'sources') {
     // Три понятные группы вместо стены статусов: что ответило само, что
     // заработает с ключом, и что всегда проверяется вручную по ссылкам
-    const links = s => (s.links || []).map(l => `<a class="btn sm" href="${esc(l.url)}" target="_blank" rel="noopener">${icon('search', 13)} ${esc(l.title || 'Открыть источник')}</a>`).join(' ');
+    // Компактные текстовые ссылки вместо стены одинаковых кнопок: у каждой
+    // своё имя (название реестра или домен), и строки не зарастают кнопками
+    const links = s => (s.links || []).length
+      ? `<span class="report-links">${(s.links || []).map(l => `<a href="${esc(l.url)}" target="_blank" rel="noopener">${esc(l.title || hostOf(l.url))}</a>`).join('')}</span>`
+      : '';
     const ok = checks.filter(s => s.status === 'ok');
     const noKey = checks.filter(s => s.status !== 'ok' && /ключ/i.test(s.summary || ''));
     const manual = checks.filter(s => s.status !== 'ok' && !/ключ/i.test(s.summary || ''));

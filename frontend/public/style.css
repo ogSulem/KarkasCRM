@@ -1,4 +1,4 @@
-:root{--danger:#dc2626;--font-ui:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,'Helvetica Neue',Arial,'Noto Sans',sans-serif;--font-mono:ui-monospace,SFMono-Regular,Menlo,Consolas,'Liberation Mono',monospace;--green:#16a34a;--green-d:#14532d;--green-l:#dcfce7;--orange:#f97316;--orange-l:#ffedd5;--ink:#0f172a;--muted:#64748b;--line:#e2e8f0;--bg:#f6f8f7;--card:#fff;--radius:14px;--shadow:0 1px 2px rgba(15,23,42,.06),0 8px 24px -12px rgba(15,23,42,.18)}
+:root{--danger:#dc2626;--font-ui:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,'Helvetica Neue',Arial,'Noto Sans','Apple Color Emoji','Segoe UI Emoji','Noto Color Emoji',sans-serif;--font-mono:ui-monospace,SFMono-Regular,Menlo,Consolas,'Liberation Mono',monospace;--green:#16a34a;--green-d:#14532d;--green-l:#dcfce7;--orange:#f97316;--orange-l:#ffedd5;--ink:#0f172a;--muted:#64748b;--line:#e2e8f0;--bg:#f6f8f7;--card:#fff;--radius:14px;--shadow:0 1px 2px rgba(15,23,42,.06),0 8px 24px -12px rgba(15,23,42,.18)}
 *{box-sizing:border-box}html,body{margin:0;height:100%}
 body{font:14px/1.55 var(--font-ui);background:var(--bg);color:var(--ink);-webkit-text-size-adjust:100%}
 /* одна гарнитура во всех темах: переключение темы меняет только цвета, текст не «прыгает» */
@@ -220,10 +220,14 @@ tr.selected td,tr.selected:hover td{background:var(--green-l)}
 .send-btn:hover{background:#15803d;border-color:#15803d}
 html[data-theme=dark] .send-btn{background:#16a34a;border-color:#16a34a;color:#fff}
 .icon-btn{display:inline-flex;align-items:center;justify-content:center;padding:8px}
+.msg-author{font-weight:600;font-size:11.5px;margin-bottom:2px;opacity:.85}
 .chat-attach{display:block;margin-bottom:6px}
 .chat-attach.img img{max-width:230px;max-height:230px;border-radius:10px;border:1px solid rgba(0,0,0,.08);display:block;cursor:pointer}
 .chat-attach.file{display:inline-flex;align-items:center;gap:7px;background:rgba(22,163,74,.12);color:inherit;padding:7px 11px;border-radius:9px;font-size:13px;text-decoration:none;max-width:100%}
-.chat-attach.file span{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.chat-attach.file span{overflow:hidden;min-width:0}
+.attach-name{display:block;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.attach-meta{display:block;opacity:.75;font-size:11.5px;margin-top:1px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.attach-cap{display:block;font-size:11.5px;opacity:.8;margin-top:3px;max-width:230px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .msg.out .chat-attach.file{background:rgba(255,255,255,.22);color:#fff}
 .profile{padding:14px}
 /* misc */
