@@ -2867,9 +2867,11 @@ ${user?.name || ''}`.trim();
             }
             if (!stageList.some(st => st.code === n.stage)) return json(res, 400, { error: 'Этап не найден в выбранной воронке — обновите страницу' });
             n.responsible = n.responsible_id ? (db.prepare('SELECT name FROM users WHERE id=?').get(n.responsible_id)?.name || null) : null;
-            const wasClosed = ['won', 'lost'].includes(d.stage);
+            // дату закрытия храним, только если этап не менялся (правка суммы у
+            // закрытой сделки); переход «успех → отказ» закрывает сделку новой
+            // датой — как одиночная правка, иначе аналитика считает её старым месяцем
             n.closed_at = !['won', 'lost'].includes(n.stage) ? null
-              : (wasClosed && d.closed_at ? d.closed_at : new Date().toISOString().slice(0, 19).replace('T', ' '));
+              : (d.stage === n.stage && d.closed_at ? d.closed_at : new Date().toISOString().slice(0, 19).replace('T', ' '));
             next.push(n);
           }
           const st = db.prepare(`UPDATE deals SET title=?,amount=?,stage=?,pipeline_id=?,contact_id=?,company_id=?,responsible=?,responsible_id=?,priority=?,loss_reason=?,deadline=?,custom=?,closed_at=?,updated_at=datetime('now') WHERE id=?`);

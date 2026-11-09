@@ -1881,7 +1881,8 @@ function openEmailComposer(cid) {
   const conv = (state.cache.convs || []).find(c => Number(c.id) === Number(cid)) || {};
   const name = String(conv.title || '').trim().split(' ')[0] || '';
   const hello = name ? `Здравствуйте, ${name}!` : 'Здравствуйте!';
-  const email = conv.email ? ` (${conv.email})` : '';
+  // адрес приходит из карточки: в нём могут оказаться угловые скобки — экранируем
+  const email = conv.email ? ` (${esc(conv.email)})` : '';
   openModal(`<h3>Письмо клиенту${email}</h3><form onsubmit="return sendEmail(event,${cid})">
    ${fld('Тема письма', `<input name="subject" required value="Информация по проекту дома">`, true)}
    ${fld('Текст письма', `<textarea name="body" rows="6" required>${esc(hello)}\n\nВысылаю информацию по каркасному дому.</textarea>`, true)}
