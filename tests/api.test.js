@@ -1202,7 +1202,7 @@ test('вебхук Wazzup: проверка адреса, счётчик вхо�
   assert.equal(st.wazzup.hook_msgs, before + 1, 'входящие считаются');
   assert.match(st.wazzup.hook_last_human, /^\d{2}\.\d{2}\.\d{4} \d{2}:\d{2}$/, 'дата последнего входящего по-человечески: ' + st.wazzup.hook_last_human);
   const dash = (await call('/api/dashboard')).body;
-  assert.ok(dash.activities.length && /Wazzup: получено сообщений: 1/.test(dash.activities[0].text), 'последнее событие журнала — принятая пачка входящих');
+  assert.ok(!dash.activities.some(a => /Wazzup: получено сообщений/.test(a.text)), 'приём сообщений не засоряет ленту событий компании: он виден по счётчику в настройках');
 });
 
 test('Wazzup: входящие дублируются на второй адрес, петля запрещена', async () => {

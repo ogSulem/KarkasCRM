@@ -5,6 +5,7 @@ import { join } from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { DatabaseSync } from 'node:sqlite';
 import assert from 'node:assert/strict';
+import { cleanDemo } from '../backend/src/seed.js';
 
 const startIn = (dir, mode) => {
   const env = { ...process.env, DATA_DIR: dir, PORT: '0', SEED_MODE: mode };
@@ -43,6 +44,11 @@ ok('demo: каталог, шаблоны, правило, конкуренты',
   const msgs = db.prepare('SELECT COUNT(*) n FROM messages').get().n;
   ok('demo: история сообщений в чатах', msgs === 7, 'сообщений: ' + msgs);
   ok('demo: есть просроченная задача', db.prepare("SELECT COUNT(*) n FROM tasks WHERE due < datetime('now') AND done=0").get().n >= 1);
+  // лента «Последние события компании» на демо-базе показывает примеры
+  // действий сотрудников, а не пустой блок и не служебный шум
+  const feed = db.prepare('SELECT text, entity_type FROM activities ORDER BY id DESC').all();
+  ok('demo: в ленте есть действия сотрудников про клиентов и сделки', feed.filter(a => ['deals', 'contacts'].includes(a.entity_type)).length >= 3, JSON.stringify(feed.slice(0, 4)));
+  ok('demo: в ленте нет строк о приёме сообщений', !feed.some(a => /Wazzup: получено/.test(a.text)), JSON.stringify(feed.slice(0, 4)));
   // шаблон — это текст ответа, а не код канала (раньше аргументы вставки были перепутаны)
   const codes = ['whatsapp', 'telegram', 'instagram', 'viber', 'email', 'any'];
   const tpls = db.prepare('SELECT name, body, channel FROM templates').all();
@@ -55,6 +61,11 @@ ok('demo: каталог, шаблоны, правило, конкуренты',
   const fixed = new DatabaseSync(join(r.dir, 'crm.db'));
   const row = fixed.prepare('SELECT body, channel FROM templates WHERE id=1').get();
   ok('старая база: перепутанные текст и канал исправляются при запуске', /Здравствуйте/.test(String(row.body)) && row.channel === 'any', JSON.stringify(row).slice(0, 80));
+  // очистка демо убирает и события ленты, привязанные к демо-сущностям
+  const removed = cleanDemo(fixed);
+  ok('cleanDemo: демо-события убраны вместе с сущностями', removed > 0
+    && fixed.prepare("SELECT COUNT(*) n FROM activities WHERE entity_type IN ('deals','contacts')").get().n === 0
+    && fixed.prepare("SELECT COUNT(*) n FROM activities WHERE text LIKE 'Демонстрационные данные загружены%'").get().n === 0);
   fixed.close();
 }
 rmSync(r.dir, { recursive: true, force: true });

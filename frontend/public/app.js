@@ -1161,7 +1161,7 @@ async function dashboard(v) {
     <div class="list">${myTasksBlock()}</div></div>
    <div class="card"><h3>Последние события компании</h3>
     <p class="form-hint">Что недавно меняли коллеги: клиенты, этапы сделок, письма, документы.</p>
-    <div class="list feed">${d.activities.map(a => `<div class="row"><span>• ${esc(a.text)}<br><small>${esc(dt(a.created_at))}${a.user_name ? ' · ' + esc(a.user_name) : ''}</small></span></div>`).join('') || '<small>Пока пусто</small>'}</div></div>
+    <div class="list feed">${d.activities.map(a => `<div class="row"><span>• ${esc(a.text)}<br><small>${esc(dt(a.created_at))}${a.user_name ? ' · ' + esc(a.user_name) : ''}</small></span></div>`).join('') || '<div class="row"><span><small>Событий пока нет: здесь появятся записи, когда сотрудники добавят клиента, поменяют этап сделки или отправят письмо.</small></span></div>'}</div></div>
   </div></div>`;
 }
 

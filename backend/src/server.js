@@ -1630,7 +1630,11 @@ export const server = http.createServer(async (req, res) => {
       if (inbound) {
         const total = Number(db.prepare("SELECT value FROM settings WHERE key='WZ_HOOK_MSG_TOTAL'").get()?.value || 0) + inbound;
         wzHookMark('WZ_HOOK_MSG_TOTAL', String(total));
-        log(`Wazzup: получено сообщений: ${inbound}`, null, null, 'Wazzup');
+        // В ленту событий приём сообщений не пишется: каждое входящее
+        // оставляло строку «Wazzup: получено сообщений», и в активный день
+        // лента на рабочем столе состояла из них целиком. Дойдёт ли входящее,
+        // админ видит по счётчику и дате последнего приёма в настройках,
+        // а лента — про действия коллег: клиенты, сделки, письма, документы.
       }
       // пустой статус не записываем: он стирал бы подпись о доставке у сообщения
       for (const s of (Array.isArray(b.statuses) ? b.statuses : []).slice(0, 500)) if (s.status && s.messageId) db.prepare('UPDATE messages SET status=? WHERE external_id=?').run(String(s.status).slice(0, 20), s.messageId);
