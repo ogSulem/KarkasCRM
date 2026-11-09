@@ -974,13 +974,17 @@ async function openNotifications() {
   const overAll = rows.filter(t => !t.done && normalizeDue(t.due).slice(0, 10) < today && normalizeDue(t.due) !== '');
   const over = overAll.filter(mineOrFree);
   const now = rows.filter(t => !t.done && normalizeDue(t.due).slice(0, 10) === today).filter(mineOrFree);
-  const convs = (await api('/api/conversations')).filter(c => c.unread);
+  const allUnread = (await api('/api/conversations')).filter(c => c.unread);
+  // как в задачах: колокол показывает личное и ничейное, а не весь офис сразу;
+  // администратору отдельно видна сводка — сколько непрочитанных у коллег
+  const convs = allUnread.filter(c => convMine(c) || (!c.assigned_id && !c.contact_responsible_id));
+  const chatNote = amAdmin() && allUnread.length > convs.length ? `<p class="form-hint" style="margin:10px 0 0">Непрочитанных чатов по компании: ${allUnread.length} — остальные назначены коллегам.</p>` : '';
   const companyNote = amAdmin() && overAll.length > over.length ? `<p class="form-hint" style="margin:10px 0 0">Просроченных задач по компании: ${overAll.length} — остальные назначены коллегам, список в задачах с областью «Все».</p>` : '';
   const rowHtml = t => {
     const meta = taskDueMeta(t.due, t.done);
     return `<div class="row"><span><b>${esc(t.title)}</b><br><small>${esc(meta.label)}${t.contact_name ? ' · ' + esc(t.contact_name) : ''}</small></span>${canEdit() ? `<button class="btn sm" onclick="closeModal();openTask(${t.id})">Открыть</button>` : ''}</div>`;
   };
-  const chatRow = c => `<div class="row"><span style="min-width:0"><b>${esc(c.title)}</b> <span class="badge">${c.unread}</span><br><small>${chan(c.channels)} · ${esc(dt(c.last_at))} · ${esc(String(c.last_body || '').slice(0, 70))}</small></span><button class="btn sm" onclick="closeModal();openConv(${c.id})">Открыть чат</button></div>`;
+  const chatRow = c => `<div class="row"><span style="min-width:0"><b>${esc(c.title)}</b> <span class="badge">${c.unread}</span><br><small>${chan(c.channels)} · ${esc(dt(c.last_at))} · ${lastWho(c)}${esc(String(c.last_body || '').slice(0, 70))}</small></span><button class="btn sm" onclick="closeModal();openConv(${c.id})">Открыть чат</button></div>`;
   const empty = 'Ничего не ждёт — можно спокойно работать с клиентами.';
   openModal(`<h3>${icon('bell', 18)} Что ждёт реакции</h3>
    <p class="form-hint">Три списка: просроченные задачи, планы на сегодня и чаты, где клиент ещё не получил ответ. Всплывающие карточки о новых сообщениях видят ответственный за клиента и администраторы, остальным растёт счётчик в меню.</p>
@@ -992,7 +996,7 @@ async function openNotifications() {
    ${now.map(rowHtml).join('') || '<small>На сегодня задач нет.</small>'}
    <h4 style="margin:16px 0 4px">${icon('inbox', 15)} Мои чаты без ответа: ${convs.length}</h4>
    <p class="form-hint" style="margin:0 0 4px">Непрочитанные сообщения клиентов: цифра на оранжевой метке — сколько писем жду́т реакции.</p>
-   ${convs.map(chatRow).join('') || '<small>Все переписки прочитаны.</small>'}
+   ${convs.map(chatRow).join('') || '<small>Все переписки прочитаны.</small>'}${chatNote}
    <div style="display:flex;gap:8px;flex-wrap:wrap;margin-top:16px">
      <button class="btn sm" onclick="closeModal();goTasks('all','')">Все задачи</button>
      <button class="btn sm" onclick="closeModal();go('inbox')">Все чаты</button>
@@ -1002,22 +1006,25 @@ async function openNotifications() {
 
 const BASE_TITLE = 'КаркасCRM — сделки, клиенты и задачи в единой CRM-системе';
 async function navCounts(d) {
-  $('#navUnread').textContent = d.unread || '';
+  // Личные непрочитанные: чужие чаты не увеличивают счётчик сотрудника и
+  // заголовок вкладки — иначе весь офис реагировал бы на каждое сообщение.
+  // Цифры по компании администратор видит сноской на столе и в колокольчике.
+  const myUnread = d.unreadMine ?? d.unread ?? 0;
+  $('#navUnread').textContent = myUnread || '';
   $('#navTasks').textContent = d.myTasksOpen || '';
   $('#navDeals').textContent = d.dealsTotal || '';
   // Колокольчик считает только причастное сотруднику: его просроченные задачи
   // (включая неназначенные — то же правило, что у списков внутри колокольчика)
-  // и непрочитанные чаты. Цифры по всей компании в счётчик не попадают:
-  // администратор видит их отдельной сноской внутри колокольчика.
+  // и его непрочитанные чаты.
   // В заголовке вкладки — только новые сообщения: их видно, даже когда CRM свёрнута.
-  const attention = (d.myTasksOverdue || 0) + (d.unread || 0);
+  const attention = (d.myTasksOverdue || 0) + myUnread;
   const b = $('#bellCount');
   if (b) b.textContent = attention || '';
   const bell = $('#bellBtn');
   if (bell) bell.title = attention
     ? `Требуют внимания: ${attention} (просроченные задачи и новые сообщения)`
     : 'Уведомления: всё под контролем';
-  document.title = d.unread ? `(${d.unread}) Новые сообщения — КаркасCRM` : BASE_TITLE;
+  document.title = myUnread ? `(${myUnread}) Новые сообщения — КаркасCRM` : BASE_TITLE;
 }
 
 /* ---------- dashboard ---------- */
@@ -1028,9 +1035,9 @@ async function dashboard(v) {
   const max = Math.max(...d.stages.map(s => s.sum), 1);
   const todayTasks = d.myTasksToday ?? 0;
   const overdueTasks = d.myTasksOverdue ?? 0;
-  const unreadChats = d.unread ?? 0;
-  const companyLine = amAdmin() && (d.tasksOverdue > overdueTasks || d.tasksToday > todayTasks)
-    ? `По компании целиком: просрочено ${d.tasksOverdue ?? 0}, на сегодня ${d.tasksToday ?? 0}.` : '';
+  const unreadChats = d.unreadMine ?? d.unread ?? 0;
+  const companyLine = amAdmin() && (d.tasksOverdue > overdueTasks || d.tasksToday > todayTasks || (d.unread || 0) > unreadChats)
+    ? `По компании целиком: просрочено ${d.tasksOverdue ?? 0}, на сегодня ${d.tasksToday ?? 0}, непрочитанных чатов ${d.unread ?? 0}.` : '';
 
   v.innerHTML = `
    <div class="card" style="margin-bottom:12px;padding:12px 16px">
@@ -1457,10 +1464,12 @@ async function addDealProduct(dealId) {
   const prods = await api('/api/products');
   state.catalogMap = Object.fromEntries(prods.map(p => [p.id, { name: p.name, price: p.price, unit: p.unit || 'шт' }]));
   openModal(`<h3>Добавить товар к сделке</h3><form onsubmit="return saveDealProduct(event,${dealId})">
-   <label>Товар из каталога<select name="product_id" onchange="pickCatalogProduct(this)"><option value="">— свободная позиция —</option>${prods.map(p => `<option value="${p.id}">${esc(p.name)} (${fmt(p.price)})</option>`).join('')}</select></label>
-   <label>Название позиции*<input name="name" required placeholder="Каркасный дом «Север»"></label>
-   <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px"><label>Цена (${CUR()})<input name="price" type="number" required value="0"></label>
-   <label>Количество<input name="qty" type="number" step="0.1" value="1"></label></div>
+   ${formLegend()}
+   ${fld('Название позиции', `<input name="name" required placeholder="Каркасный дом «Север»">`, true)}
+   ${grid2(`${fld('Цена (' + CUR() + ')', `<input name="price" type="number" required value="0">`, true)}
+     ${fld('Количество', `<input name="qty" type="number" step="0.1" value="1">`)}`)}
+   ${fld('Товар из каталога', `<select name="product_id" onchange="pickCatalogProduct(this)"><option value="">— свободная позиция —</option>${prods.map(p => `<option value="${p.id}">${esc(p.name)} (${fmt(p.price)})</option>`).join('')}</select>`)}
+   <p class="form-hint" style="margin-top:-4px">Выберете позицию из каталога — название и цена подставятся сами.</p>
    <button class="btn primary w">Добавить</button></form>`);
 }
 function pickCatalogProduct(sel) {
@@ -1501,7 +1510,7 @@ function attachmentHtml(m) {
   const url = esc(m.content_uri);
   const isImage = (m.content_type || '').startsWith('image/') || /\.(png|jpe?g|gif|webp|svg)$/i.test(m.content_uri);
   if (isImage) return `<a href="${url}" target="_blank" rel="noopener" class="chat-attach img"><img loading="lazy" src="${url}" alt="${esc(m.content_name || 'изображение')}" onerror="imgFail(this)"></a>`;
-  return `<a href="${url}" target="_blank" rel="noopener" class="chat-attach file">${icon('file', 14)}<span>${esc(m.content_name || nameFromUri(url) || 'вложение')}</span></a>`;
+  return `<a href="${url}" target="_blank" rel="noopener" class="chat-attach file">${icon('file', 14)}<span>${esc(m.content_name || nameFromUri(m.content_uri) || 'вложение')}</span></a>`;
 }
 const MSG_STATUS = { sent: 'отправлено', delivered: 'доставлено', read: 'прочитано', inbound: 'входящее', received: 'получено', local: 'сохранено в CRM', error: 'не отправлено' };
 const statusLabel = s => MSG_STATUS[s] || s || '';
@@ -1734,6 +1743,11 @@ async function refreshInbox() {
 // На команде в полсотни человек список всех чатов превращается в простыню.
 const convMine = c => Number(c.assigned_id) === Number(meId()) || Number(c.contact_responsible_id) === Number(meId());
 const convScopeList = list => (state.convScope === 'mine' ? (list || []).filter(convMine) : list || []);
+// Чья последняя строка: ответ менеджера (свой, коллеги, из второй CRM или от
+// правила) не должен выглядеть словами клиента — превью помечается, как в мессенджерах
+const lastWho = c => (c.last_body && c.last_direction === 'out')
+  ? (c.last_author && c.last_author !== ((state.me && state.me.name) || '') ? esc(c.last_author) + ': ' : 'Вы: ')
+  : '';
 const convEmptyHtml = all => (state.convScope === 'mine' && (all || []).length ? '<div class="empty">Моих диалогов нет: переключитесь на «Все чаты» выше.</div>' : '<div class="empty">Чатов пока нет</div>');
 // Список диалогов рисуется порциями: за годы работы чатов накапливаются
 // тысячи, а огромный DOM тормозит страницу на ровном месте. Список отсортирован
@@ -1768,14 +1782,9 @@ function listStamp(s) {
 function convRow(c, activeId) {
   const selMode = state.convSelect && canEdit();
   const sel = selSet('convs').has(c.id);
-  // Чья последняя строка: ответ менеджера (свой, из второй CRM или от правила)
-  // не должен выглядеть словами клиента — как в мессенджерах, превью помечается
-  const lastPre = c.last_body && c.last_direction === 'out'
-    ? (c.last_author && c.last_author !== ((state.me && state.me.name) || '') ? esc(c.last_author) + ': ' : 'Вы: ')
-    : '';
   return `<div class="conv ${c.id === activeId ? 'active' : ''}${c.unread ? ' unread' : ''}${sel ? ' selected' : ''}${selMode ? ' sel-mode' : ''}" onclick="${selMode ? `toggleSel('convs',${c.id})` : `openConv(${c.id})`}">${selMode ? `<input type="checkbox" class="conv-check" ${sel ? 'checked' : ''} onclick="event.stopPropagation();toggleSel('convs',${c.id})" title="Отметить чат">` : ''}
     <b><span>${esc(c.title)}</span>${c.unread ? `<span class="badge">${c.unread}</span>` : ''}</b>
-    <p>${c.last_body ? lastPre + esc(c.last_body) : '—'}</p><small>${chan(c.channels)} · ${esc(listStamp(c.last_at))}</small></div>`;
+    <p>${c.last_body ? lastWho(c) + esc(c.last_body) : '—'}</p><small>${chan(c.channels)} · ${esc(listStamp(c.last_at))}</small></div>`;
 }
 function toggleConvSelect() { state.convSelect = !state.convSelect; clearSel('convs'); }
 // отметить выбранные чаты прочитанными одной командой
@@ -1873,7 +1882,10 @@ function openEmailComposer(cid) {
   const name = String(conv.title || '').trim().split(' ')[0] || '';
   const hello = name ? `Здравствуйте, ${name}!` : 'Здравствуйте!';
   const email = conv.email ? ` (${conv.email})` : '';
-  openModal(`<h3>Письмо клиенту${email}</h3><form onsubmit="return sendEmail(event,${cid})"><label>Тема письма*<input name="subject" required value="Информация по проекту дома"></label><label>Текст письма*<textarea name="body" rows="6" required>${esc(hello)}\n\nВысылаю информацию по каркасному дому.</textarea></label><button class="btn primary w">Отправить письмо</button></form>`);
+  openModal(`<h3>Письмо клиенту${email}</h3><form onsubmit="return sendEmail(event,${cid})">
+   ${fld('Тема письма', `<input name="subject" required value="Информация по проекту дома">`, true)}
+   ${fld('Текст письма', `<textarea name="body" rows="6" required>${esc(hello)}\n\nВысылаю информацию по каркасному дому.</textarea>`, true)}
+   <button class="btn primary w">Отправить письмо</button></form>`);
 }
 async function sendEmail(e, cid) {
   e.preventDefault(); const b = Object.fromEntries(new FormData(e.target));
@@ -2687,13 +2699,16 @@ async function openCompetitor(id) {
    </div>
    <h4>Заполнить вручную</h4>`}
    <form onsubmit="return saveCompetitor(event,${id || 'null'})">
-   <label>Название организации*<input name="name" required value="${esc(c.name || '')}" placeholder="ООО «БрусДом»"></label>
-   <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px"><label>ИНН<input name="inn" value="${esc(c.inn || '')}"></label><label>ОГРН<input name="ogrn" value="${esc(c.ogrn || '')}"></label></div>
-   <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px"><label>Город<input name="city" value="${esc(c.city || '')}"></label><label>Сайт<input name="website" value="${esc(c.website || '')}" placeholder="brusdom.ru"></label></div>
-   <label>Телефон<input name="phone" value="${esc(c.phone || '')}"></label>
-   <label>Ссылка на прайс<input name="price_url" value="${esc(c.price_url || '')}" placeholder="https://…/price.csv"></label>
+   ${formLegend()}
+   ${fld('Название организации', `<input name="name" required value="${esc(c.name || '')}" placeholder="ООО «БрусДом»">`, true)}
+   ${grid2(`${fld('ИНН', `<input name="inn" value="${esc(c.inn || '')}">`)}
+     ${fld('ОГРН', `<input name="ogrn" value="${esc(c.ogrn || '')}">`)}`)}
+   ${grid2(`${fld('Город', `<input name="city" value="${esc(c.city || '')}">`)}
+     ${fld('Сайт', `<input name="website" value="${esc(c.website || '')}" placeholder="brusdom.ru">`)}`)}
+   ${fld('Телефон', `<input name="phone" value="${esc(c.phone || '')}">`)}
+   ${fld('Ссылка на прайс', `<input name="price_url" value="${esc(c.price_url || '')}" placeholder="https://…/price.csv">`)}
    <p class="form-hint" style="margin-top:-4px">Если конкурент публикует прайс таблицей, укажите адрес — CRM сама подтянет его при каждой проверке, и позиции попадут в сравнение цен.</p>
-   <label>Заметки<textarea name="notes" rows="2">${esc(c.notes || '')}</textarea></label>
+   ${fld('Заметки', `<textarea name="notes" rows="2">${esc(c.notes || '')}</textarea>`)}
    <button class="btn primary w">Сохранить</button></form>`);
 }
 async function saveCompetitor(e, id) {
@@ -2889,7 +2904,13 @@ function competitorTab(c) {
 }
 
 function addReview(cid) {
-  openModal(`<h3>Добавить отзыв</h3><form onsubmit="return saveReview(event,${cid})"><label>Автор<input name="author" placeholder="Алексей"></label><div style="display:grid;grid-template-columns:1fr 1fr;gap:12px"><label>Оценка (1-5)<input name="rating" type="number" min="1" max="5" value="5"></label><label>Источник<select name="source"><option value="yandex">Яндекс</option><option value="google">Google</option><option value="2gis">2ГИС</option><option value="avito">Авито</option></select></label></div><label>Текст отзыва*<textarea name="text" rows="3" required></textarea></label><button class="btn primary w">Сохранить</button></form>`);
+  openModal(`<h3>Добавить отзыв</h3><form onsubmit="return saveReview(event,${cid})">
+   ${formLegend()}
+   ${fld('Текст отзыва', `<textarea name="text" rows="3" required></textarea>`, true)}
+   ${grid2(`${fld('Оценка (1-5)', `<input name="rating" type="number" min="1" max="5" value="5">`)}
+     ${fld('Источник', `<select name="source"><option value="yandex">Яндекс</option><option value="google">Google</option><option value="2gis">2ГИС</option><option value="avito">Авито</option></select>`)}`)}
+   ${fld('Автор', `<input name="author" placeholder="Алексей">`)}
+   <button class="btn primary w">Сохранить</button></form>`);
 }
 async function saveReview(e, cid) { e.preventDefault(); const b = Object.fromEntries(new FormData(e.target)); b.competitor_id = cid; b.rating = +b.rating; await api('/api/reviews', { method: 'POST', body: JSON.stringify(b) }); closeModal(); toast('Отзыв добавлен'); openCompetitorCard(cid); return false; }
 async function delReview(rid, cid) { await api('/api/reviews/' + rid, { method: 'DELETE' }); toast('Удалено'); openCompetitorCard(cid); }
@@ -3206,7 +3227,7 @@ async function settings(v) {
       <p><small><b>Создать задачу</b> — задача ответственному, срок сегодня 14:00, с уведомлением.</small></p>
       <p><small><b>Перевести на этап</b> — сделка переходит на указанный этап, аналитика пересчитывается.</small></p>
       <p><small><b>Добавить тег</b> — метка клиенту для фильтра в контактах.</small></p>
-      <p><small><b>Отправить сообщение</b> — в канал, откуда писал клиент; без переписки ничего не уходит, причина пишется в историю.</small></p>
+      <p><small><b>Отправить сообщение</b> — в канал, откуда писал клиент; без переписки ничего не уходит, причина пишется в историю. Одно правило пишет в одну беседу не чаще раза за три часа.</small></p>
       <p><small><b>Отправить письмо</b> — на e-mail из карточки клиента; тема — название правила. Нужна настроенная почта.</small></p>
       <p><small><b>Передать сделку</b> — сделка и клиент переходят сотруднику, с уведомлением.</small></p>
       <p><small><b>Выдержка «через N дней»</b> — действие попадает в список «Запланированные действия» выше и срабатывает в срок.</small></p>
@@ -3700,8 +3721,9 @@ async function toggleAutomation(id, el) {
 }
 async function openTemplate(id = null) {
   const rows = await api('/api/templates'); const t = id ? (rows.find(x => x.id === id) || {}) : {};
-  openModal(`<h3>${id ? 'Шаблон' : 'Новый шаблон'}</h3><form onsubmit="return saveTemplate(event,${id || 'null'})"><label>Название<input name="name" required value="${esc(t.name || '')}" placeholder="Приветствие"></label>
-   <label>Текст сообщения<textarea name="body" rows="5" required placeholder="Здравствуйте, {name}! …">${esc(t.body || '')}</textarea></label>
+  openModal(`<h3>${id ? 'Шаблон' : 'Новый шаблон'}</h3><form onsubmit="return saveTemplate(event,${id || 'null'})">
+   ${fld('Название', `<input name="name" required value="${esc(t.name || '')}" placeholder="Приветствие">`, true)}
+   ${fld('Текст сообщения', `<textarea name="body" rows="5" required placeholder="Здравствуйте, {name}! …">${esc(t.body || '')}</textarea>`, true)}
    <p><small>Подстановки: {name} — имя клиента, {sum} — сумма его открытой сделки, {date} — сегодняшняя дата. Текст можно поправить после подстановки в чате.</small></p>
    <button class="btn primary w">Сохранить</button></form>`);
 }
@@ -3720,13 +3742,13 @@ function delTemplate(id) {
 async function openUser(id) {
   const rows = await api('/api/users'); const x = id ? (rows.find(u => u.id === id) || {}) : {};
   openModal(`<h3>${id ? 'Пользователь' : 'Новый пользователь'}</h3><form onsubmit="return saveUser(event,${id || 'null'})">
-   <label>Имя<input name="name" required value="${esc(x.name || '')}"></label><label>E-mail<input name="email" type="email" required value="${esc(x.email || '')}"></label>
-   <label>Роль<select name="role">${Object.entries({ admin: 'Администратор — всё, включая настройки', manager: 'Менеджер — клиенты, сделки, задачи, чаты', viewer: 'Наблюдатель — только просмотр' }).map(([k, n]) => `<option value="${k}" ${k === (x.role || 'manager') ? 'selected' : ''}>${n}</option>`).join('')}</select></label>
-   <label style="display:flex;gap:8px;align-items:center"><input type="checkbox" name="active" style="width:auto" ${x.active === 0 ? '' : 'checked'}> Сотрудник может входить в CRM</label>
-   <label>${id ? 'Новый пароль (оставьте пустым, чтобы не менять)' : 'Пароль (мин. 12 символов)'}
-     <div class="pw-wrap"><input name="password" type="password" minlength="12" autocomplete="new-password" ${id ? '' : 'required'} placeholder="минимум 12 знаков"><button type="button" class="pw-eye" title="Показать/скрыть пароль" onclick="togglePass(this)">${icon('eye', 16)}</button></div>
-   </label>
+   ${formLegend()}
+   ${grid2(`${fld('Имя', `<input name="name" required value="${esc(x.name || '')}">`, true)}
+     ${fld('E-mail', `<input name="email" type="email" required value="${esc(x.email || '')}">`, true)}`)}
+   ${fld(id ? 'Новый пароль (оставьте пустым, чтобы не менять)' : 'Пароль (мин. 12 символов)', `<div class="pw-wrap"><input name="password" type="password" minlength="12" autocomplete="new-password" ${id ? '' : 'required'} placeholder="минимум 12 знаков"><button type="button" class="pw-eye" title="Показать/скрыть пароль" onclick="togglePass(this)">${icon('eye', 16)}</button></div>`, !id)}
    <button type="button" class="btn w" onclick="generateUserPassword(this.form)">Сгенерировать пароль</button>
+   ${fld('Роль', `<select name="role">${Object.entries({ admin: 'Администратор — всё, включая настройки', manager: 'Менеджер — клиенты, сделки, задачи, чаты', viewer: 'Наблюдатель — только просмотр' }).map(([k, n]) => `<option value="${k}" ${k === (x.role || 'manager') ? 'selected' : ''}>${n}</option>`).join('')}</select>`)}
+   <label style="display:flex;gap:8px;align-items:center"><input type="checkbox" name="active" style="width:auto" ${x.active === 0 ? '' : 'checked'}> Сотрудник может входить в CRM</label>
    <p><small>Сохраните пароль и передайте сотруднику по защищённому каналу. Он сможет изменить его в профиле.</small></p>
    <button class="btn primary w">Сохранить</button></form>`);
 }

@@ -230,6 +230,8 @@ try {
     // новые сообщения видны в заголовке вкладки, даже когда CRM свёрнута
     window.navCounts({ unread: 2, myTasksOpen: 0, dealsTotal: 0, tasksOverdue: 0 });
     check('счётчик непрочитанных виден в заголовке вкладки', window.document.title.startsWith('(2) '), window.document.title);
+    window.navCounts({ unread: 5, unreadMine: 1, myTasksOpen: 0, myTasksOverdue: 0, dealsTotal: 0, tasksOverdue: 0 });
+    check('в заголовке вкладки и на колокольчике — только личные непрочитанные', window.document.title.startsWith('(1) ') && $('#bellCount').textContent === '1' && $('#navUnread').textContent === '1', window.document.title);
     window.navCounts({ unread: 0, myTasksOpen: 0, dealsTotal: 0, tasksOverdue: 0 });
     check('без непрочитанных заголовок вкладки обычный', !window.document.title.startsWith('('), window.document.title);
     check('кнопка возврата к новым сообщениям предусмотрена', typeof window.scrollChatBottom === 'function' && typeof window.showJumpNew === 'function' && cssText.includes('.jump-new{position:absolute'));
@@ -1162,7 +1164,7 @@ try {
   check('тост о просрочке видят только причастные', appJsRaw.includes('d.tasks.filter(t => !t.responsible_id || Number(t.responsible_id) === Number(meId()))'));
   check('предел длины сообщения проверяется и в интерфейсе', appJsRaw.includes('body.length > 4096'));
   check('массовый перевод в «Не реализовано» спрашивает причину отказа', appJsRaw.includes('bulkStageTo') && appJsRaw.includes("if (stage !== 'lost') return;"));
-  check('счётчик колокольчика личный, а не по всей компании', appJsRaw.includes('(d.myTasksOverdue || 0) + (d.unread || 0)'));
+  check('счётчик колокольчика личный, а не по всей компании', appJsRaw.includes('(d.myTasksOverdue || 0) + myUnread') && appJsRaw.includes('const myUnread = d.unreadMine ?? d.unread ?? 0;'));
   check('палитра не предлагает зрителю действия создания', appJsRaw.includes("if (g.edit && !canEdit()) continue;") && appJsRaw.includes("group: 'Быстрое создание', edit: true"));
   check('зарегистрированный адрес вебхука виден в настройках', appJsRaw.includes('s.wazzup.webhook_url') && serverJsRaw.includes("webhook_url: getSetting('WAZZUP_WEBHOOK_URL')"));
   check('тема сотрудника личная: выбор уходит на сервер', appJsRaw.includes("'/api/me/theme'") && serverJsRaw.includes('UPDATE users SET theme'));
