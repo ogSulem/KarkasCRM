@@ -730,6 +730,21 @@ try {
     window.__setTeam([]);
   }
   {
+    // Кэш команды устаревает после сохранения: список перечитывается без
+    // перезагрузки страницы, фиктивная запись из кэша исчезает.
+    // Пересохраняем существующего сотрудника его же данными — следов не остаётся
+    const roster = await window.api('/api/users');
+    const target = roster.find(u => u.id !== window.__state.me.id) || roster[0];
+    window.__setTeam([{ id: 999999, name: 'Фиктивный Сотрудник', role: 'manager', active: 1 }]);
+    await window.openUser(target.id); await wait(350);
+    const uForm = $('#modalBody form');
+    await window.saveUser({ preventDefault() { }, target: uForm }, target.id);
+    await wait(350);
+    const teamAfter = await window.team();
+    check('список сотрудников освежается после сохранения без перезагрузки страницы',
+      teamAfter.some(u => u.id === target.id) && !teamAfter.some(u => u.id === 999999));
+  }
+  {
     const moreBtn = $$('#view button').find(b => /Ещё/.test(b.textContent));
     check('в контактах есть меню «Ещё»', Boolean(moreBtn));
     moreBtn.click(); await wait(120);
@@ -1430,6 +1445,13 @@ try {
     check('испорченный punycode не подменяется выдуманным адресом', window.humanOrigin('https://xn---abc') === 'https://xn---abc');
     check('машинный адрес вебхука остаётся в punycode: иначе Wazzup его не примет',
       window.wazzupHookUrl({ public_url: 'https://crm.xn--80aaamzedb7cml.xn--p1ai', wazzup: {} }).includes('xn--80aaamzedb7cml'));
+
+    // Серверные события перерисовывают только разделы, которых они касаются:
+    // ценник каталога не перечитывает задачи, а настройки не дёргаются вовсе
+    check('раздел обновляется только на событии про свои таблицы',
+      window.viewCaresAbout('tasks', 'tasks') && window.viewCaresAbout('pipe', 'contacts')
+      && !window.viewCaresAbout('tasks', 'products') && !window.viewCaresAbout('settings', 'deals')
+      && window.viewCaresAbout('dashboard', 'all') && window.viewCaresAbout('contacts', 'новая-таблица'));
     // расшифровка нужна только там, где адрес читает человек. Вебхук и код для
     // сайта уходят машинам: им нужен валидный домен, а не красивые буквы.
     // ── входящие из Wazzup: админ видит, доходят ли сообщения ────────────────
