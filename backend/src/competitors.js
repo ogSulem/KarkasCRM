@@ -931,6 +931,24 @@ export function createCompetitors(ctx) {
       }
       return json(res, 405, { error: 'Метод не поддерживается' });
     }
+    // Массовое удаление карточек конкурентов. Прайс-строки в price_rows
+    // не имеют внешнего ключа, поэтому чистим их явно и одной транзакцией.
+    if (p === '/api/competitors/bulk-delete' && req.method === 'POST') {
+      const b = await readBody(req);
+      const ids = [...new Set((b.ids || []).map(Number).filter(n => Number.isInteger(n) && n > 0))].slice(0, 200);
+      if (!ids.length) return json(res, 400, { error: 'Не выбрано ни одной карточки конкурента' });
+      let removed = 0;
+      db.exec('BEGIN IMMEDIATE');
+      try {
+        for (const id of ids) {
+          db.prepare("DELETE FROM price_rows WHERE scope='competitor' AND competitor_id=?").run(id);
+          removed += db.prepare('DELETE FROM competitors WHERE id=?').run(id).changes;
+        }
+        db.exec('COMMIT');
+      } catch (e) { try { db.exec('ROLLBACK') } catch {} throw e }
+      log(`Массовое удаление конкурентов: ${removed} карточек`, 'competitors', null, user.name);
+      return json(res, 200, { deleted: removed });
+    }
     const mId = p.match(/^\/api\/competitors\/(\d+)(?:\/(check|reviews|prices|report))?$/);
     if (mId) {
       const id = Number(mId[1]), action = mId[2];
@@ -949,7 +967,13 @@ export function createCompetitors(ctx) {
           b.inn = innD || null;
         }
         const f = ['name', 'inn', 'ogrn', 'city', 'website', 'phone', 'notes', 'price_url']; const ks = Object.keys(b).filter(k => f.includes(k)); if (ks.length) db.prepare(`UPDATE competitors SET ${ks.map(k => k + '=?')} WHERE id=?`).run(...ks.map(k => b[k]), id); return json(res, 200, competitorFull(id)); }
-      if (!action && req.method === 'DELETE') { db.prepare('DELETE FROM competitors WHERE id=?').run(id); return json(res, 200, { deleted: true }); }
+      if (!action && req.method === 'DELETE') {
+        // у price_rows нет внешнего ключа на competitors: строки прайса
+        // конкурента удаляем явно, иначе они навсегда останутся в базе
+        db.prepare("DELETE FROM price_rows WHERE scope='competitor' AND competitor_id=?").run(id);
+        db.prepare('DELETE FROM competitors WHERE id=?').run(id);
+        return json(res, 200, { deleted: true });
+      }
       if (action === 'report' && req.method === 'GET') return json(res, 200, competitorFull(id));
       if (action === 'check' && req.method === 'POST') { const b = await readBody(req).catch(() => ({})); if (b.inn && !comp.inn) { const innD = digits(b.inn); if (!validInn(innD)) return json(res, 400, { error: INN_ERR }); db.prepare('UPDATE competitors SET inn=? WHERE id=?').run(innD, id); comp.inn = innD } if (!checkLimit(res, user)) return; const out = await runCheck(comp, { sources: b.sources, pullTable: b.pullTable !== false }); return json(res, 200, { ...out, competitor: competitorFull(id) }); }
       if (action === 'reviews' && req.method === 'POST') { const b = await readBody(req); const r = db.prepare('INSERT INTO reviews(competitor_id,source,rating,text,author,url) VALUES(?,?,?,?,?,?)').run(id, b.source || 'вручную', b.rating ?? null, b.text || '', b.author || user.name, b.url || ''); return json(res, 201, { id: r.lastInsertRowid }); }

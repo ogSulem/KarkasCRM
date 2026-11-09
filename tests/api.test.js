@@ -601,6 +601,7 @@ test('права: менеджер ведёт клиентов, но не мен
   assert.match(String(mgrProd.body.error), /добавить прямо в сделку/, 'отказ объясняет, что делать вместо этого');
   const anyProd = (await call('/api/products', { method: 'POST', body: JSON.stringify({ name: 'Позиция для проверки прав', price: 1000 }) })).body;
   assert.equal((await asM('/api/products/' + anyProd.id, { method: 'PATCH', body: JSON.stringify({ price: 1 }) })).status, 403, 'менеджер не меняет цену в прайс-листе');
+  assert.equal((await asM('/api/bulk', { method: 'POST', body: JSON.stringify({ table: 'products', ids: [anyProd.id], action: 'update', patch: { active: 0 } }) })).status, 403, 'менеджер не меняет прайс-лист и массово');
   assert.equal((await asM('/api/products')).status, 200, 'менеджер видит прайс-лист');
   assert.equal((await asM(`/api/deals/${d.body.id}/products`, { method: 'POST', body: JSON.stringify({ name: 'Свободная позиция', price: 5000, qty: 1 }) })).status, 201, 'в сделку менеджер добавляет любую позицию');
   await call('/api/products/' + anyProd.id, { method: 'DELETE' });

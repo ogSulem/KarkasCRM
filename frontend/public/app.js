@@ -335,7 +335,7 @@ const state = {
   view: 'dashboard', settingsTab: 'integrations', pipeline: 1, conv: null, listOnly: false,
   deals: [], stages: [], pipelines: [], contacts: [], companies: [], channels: [],
   cache: {}, dealTab: 'details', meta: null, dupes: null, me: null, users: [], convScope: 'all', convSelect: false, drafts: {},
-  taskScope: 'mine', taskFilter: '', dealScope: 'all', taskView: 'list', taskSelectMode: false, sel: {}
+  taskScope: 'mine', taskFilter: '', dealScope: 'all', taskView: 'list', sel: {}, bulkActions: {}
 };
 // первичное применение темы — после объявления state: синхронизация личной
 // темы сотрудника обращается к нему и не должна выполняться до инициализации
@@ -1153,7 +1153,7 @@ function dragDealEnd() {
 // бывают тысячи, а доска должна открываться мгновенно. Счётчики и суммы
 // колонки считаются по всем сделкам, а не по видимой порции.
 const dealCardHtml = (x, s) => `<article class="deal ${selSet('deals').has(x.id) ? 'selected' : ''}" ${canEdit() ? `draggable="true" ondragstart="dragDealStart(event,${x.id})" ondragend="dragDealEnd()"` : ''} onclick="openDealCard(${x.id})" style="border-left-color:${esc(s.color)}${selSet('deals').has(x.id) ? ';box-shadow:0 0 0 2px var(--green)' : ''}">
-    <b>${esc(x.title)}</b>${canEdit() ? `<input type="checkbox" title="Выбрать для массового действия" style="position:absolute;top:8px;right:8px" ${selSet('deals').has(x.id) ? 'checked' : ''} onclick="event.stopPropagation()" onchange="toggleSel('deals',${x.id})">` : ''}<span class="sum">${fmt(x.amount)}</span>
+    <b>${esc(x.title)}</b>${canEdit() ? `<input type="checkbox" title="Выбрать для массового действия" data-selkey="deals" data-selid="${x.id}" style="position:absolute;top:8px;right:8px" ${selSet('deals').has(x.id) ? 'checked' : ''} onclick="event.stopPropagation()" onchange="toggleSel('deals',${x.id})">` : ''}<span class="sum">${fmt(x.amount)}</span>
     <small>${icon('contact', 13)} ${esc(x.contact_name || 'Без контакта')}${x.deadline ? ' · ' + icon('clock', 13) + ' ' + esc(dateText(x.deadline)) : ''}</small>
     <div>${dealTaskBadge(x)}</div>
     <div class="deal-foot"><span class="prio ${esc(x.priority)}">${x.priority === 'high' ? 'высокий' : x.priority === 'low' ? 'низкий' : 'обычный'}</span>${canEdit() ? `<span><button class="btn sm" title="Передвинуть на следующий этап" onclick="event.stopPropagation();moveDeal(${x.id},1)">→</button></span>` : ''}</div></article>`;
@@ -1179,13 +1179,14 @@ async function pipe(v) {
   const noTaskCount = d.deals.filter(x => !x.tasks_open && !['won', 'lost'].includes(x.stage)).length;
   const overdueCount = d.deals.filter(x => x.tasks_open > 0 && taskDueMeta(x.next_task_due).overdue && !['won', 'lost'].includes(x.stage)).length;
 
-  v.innerHTML = `${viewerNote()}${canEdit() ? bulkBar('deals', `${bulkStage()}${bulkOwner('deals')}`) : ''}<div class="card toolbar">
+  v.innerHTML = `${viewerNote()}<div class="card toolbar">
     <b>Воронка:</b><select style="width:auto" onchange="setPipeline(this.value)">${d.pipelines.map(p => `<option value="${p.id}" ${p.id === state.pipeline ? 'selected' : ''}>${esc(p.name)}</option>`).join('')}</select>
     <span class="tabs" style="margin:0"><button class="${state.dealScope !== 'mine' && state.dealScope !== 'notask' && state.dealScope !== 'overdue' ? 'active' : ''}" onclick="setDealScope('all')">Все сделки</button><button class="${state.dealScope === 'mine' ? 'active' : ''}" onclick="setDealScope('mine')">Мои (${d.deals.filter(x => x.responsible_id === meId()).length})</button><button class="${state.dealScope === 'notask' ? 'active' : ''}" onclick="setDealScope('notask')">Без задач (${noTaskCount})</button><button class="${state.dealScope === 'overdue' ? 'active' : ''}" onclick="setDealScope('overdue')">Просрочено (${overdueCount})</button></span>
     <span class="tag" title="Сделок в текущем фильтре">Показано: ${shown.length}${shown.length !== shown.filter(x => !['won', 'lost'].includes(x.stage)).length ? ` · в работе: ${shown.filter(x => !['won', 'lost'].includes(x.stage)).length}` : ''}</span><span class="tag orange" title="Сумма активных сделок в фильтре">В работе на ${fmt(shown.filter(x => !['won', 'lost'].includes(x.stage)).reduce((a, x) => a + x.amount, 0))}</span>
     <button class="btn sm" style="margin-left:auto" onclick="download('/api/export/deals','deals.csv')" title="Выгрузить сделки в CSV">${icon('download', 13)} Экспорт</button>
     <input id="dealSearch" style="max-width:210px" placeholder="Поиск по сделкам и клиентам" value="${esc(state.dealQuery || '')}" oninput="liveSearch('deals',()=>setDealQuery(this.value))">
     ${(state.me && state.me.role) === 'admin' ? `<button class="btn sm" onclick="openPipelineEditor()">${icon('settings', 13)} Настроить воронку</button>` : ''}</div>
+  ${canEdit() ? bulkSlot('deals', `${bulkStage()}${bulkOwner('deals')}`) : ''}
   <div class="kanban">${d.stages.map(s => {
     const colDeals = shown.filter(x => x.stage === s.code);
     const colSum = colDeals.reduce((a, x) => a + x.amount, 0);
@@ -1782,7 +1783,7 @@ function listStamp(s) {
 function convRow(c, activeId) {
   const selMode = state.convSelect && canEdit();
   const sel = selSet('convs').has(c.id);
-  return `<div class="conv ${c.id === activeId ? 'active' : ''}${c.unread ? ' unread' : ''}${sel ? ' selected' : ''}${selMode ? ' sel-mode' : ''}" onclick="${selMode ? `toggleSel('convs',${c.id})` : `openConv(${c.id})`}">${selMode ? `<input type="checkbox" class="conv-check" ${sel ? 'checked' : ''} onclick="event.stopPropagation();toggleSel('convs',${c.id})" title="Отметить чат">` : ''}
+  return `<div class="conv ${c.id === activeId ? 'active' : ''}${c.unread ? ' unread' : ''}${sel ? ' selected' : ''}${selMode ? ' sel-mode' : ''}" onclick="${selMode ? `toggleSel('convs',${c.id})` : `openConv(${c.id})`}">${selMode ? `<input type="checkbox" class="conv-check" data-selkey="convs" data-selid="${c.id}" ${sel ? 'checked' : ''} onclick="event.stopPropagation();toggleSel('convs',${c.id})" title="Отметить чат">` : ''}
     <b><span>${esc(c.title)}</span>${c.unread ? `<span class="badge">${c.unread}</span>` : ''}</b>
     <p>${c.last_body ? lastWho(c) + esc(c.last_body) : '—'}</p><small>${chan(c.channels)} · ${esc(listStamp(c.last_at))}</small></div>`;
 }
@@ -1909,22 +1910,48 @@ async function checkHealth() {
 
 /* ---------- multi-select / bulk actions ---------- */
 function selSet(key) { if (!state.sel[key]) state.sel[key] = new Set(); return state.sel[key]; }
-function toggleSel(key, id) { const s = selSet(key); if (s.has(id)) s.delete(id); else s.add(id); render(); }
-function clearSel(key) { selSet(key).clear(); render(); }
+// Отметка строки не перерисовывает весь экран: обновляются только галочки,
+// подсветка строк и панель массовых действий. Полная перерисовка на каждый
+// щелчок выглядела как мерцание и сбрасывала прокрутку длинных списков.
+// Список чатов (convs) живёт по-старому: его перерисовка дешевле и там
+// галочка меняет сам режим строки.
+function syncSelDom(key) {
+  const s = selSet(key);
+  document.querySelectorAll(`[data-selkey="${key}"]`).forEach(cb => {
+    const on = s.has(Number(cb.dataset.selid));
+    if (cb.checked !== on) cb.checked = on;
+    const row = cb.closest('tr,.deal,.taskrow');
+    if (row) row.classList.toggle('selected', on);
+  });
+  refreshBulkSlot(key);
+}
+function toggleSel(key, id) { const s = selSet(key); if (s.has(id)) s.delete(id); else s.add(id); if (key === 'convs') return render(); syncSelDom(key); }
+function clearSel(key) { selSet(key).clear(); if (key === 'convs') return render(); syncSelDom(key); }
 function selCount(key) { return selSet(key).size; }
 function bulkBar(key, actionsHtml = '') {
   const n = selCount(key);
   return `<div class="bulkbar"><button class="btn sm ghost" onclick="selectAllVisible('${key}')" title="Отметить все строки на экране">Выбрать все</button>${n ? ` <b>Выбрано: ${n}</b> <button class="btn sm ghost" onclick="clearSel('${key}')">Снять выбор</button> ${actionsHtml}` : ''}</div>`;
 }
-// «Выбрать все» берёт строки, которые сейчас на экране: чекбоксы уже содержат
-// свои id в обработчиках, поэтому отдельный список ids не нужен
+// Панель массовых действий появляется только после первой отметки: пустая
+// полоса с «Выбрать все» над каждым списком утяжеляла экран и уводила взгляд
+// от самих данных. Действия панели запоминаются, чтобы перерисовывать её
+// на месте, без полного render().
+function bulkSlot(key, actionsHtml = '') {
+  state.bulkActions = state.bulkActions || {};
+  state.bulkActions[key] = actionsHtml;
+  return `<div id="bulk-${key}">${selCount(key) ? bulkBar(key, actionsHtml) : ''}</div>`;
+}
+function refreshBulkSlot(key) {
+  const slot = document.getElementById('bulk-' + key);
+  if (slot) slot.innerHTML = selCount(key) ? bulkBar(key, (state.bulkActions || {})[key] || '') : '';
+}
+// «Выбрать все» берёт строки, которые сейчас на экране: id лежат в данных
+// чекбоксов (data-selid), отдельный список не нужен
 function selectAllVisible(key) {
   const sel = selSet(key);
-  document.querySelectorAll(`[onchange*="toggleSel('${key}'"],[onclick*="toggleSel('${key}'"]`).forEach(el => {
-    const m = (el.getAttribute('onchange') || el.getAttribute('onclick') || '').match(new RegExp(`toggleSel\\('${key}',(\\d+)\\)`));
-    if (m) sel.add(Number(m[1]));
-  });
-  render();
+  document.querySelectorAll(`[data-selkey="${key}"]`).forEach(cb => sel.add(Number(cb.dataset.selid)));
+  if (key === 'convs') return render();
+  syncSelDom(key);
 }
 async function bulkApply(table, action, patch = {}) {
   const ids = [...selSet(table)];
@@ -2000,9 +2027,9 @@ async function contacts(v) {
   });
   const tagsAll = [...new Set(list.flatMap(c => (c.tags || '').split(',').map(s => s.trim()).filter(Boolean)))];
 
-  v.innerHTML = `${viewerNote()}${canEdit() ? bulkBar('contacts', `${bulkOwner('contacts')}<button class="btn sm" onclick="bulkAddTag()">${icon('tag', 13)} Добавить тег</button><button class="btn sm danger" onclick="bulkApply('contacts','delete')">${icon('trash', 13)} Удалить</button>`) : ''}
+  v.innerHTML = `${viewerNote()}
   <div class="card toolbar">
-   <input id="contactSearch" style="max-width:220px" placeholder="Поиск по имени, тел, почте" value="${esc(f.q)}" oninput="liveSearch('contacts',()=>setContactQuery(this.value))">
+   <input id="contactSearch" style="flex:1 1 320px;min-width:240px;max-width:480px" placeholder="Поиск по имени, тел, почте" value="${esc(f.q)}" oninput="liveSearch('contacts',()=>setContactQuery(this.value))">
    <select style="width:auto" onchange="setContactFilter('owner',this.value)"><option value="">Все ответственные</option>${__team.map(u => `<option value="${u.id}" ${f.owner == u.id ? 'selected' : ''}>${esc(u.name)}</option>`).join('')}</select>
    <select style="width:auto" onchange="setContactFilter('source',this.value)"><option value="">Все источники</option>${(state.meta?.sources || Object.keys(SOURCE_LABELS)).map(s => `<option value="${esc(s)}" ${f.source === s ? 'selected' : ''}>${esc(sourceLabel(s))}</option>`).join('')}</select>
    ${tagsAll.length ? `<select style="width:auto" onchange="setContactFilter('tag',this.value)"><option value="">Все теги</option>${tagsAll.map(t => `<option value="${esc(t)}" ${f.tag === t ? 'selected' : ''}>${esc(t)}</option>`).join('')}</select>` : ''}
@@ -2010,8 +2037,9 @@ async function contacts(v) {
    <span class="tag grey" style="margin-left:auto">показано ${Math.min(filtered.length, state.contactLimit || 50)} из ${filtered.length}${filtered.length !== list.length ? ` (всего в базе ${list.length})` : ''}</span>
    <button class="btn sm" onclick="openMenu(event, contactsMoreMenu())" title="Дубли, экспорт и импорт">${icon('more', 13)} Ещё</button>
    ${canEdit() ? `<button class="btn sm primary" onclick="openContact()">${icon('plus', 13)} Новый контакт</button>` : ''}</div>
+  ${canEdit() ? bulkSlot('contacts', `${bulkOwner('contacts')}<button class="btn sm" onclick="bulkAddTag()">${icon('tag', 13)} Добавить тег</button><button class="btn sm danger" onclick="bulkApply('contacts','delete')">${icon('trash', 13)} Удалить</button>`) : ''}
   <div class="card"><div class="tbl-scroll"><table><tr><th class="sel"></th><th>Клиент</th><th>Телефон / E-mail</th><th>Компания</th><th>Источник</th><th>Теги</th><th>Ответственный</th><th></th></tr>
-   ${filtered.slice(0, state.contactLimit || 50).map(c => `<tr class="${selSet('contacts').has(c.id) ? 'selected' : ''}"><td class="sel">${canEdit() ? `<input type="checkbox" title="Выбрать для массового действия" ${selSet('contacts').has(c.id) ? 'checked' : ''} onchange="toggleSel('contacts',${c.id})">` : ''}</td>
+   ${filtered.slice(0, state.contactLimit || 50).map(c => `<tr class="${selSet('contacts').has(c.id) ? 'selected' : ''}"><td class="sel">${canEdit() ? `<input type="checkbox" title="Выбрать для массового действия" data-selkey="contacts" data-selid="${c.id}" ${selSet('contacts').has(c.id) ? 'checked' : ''} onchange="toggleSel('contacts',${c.id})">` : ''}</td>
     <td><a href="#" onclick="openContactCard(${c.id});return false"><b>${esc(c.name)}</b></a></td><td>${esc(c.phone || '—')}<br><small>${esc(c.email || '')}</small></td><td>${esc(c.company || '—')}</td><td><span class="tag grey">${esc(sourceLabel(c.source))}</span></td>
     <td>${(c.tags || '').split(',').filter(Boolean).map(t => `<span class="tag">${esc(t.trim())}</span>`).join('')}</td>
     <td><small>${esc(__team.find(u => u.id === c.responsible_id)?.name || '—')}</small></td>
@@ -2255,10 +2283,11 @@ async function companies(v) {
   const q = (state.companyQuery || '').trim().toLowerCase();
   const shown = q ? rows.filter(c => `${c.name} ${c.inn || ''} ${c.phone || ''} ${c.email || ''}`.toLowerCase().includes(q)) : rows;
   v.innerHTML = `${viewerNote()}<div class="card"><div class="row" style="border:0;flex-wrap:wrap;gap:8px"><h3>Компании (${shown.length}${shown.length !== rows.length ? ` из ${rows.length}` : ''})</h3>
-   <input id="companySearch" style="max-width:240px" placeholder="Поиск: название, ИНН, телефон, почта" value="${esc(state.companyQuery || '')}" oninput="liveSearch('companies',()=>setCompanyQuery(this.value))">
+   <input id="companySearch" style="flex:1 1 320px;min-width:240px;max-width:480px" placeholder="Поиск: название, ИНН, телефон, почта" value="${esc(state.companyQuery || '')}" oninput="liveSearch('companies',()=>setCompanyQuery(this.value))">
    ${canEdit() ? `<button class="btn sm primary" style="margin-left:auto" onclick="openCompany()">+ Компания</button>` : ''}</div>
-  <div class="tbl-scroll"><table><tr><th>Компания</th><th>ИНН</th><th>Телефон</th><th>E-mail</th><th>Сайт</th><th></th></tr>
-   ${shown.slice(0, state.companyLimit || 100).map(c => `<tr><td><b>${esc(c.name)}</b></td><td>${esc(c.inn || '—')}</td><td>${esc(c.phone || '—')}</td><td>${esc(c.email || '—')}</td><td>${siteHref(c.site) ? `<a href="${esc(siteHref(c.site))}" target="_blank" rel="noopener">${esc(c.site)}</a>` : '—'}</td><td style="white-space:nowrap">${canEdit() ? `<button class="btn sm" title="Открыть карточку компании" onclick="openCompany(${c.id})">${icon('edit', 13)} Изменить</button> <button class="btn sm danger" title="Удалить компанию" onclick="del('companies',${c.id})">${icon('close', 13)}</button>` : `<button class="btn sm" onclick="openCompany(${c.id})">Открыть</button>`}</td></tr>`).join('') || '<tr><td colspan="6"><div class="empty">Компаний не найдено — измените поиск или добавьте компанию</div></td></tr>'}</table></div>
+  ${canEdit() ? bulkSlot('companies', `<button class="btn sm danger" onclick="bulkApply('companies','delete')">${icon('trash', 13)} Удалить</button>`) : ''}
+  <div class="tbl-scroll"><table><tr><th class="sel"></th><th>Компания</th><th>ИНН</th><th>Телефон</th><th>E-mail</th><th>Сайт</th><th></th></tr>
+   ${shown.slice(0, state.companyLimit || 100).map(c => `<tr class="${selSet('companies').has(c.id) ? 'selected' : ''}"><td class="sel">${canEdit() ? `<input type="checkbox" data-selkey="companies" data-selid="${c.id}" title="Выбрать для массового действия" ${selSet('companies').has(c.id) ? 'checked' : ''} onchange="toggleSel('companies',${c.id})">` : ''}</td><td><b>${esc(c.name)}</b></td><td>${esc(c.inn || '—')}</td><td>${esc(c.phone || '—')}</td><td>${esc(c.email || '—')}</td><td>${siteHref(c.site) ? `<a href="${esc(siteHref(c.site))}" target="_blank" rel="noopener">${esc(c.site)}</a>` : '—'}</td><td style="white-space:nowrap">${canEdit() ? `<button class="btn sm" title="Открыть карточку компании" onclick="openCompany(${c.id})">${icon('edit', 13)} Изменить</button> <button class="btn sm danger" title="Удалить компанию" onclick="del('companies',${c.id})">${icon('close', 13)}</button>` : `<button class="btn sm" onclick="openCompany(${c.id})">Открыть</button>`}</td></tr>`).join('') || '<tr><td colspan="6"><div class="empty">Компаний не найдено — измените поиск или добавьте компанию</div></td></tr>'}</table></div>
    ${shown.length > (state.companyLimit || 100) ? `<div style="text-align:center;margin-top:10px"><button class="btn" onclick="showMoreCompanies()">Показать ещё</button></div>` : ''}</div>`;
 }
 async function openCompany(id) {
@@ -2322,16 +2351,15 @@ async function tasks(v) {
    ${state.taskQuery ? `<span class="tag grey" style="display:inline-flex;gap:6px;align-items:center">Поиск: ${esc(state.taskQuery)}<button class="btn sm" style="padding:0 4px" title="Очистить поиск" onclick="clearTaskQuery()">×</button></span>` : ''}
    <span class="tabs" style="margin:0"><button class="${state.taskView === 'list' ? 'active' : ''}" onclick="setTaskView('list')">${icon('list', 14)} Список</button><button class="${state.taskView === 'week' ? 'active' : ''}" onclick="setTaskView('week')">${icon('calendar', 14)} Неделя</button></span>
    <input id="taskSearch" style="max-width:220px" placeholder="Поиск по задачам" value="${esc(state.taskQuery || '')}" oninput="liveSearch('tasks',()=>setTaskQuery(this.value))">
-   ${canEdit() ? `<button class="btn sm ${state.taskSelectMode ? 'active' : ''}" onclick="toggleTaskSelect()">${state.taskSelectMode ? 'Отменить выбор' : 'Выбрать несколько'}</button>` : ''}
    ${canEdit() ? `<button class="btn sm primary" style="margin-left:auto" onclick="openTask()">${icon('plus', 14)} Задача</button>` : ''}</div>
    ${state.taskScope === 'mine' ? `<p><small>Здесь задачи, назначенные на вас (${esc((state.me && state.me.name) || '')}), и неназначенные — их удобно разобрать первыми.</small></p>` : ''}
    ${state.taskView === 'week' ? weekCalendar(rows) : ''}
-   ${state.taskView !== 'week' && state.taskSelectMode && canEdit() ? bulkBar('tasks', `<button class="btn sm" onclick="bulkApply('tasks','update',{done:1})">${icon('check', 14)} Выполнить выбранные</button> <button class="btn sm" onclick="bulkRescheduleTasks()">Перенести</button> <button class="btn sm danger" onclick="bulkApply('tasks','delete')">${icon('trash', 14)} Удалить</button>`) : ''}
+   ${state.taskView !== 'week' && canEdit() ? bulkSlot('tasks', `<button class="btn sm" onclick="bulkApply('tasks','update',{done:1})">${icon('check', 14)} Выполнить выбранные</button> <button class="btn sm" onclick="bulkRescheduleTasks()">Перенести</button> <button class="btn sm danger" onclick="bulkApply('tasks','delete')">${icon('trash', 14)} Удалить</button>`) : ''}
    ${state.taskView === 'week' ? '' : groups.map(([t, list]) => list.length ? `<h3 style="margin-top:12px">${t} <small>${list.length}</small></h3>${list.slice(0, state.taskLimit || 50).map(x => {
      const meta = taskDueMeta(x.due, x.done);
      return `<div class="row taskrow ${selSet('tasks').has(x.id) ? 'selected' : ''}">
        <div style="display:flex;gap:10px;align-items:center;min-width:0;flex:1">
-         ${state.taskSelectMode && canEdit() ? `<input type="checkbox" style="width:16px" ${selSet('tasks').has(x.id) ? 'checked' : ''} onchange="toggleSel('tasks',${x.id})" title="Выбрать для действия">` : ''}
+         ${canEdit() ? `<input type="checkbox" data-selkey="tasks" data-selid="${x.id}" style="width:16px;flex-shrink:0" ${selSet('tasks').has(x.id) ? 'checked' : ''} onchange="toggleSel('tasks',${x.id})" title="Отметить для массового действия">` : ''}
          ${canEdit() ? `<button type="button" class="btn sm mark ${x.done ? 'done' : ''}" onclick="toggleTask(${x.id}, ${x.done ? 0 : 1})">${x.done ? icon('check', 13) + ' Выполнено' : 'Выполнить'}</button>` : ''}
          <span class="${x.done ? 'task-done' : ''}">${types[x.type] || icon('task', 14)} <b>${esc(x.title)}</b>${x.repeat && x.repeat !== 'none' ? ' <span class="tag grey" title="Повторяется">' + icon('repeat', 12) + ' ' + ({ daily: 'ежедневно', weekly: 'еженедельно', monthly: 'ежемесячно' }[x.repeat] || '') + '</span>' : ''}</span>
          <small class="${meta.overdue ? 'task-due-overdue' : (meta.label.startsWith('сегодня') ? 'task-due-today' : '')}">${esc(meta.label)}${x.contact_name ? ' · ' + esc(x.contact_name) : ''}${x.deal_title ? ' · ' + esc(x.deal_title) : ''}${x.responsible_name ? ' · ' + esc(x.responsible_name) : ''}</small>
@@ -2345,12 +2373,6 @@ async function tasks(v) {
    }).join('')}${list.length > (state.taskLimit || 50) ? `<div style="margin:6px 0 10px"><small>Показано ${state.taskLimit || 50} из ${list.length}. <button class="btn sm" onclick="showMoreTasks()">Показать ещё</button></small></div>` : ''}` : '').join('') || `<div class="empty-state"><span class="ico">${icon('target', 36)}</span><b>Задач нет</b>${state.taskQuery || state.taskFilter
       ? 'Под этот фильтр ничего не подошло — измените условия поиска выше.'
       : 'Поставьте первое дело — звонок, встречу или письмо: кнопка «Задача» в правом верхнем углу списка и в шапке страницы.'}</div>`}</div>`;
-}
-
-function toggleTaskSelect() {
-  state.taskSelectMode = !state.taskSelectMode;
-  if (!state.taskSelectMode) clearSel('tasks');
-  render();
 }
 
 function bulkRescheduleTasks() {
@@ -2484,15 +2506,16 @@ async function products(v) {
   const onSale = rows.filter(p => p.active);
   const noPrice = onSale.filter(p => !(Number(p.price) > 0)).length;
   v.innerHTML = `${viewerNote()}<div class="card"><div class="row" style="border:0;flex-wrap:wrap;gap:8px"><h3>Каталог и прайс-лист (${shown.length})</h3>
+   <input id="productSearch" style="flex:1 1 320px;min-width:240px;max-width:480px" placeholder="Поиск: название, артикул, примечание" value="${esc(state.productQuery || '')}" oninput="liveSearch('products',()=>setProductQuery(this.value))">
    <span class="tabs" style="margin:0"><button class="${onlyActive ? 'active' : ''}" onclick="setProductScope('active')">В продаже</button><button class="${!onlyActive ? 'active' : ''}" onclick="setProductScope('all')">Все${archived ? ` (+${archived} в архиве)` : ''}</button></span>
-   <input id="productSearch" style="max-width:230px" placeholder="Поиск: название, артикул, примечание" value="${esc(state.productQuery || '')}" oninput="liveSearch('products',()=>setProductQuery(this.value))">
    <button class="btn sm" title="Скачать прайс-лист таблицей CSV — откроется в Excel" onclick="download('/api/prices/export?scope=ours','price-list.csv')">${icon('download', 13)} Скачать прайс</button>
    ${amAdmin() ? `<button class="btn sm" title="Загрузить прайс из Excel или CSV" onclick="openPriceImport(null,'ours')">${icon('upload', 13)} Загрузить из файла</button>` : ''}
    ${amAdmin() ? `<button class="btn sm primary" style="margin-left:auto" onclick="openProduct()">+ Товар / проект</button>` : ''}</div>
   <p class="form-hint" style="margin:-2px 0 10px">Это <b>один список</b>: отсюда позиции берутся в сделки, и эти же цены CRM сравнивает с ценами конкурентов (раздел «Конкуренты» → «Наш прайс-лист»). В продаже: <b>${onSale.length}</b>${archived ? ` · в архиве: ${archived}` : ''}${noPrice ? ` · без цены: ${noPrice} — в сравнении они не участвуют` : ''}.</p>
   ${amAdmin() ? '' : '<p class="form-hint" style="margin:-6px 0 10px">Прайс-лист меняет администратор. Нужной позиции нет? Добавьте её прямо в сделку — сумма пересчитается, а общий прайс останется неизменным.</p>'}
-  <div class="tbl-scroll"><table><tr><th>Артикул</th><th>Название</th><th>Цена</th><th>Ед.</th><th>В продаже</th><th></th></tr>
-   ${shown.map(p => `<tr><td><code>${esc(p.sku || '—')}</code></td><td><b>${esc(p.name)}</b>${p.note ? `<br><small>${esc(p.note)}</small>` : ''}</td><td>${Number(p.price) > 0 ? fmt(p.price) : '<span class="tag grey">цена не указана</span>'}</td><td>${esc(p.unit || 'шт')}</td><td>${p.active ? 'Да' : '<span class="tag grey">Архив</span>'}</td><td style="white-space:nowrap">${amAdmin() ? `<button class="btn sm" title="Изменить позицию" onclick="openProduct(${p.id})">${icon('edit', 13)} Изменить</button> <button class="btn sm danger" title="Удалить из каталога" onclick="del('products',${p.id})">${icon('close', 13)}</button>` : `<button class="btn sm" title="Посмотреть позицию" onclick="openProduct(${p.id})">Открыть</button>`}</td></tr>`).join('') || '<tr><td colspan="6"><div class="empty">Ничего не найдено — измените фильтр или добавьте позицию</div></td></tr>'}</table></div></div>`;
+  ${amAdmin() ? bulkSlot('products', `<button class="btn sm" onclick="bulkApply('products','update',{active:0})">Снять с продажи</button><button class="btn sm" onclick="bulkApply('products','update',{active:1})">Вернуть в продажу</button><button class="btn sm danger" onclick="bulkApply('products','delete')">${icon('trash', 13)} Удалить</button>`) : ''}
+  <div class="tbl-scroll"><table><tr><th class="sel"></th><th>Артикул</th><th>Название</th><th>Цена</th><th>Ед.</th><th>В продаже</th><th></th></tr>
+   ${shown.map(p => `<tr class="${selSet('products').has(p.id) ? 'selected' : ''}"><td class="sel">${amAdmin() ? `<input type="checkbox" data-selkey="products" data-selid="${p.id}" title="Выбрать для массового действия" ${selSet('products').has(p.id) ? 'checked' : ''} onchange="toggleSel('products',${p.id})">` : ''}</td><td><code>${esc(p.sku || '—')}</code></td><td><b>${esc(p.name)}</b>${p.note ? `<br><small>${esc(p.note)}</small>` : ''}</td><td>${Number(p.price) > 0 ? fmt(p.price) : '<span class="tag grey">цена не указана</span>'}</td><td>${esc(p.unit || 'шт')}</td><td>${p.active ? 'Да' : '<span class="tag grey">Архив</span>'}</td><td style="white-space:nowrap">${amAdmin() ? `<button class="btn sm" title="Изменить позицию" onclick="openProduct(${p.id})">${icon('edit', 13)} Изменить</button> <button class="btn sm danger" title="Удалить из каталога" onclick="del('products',${p.id})">${icon('close', 13)}</button>` : `<button class="btn sm" title="Посмотреть позицию" onclick="openProduct(${p.id})">Открыть</button>`}</td></tr>`).join('') || '<tr><td colspan="7"><div class="empty">Ничего не найдено — измените фильтр или добавьте позицию</div></td></tr>'}</table></div></div>`;
 }
 async function openProduct(id) {
   const p = id ? await api('/api/products/' + id) : {};
@@ -2566,14 +2589,16 @@ async function competitorsView(v) {
   v.innerHTML = `${viewerNote()}
   <div class="card toolbar">
     <h3 style="margin:0">Конкуренты на контроле (${shown.length}${shown.length !== list.length ? ` из ${list.length}` : ''})</h3>
-    <input id="compFilter" style="max-width:260px;margin-left:auto" placeholder="Поиск: название, ИНН, город" value="${esc(state.compQuery || '')}" oninput="liveSearch('compList',()=>setCompQuery(this.value))">
+    <input id="compFilter" style="flex:1 1 320px;min-width:240px;max-width:480px" placeholder="Поиск: название, ИНН, город" value="${esc(state.compQuery || '')}" oninput="liveSearch('compList',()=>setCompQuery(this.value))">
     ${state.compQuery ? `<button class="btn sm ghost" onclick="clearCompQuery()">Сбросить</button>` : ''}
-    ${canEdit() ? `<button class="btn primary" onclick="openCompetitor()">${icon('plus', 14)} Добавить конкурента</button>` : ''}
+    ${canEdit() ? `<button class="btn primary" style="margin-left:auto" onclick="openCompetitor()">${icon('plus', 14)} Добавить конкурента</button>` : `<span style="margin-left:auto"></span>`}
     <button class="btn" title="Наш прайс-лист — это раздел «Каталог»: те же позиции и цены" onclick="openOurPrices()">${icon('excel', 14)} Наш прайс-лист${ours.rows.length ? ` (${ours.rows.length})` : ''}</button>
   </div>
+  ${canEdit() ? bulkSlot('competitors', `<button class="btn sm danger" onclick="bulkDeleteCompetitors()">${icon('trash', 13)} Удалить</button>`) : ''}
   <div class="card">
-   <div class="tbl-scroll"><table><tr><th>Конкурент</th><th>ИНН</th><th>Риск и проверка</th><th>Цены</th><th></th></tr>
-    ${shown.map(c => `<tr>
+   <div class="tbl-scroll"><table><tr><th class="sel"></th><th>Конкурент</th><th>ИНН</th><th>Риск и проверка</th><th>Цены</th><th></th></tr>
+    ${shown.map(c => `<tr class="${selSet('competitors').has(c.id) ? 'selected' : ''}">
+     <td class="sel">${canEdit() ? `<input type="checkbox" data-selkey="competitors" data-selid="${c.id}" title="Выбрать для массового действия" ${selSet('competitors').has(c.id) ? 'checked' : ''} onchange="toggleSel('competitors',${c.id})">` : ''}</td>
      <td><a href="#" onclick="openCompetitorCard(${c.id});return false"><b>${esc(c.name)}</b></a><br><small>${esc(c.city || '')}${c.city && siteHref(c.website) ? ' · ' : ''}${siteHref(c.website) ? `<a href="${esc(siteHref(c.website))}" target="_blank" rel="noopener">${esc(c.website)}</a>` : ''}</small></td>
      <td><code>${esc(c.inn || '—')}</code></td>
      <td>${c.risk === null || c.risk === undefined ? '<span class="tag grey">не проверялся</span>' : `<span class="tag risk-tag" style="--risk:${esc(riskColor(c.level))}" title="Риск-оценка от 0 до 100 по открытым источникам">риск ${c.risk} · ${esc(RISK_LABELS[String(c.level || '').toLowerCase()] || c.level || '—')}</span>`}<br><small>${esc(dt(c.checked_at) || '')}</small></td>
@@ -2583,7 +2608,7 @@ async function competitorsView(v) {
        ${canEdit() ? `<button class="btn sm" onclick="checkCompetitor(${c.id})">${icon('refresh', 13)} Проверить</button>
        <button class="btn sm" title="Изменить карточку конкурента" onclick="openCompetitor(${c.id})">${icon('edit', 13)}</button>
        <button class="btn sm danger" title="Удалить конкурента" onclick="delCompetitor(${c.id})">${icon('close', 13)}</button>` : ''}
-     </td></tr>`).join('') || `<tr><td colspan="5"><div class="empty">${q ? 'Ничего не найдено — измените поиск' : 'Конкурентов пока нет — добавьте первого кнопкой выше'}</div></td></tr>`}
+     </td></tr>`).join('') || `<tr><td colspan="6"><div class="empty">${q ? 'Ничего не найдено — измените поиск' : 'Конкурентов пока нет — добавьте первого кнопкой выше'}</div></td></tr>`}
    </table></div>
   </div>`;
 }
@@ -2693,6 +2718,15 @@ function delCompetitor(id) {
   askConfirm('Удалить конкурента вместе со всеми его отчётами? Действие необратимо.', async () => {
     await api('/api/competitors/' + id, { method: 'DELETE' });
     toast('Удалено'); render();
+  }, { okText: 'Удалить' });
+}
+function bulkDeleteCompetitors() {
+  const ids = [...selSet('competitors')];
+  if (!ids.length) return;
+  askConfirm(`Удалить выбранные карточки конкурентов — ${ids.length} шт.? Отчёты, отзывы, найденные изменения и прайсы этих карточек удалятся вместе с ними.`, async () => {
+    const r = await api('/api/competitors/bulk-delete', { method: 'POST', body: JSON.stringify({ ids }) });
+    clearSel('competitors');
+    toast(`Удалено карточек: ${r.deleted}`); render();
   }, { okText: 'Удалить' });
 }
 
@@ -3021,7 +3055,10 @@ async function settings(v) {
     profile: 'Профиль'
   };
   const adminOnly = ['integrations', 'competitors', 'fields', 'pipelines', 'automations', 'team', 'data'];
-  const tabs = Object.fromEntries(Object.entries(allTabs).filter(([k]) => isAdmin || !adminOnly.includes(k)));
+  // Наблюдателю остаётся только «Профиль»: шаблоны ответов — рабочий
+  // инструмент менеджера, а менять что-либо наблюдатель не может вовсе
+  const isViewer = (state.me && state.me.role) === 'viewer';
+  const tabs = Object.fromEntries(Object.entries(allTabs).filter(([k]) => isAdmin ? true : (isViewer ? k === 'profile' : !adminOnly.includes(k))));
   if (!tabs[state.settingsTab]) state.settingsTab = isAdmin ? 'integrations' : 'profile';
   let body = '';
 

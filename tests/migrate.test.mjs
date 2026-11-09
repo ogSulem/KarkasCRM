@@ -35,6 +35,7 @@ CREATE TABLE conversations(id INTEGER PRIMARY KEY,contact_id INTEGER,title TEXT,
 CREATE TABLE messages(id INTEGER PRIMARY KEY,conversation_id INTEGER,channel TEXT DEFAULT 'whatsapp',direction TEXT DEFAULT 'in',body TEXT,author TEXT,created_at TEXT DEFAULT (datetime('now')));
 CREATE TABLE channels(id INTEGER PRIMARY KEY,provider TEXT,external_id TEXT UNIQUE,name TEXT,transport TEXT,phone TEXT,state TEXT,raw TEXT);
 CREATE TABLE price_rows(id INTEGER PRIMARY KEY,competitor_id INTEGER,scope TEXT DEFAULT 'competitor',item TEXT,price REAL,unit TEXT,sku TEXT,note TEXT,source_name TEXT,updated_at TEXT DEFAULT (datetime('now')));
+CREATE TABLE competitors(id INTEGER PRIMARY KEY,name TEXT NOT NULL,inn TEXT,ogrn TEXT,city TEXT,website TEXT,phone TEXT,notes TEXT DEFAULT '',price_url TEXT DEFAULT '',created_at TEXT DEFAULT (datetime('now')));
 `);
 old.exec(`
 INSERT INTO contacts(name,phone,email,source) VALUES('Клиент из старой базы','+7 900 123-45-67','old@mail.ru','avito');
@@ -45,6 +46,7 @@ INSERT INTO pipelines(name) VALUES('Основная воронка');
 INSERT INTO stages(pipeline_id,code,name,color,sort,kind) VALUES(1,'new','Неразобранное','#f97316',0,'open');
 INSERT INTO settings(key,value) VALUES('COMPANY_NAME','Старая компания');
 INSERT INTO products(name,sku,price,unit,active) VALUES('Дом из старой базы','OLD-1',1000000,'шт',1);
+INSERT INTO competitors(id,name) VALUES(7,'Старый конкурент');
 INSERT INTO price_rows(competitor_id,scope,item,price,unit,sku,note,source_name) VALUES
   (NULL,'ours','Дом из старой базы',1200000,'шт','OLD-1','под ключ','наш прайс'),
   (NULL,'ours','Баня из старого прайса',890000,'шт','','','наш прайс'),

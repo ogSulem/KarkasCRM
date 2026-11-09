@@ -53,7 +53,7 @@ Object.assign(window, {
   SKELETONS, toggleTheme, applyTheme, openPalette, closePalette, toggleSel, clearSel,
   siteFormCode, bulkApply, openContactCard, openDealCard, api, get token() { return token },
   icon, normalizeDue, taskDueMeta, isAscii, endSession, togglePass,
-  toggleUserMenu, closeUserMenu, toggleTaskSelect, ICON_PATHS, msgHtml, channelOptions,
+  toggleUserMenu, closeUserMenu, ICON_PATHS, msgHtml, channelOptions,
   uploadChatFile, toggleDeadChannels, checkHealth,
   sourceLabel, channelLabel, roleLabel, askConfirm, askInput, translit, SOURCE_LABELS, CHANNEL_LABELS, ROLE_LABELS,
   isoDate, todayISO, fmtDayMonth, kindStage, fld, grid2, formLegend, pushToast, notify, captureFocus, restoreFocus, PALETTE_ACTIONS,
@@ -253,17 +253,25 @@ try {
     window.go('inbox'); await wait(500);
     check('чат: после перерисовки сообщение на месте', /Проверка сохранения сообщения/.test($('#chatMsgs').textContent));
   }
-  // «Выбрать все» доступен в списках клиентов и сделок
+  // Панель массовых действий и «Выбрать все» появляются после первой отметки
   {
     window.go('contacts'); await wait(700);
-    check('в списке клиентов есть кнопка «Выбрать все»', /Выбрать все/.test($('#view').innerHTML));
+    check('без отметок панели массовых действий нет', !/Выбрать все/.test($('#view').innerHTML));
+    window.toggleSel('contacts', Number($('#view tr input[data-selkey="contacts"]').dataset.selid)); await wait(250);
+    check('после первой отметки вышли «Выбрать все» и действия', /Выбрать все/.test($('#view').innerHTML) && /Выбрано: 1/.test($('#view').innerHTML));
+    check('панель клиентов стоит под блоком поиска', ($('.card.toolbar').compareDocumentPosition($('#bulk-contacts')) & window.Node.DOCUMENT_POSITION_FOLLOWING) !== 0);
+    const cBoxes = $$('#view tr input[data-selkey="contacts"]').length;
     window.selectAllVisible('contacts');
-    check('«Выбрать все» отмечает видимые строки клиентов', window.__state.sel.contacts.size > 0, 'size=' + window.__state.sel.contacts.size);
-    window.clearSel('contacts');
+    check('«Выбрать все» отмечает все строки клиентов на экране', cBoxes > 0 && window.__state.sel.contacts.size === cBoxes, `size=${window.__state.sel.contacts.size}, строк=${cBoxes}`);
+    window.clearSel('contacts'); await wait(150);
+    check('после снятия выбора панель исчезла', !/Выбрать все/.test($('#view').innerHTML));
     window.go('pipe'); await wait(700);
-    check('в сделках есть кнопка «Выбрать все»', /Выбрать все/.test($('#view').innerHTML));
+    check('в сделках панель появляется только после отметки', !/Выбрать все/.test($('#view').innerHTML));
+    window.toggleSel('deals', Number($('#view .deal input[data-selkey="deals"]').dataset.selid)); await wait(250);
+    check('панель сделок стоит под блоком выбора воронки', /Выбрать все/.test($('#view').innerHTML) && ($('.card.toolbar').compareDocumentPosition($('#bulk-deals')) & window.Node.DOCUMENT_POSITION_FOLLOWING) !== 0);
+    const dBoxes = $$('#view .deal input[data-selkey="deals"]').length;
     window.selectAllVisible('deals');
-    check('«Выбрать все» отмечает видимые сделки', window.__state.sel.deals.size > 0, 'size=' + window.__state.sel.deals.size);
+    check('«Выбрать все» отмечает все сделки на экране', dBoxes > 0 && window.__state.sel.deals.size === dBoxes, `size=${window.__state.sel.deals.size}, карточек=${dBoxes}`);
     window.clearSel('deals');
   }
 
@@ -602,10 +610,17 @@ try {
   window.__state.taskView = 'week'; window.go('tasks'); await wait(350);
   check('календарь задач на неделю', /class="calendar"/.test($('#view').innerHTML) && /cal-day/.test($('#view').innerHTML));
   window.__state.taskView = 'list'; window.go('tasks'); await wait(300);
-  check('в обычном режиме чекбоксы задач скрыты', $$('#view .taskrow input[type=checkbox]').length === 0);
-  window.toggleTaskSelect(); await wait(450);
-  check('режим мультивыбора показывает чекбоксы', $$('#view .taskrow input[type=checkbox]').length > 0, $$('#view .taskrow').length + ' строк задач');
-  window.toggleTaskSelect(); await wait(300);
+  check('чекбокс есть у каждой задачи', $$('#view .taskrow input[type=checkbox]').length === $$('#view .taskrow').length && $$('#view .taskrow').length > 0, $$('#view .taskrow').length + ' строк задач');
+  {
+    const cb = $('#view .taskrow input[type=checkbox]');
+    const mark = $$('#view .taskrow .btn.mark').find(b => /Выполнить/.test(b.textContent));
+    check('чекбокс задачи стоит слева от кнопки «Выполнить»', Boolean(mark) && (cb.compareDocumentPosition(mark) & window.Node.DOCUMENT_POSITION_FOLLOWING) !== 0);
+  }
+  check('без отметок панели массовых действий нет', !/bulkbar/.test($('#view').innerHTML));
+  window.toggleSel('tasks', Number($('#view .taskrow input[type=checkbox]').dataset.selid)); await wait(250);
+  check('после отметки задачи вышли «Выбрать все» и действия', /Выбрать все/.test($('#view').innerHTML) && /Выбрано: 1/.test($('#view').innerHTML) && /Выполнить выбранные/.test($('#bulk-tasks').innerHTML));
+  window.clearSel('tasks'); await wait(200);
+  check('после снятия выбора панель исчезла, галочки сброшены', !/bulkbar/.test($('#view').innerHTML) && $$('#view .taskrow input[type=checkbox]:checked').length === 0);
   check('в задачах есть поиск по названию и клиенту', Boolean($('#taskSearch')) && /Поиск по задачам/.test($('#taskSearch').placeholder));
   check('кнопка «Задача» в списке одна — в правом углу', $$('#view .row > button.btn.primary').length === 1);
   window.__state.taskQuery = 'такой задачи точно нет'; window.go('tasks'); await wait(450);
@@ -640,9 +655,30 @@ try {
   check('фильтры в списке контактов', /Все ответственные/.test($('#view').innerHTML) && /Все источники/.test($('#view').innerHTML));
   await window.openContactCard(1); await wait(250);
   check('карточка клиента', /Сделки клиента/.test($('#modalBody').innerHTML)); window.closeModal();
+  const selProbe = window.document.createElement('i'); selProbe.id = 'selProbe'; $('#view').appendChild(selProbe);
   window.toggleSel('contacts', window.__state.contacts[0].id); await wait(300);
   check('панель массовых действий', /class="bulkbar"/.test($('#view').innerHTML) && /Выбрано: 1/.test($('#view').innerHTML));
+  check('отметка строки не перерисовывает весь экран', Boolean($('#selProbe')));
+  selProbe.remove();
   window.clearSel('contacts'); await wait(200);
+  check('после снятия выбора панель массовых действий исчезла', !/bulkbar/.test($('#view').innerHTML));
+  const selComp = await window.api('/api/companies', { method: 'POST', body: JSON.stringify({ name: 'ООО «Проверка выбора»' }) });
+  window.go('companies'); await wait(500);
+  check('у компаний есть чекбоксы, панели без отметок нет', $$('#view tr input[data-selkey="companies"]').length > 0 && !/bulkbar/.test($('#view').innerHTML));
+  window.toggleSel('companies', selComp.id); await wait(250);
+  check('панель компаний предлагает удаление', /Выбрать все/.test($('#view').innerHTML) && /Удалить/.test($('#bulk-companies').innerHTML));
+  check('отмеченная строка компании подсвечена', $(`#view tr input[data-selkey="companies"][data-selid="${selComp.id}"]`).checked && $(`#view tr input[data-selkey="companies"][data-selid="${selComp.id}"]`).closest('tr').classList.contains('selected'));
+  window.clearSel('companies'); await wait(150);
+  check('после снятия выбора галочка компании сброшена', $(`#view tr input[data-selkey="companies"][data-selid="${selComp.id}"]`).checked === false && !/bulkbar/.test($('#view').innerHTML));
+  await window.api('/api/companies/' + selComp.id, { method: 'DELETE' });
+  const selRival = await window.api('/api/competitors', { method: 'POST', body: JSON.stringify({ name: 'ООО «Проверка панели»' }) });
+  window.go('competitors'); await wait(500);
+  check('у конкурентов есть чекбоксы, панели без отметок нет', $$('#view tr input[data-selkey="competitors"]').length > 0 && !/bulkbar/.test($('#view').innerHTML));
+  window.toggleSel('competitors', selRival.id); await wait(250);
+  check('панель конкурентов предлагает удаление карточек', /Выбрать все/.test($('#view').innerHTML) && /Удалить/.test($('#bulk-competitors').innerHTML));
+  window.clearSel('competitors'); await wait(150);
+  await window.api('/api/competitors/' + selRival.id, { method: 'DELETE' });
+  window.go('contacts'); await wait(500);
   {
     const moreBtn = $$('#view button').find(b => /Ещё/.test(b.textContent));
     check('в контактах есть меню «Ещё»', Boolean(moreBtn));
@@ -778,6 +814,10 @@ try {
     check('каталог говорит, что он же прайс-лист', /Каталог и прайс-лист/.test(text) && /один список/.test(text), text.replace(/\s+/g, ' ').slice(0, 120));
     check('из каталога прайс можно скачать и загрузить файлом', /Скачать прайс/.test(text) && /Загрузить из файла/.test(text));
     check('загруженный прайс виден в каталоге теми же позициями', $$('#view table tr').length === 3 && /Каркасный дом 8×10/.test(text) && /Баня 4×6/.test(text), $$('#view table tr').length + ' строк');
+    check('у каталога есть чекбоксы, панели без отметок нет', $$('#view tr input[data-selkey="products"]').length === 2 && !/bulkbar/.test($('#view').innerHTML));
+    window.toggleSel('products', Number($('#view tr input[data-selkey="products"]').dataset.selid)); await wait(250);
+    check('панель каталога: снять с продажи, вернуть, удалить', /Снять с продажи/.test($('#bulk-products').innerHTML) && /Вернуть в продажу/.test($('#bulk-products').innerHTML) && /Удалить/.test($('#bulk-products').innerHTML));
+    window.clearSel('products'); await wait(150);
     const pSearch = $('#globalSearch');
     pSearch.value = 'Баня 4×6'; pSearch.dispatchEvent(new window.Event('input', { bubbles: true })); await wait(500);
     check('общий поиск находит позицию прайс-листа', /Каталог и прайс/.test($('#searchResults').innerHTML) && /Баня/.test($('#searchResults').innerHTML), $('#searchResults').textContent.replace(/\s+/g, ' ').slice(0, 90));
@@ -1092,6 +1132,7 @@ try {
   check('менеджер не может менять прайс-лист (403)', mgrOurs.status === 403);
   window.go('products'); await wait(420);
   check('менеджер видит прайс-лист без кнопок загрузки и удаления', !/Загрузить из файла/.test($('#view').textContent) && $$('#view .btn.danger').length === 0 && !/\+ Товар \/ проект/.test($('#view').textContent), $('#view').textContent.replace(/\s+/g, ' ').slice(0, 120));
+  check('у менеджера нет чекбоксов каталога и панели массовых действий', $$('#view tr input[data-selkey="products"]').length === 0 && !/bulk-products/.test($('#view').innerHTML));
   check('менеджеру объяснено, где взять позицию без каталога', /Добавьте её прямо в сделку/.test($('#view').textContent));
   await window.openProduct(); await wait(300);
   check('форма позиции у менеджера открывается на просмотр', Boolean($('#modalBody form input[name=name]')) && $('#modalBody form input[name=name]').disabled === true && /Прайс-лист меняет администратор/.test($('#modalBody').textContent));
@@ -1104,10 +1145,13 @@ try {
   check('наблюдатель не видит кнопок создания и удаления клиентов', !/Новый контакт/.test($('#view').innerHTML) && $$('#view .btn.danger').length === 0);
   window.go('tasks'); await wait(450);
   check('наблюдатель видит задачи без кнопок изменения', /Задач:/.test($('#view').textContent) && $$('#view .taskrow .btn').length === 0);
+  check('у наблюдателя нет чекбоксов задач', $$('#view .taskrow input[type=checkbox]').length === 0);
   window.go('inbox'); await wait(450);
   check('наблюдатель читает чаты без поля отправки', !$('#msgText') && /Режим просмотра/.test($('#view').textContent));
   check('в шапке наблюдателя кнопки создания скрыты', cssText.includes('body.role-viewer .head-create{display:none}') && cssText.includes('body.role-viewer .head-readonly{display:inline-block}'));
   window.closeModal();
+  window.go('settings'); await wait(350);
+  check('в настройках наблюдателю доступен только профиль', /Профиль/.test($('#view').textContent) && !/Шаблоны сообщений/.test($('#view').innerHTML) && !/Интеграции и каналы/.test($('#view').innerHTML));
   window.__state.me = admin; window.document.body.classList.remove('role-viewer');
   window.__state.settingsTab = 'integrations';
 
