@@ -1477,6 +1477,32 @@ try {
       window.go(prevView); await wait(400);
       check('менеджер в чатах не запрашивает админские настройки', settingsHits === 0, 'запросов: ' + settingsHits);
     }
+    // Профиль освежается при восстановлении живого канала: после смены прав
+    // админом интерфейс переключается на новую роль без перезагрузки страницы
+    {
+      window.document.getElementById('uName').textContent = 'Испорчено';
+      await window.syncMe();
+      check('профиль освежается без перезагрузки страницы',
+        $('#uName').textContent === window.__state.me.name
+        && window.document.body.classList.contains('role-' + window.__state.me.role));
+    }
+    // Наблюдателю доступна массовая отметка «Прочитано»: метки личные,
+    // общих данных они не меняют, а непрочитанное вечно копиться не должно
+    {
+      const prevRole = window.__state.me.role, prevView = window.__state.view;
+      window.__state.me.role = 'viewer';
+      window.go('inbox'); await wait(700);
+      const hasSelect = $$('#view button').some(b => b.textContent.trim() === 'Выбрать');
+      window.toggleConvSelect(); await wait(150);
+      window.toggleSel('convs', 1); await wait(250);
+      check('наблюдатель может отметить чаты прочитанными пачкой',
+        hasSelect && /Прочитано/.test($('#view').innerHTML));
+      check('наблюдателю не предлагается поле отправки сообщения',
+        !$('#msgText') && /Режим просмотра/.test($('#view').innerHTML));
+      window.clearSel('convs'); window.toggleConvSelect(); await wait(150);
+      window.__state.me.role = prevRole;
+      window.go(prevView); await wait(400);
+    }
     // расшифровка нужна только там, где адрес читает человек. Вебхук и код для
     // сайта уходят машинам: им нужен валидный домен, а не красивые буквы.
     // ── входящие из Wazzup: админ видит, доходят ли сообщения ────────────────

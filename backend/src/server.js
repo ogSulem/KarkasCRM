@@ -1741,7 +1741,7 @@ export const server = http.createServer(async (req, res) => {
       autoDeal: getSetting('AUTO_DEAL', '1') === '1',
       activeUsers: db.prepare('SELECT COUNT(*) n FROM users WHERE active=1').get().n,
     });
-    if (user && p.startsWith('/api/') && user.role === 'viewer' && req.method !== 'GET' && !['/api/me/password', '/api/me/theme'].includes(p)) return json(res, 403, { error: 'Роль «Наблюдатель» — только просмотр' });
+    if (user && p.startsWith('/api/') && user.role === 'viewer' && req.method !== 'GET' && !['/api/me/password', '/api/me/theme', '/api/conversations/read'].includes(p)) return json(res, 403, { error: 'Роль «Наблюдатель» — только просмотр' });
     // настройки, команда, воронки, шаблоны, автоматизации, ключи и обслуживание — только администратор
     if (user && user.role !== 'admin' && req.method !== 'GET' && ADMIN_ONLY.some(re => re.test(p))) {
       const hint = ADMIN_ONLY_HINT.find(([re]) => re.test(p));
