@@ -8,7 +8,7 @@ const VERSION = readFileSync(new URL('../VERSION', import.meta.url), 'utf8').tri
 process.env.DATA_DIR = '/tmp/karkas-test-' + Date.now();
 process.env.PORT = '18099';
 process.env.SEED_MODE = 'off'; // детерминированная чистая база для тестов
-const { server } = await import('../backend/src/server.js');
+const { server, db } = await import('../backend/src/server.js');
 const base = 'http://127.0.0.1:18099';
 let h;
 const call = (p, opt = {}) => fetch(base + p, { ...opt, headers: { 'Content-Type': 'application/json', ...(h || {}), ...(opt.headers || {}) } }).then(async r => ({ status: r.status, body: (r.headers.get('content-type') || '').includes('json') ? await r.json() : await r.text() }));
@@ -763,6 +763,16 @@ test('массовые действия со сделками: этап, отв�
   const back = await call('/api/bulk', { method: 'POST', body: JSON.stringify({ table: 'deals', ids: [ids[0], ids[1]], action: 'update', patch: { stage: 'negotiation' } }) });
   assert.equal(back.status, 200);
   assert.equal((await call('/api/deals/' + ids[0])).body.deal.closed_at, null, 'возврат в работу очищает дату закрытия');
+  // дата закрытия обновляется при переходе между закрытыми этапами и хранится,
+  // если этап не менялся: аналитика считает сделку там, где её реально закрыли
+  db.prepare("UPDATE deals SET stage='won',closed_at='2020-01-01 10:00:00' WHERE id=?").run(ids[1]);
+  await call('/api/bulk', { method: 'POST', body: JSON.stringify({ table: 'deals', ids: [ids[1]], action: 'update', patch: { stage: 'lost' } }) });
+  const relisted = (await call('/api/deals/' + ids[1])).body.deal;
+  assert.equal(relisted.stage, 'lost');
+  assert.ok(relisted.closed_at > '2021-01-01', 'переход «Успешно → Отказ» обновляет дату закрытия, а не хранит старую');
+  db.prepare("UPDATE deals SET closed_at='2020-05-05 10:00:00' WHERE id=?").run(ids[1]);
+  await call('/api/bulk', { method: 'POST', body: JSON.stringify({ table: 'deals', ids: [ids[1]], action: 'update', patch: { amount: 777 } }) });
+  assert.equal((await call('/api/deals/' + ids[1])).body.deal.closed_at, '2020-05-05 10:00:00', 'дата закрытия не уезжает при массовой правке суммы');
   // ошибочные значения отбиваются до записи: пачка не должна измениться частично
   assert.equal((await call('/api/bulk', { method: 'POST', body: JSON.stringify({ table: 'deals', ids: [ids[2]], action: 'update', patch: { responsible_id: 999999 } }) })).status, 400, 'несуществующий ответственный отклоняется');
   assert.equal((await call('/api/bulk', { method: 'POST', body: JSON.stringify({ table: 'deals', ids: [ids[2]], action: 'update', patch: { amount: -5 } }) })).status, 400, 'отрицательная сумма отклоняется');
