@@ -174,6 +174,11 @@ if (missingColumns.length && !freshDb) console.log(`Схема базы обно
 // индексы создаём ПОСЛЕ миграций: иначе база прошлой версии упадёт на отсутствующей колонке
 db.exec(`
 CREATE INDEX IF NOT EXISTS idx_msg_conv ON messages(conversation_id,id);
+-- Непрочитанное считается EXISTS-запросом «есть ли входящее с id больше
+-- отметки»: без direction в индексе планировщик сканировал сообщения по
+-- rowid и на пяти тысячах диалогов счётчик собирался секунды. Покрывающий
+-- индекс свёл тот же запрос к миллисекундам.
+CREATE INDEX IF NOT EXISTS idx_msg_conv_dir ON messages(conversation_id,direction,id);
 CREATE INDEX IF NOT EXISTS idx_deals_stage ON deals(stage);
 CREATE INDEX IF NOT EXISTS idx_contacts_phone ON contacts(phone);
 CREATE INDEX IF NOT EXISTS idx_contacts_phone_norm ON contacts(phone_norm);
