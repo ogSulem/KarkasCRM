@@ -613,7 +613,12 @@ const amAdmin = () => (state.me && state.me.role) === 'admin';
 const canEdit = () => (state.me && state.me.role) !== 'viewer';
 const viewerNote = () => canEdit() ? '' : `<div class="notice info">${icon('eye', 15)} <b>Режим просмотра.</b> Все данные и выгрузки доступны, а изменения вносят сотрудники с ролью «Менеджер» или «Администратор».</div>`;
 function userOptions(selId) {
-  return `<option value="">— не назначен —</option>` + __team.map(u => `<option value="${u.id}" ${u.id === selId ? 'selected' : ''}>${esc(u.name)} (${esc(roleLabel(u.role))})</option>`).join('');
+  // Сотрудник с закрытым доступом не предлагается для новых назначений:
+  // обращения вставали бы за того, кто уже не работает. Текущий ответственный
+  // остаётся в списке даже заблокированным — старые записи должны показывать,
+  // за кем они закреплены.
+  const list = __team.filter(u => u.active !== 0 || Number(u.id) === Number(selId));
+  return `<option value="">— не назначен —</option>` + list.map(u => `<option value="${u.id}" ${u.id === selId ? 'selected' : ''}>${esc(u.name)} (${esc(roleLabel(u.role))})${u.active === 0 ? ' — доступ закрыт' : ''}</option>`).join('');
 }
 
 // Подсказка в форме: по текущим правилам распределения считает, кому
@@ -1352,12 +1357,12 @@ async function openDealCard(id) {
      <div style="display:flex;gap:6px">
        <button class="btn sm" onclick="printDoc(${deal.id},'quote')" title="Коммерческое предложение">${icon('print', 13)} КП</button>
        <button class="btn sm" onclick="printDoc(${deal.id},'invoice')" title="Счёт на оплату">${icon('fileText', 13)} Счёт</button>
-       <button class="btn sm" onclick="sendDoc(${deal.id})" title="Отправить КП или счёт клиенту письмом">${icon('mail', 13)} Отправить</button>
+       ${canEdit() ? `<button class="btn sm" onclick="sendDoc(${deal.id})" title="Отправить КП или счёт клиенту письмом">${icon('mail', 13)} Отправить</button>` : ''}
      </div>
    </div>
-   ${!done && !openTasks ? `<div class="card tint-warn" style="margin:10px 0;padding:10px 12px"><b>${icon('alertCircle', 15)} У сделки нет открытых задач</b> — она может зависнуть. <button class="btn sm" style="margin-left:6px" onclick="openTask(null,{deal_id:${deal.id},contact_id:${deal.contact_id || 'null'}})">${icon('plus', 13)} Поставить задачу</button></div>` : ''}
+   ${canEdit() && !done && !openTasks ? `<div class="card tint-warn" style="margin:10px 0;padding:10px 12px"><b>${icon('alertCircle', 15)} У сделки нет открытых задач</b> — она может зависнуть. <button class="btn sm" style="margin-left:6px" onclick="openTask(null,{deal_id:${deal.id},contact_id:${deal.contact_id || 'null'}})">${icon('plus', 13)} Поставить задачу</button></div>` : ''}
    ${!done && openTasks && nextTask ? `<p style="margin:6px 0 0"><small>${icon('clock', 13)} Ближайшая задача: <b>${esc(nextTask.title)}</b> — ${esc(taskDueMeta(nextTask.due).label)}</small></p>` : ''}
-   ${done ? '' : `<div class="card-actions">
+   ${done || !canEdit() ? '' : `<div class="card-actions">
      ${deal.contact_phone ? `<a class="btn sm" href="tel:${esc(String(deal.contact_phone).replace(/[^+\d]/g, ''))}">${icon('phone', 13)} Позвонить</a>` : ''}
      ${deal.contact_phone ? `<a class="btn sm" href="https://wa.me/${esc(String(deal.contact_phone).replace(/[^\d]/g, ''))}" target="_blank" rel="noopener">${icon('whatsapp', 13)} WhatsApp</a>` : ''}
      <button class="btn sm" onclick="openTask(null,{deal_id:${deal.id},contact_id:${deal.contact_id || 'null'}})">${icon('plus', 13)} Задача</button>
@@ -1400,18 +1405,18 @@ function dealTab(deal, d) {
   }
   if (state.dealTab === 'products') {
     const total = d.products.reduce((a, p) => a + p.price * p.qty, 0);
-    return `<table><tr><th>Товар / проект</th><th>Цена</th><th>Кол-во</th><th>Сумма</th><th></th></tr>${d.products.map(p => `<tr><td>${esc(p.name)}</td><td>${fmt(p.price)}</td><td>${p.qty}</td><td><b>${fmt(p.price * p.qty)}</b></td><td><button class="btn sm danger" onclick="delRow('deal_products',${p.id},${deal.id})">${icon('close', 13)}</button></td></tr>`).join('') || '<tr><td colspan="5"><small>Позиций нет — добавьте проект дома или доп. опцию</small></td></tr>'}${d.products.length ? `<tr><td colspan="3" style="text-align:right"><b>Итого по позициям:</b></td><td><b>${fmt(total)}</b></td><td></td></tr>${Math.abs(total - deal.amount) >= 1 ? `<tr><td colspan="5"><small>Сумма сделки — ${fmt(deal.amount)}. <button class="btn sm" onclick="syncDealAmount(${deal.id},${total})">Подставить ${fmt(total)} в сделку</button></small></td></tr>` : ''}` : ''}</table>
-     <hr><button class="btn sm primary" onclick="addDealProduct(${deal.id})">+ Добавить товар / услугу</button>`;
+    return `<table><tr><th>Товар / проект</th><th>Цена</th><th>Кол-во</th><th>Сумма</th><th></th></tr>${d.products.map(p => `<tr><td>${esc(p.name)}</td><td>${fmt(p.price)}</td><td>${p.qty}</td><td><b>${fmt(p.price * p.qty)}</b></td><td>${canEdit() ? `<button class="btn sm danger" onclick="delRow('deal_products',${p.id},${deal.id})">${icon('close', 13)}</button>` : ''}</td></tr>`).join('') || '<tr><td colspan="5"><small>Позиций нет — добавьте проект дома или доп. опцию</small></td></tr>'}${d.products.length ? `<tr><td colspan="3" style="text-align:right"><b>Итого по позициям:</b></td><td><b>${fmt(total)}</b></td><td></td></tr>${Math.abs(total - deal.amount) >= 1 && canEdit() ? `<tr><td colspan="5"><small>Сумма сделки — ${fmt(deal.amount)}. <button class="btn sm" onclick="syncDealAmount(${deal.id},${total})">Подставить ${fmt(total)} в сделку</button></small></td></tr>` : ''}` : ''}</table>
+     ${canEdit() ? `<hr><button class="btn sm primary" onclick="addDealProduct(${deal.id})">+ Добавить товар / услугу</button>` : ''}`;
   }
   if (state.dealTab === 'tasks') {
     return `<div class="list">${d.tasks.map(t => {
       const meta = taskDueMeta(t.due, t.done);
       return `<div class="row">
-        <span><button class="btn sm mark ${t.done ? 'done' : ''}" onclick="toggleTask(${t.id}, ${t.done ? 0 : 1}, ${deal.id})">${t.done ? icon('check', 13) + ' Выполнено' : 'Выполнить'}</button> <span class="${t.done ? 'task-done' : ''}">${esc(t.title)}</span><br><small class="${meta.overdue ? 'task-due-overdue' : ''}">${esc(meta.label)}</small></span>
-        <button class="btn sm danger" onclick="delRow('tasks',${t.id},${deal.id})">${icon('close', 13)}</button>
+        <span>${canEdit() ? `<button class="btn sm mark ${t.done ? 'done' : ''}" onclick="toggleTask(${t.id}, ${t.done ? 0 : 1}, ${deal.id})">${t.done ? icon('check', 13) + ' Выполнено' : 'Выполнить'}</button> ` : ''}<span class="${t.done ? 'task-done' : ''}">${esc(t.title)}</span><br><small class="${meta.overdue ? 'task-due-overdue' : ''}">${esc(meta.label)}</small></span>
+        ${canEdit() ? `<button class="btn sm danger" onclick="delRow('tasks',${t.id},${deal.id})">${icon('close', 13)}</button>` : ''}
       </div>`;
     }).join('') || '<small>Задач нет</small>'}</div>
-     <button class="btn sm primary" style="margin-top:10px" onclick="openTask(null,{deal_id:${deal.id},contact_id:${deal.contact_id}})">+ Задача по сделке</button>`;
+     ${canEdit() ? `<button class="btn sm primary" style="margin-top:10px" onclick="openTask(null,{deal_id:${deal.id},contact_id:${deal.contact_id}})">+ Задача по сделке</button>` : ''}`;
   }
   if (state.dealTab === 'notes') {
     return `<form onsubmit="return addNote(event,'deals',${deal.id})"><label>Новая заметка<textarea name="body" rows="2" required placeholder="Договорились перезвонить после замера…"></textarea></label><button class="btn sm primary">Добавить</button></form>
@@ -1966,7 +1971,7 @@ async function bulkApplyNow(table, action, ids, patch) {
   render();
 }
 function bulkOwner(table) {
-  return `<select style="width:auto" onchange="if(this.value){bulkApply('${table}','update',{responsible_id:+this.value});this.value=''}"><option value="">Сменить ответственного…</option>${__team.map(u => `<option value="${u.id}">${esc(u.name)}</option>`).join('')}</select>`;
+  return `<select style="width:auto" onchange="if(this.value){bulkApply('${table}','update',{responsible_id:+this.value});this.value=''}"><option value="">Сменить ответственного…</option>${__team.filter(u => u.active !== 0).map(u => `<option value="${u.id}">${esc(u.name)}</option>`).join('')}</select>`;
 }
 function bulkStage() {
   return `<select style="width:auto" onchange="if(this.value){bulkStageTo(this.value);this.value=''}"><option value="">Перевести на этап…</option>${(state.stages || []).map(s => `<option value="${s.code}">${esc(s.name)}</option>`).join('')}</select>`;
@@ -2182,10 +2187,10 @@ async function openContactCard(id) {
        ${rawPhone ? `<a class="btn sm" href="https://wa.me/${rawPhone}" target="_blank" rel="noopener">${icon('whatsapp', 13)} WhatsApp</a><a class="btn sm" href="tel:${esc(String(c.phone).replace(/[^+\d]/g, ''))}">${icon('phone', 13)} Позвонить</a>` : ''}
        ${conv
         ? `<button class="btn sm" onclick="closeModal();openConv(${conv.id})">${icon('chat', 13)} Чат</button>`
-        : `<button class="btn sm" onclick="startConv(${c.id})">${icon('chat', 13)} Написать</button>`}
-       <button class="btn sm" onclick="openTask(null,{contact_id:${c.id}})">+ Задача</button>
+        : `${canEdit() ? `<button class="btn sm" onclick="startConv(${c.id})">${icon('chat', 13)} Написать</button>` : ''}`}
+       ${canEdit() ? `<button class="btn sm" onclick="openTask(null,{contact_id:${c.id}})">+ Задача</button>
        <button class="btn sm primary" onclick="openDeal(${c.id})">+ Сделка</button>
-       <button class="btn sm" onclick="openContact(${c.id})">Редактировать</button>
+       <button class="btn sm" onclick="openContact(${c.id})">Редактировать</button>` : ''}
      </div>
    </div>
    <hr>
@@ -2197,9 +2202,9 @@ async function openContactCard(id) {
        <div class="list">${contactTasks.map(t => {
          const meta = taskDueMeta(t.due, t.done);
          return `<div class="row"><span><b>${esc(t.title)}</b><br><small class="${meta.overdue ? 'task-due-overdue' : ''}">${esc(meta.label)}</small></span>
-           <span style="display:flex;gap:6px"><button class="btn sm mark" onclick="toggleTask(${t.id},1);openContactCard(${c.id})">${icon('check', 13)} Выполнить</button><button class="btn sm" onclick="openTask(${t.id})">${icon('edit', 13)}</button></span></div>`;
+           ${canEdit() ? `<span style="display:flex;gap:6px"><button class="btn sm mark" onclick="toggleTask(${t.id},1);openContactCard(${c.id})">${icon('check', 13)} Выполнить</button><button class="btn sm" onclick="openTask(${t.id})">${icon('edit', 13)}</button></span>` : ''}</div>`;
        }).join('') || '<small>Открытых задач нет — поставьте звонок или встречу, чтобы не потерять клиента.</small>'}</div>
-       <button class="btn sm" style="margin-top:8px" onclick="openTask(null,{contact_id:${c.id}})">+ Задача клиенту</button>
+       ${canEdit() ? `<button class="btn sm" style="margin-top:8px" onclick="openTask(null,{contact_id:${c.id}})">+ Задача клиенту</button>` : ''}
        <h4 style="margin-top:16px">Заметки</h4>
        <form onsubmit="return addNote(event,'contacts',${c.id})"><textarea name="body" rows="2" required placeholder="Заметка о клиенте…"></textarea><button class="btn sm primary" style="margin-top:6px">Добавить заметку</button></form>
        <div class="list" style="margin-top:10px">${notes.map(n => noteRow(n, 'contacts', c.id, `${n.id},${c.id}`)).join('') || '<small>Заметок нет</small>'}</div>
@@ -2912,7 +2917,7 @@ function competitorTab(c) {
   }
   if (state.compTab === 'reviews') {
     return `<div class="row" style="border:0"><h4>Отзывы клиентов (${(c.reviews || []).length})</h4><button class="btn sm" onclick="addReview(${c.id})">+ Добавить отзыв</button></div>
-     <div class="list">${(c.reviews || []).map(r => `<div class="row"><span><b>${esc(r.author || 'Клиент')}</b> (${r.rating} ${icon('star', 12)}) — <small>${esc(r.source || 'карты')}</small><br>${esc(r.text)}</span><button class="btn sm danger" onclick="delReview(${r.id},${c.id})">${icon('close', 13)}</button></div>`).join('') || '<small>Отзывов пока нет</small>'}</div>`;
+     <div class="list">${(c.reviews || []).map(r => `<div class="row"><span><b>${esc(r.author || 'Клиент')}</b> (${r.rating} ${icon('star', 12)}) — <small>${esc(r.source || 'карты')}</small><br>${esc(r.text)}</span>${canEdit() ? `<button class="btn sm danger" onclick="delReview(${r.id},${c.id})">${icon('close', 13)}</button>` : ''}</div>`).join('') || '<small>Отзывов пока нет</small>'}</div>`;
   }
   if (state.compTab === 'prices') {
     // сравнение считается по текущим данным: обновили цену в каталоге — цифры сразу свежие

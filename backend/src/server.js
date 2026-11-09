@@ -1165,11 +1165,24 @@ async function overdueTick() {
   if (!overdue.length) return;
   const ids = overdue.map(t => t.id);
   db.prepare(`UPDATE tasks SET notified_at=? WHERE id IN (${ids.map(() => '?').join(',')})`).run(today, ...ids);
-  // responsible_id нужен в рассылке: клиент показывает тост только тем, кого
-  // задача касается (своя или неназначенная), а не всей компании
   const list = overdue.map(t => ({ id: t.id, title: t.title, due: t.due, contact: t.contact_name || '', responsible_id: t.responsible_id }));
   log(`Просроченные задачи: ${list.length} (${list.map(t => t.title).slice(0, 3).join('; ')})`);
-  broadcast('notify', { type: 'overdue_tasks', count: list.length, tasks: list });
+  // Адресная рассылка: каждому сотруднику приходят только его собственные
+  // просрочки и неназначенные (их должен кто-то взять). Раньше полный список
+  // уходил всем подключённым, а клиент отсекал чужие задачи — названия чужих
+  // дел текли через поток без надобности.
+  const unassigned = list.filter(t => !t.responsible_id);
+  const byUser = new Map();
+  for (const t of list) if (t.responsible_id) {
+    const k = Number(t.responsible_id);
+    if (!byUser.has(k)) byUser.set(k, []);
+    byUser.get(k).push(t);
+  }
+  for (const c of [...clients]) {
+    const tasks = [...(byUser.get(Number(c.userId)) || []), ...unassigned];
+    if (!tasks.length) continue;
+    try { c.write(`event: notify\ndata: ${JSON.stringify({ type: 'overdue_tasks', count: tasks.length, tasks })}\n\n`); } catch {}
+  }
   const hook = getSetting('NOTIFY_WEBHOOK');
   if (hook) fetch(hook, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ type: 'overdue_tasks', count: list.length, tasks: list, company: getSetting('COMPANY_NAME') }) }).catch(() => {});
 }
@@ -2629,7 +2642,12 @@ ${user?.name || ''}`.trim();
     }
 
     // ===== channels & integrations (all configurable from UI) =====
-    if (p === '/api/channels') return json(res, 200, db.prepare('SELECT * FROM channels ORDER BY id DESC').all());
+    if (p === '/api/channels') {
+      const rows = db.prepare('SELECT * FROM channels ORDER BY id DESC').all();
+      // raw — технический ответ вендора со служебными полями: менеджерам
+      // и наблюдателям он не нужен, а администратору помогает в диагностике
+      return json(res, 200, user.role === 'admin' ? rows : rows.map(r => { const { raw, ...rest } = r; return rest; }));
+    }
     // Своё название канала. Вендор имени не отдаёт, только номер или юзернейм,
     // а каналов у заказчика бывает по одному на сотрудника.
     const mChLabel = p.match(/^\/api\/channels\/(\d+)$/);
