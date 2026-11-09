@@ -110,7 +110,7 @@ export async function sendMail({ host, port = 587, secure, starttls, user, pass,
   const implicitTls = secure ?? Number(port) === 465;
   const useStarttls = secure === false ? false : starttls !== false; // SMTP_SECURE=0 — явный отказ от шифрования
   const messageId = `<${randomBytes(8).toString('hex')}@karkascrm>`;
-  const log = [], GREETING = [];
+  const log = [];
   let socket, secureNow = implicitTls;
 
   const connect = () => new Promise((resolve, reject) => {
@@ -161,7 +161,7 @@ export async function sendMail({ host, port = 587, secure, starttls, user, pass,
     await connect();
     watchSocket();
     startReading();
-    GREETING.push((await readCode(['220'])).line);
+    await readCode(['220']);
     let caps = (await send('EHLO karkascrm', ['250'])).lines.join(' ');
     if (!secureNow && useStarttls) {
       if (/STARTTLS/i.test(caps)) {

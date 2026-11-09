@@ -802,6 +802,7 @@ async function boot() {
     $('#uEmail').textContent = me.user.email;
     $('#uAva').textContent = (me.user.name || 'A')[0].toUpperCase();
     state.me = me.user;
+    loadDrafts(); // черновики читаются заново: ключ зависит от сотрудника
     // роль на теле страницы: для наблюдателя прячем кнопки создания в шапке
     document.body.classList.remove('role-admin', 'role-manager', 'role-viewer');
     document.body.classList.add('role-' + (['admin', 'manager', 'viewer'].includes(me.user.role) ? me.user.role : 'manager'));
@@ -1681,10 +1682,12 @@ async function inbox(v) {
   // а причина спрятана в настройках. Баннер ведёт прямо к кнопке, которая чинит.
   // пока входящих не было, настройки перечитываются: баннер должен исчезнуть
   // сразу после первого сообщения, а не после ручного захода в настройки
-  if (!state.cache.settings || !(state.cache.settings.wazzup && state.cache.settings.wazzup.hook_msgs)) {
+  // баннер про регистрацию вебхука чинится в настройках, а они только у админа:
+  // остальным показывать его бессмысленно, и настройки перечитывать не нужно
+  if (!state.cache.settings || (amAdmin() && !(state.cache.settings.wazzup && state.cache.settings.wazzup.hook_msgs))) {
     state.cache.settings = await api('/api/settings').catch(() => state.cache.settings);
   }
-  const wzN = state.cache.settings && state.cache.settings.wazzup;
+  const wzN = amAdmin() ? (state.cache.settings && state.cache.settings.wazzup) : null;
   const wzNudge = wzN && wzN.configured && !wzN.hook_msgs && !wzN.hook_test_at
     ? `<div class="card tint-warn" style="margin:0 0 10px"><p><small>Wazzup подключён, но сообщения ещё не приходили: у Wazzup не указан входящий адрес этой CRM. Нажмите «Зарегистрировать адрес автоматически» — и входящие появятся здесь. <button type="button" class="btn sm" onclick="state.settingsTab='integrations';go('settings')">Открыть настройки</button></small></p></div>`
     : '';
@@ -1819,11 +1822,25 @@ async function saveQuickNote(e, cid) { e.preventDefault(); await api('/api/notes
 
 // Черновик живёт между разделами и перезагрузкой страницы: недописанный ответ
 // не пропадает, когда сотрудник убежал смотреть карточку клиента.
-function saveDraft(cid) { const t = $('#msgText'); if (!t) return; const v = t.value; if (v.trim()) state.drafts[cid] = v; else delete state.drafts[cid]; pruneDrafts(); try { localStorage.setItem('karkas-drafts', JSON.stringify(state.drafts)); } catch {} }
+function saveDraft(cid) { const t = $('#msgText'); if (!t) return; const v = t.value; if (v.trim()) state.drafts[cid] = v; else delete state.drafts[cid]; pruneDrafts(); try { localStorage.setItem(draftKey(), JSON.stringify(state.drafts)); } catch {} }
 // Черновики давно закрытых диалогов не должны вечно копиться в браузере:
 // держим последние 50, первыми выбываем самые старые
 function pruneDrafts(max = 50) { const keys = Object.keys(state.drafts); while (keys.length > max) delete state.drafts[keys.shift()]; }
-function loadDrafts() { try { state.drafts = JSON.parse(localStorage.getItem('karkas-drafts') || '{}') || {}; } catch { state.drafts = {}; } }
+// Черновики привязаны к сотруднику: на общем компьютере неотправленный текст
+// каждого остаётся своим, так же как тема оформления.
+const draftKey = () => 'karkas-drafts-' + (meId() || 'anon');
+function loadDrafts() {
+  try { state.drafts = JSON.parse(localStorage.getItem(draftKey()) || '{}') || {}; } catch { state.drafts = {}; }
+  // общее хранилище прежних версий переезжает к тому, кто открыл CRM первым,
+  // и больше не копится: ключ сотрудника заменяет его
+  try {
+    const legacy = localStorage.getItem('karkas-drafts');
+    if (legacy && meId()) {
+      if (!Object.keys(state.drafts).length) { state.drafts = JSON.parse(legacy) || {}; pruneDrafts(); localStorage.setItem(draftKey(), JSON.stringify(state.drafts)); }
+      localStorage.removeItem('karkas-drafts');
+    }
+  } catch { try { localStorage.removeItem('karkas-drafts'); } catch {} }
+}
 function autoGrow(el) { el.style.height = 'auto'; el.style.height = Math.min(el.scrollHeight, 140) + 'px'; placeJumpNew(); }
 function msgKey(ev, cid) { if (ev.key === 'Enter' && !ev.shiftKey) { ev.preventDefault(); ev.target.form.requestSubmit(); } }
 function showJumpNew() { const chat = $('.chat'); if (!chat || $('#jumpNew')) return; const b = document.createElement('button'); b.type = 'button'; b.id = 'jumpNew'; b.className = 'jump-new'; b.textContent = 'Новые сообщения ↓'; b.onclick = scrollChatBottom; chat.appendChild(b); placeJumpNew(); }
@@ -2048,7 +2065,7 @@ async function contacts(v) {
     <td><a href="#" onclick="openContactCard(${c.id});return false"><b>${esc(c.name)}</b></a></td><td>${esc(c.phone || '—')}<br><small>${esc(c.email || '')}</small></td><td>${esc(c.company || '—')}</td><td><span class="tag grey">${esc(sourceLabel(c.source))}</span></td>
     <td>${(c.tags || '').split(',').filter(Boolean).map(t => `<span class="tag">${esc(t.trim())}</span>`).join('')}</td>
     <td><small>${esc(__team.find(u => u.id === c.responsible_id)?.name || '—')}</small></td>
-    <td style="white-space:nowrap"><button class="btn sm" onclick="openContactCard(${c.id})">Карточка</button>${canEdit() ? ` <button class="btn sm" onclick="openDeal(${c.id})">+ Сделка</button> <button class="btn sm danger" title="Удалить контакт" onclick="del('contacts',${c.id})">${icon('close', 13)}</button>` : ''}</td></tr>`).join('') || '<tr><td colspan="8"><div class="empty">Контактов не найдено</div></td></tr>'}</table></div>
+    <td style="white-space:nowrap"><button class="btn sm" onclick="openContactCard(${c.id})">Карточка</button>${canEdit() ? ` <button class="btn sm" onclick="openDeal(${c.id})">+ Сделка</button> <button class="btn sm danger" title="Удалить контакт" onclick="del('contacts',${c.id})">${icon('close', 13)}</button>` : ''}</td></tr>`).join('') || '<tr><td colspan="8"><div class="empty">Контактов не найдено — измените фильтры или добавьте клиента</div></td></tr>'}</table></div>
    ${filtered.length > (state.contactLimit || 50) ? `<div style="text-align:center;margin-top:10px"><button class="btn" onclick="showMoreContacts()">Показать ещё 50</button></div>` : ''}</div>`;
 }
 
@@ -2292,9 +2309,34 @@ async function companies(v) {
    ${canEdit() ? `<button class="btn sm primary" style="margin-left:auto" onclick="openCompany()">+ Компания</button>` : ''}</div>
   ${canEdit() ? bulkSlot('companies', `<button class="btn sm danger" onclick="bulkApply('companies','delete')">${icon('trash', 13)} Удалить</button>`) : ''}
   <div class="tbl-scroll"><table><tr><th class="sel"></th><th>Компания</th><th>ИНН</th><th>Телефон</th><th>E-mail</th><th>Сайт</th><th></th></tr>
-   ${shown.slice(0, state.companyLimit || 100).map(c => `<tr class="${selSet('companies').has(c.id) ? 'selected' : ''}"><td class="sel">${canEdit() ? `<input type="checkbox" data-selkey="companies" data-selid="${c.id}" title="Выбрать для массового действия" ${selSet('companies').has(c.id) ? 'checked' : ''} onchange="toggleSel('companies',${c.id})">` : ''}</td><td><b>${esc(c.name)}</b></td><td>${esc(c.inn || '—')}</td><td>${esc(c.phone || '—')}</td><td>${esc(c.email || '—')}</td><td>${siteHref(c.site) ? `<a href="${esc(siteHref(c.site))}" target="_blank" rel="noopener">${esc(c.site)}</a>` : '—'}</td><td style="white-space:nowrap">${canEdit() ? `<button class="btn sm" title="Открыть карточку компании" onclick="openCompany(${c.id})">${icon('edit', 13)} Изменить</button> <button class="btn sm danger" title="Удалить компанию" onclick="del('companies',${c.id})">${icon('close', 13)}</button>` : `<button class="btn sm" onclick="openCompany(${c.id})">Открыть</button>`}</td></tr>`).join('') || '<tr><td colspan="6"><div class="empty">Компаний не найдено — измените поиск или добавьте компанию</div></td></tr>'}</table></div>
+   ${shown.slice(0, state.companyLimit || 100).map(c => `<tr class="${selSet('companies').has(c.id) ? 'selected' : ''}"><td class="sel">${canEdit() ? `<input type="checkbox" data-selkey="companies" data-selid="${c.id}" title="Выбрать для массового действия" ${selSet('companies').has(c.id) ? 'checked' : ''} onchange="toggleSel('companies',${c.id})">` : ''}</td><td><a href="#" onclick="openCompanyCard(${c.id});return false"><b>${esc(c.name)}</b></a></td><td>${esc(c.inn || '—')}</td><td>${esc(c.phone || '—')}</td><td>${esc(c.email || '—')}</td><td>${siteHref(c.site) ? `<a href="${esc(siteHref(c.site))}" target="_blank" rel="noopener">${esc(c.site)}</a>` : '—'}</td><td style="white-space:nowrap">${canEdit() ? `<button class="btn sm" title="Открыть карточку компании" onclick="openCompany(${c.id})">${icon('edit', 13)} Изменить</button> <button class="btn sm danger" title="Удалить компанию" onclick="del('companies',${c.id})">${icon('close', 13)}</button>` : `<button class="btn sm" onclick="openCompanyCard(${c.id})">Открыть</button>`}</td></tr>`).join('') || '<tr><td colspan="7"><div class="empty">Компаний не найдено — измените поиск или добавьте компанию</div></td></tr>'}</table></div>
    ${shown.length > (state.companyLimit || 100) ? `<div style="text-align:center;margin-top:10px"><button class="btn" onclick="showMoreCompanies()">Показать ещё</button></div>` : ''}</div>`;
 }
+// Карточка компании: кто у неё работает и что с ней продаётся.
+// Данные те же, что в списках, — открываются в один клик из таблицы.
+async function openCompanyCard(id) {
+  const c = await api('/api/companies/' + id);
+  const [people, dealsData] = await Promise.all([
+    api('/api/contacts').catch(() => []),
+    // сделки отдаются объектом {pipelines, stages, deals}; без параметра pipeline
+    // список по всем воронкам — карточке компании нужны именно все
+    api('/api/deals').catch(() => ({ deals: [] })),
+  ]);
+  const staff = people.filter(x => Number(x.company_id) === Number(id));
+  const deals = (dealsData.deals || []).filter(x => Number(x.company_id) === Number(id));
+  const sum = deals.reduce((a, d) => a + (Number(d.amount) || 0), 0);
+  openModal(`<div class="modal-head">
+    <div><h3>${esc(c.name)}</h3><small>${esc(c.inn || 'ИНН не указан')}${siteHref(c.site) ? ` · <a href="${esc(siteHref(c.site))}" target="_blank" rel="noopener">${esc(c.site)}</a>` : ''}</small></div>
+    ${canEdit() ? `<button class="btn sm" onclick="openCompany(${c.id})">${icon('edit', 13)} Изменить</button>` : ''}
+  </div>
+  <p>${icon('phone', 13)} <b>${esc(c.phone || '—')}</b><br>${icon('mail', 13)} <b>${esc(c.email || '—')}</b></p>
+  ${c.notes ? `<p class="form-hint">${esc(c.notes)}</p>` : ''}
+  <h4 style="margin-top:14px">Сотрудники клиента (${staff.length})</h4>
+  <div class="list">${staff.map(x => `<div class="row"><span><a href="#" onclick="closeModal();openContactCard(${x.id});return false"><b>${esc(x.name)}</b></a><br><small>${[esc(x.position || ''), esc(x.phone || '')].filter(Boolean).join(' · ') || '—'}</small></span>${canEdit() ? `<button class="btn sm" onclick="closeModal();openDeal(${x.id})">+ Сделка</button>` : ''}</div>`).join('') || '<small>Контактов пока нет — добавьте сотрудника в карточке клиента и выберите эту компанию.</small>'}</div>
+  <h4 style="margin-top:14px">Сделки (${deals.length})${deals.length ? ` · ${fmt(sum)}` : ''}</h4>
+  <div class="list">${deals.map(d => `<div class="row"><span><a href="#" onclick="closeModal();openDealCard(${d.id});return false"><b>${esc(d.title)}</b></a><br><small>${esc(stageLabel(d.stage) || d.stage)} · ${fmt(d.amount)}</small></span></div>`).join('') || '<small>Сделок пока нет.</small>'}</div>`);
+}
+
 async function openCompany(id) {
   const c = id ? await api('/api/companies/' + id) : {};
   if (id) await ensureStages();
@@ -4050,7 +4092,7 @@ const PALETTE_ACTIONS = [
     { ico: 'plus', title: 'Новый контакт', hint: 'добавить клиента', run: () => openContact() },
     { ico: 'plus', title: 'Новая задача', hint: 'поставить дело', run: () => openTask() },
     { ico: 'company', title: 'Новая компания', hint: 'добавить юрлицо', run: () => openCompany() },
-    { ico: 'competitor', title: 'Проверить конкурента', hint: 'найти по ИНН', run: () => { go('competitors'); setTimeout(() => $('#compSearch')?.focus(), 250); } },
+    { ico: 'competitor', title: 'Проверить конкурента', hint: 'поиск и проверка по ИНН', run: () => { go('competitors'); setTimeout(async () => { await openCompetitor(); $('#compFind')?.focus(); }, 300); } },
     { ico: 'upload', title: 'Импорт контактов из CSV', hint: 'загрузить файл', run: () => importContacts() }
   ]},
   { group: 'Интерфейс', items: [

@@ -232,3 +232,26 @@ test('просроченная задача: уведомление адресн
   assert.ok(ev, 'неназначенная просрочка приходит сотруднику');
   assert.ok(!ev.tasks.some(t => t.id === task.data.id), 'чужая назначенная задача в рассылке коллеги не появляется');
 });
+
+test('детали настроек не уходят менеджерам и наблюдателям', async () => {
+  // Секреты кладём прямо в базу: проверяется состав ответов API, а не формы сохранения
+  const setS = (k, v) => db.prepare('INSERT INTO settings(key,value) VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value').run(k, v);
+  setS('WEBHOOK_SECRET', 'hooksecret-123');
+  setS('WAZZUP_WEBHOOK_SECRET', 'wzsecret-456');
+  setS('EMAIL_WEBHOOK_SECRET', 'mailsecret-789');
+  setS('SMTP_HOST', 'mail.example.com');
+  setS('NOTIFY_WEBHOOK', 'https://hooks.example.com/alerts');
+
+  const adm = (await call('/api/settings', { token: admin })).data;
+  assert.equal(adm.webhook.secret, 'hooksecret-123', 'админ видит код защиты формы сайта');
+  assert.equal(adm.wazzup.webhook_secret, 'wzsecret-456', 'админ видит код защиты Wazzup');
+  assert.equal(adm.maintenance.notify_webhook, 'https://hooks.example.com/alerts', 'админ видит адрес уведомлений');
+
+  const mgr = await personalLogin('Настроечный Менеджер', 'settings-mgr@example.com');
+  const r = await call('/api/settings', { token: mgr.token });
+  assert.equal(r.status, 403, 'настройки доступны только администратору');
+  const raw = JSON.stringify(r.data);
+  for (const secret of ['hooksecret-123', 'wzsecret-456', 'mailsecret-789', 'mail.example.com', 'hooks.example.com']) {
+    assert.ok(!raw.includes(secret), 'служебные данные не уходят менеджеру: ' + secret);
+  }
+});

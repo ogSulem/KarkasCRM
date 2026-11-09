@@ -2548,6 +2548,11 @@ ${user?.name || ''}`.trim();
     }
     const mEmail = p.match(/^\/api\/conversations\/(\d+)\/email$/);
     if (mEmail && req.method === 'POST') {
+      // Предел частоты отправок: письма, отправленные потоком — случайно или
+      // намеренно, — грозят блокировкой релея у почтового провайдера, а
+      // разбирается с этим вся компания
+      const rlMail = rateLimit('email:' + user.id, 20, 60000);
+      if (!rlMail.ok) { res.setHeader('Retry-After', String(rlMail.retryAfter || 60)); return json(res, 429, { error: 'Слишком много писем за короткое время — сделайте паузу и повторите' }); }
       const b = await readBody(req);
       const conv = db.prepare('SELECT cv.*,c.phone,c.email FROM conversations cv LEFT JOIN contacts c ON c.id=cv.contact_id WHERE cv.id=?').get(mEmail[1]);
       if (!conv) return json(res, 404, { error: 'Чат не найден' });
