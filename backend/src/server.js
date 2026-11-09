@@ -2967,9 +2967,12 @@ ${user?.name || ''}`.trim();
     }
     const st = statSync(file);
     const ext = extname(file).toLowerCase();
-    const isCode = ext === '.html' || ext === '.js' || ext === '.css';
-    const cacheControl = isCode ? 'no-store, must-revalidate' : 'no-cache';
-    // ETag = размер+время файла: браузер переиспользует копию и страница открывается мгновенно
+    // no-cache — «храни, но сверяй с сервером перед каждым использованием»:
+    // неизменный файл возвращается как 304 за сотни байт вместо полной
+    // перекачки интерфейса при каждом открытии, а после обновления ETag
+    // меняется и браузер сразу забирает новую версию, без жёсткой перезагрузки
+    const cacheControl = 'no-cache';
+    // ETag = размер+время файла: по нему браузер и сверяет свою копию
     const etag = `W/"${st.size.toString(16)}-${Math.round(st.mtimeMs).toString(16)}"`;
     const headers = { 'Content-Type': MIME[ext] || 'application/octet-stream', 'Cache-Control': cacheControl, ETag: etag };
     if (req.headers['if-none-match'] === etag) { res.writeHead(304, headers); return res.end(); }
