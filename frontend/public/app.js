@@ -1749,8 +1749,8 @@ async function inbox(v) {
 
   if (seq !== inboxSeq) return;
   v.innerHTML = `${wzNudge}<div class="inbox${cur ? '' : ' list-only'}">
-   <div class="convs"><div style="padding:10px;border-bottom:1px solid var(--line)"><div class="tabs" style="margin-bottom:8px;flex-wrap:wrap"><button type="button" class="${state.convScope === 'mine' ? '' : 'active'}" onclick="setConvScope('all')">Все чаты</button><button type="button" class="${state.convScope === 'mine' ? 'active' : ''}" onclick="setConvScope('mine')">Мои</button>${canEdit() ? `<button type="button" class="${state.convSelect ? 'active' : ''}" style="margin-left:auto" onclick="toggleConvSelect()" title="Отметить несколько чатов и пометить их прочитанными">Выбрать</button>` : ''}</div><input id="convSearch" placeholder="Поиск диалогов" oninput="filterConvs(this.value)"></div>
-   ${canEdit() && state.convSelect ? bulkBar('convs', `<button class="btn sm" onclick="markConvsRead()">${icon('check', 14)} Прочитано</button>`) : ''}
+   <div class="convs"><div style="padding:10px;border-bottom:1px solid var(--line)"><div class="tabs" style="margin-bottom:8px;flex-wrap:wrap"><button type="button" class="${state.convScope === 'mine' ? '' : 'active'}" onclick="setConvScope('all')">Все чаты</button><button type="button" class="${state.convScope === 'mine' ? 'active' : ''}" onclick="setConvScope('mine')">Мои</button><button type="button" class="${state.convSelect ? 'active' : ''}" style="margin-left:auto" onclick="toggleConvSelect()" title="Отметить несколько чатов и пометить их прочитанными">Выбрать</button></div><input id="convSearch" placeholder="Поиск диалогов" oninput="filterConvs(this.value)"></div>
+   ${state.convSelect ? bulkBar('convs', `<button class="btn sm" onclick="markConvsRead()">${icon('check', 14)} Прочитано</button>`) : ''}
    <div id="convList">${convListHtml(convScopeList(convs), (cur || {}).id, convs)}</div></div>
    <div class="chat">${cur ? `
     <div class="chat-head"><button type="button" class="btn sm chat-back" onclick="closeConv()" aria-label="К списку диалогов">${icon('arrowLeft', 14)}</button><div><b>${esc(cur.title)}</b> <small>${esc(cur.phone || '')}</small></div>
@@ -1850,7 +1850,7 @@ function listStamp(s) {
 }
 // строка беседы: одна на первичный рендер и на фильтрацию, чтобы вид не разъезжался
 function convRow(c, activeId) {
-  const selMode = state.convSelect && canEdit();
+  const selMode = state.convSelect;
   const sel = selSet('convs').has(c.id);
   return `<div class="conv ${c.id === activeId ? 'active' : ''}${c.unread ? ' unread' : ''}${sel ? ' selected' : ''}${selMode ? ' sel-mode' : ''}" onclick="${selMode ? `toggleSel('convs',${c.id})` : `openConv(${c.id})`}">${selMode ? `<input type="checkbox" class="conv-check" data-selkey="convs" data-selid="${c.id}" ${sel ? 'checked' : ''} onclick="event.stopPropagation();toggleSel('convs',${c.id})" title="Отметить чат">` : ''}
     <b><span>${esc(c.title)}</span>${c.unread ? `<span class="badge">${c.unread}</span>` : ''}</b>
@@ -4350,7 +4350,10 @@ function connectSSE() {
   const es = new EventSource('/api/events');
   // после переподключения события за время обрыва не придут задним числом:
   // счётчики сверяются с сервером сразу, как соединение снова открыто
-  es.addEventListener('open', () => { api('/api/dashboard').then(navCounts).catch(() => {}); });
+  es.addEventListener('open', () => {
+    api('/api/dashboard').then(navCounts).catch(() => {});
+    syncMe(); // права и имя подтягиваются после любого обрыва соединения
+  });
   es.addEventListener('notify', e => {
     const d = JSON.parse(e.data);
     if (d.type === 'overdue_tasks') {
@@ -4424,8 +4427,9 @@ function connectSSE() {
   es.addEventListener('change', e => {
     let d = {}; try { d = JSON.parse(e.data); } catch { }
     // команду перечитываем при любом изменении сотрудников: кэш имён
-    // устарел бы до перезагрузки страницы
-    if (d.table === 'users') __team.length = 0;
+    // устарел бы до перезагрузки страницы; свой профиль тоже освежаем —
+    // роль или имя могли поменять именно этому сотруднику
+    if (d.table === 'users') { __team.length = 0; syncMe(); }
     // чужие правки шаблонов и настроек не видны до перезагрузки: кэш
     // сбрасывается, и следующая отрисовка берёт свежие данные с сервера
     if (d.table === 'templates') state.cache.templates = null;
@@ -4450,6 +4454,34 @@ function connectSSE() {
     }, 400);
   });
   return es;
+}
+// Профиль освежается при каждом восстановлении живого канала и при событии
+// про сотрудников: админ поменял роль или имя — интерфейс переключается на
+// новую роль без перезагрузки страницы. Сервер права применяет сразу, здесь
+// подтягивается только отображение.
+async function syncMe() {
+  try {
+    const me = await api('/api/me', { noSessionEnd: true });
+    const u = me && me.user;
+    if (!u) return;
+    const roleChanged = (state.me && state.me.role) !== u.role;
+    state.me = u;
+    $('#uName').textContent = u.name;
+    $('#uEmail').textContent = u.email || '';
+    $('#uAva').textContent = (u.name || 'A')[0].toUpperCase();
+    document.body.classList.remove('role-admin', 'role-manager', 'role-viewer');
+    document.body.classList.add('role-' + (['admin', 'manager', 'viewer'].includes(u.role) ? u.role : 'manager'));
+    const sideInt = $('#sideIntegrations');
+    if (sideInt) sideInt.classList.toggle('hidden', u.role !== 'admin');
+    if (u.must_change_password) {
+      $('#login').classList.add('hidden'); $('#app').classList.add('hidden');
+      $('#passwordChange').classList.remove('hidden');
+      return;
+    }
+    // роль изменилась — разделы перерисовываются под новые права;
+    // открытое модальное окно не сбиваем
+    if (roleChanged && $('#modal').classList.contains('hidden')) render();
+  } catch { /* профиль не освежился — не беда, сервер права уже применил */ }
 }
 function initRealtime() {
   totalStop();

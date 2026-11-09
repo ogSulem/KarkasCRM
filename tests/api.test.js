@@ -330,6 +330,17 @@ test('автоматизации, шаблоны, интеграции, кома
   assert.equal((await call('/api/contacts')).status, 200, 'менеджер видит данные');
   h = { Authorization: 'Bearer ' + vwToken };
   assert.equal((await call('/api/contacts', { method: 'POST', body: JSON.stringify({ name: 'Nope' }) })).status, 403, 'наблюдатель только читает');
+  // Личная метка прочитанного — не изменение общих данных: просмотренный
+  // наблюдателем чат не должен вечно висеть непрочитанным
+  h = adminH;
+  await call('/webhooks/generic', { method: 'POST', body: JSON.stringify({ channel: 'site', phone: '79220001122', name: 'Чат Наблюдателя', body: 'Вопрос команде' }) });
+  const vwConv = (await call('/api/conversations')).body.find(c => (c.phone || '').includes('9220001122'));
+  assert.ok(vwConv, 'чат для проверки наблюдателя создан');
+  h = { Authorization: 'Bearer ' + vwToken };
+  const marked = await call('/api/conversations/read', { method: 'POST', body: JSON.stringify({ ids: [vwConv.id] }) });
+  assert.equal(marked.status, 200, 'наблюдатель отмечает чат прочитанным');
+  assert.equal(marked.body.marked, 1, 'метка сохранена');
+  assert.equal((await call(`/api/conversations/${vwConv.id}/messages`, { method: 'POST', body: JSON.stringify({ body: 'Привет' }) })).status, 403, 'наблюдатель не пишет в чат');
   h = adminH;
 });
 
