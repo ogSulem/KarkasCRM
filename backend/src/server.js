@@ -1761,6 +1761,9 @@ export const server = http.createServer(async (req, res) => {
         contacts: db.prepare('SELECT COUNT(*) n FROM contacts').get().n,
         companies: db.prepare('SELECT COUNT(*) n FROM companies').get().n,
         unread: db.prepare('SELECT COUNT(*) n FROM conversations cv WHERE EXISTS (SELECT 1 FROM messages m WHERE m.conversation_id=cv.id AND m.direction=\'in\' AND m.id > COALESCE((SELECT rm.last_msg_id FROM read_marks rm WHERE rm.conversation_id=cv.id AND rm.user_id=?),0))').get(user.id).n,
+        // личный счётчик непрочитанных: свои беседы, беседы своего клиента и
+        // ничейные — то же правило, что у «Моих задач» и у списка в колокольчике
+        unreadMine: db.prepare("SELECT COUNT(*) n FROM conversations cv LEFT JOIN contacts c ON c.id=cv.contact_id WHERE (cv.assigned_id=? OR c.responsible_id=? OR (cv.assigned_id IS NULL AND c.responsible_id IS NULL)) AND EXISTS (SELECT 1 FROM messages m WHERE m.conversation_id=cv.id AND m.direction='in' AND m.id > COALESCE((SELECT rm.last_msg_id FROM read_marks rm WHERE rm.conversation_id=cv.id AND rm.user_id=?),0))").get(user.id, user.id, user.id).n,
         tasksOpen: db.prepare('SELECT COUNT(*) n FROM tasks WHERE done=0').get().n,
         tasksToday,
         tasksOverdue,
@@ -2201,13 +2204,7 @@ ${link}
 ${company.name || ''}${company.phone ? ', ' + company.phone : ''}
 ${user?.name || ''}`.trim();
       try {
-        await sendMail({
-          host: getSetting('SMTP_HOST'), port: Number(getSetting('SMTP_PORT', '587')),
-          secure: getSetting('SMTP_SECURE') === '1' ? true : getSetting('SMTP_SECURE') === '0' ? false : undefined,
-          user: getSetting('SMTP_USER') || undefined, pass: getSetting('SMTP_PASS') || undefined,
-          from: getSetting('MAIL_FROM') || getSetting('SMTP_USER') || undefined, fromName: getSetting('MAIL_FROM_NAME') || company.name || undefined,
-          to, toName: deal.contact_name || undefined, subject: String(b.subject || '').trim() || `${kind} от ${company.name || 'нашей компании'}`, text,
-        });
+        await sendMail({ ...smtpSettings(), to, toName: deal.contact_name || undefined, subject: String(b.subject || '').trim() || `${kind} от ${company.name || 'нашей компании'}`, text });
       } catch (e) {
         return json(res, 502, { error: 'Письмо не ушло: ' + e.message });
       }
@@ -2548,7 +2545,7 @@ ${user?.name || ''}`.trim();
       if (mailText.length > 100000) return json(res, 400, { error: 'Письмо слишком длинное: предел 100 000 символов. Сократите текст или приложите документ ссылкой.' });
       let send = { delivered: false, mode: 'not-configured' }, status = 'error';
       try {
-        const r = await sendMail({ host: getSetting('SMTP_HOST'), port: Number(getSetting('SMTP_PORT', '587')), secure: getSetting('SMTP_SECURE') === '1' ? true : getSetting('SMTP_SECURE') === '0' ? false : undefined, user: getSetting('SMTP_USER'), pass: getSetting('SMTP_PASS'), from: getSetting('MAIL_FROM') || getSetting('SMTP_USER'), fromName: getSetting('COMPANY_NAME', 'CRM'), to, toName: conv.title || '', subject: String(b.subject || '').slice(0, 200) || 'Письмо от ' + getSetting('COMPANY_NAME', 'CRM'), text: mailText });
+        const r = await sendMail({ ...smtpSettings(), to, toName: conv.title || '', subject: String(b.subject || '').slice(0, 200) || 'Письмо от ' + getSetting('COMPANY_NAME', 'CRM'), text: mailText });
         send = { delivered: true, mode: 'smtp', id: r.messageId }; status = 'sent';
       } catch (e) { send = { delivered: false, mode: 'error: ' + e.message } }
       const ins = db.prepare('INSERT INTO messages(conversation_id,channel,direction,body,subject,status,author) VALUES(?,?,?,?,?,?,?)').run(conv.id, 'email', 'out', mailText, String(b.subject || '').slice(0, 200), status, user.name);
@@ -2681,7 +2678,7 @@ ${user?.name || ''}`.trim();
       const to = b.to || getSetting('SMTP_TEST_TO') || getSetting('SMTP_USER') || getSetting('MAIL_FROM');
       if (!to) return json(res, 400, { error: 'Укажите адрес получателя тестового письма' });
       try {
-        const out = await sendMail({ host: getSetting('SMTP_HOST'), port: Number(getSetting('SMTP_PORT', '587')), secure: getSetting('SMTP_SECURE') === '1' ? true : getSetting('SMTP_SECURE') === '0' ? false : undefined, user: getSetting('SMTP_USER'), pass: getSetting('SMTP_PASS'), from: getSetting('MAIL_FROM') || getSetting('SMTP_USER'), fromName: getSetting('COMPANY_NAME', 'CRM'), to, subject: 'КаркасCRM: проверка почты', text: `Почта настроена верно. Письмо отправлено ${new Date().toLocaleString('ru-RU')}.` });
+        const out = await sendMail({ ...smtpSettings(), to, subject: 'КаркасCRM: проверка почты', text: `Почта настроена верно. Письмо отправлено ${new Date().toLocaleString('ru-RU')}.` });
         setSetting('SMTP_TEST_TO', to); log(`Проверочное письмо отправлено на ${to}`, null, null, user.name);
         return json(res, 200, { ok: true, to, messageId: out.messageId });
       } catch (e) { return json(res, 400, { ok: false, error: e.message }) }

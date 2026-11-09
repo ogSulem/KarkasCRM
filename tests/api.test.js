@@ -1292,6 +1292,32 @@ test('непрочитанные личные: чтение одного сот�
   assert.equal((await call('/api/dashboard', { headers: mh })).body.unread, d0m, 'счётчик менеджера тоже вернулся к базовому');
 });
 
+test('счётчик непрочитанных чатов личный: чужая беседа не будит весь офис', async () => {
+  // отдельный менеджер: у прежней учётки сюита пароль уже менялся принудительно
+  await call('/api/users', { method: 'POST', body: JSON.stringify({ name: 'Счётчик Чатов', email: 'unreadmine@example.com', password: 'unreadmine12345', role: 'manager' }) });
+  const mgrLogin = await readyLogin('/api/auth/login', { method: 'POST', body: JSON.stringify({ email: 'unreadmine@example.com', password: 'unreadmine12345' }) });
+  const mh = { Authorization: 'Bearer ' + mgrLogin.body.token };
+  const hook = body => fetch(base + '/webhooks/wazzup?secret=hook-secret-1', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) }).then(r => r.status);
+  const meAdmin = (await call('/api/me')).body.user;
+  const m0a = (await call('/api/dashboard')).body.unreadMine;
+  const m0m = (await call('/api/dashboard', { headers: mh })).body.unreadMine;
+  const d0m = (await call('/api/dashboard', { headers: mh })).body.unread;
+  // новый клиент написал впервые: чат ничей, и он на счету у обоих
+  assert.equal(await hook({ messages: [{ messageId: 'wz-unread-mine-1', channelId: 'ch-um', chatType: 'whatsapp', chatId: '79000000006', type: 'text', text: 'Ничейное обращение', status: 'inbound', contact: { name: 'Ничей Клиент', phone: '79000000006' } }] }), 200);
+  assert.equal((await call('/api/dashboard')).body.unreadMine, m0a + 1, 'админу ничейный чат попал в личный счётчик');
+  assert.equal((await call('/api/dashboard', { headers: mh })).body.unreadMine, m0m + 1, 'менеджеру тоже: ничейные разбирают все');
+  assert.equal((await call('/api/dashboard', { headers: mh })).body.unread, d0m + 1, 'общий счётчик вырос у обоих');
+  // клиента забрал администратор: у менеджера чат уходит из личного счётчика,
+  // но общий счётчик непрочитанных от назначения не меняется
+  const conv = (await call('/api/conversations')).body.find(c => c.external_chat_id === '79000000006');
+  assert.ok(conv, 'беседа найдена');
+  const r = await call('/api/bulk', { method: 'POST', body: JSON.stringify({ table: 'contacts', action: 'update', ids: [conv.contact_id], patch: { responsible_id: meAdmin.id } }) });
+  assert.equal(r.body.count, 1, 'клиент закреплён за администратором');
+  assert.equal((await call('/api/dashboard')).body.unreadMine, m0a + 1, 'у администратора чат остался в личном счётчике');
+  assert.equal((await call('/api/dashboard', { headers: mh })).body.unreadMine, m0m, 'у менеджера чужой чат из личного счётчика исчез');
+  assert.equal((await call('/api/dashboard', { headers: mh })).body.unread, d0m + 1, 'общий счётчик назначение не меняет');
+});
+
 test('исходящие из другой CRM видны в чате, эхо своих не дублируется, отметка «прочитано» пачкой', async () => {
   const hook = body => fetch(base + '/webhooks/wazzup?secret=hook-secret-1', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) }).then(r => r.status);
   // беседа создаётся обычным входящим
