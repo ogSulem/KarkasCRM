@@ -121,6 +121,7 @@ th,td{overflow-wrap:break-word}
    конкуренты, сотрудники и каталог — там от шести до восьми колонок */
 .tbl-scroll{overflow-x:auto;-webkit-overflow-scrolling:touch}
 tr:hover td{background:#fafcfb}
+tr.selected td,tr.selected:hover td{background:var(--green-l)}
 .tag{display:inline-block;background:var(--green-l);color:#166534;border-radius:999px;padding:2px 9px;font-size:12.5px;margin:1px 3px 1px 0}
 .tag.orange{background:var(--orange-l);color:#9a3412}
 .tag.grey{background:#f1f5f9;color:#475569}
@@ -135,6 +136,7 @@ tr:hover td{background:#fafcfb}
 .btn-col-add:hover{background:rgba(0,0,0,.08);color:var(--ink)}
 .deal{position:relative;background:#fff;border:1px solid var(--line);border-left:3px solid var(--green);border-radius:11px;padding:10px;cursor:grab;box-shadow:0 1px 2px rgba(15,23,42,.05);display:block;transition:transform .15s cubic-bezier(0.4,0,0.2,1),box-shadow .15s cubic-bezier(0.4,0,0.2,1)}
 .deal:hover{transform:translateY(-2px);box-shadow:0 8px 18px -6px rgba(15,23,42,.12)}
+.deal.selected{background:var(--green-l);box-shadow:inset 0 0 0 2px var(--green)}
 .deal b{font-size:14px;display:block;margin-bottom:2px}
 .deal .sum{color:var(--green-d);font-weight:700}
 .deal small{display:block;margin-top:4px}
@@ -426,6 +428,8 @@ html[data-theme=dark] .user-menu{background:var(--card);border-color:var(--line)
 html[data-theme=dark] .user-menu-item{color:var(--ink)}
 html[data-theme=dark] .user-menu-item:hover{background:#123326;color:#86efac}
 html[data-theme=dark] .taskrow.selected{background:#123326!important}
+html[data-theme=dark] tr.selected td,html[data-theme=dark] tr.selected:hover td{background:#123326}
+html[data-theme=dark] .deal.selected{background:#123326;box-shadow:inset 0 0 0 2px #166534}
 html[data-theme=dark] .btn.sm.mark{color:var(--green);border-color:var(--green)}
 html[data-theme=dark] .btn.sm.mark:hover{background:var(--green-l);color:#86efac}
 html[data-theme=dark] .btn.sm.mark.done{background:var(--green);color:#04170c;border-color:var(--green)}

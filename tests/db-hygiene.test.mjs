@@ -129,11 +129,13 @@ test('старые «висячие» строки убираются, данн�
   db.prepare("INSERT INTO deal_products(deal_id,name,price,qty) VALUES(999999,'сирота',1,1)").run();
   db.prepare("INSERT INTO tasks(title,deal_id,contact_id) VALUES('сирота',999999,999999)").run();
   db.prepare("INSERT INTO conversations(contact_id,title) VALUES(999999,'сирота')").run();
+  db.prepare("INSERT INTO price_rows(scope,competitor_id,item,price) VALUES('competitor',999999,'сирота',5)").run();
   const conv = db.prepare("SELECT id FROM conversations WHERE title='сирота'").get().id;
   db.prepare("INSERT INTO messages(conversation_id,body) VALUES(?,'сирота')").run(conv);
   db.exec('PRAGMA foreign_keys=ON');
   const before = auditDatabase(db);
-  assert.ok(before.orphanTotal >= 6, 'аудит видит все виды сирот');
+  assert.ok(before.orphanTotal >= 7, 'аудит видит все виды сирот');
+  assert.equal(before.orphans.compPrices, 1, 'прайс удалённого конкурента виден аудиту');
   const cleaned = cleanupOrphans(db);
   assert.ok(Object.values(cleaned).reduce((a, b) => a + b, 0) >= 6);
   const after = auditDatabase(db);

@@ -31,6 +31,8 @@ const CHECKS = {
     WHERE contact_id IS NOT NULL AND NOT EXISTS (SELECT 1 FROM contacts WHERE id = deals.contact_id)`,
   deals_company: `SELECT COUNT(*) n FROM deals
     WHERE company_id IS NOT NULL AND NOT EXISTS (SELECT 1 FROM companies WHERE id = deals.company_id)`,
+  compPrices: `SELECT COUNT(*) n FROM price_rows
+    WHERE scope='competitor' AND competitor_id IS NOT NULL AND NOT EXISTS (SELECT 1 FROM competitors WHERE id = price_rows.competitor_id)`,
 };
 
 const TABLES = ['users', 'companies', 'contacts', 'pipelines', 'stages', 'deals', 'tasks', 'notes',
@@ -60,7 +62,7 @@ export function auditDatabase(db) {
  * клиента. Данные пользователей не затрагиваются.
  */
 export function cleanupOrphans(db) {
-  const removed = { notes: 0, deal_products: 0, conversations: 0, messages: 0, tasksUnlinked: 0, contactsUnlinked: 0, dealsUnlinked: 0 };
+  const removed = { notes: 0, deal_products: 0, conversations: 0, messages: 0, tasksUnlinked: 0, contactsUnlinked: 0, dealsUnlinked: 0, compPrices: 0 };
   db.exec('BEGIN IMMEDIATE');
   try {
     const run = sql => db.prepare(sql).run().changes;
@@ -85,6 +87,14 @@ export function cleanupOrphans(db) {
       WHERE company_id IS NOT NULL AND NOT EXISTS (SELECT 1 FROM companies WHERE id = deals.company_id)`);
     db.exec('COMMIT');
   } catch (e) { try { db.exec('ROLLBACK') } catch {} throw e }
+  // Строки прайса конкурентов хранятся без внешнего ключа: убираем строки
+  // удалённых карточек вне основной транзакции, чтобы старая база без модуля
+  // конкурентов не ломала всю уборку
+  try {
+    removed.compPrices += db.prepare(`DELETE FROM price_rows
+      WHERE scope='competitor' AND competitor_id IS NOT NULL
+        AND NOT EXISTS (SELECT 1 FROM competitors WHERE id = price_rows.competitor_id)`).run().changes;
+  } catch { /* старая база без таблиц конкурентов */ }
   return removed;
 }
 

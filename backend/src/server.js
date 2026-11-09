@@ -2772,7 +2772,10 @@ ${user?.name || ''}`.trim();
       const fields = CRUD[table];
       if (!fields || !ids.length) return json(res, 400, { error: 'Нечего обрабатывать: укажите таблицу и хотя бы одну запись' });
       if (ids.length > 500) return json(res, 400, { error: 'За один раз можно изменить не больше 500 записей' });
-      if ((b.action === 'delete' && (table === 'products' || table === 'automations')) && !requireAdmin(user, res)) return;
+      // Каталог — администраторская зона: массовые операции закрыты остальным
+      // так же, как одиночные правки прайса
+      if (table === 'products' && !requireAdmin(user, res)) return;
+      if (b.action === 'delete' && table === 'automations' && !requireAdmin(user, res)) return;
       if (b.action === 'delete' && table === 'templates') {
         // шаблоны личные: массово удаляем только свои, чужие не трогаем
         const st = db.prepare('DELETE FROM templates WHERE id=? AND user_id=?');

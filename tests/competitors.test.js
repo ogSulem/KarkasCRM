@@ -10,7 +10,7 @@ process.env.DATA_DIR = '/tmp/karkas-competitors-' + Date.now();
 process.env.PORT = '18088';
 // внешние источники замоканы на localhost — разрешаем внутренние адреса
 process.env.ALLOW_PRIVATE_FETCH = '1';
-const { server } = await import('../backend/src/server.js');
+const { server, db } = await import('../backend/src/server.js');
 const base = 'http://127.0.0.1:18088';
 const INN = '7700000009', OGRN = '1027700000001';
 let h, mocks = {}, calls = [];
@@ -260,9 +260,24 @@ test('конкурент редактируется и удаляется', asyn
   const patched = await call('/api/competitors/' + id, { method: 'PATCH', body: JSON.stringify({ name: 'ООО Изменённый', website: 'https://example.com' }) });
   assert.equal(patched.body.name, 'ООО Изменённый');
   assert.equal(patched.body.website, 'https://example.com');
+  await call(`/api/competitors/${id}/prices`, { method: 'POST', body: JSON.stringify({ scope: 'competitor', text: 'Позиция удаляемого;100;шт' }) });
   const del = await call('/api/competitors/' + id, { method: 'DELETE' });
   assert.equal(del.body.deleted, true);
   assert.equal((await call('/api/competitors/' + id)).status, 404);
+  assert.equal(db.prepare("SELECT COUNT(*) n FROM price_rows WHERE scope='competitor' AND competitor_id=?").get(id).n, 0, 'прайс удалённой карточки не остаётся в базе');
+});
+
+test('массовое удаление конкурентов чистит карточки и их прайсы', async () => {
+  const a = await call('/api/competitors', { method: 'POST', body: JSON.stringify({ name: 'ООО «Массовый А»' }) });
+  const b = await call('/api/competitors', { method: 'POST', body: JSON.stringify({ name: 'ООО «Массовый Б»' }) });
+  await call(`/api/competitors/${a.body.id}/prices`, { method: 'POST', body: JSON.stringify({ scope: 'competitor', text: 'Позиция А;100;шт' }) });
+  const del = await call('/api/competitors/bulk-delete', { method: 'POST', body: JSON.stringify({ ids: [a.body.id, b.body.id, a.body.id, 999999] }) });
+  assert.equal(del.status, 200);
+  assert.equal(del.body.deleted, 2, 'повторы и несуществующие id не ломают счёт');
+  assert.equal((await call('/api/competitors/' + a.body.id)).status, 404);
+  assert.equal(db.prepare("SELECT COUNT(*) n FROM price_rows WHERE scope='competitor' AND competitor_id=?").get(a.body.id).n, 0, 'прайсы обеих карточек удалены');
+  const empty = await call('/api/competitors/bulk-delete', { method: 'POST', body: JSON.stringify({ ids: [] }) });
+  assert.equal(empty.status, 400, 'пустой список — понятная ошибка');
 });
 
 test('наш прайс загружается из настроек: знакомые позиции обновляются, новые добавляются', async () => {
