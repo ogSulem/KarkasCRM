@@ -897,13 +897,16 @@ const SKELETONS = {
 };
 
 async function go(view, subTab) {
+  const prevView = state.view;
   state.view = view;
   if (subTab) state.settingsTab = subTab;
   $$('#nav button').forEach(b => b.classList.toggle('active', b.dataset.view === view));
   const [t, sub] = TITLES[view] || [view, ''];
   $('#title').textContent = t; $('#subtitle').textContent = sub;
   const v = $('#view');
-  v.innerHTML = (SKELETONS[state.view] || SKELETONS.dashboard)();
+  // Переключение внутри раздела (диалог в чатах, вкладка настроек) скелет не
+  // показывает: экран не мигает, прежнее содержимое сменяется новым за один раз
+  if (prevView !== view) v.innerHTML = (SKELETONS[state.view] || SKELETONS.dashboard)();
   await render();
 }
 
@@ -3935,6 +3938,9 @@ async function saveUser(e, id) {
   btn.disabled = true;
   try {
     await api(id ? '/api/users/' + id : '/api/users', { method: id ? 'PATCH' : 'POST', body: JSON.stringify(b) });
+    // список сотрудников перечитывается: новый человек сразу попадает
+    // в выпадашки ответственных, а отключённый из них исчезает
+    __team.length = 0;
     closeModal();
     if (b.password) {
       const credentials = `КаркасCRM — данные для входа\nАдрес: ${humanOrigin((state.cache.settings && state.cache.settings.public_url) || location.origin)}\nИмя: ${b.name}\nE-mail: ${b.email}\nВременный пароль: ${b.password}\n\nПри первом входе задайте личный пароль (не менее 12 символов). Не передавайте эти данные другим людям.`;
@@ -4305,6 +4311,31 @@ function totalStop() {
   if (realtime) { try { realtime.close() } catch {} realtime = null; }
   if (navTimer) { clearInterval(navTimer); navTimer = null; }
 }
+// Какой раздел какие таблицы показывает: при серверных событиях перерисовываются
+// только разделы, которых изменение касается. Ценник в каталоге не должен
+// перечитывать список задач, а проверка конкурента — доску сделок.
+const VIEW_TABLES = {
+  dashboard: ['deals', 'tasks', 'pipelines', 'contacts'],
+  pipe: ['deals', 'pipelines', 'tasks', 'contacts', 'companies', 'users'],
+  tasks: ['tasks', 'deals', 'contacts', 'users'],
+  contacts: ['contacts', 'companies', 'users'],
+  companies: ['companies'],
+  products: ['products'],
+  analytics: ['deals', 'contacts', 'pipelines', 'users'],
+  competitors: ['competitors', 'products'],
+  settings: [], // формы настроек события не дёргают: заполнение не сбивается;
+  // список «Команда» обновляется адресной веткой ниже
+};
+const KNOWN_TABLES = new Set(['tasks', 'deals', 'contacts', 'companies', 'products', 'templates',
+  'automations', 'notes', 'pipelines', 'competitors', 'channels', 'conversations', 'settings', 'users']);
+function viewCaresAbout(view, table) {
+  const list = VIEW_TABLES[view];
+  if (!list) return false;
+  if (!table || table === 'all') return true;
+  if (!KNOWN_TABLES.has(table)) return true; // незнакомая таблица — лучше лишнее обновление
+  return list.includes(table);
+}
+
 function connectSSE() {
   const es = new EventSource('/api/events');
   // после переподключения события за время обрыва не придут задним числом:
@@ -4329,7 +4360,6 @@ function connectSSE() {
         title: 'Вам передали сделку', kind: 'task', text: d.title,
         actionLabel: 'Открыть сделку', onAction: () => openDealCard(d.id),
       });
-      api('/api/dashboard').then(navCounts).catch(() => {});
     }
     if (d.type === 'contact_assigned') {
       notify({
@@ -4344,7 +4374,6 @@ function connectSSE() {
         actionLabel: 'Открыть задачу',
         onAction: () => openTask(d.id),
       });
-      api('/api/dashboard').then(navCounts).catch(() => {});
     }
     if (d.type === 'bulk_assigned') {
       // при массовой передаче — один тост со сводкой, а не сотня одинаковых
@@ -4353,7 +4382,6 @@ function connectSSE() {
         title: 'Вам передали записи', kind: 'task', text: `${d.count} ${where[1]}`,
         actionLabel: 'Посмотреть', onAction: () => go(where[0]),
       });
-      api('/api/dashboard').then(navCounts).catch(() => {});
     }
     // уведомления касаются задач и передач: ленту чатов они не меняют,
     // на рабочем столе плитки «Требует внимания» перерисовываем
@@ -4383,7 +4411,11 @@ function connectSSE() {
     }
     api('/api/dashboard').then(navCounts).catch(() => {});
   });
-  es.addEventListener('change', () => {
+  es.addEventListener('change', e => {
+    let d = {}; try { d = JSON.parse(e.data); } catch { }
+    // команду перечитываем при любом изменении сотрудников: кэш имён
+    // устарел бы до перезагрузки страницы
+    if (d.table === 'users') __team.length = 0;
     // совместная работа: списки обновляются у всех, но открытую карточку не сбиваем.
     // Перерисовку склеиваем: при массовом импорте событий приходит много, а запрос нужен один.
     clearTimeout(__changeTimer);
@@ -4393,7 +4425,13 @@ function connectSSE() {
       // чаты обновляем и при чужих сообщениях-событиях: коллега взял диалог
       // или ответил — список «Мои/Все» должен это отражать без F5
       if (state.view === 'inbox') { refreshInbox(); return; }
-      if (['pipe', 'dashboard', 'contacts', 'companies', 'tasks', 'products', 'analytics', 'competitors'].includes(state.view)) render();
+      // раздел перечитывается, только когда изменение касается его таблиц;
+      // в настройках живым остаётся лишь список команды — формы не сбиваются
+      if (state.view === 'settings') {
+        if (state.settingsTab === 'team' && d.table === 'users') render();
+        return;
+      }
+      if (viewCaresAbout(state.view, d.table)) render();
     }, 400);
   });
   return es;

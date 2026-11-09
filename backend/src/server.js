@@ -2355,6 +2355,7 @@ ${user?.name || ''}`.trim();
         const email = b.email.trim().toLowerCase();
         if (db.prepare('SELECT id FROM users WHERE email=?').get(email)) return json(res, 409, { error: 'Этот e-mail уже используется' });
         const r = db.prepare('INSERT INTO users(name,email,pass,role,active,must_change_password) VALUES(?,?,?,?,?,1)').run(b.name.trim(), email, hashPass(b.password), b.role || 'manager', b.active ?? 1);
+        broadcast('change', { table: 'users' });
         return json(res, 201, { id: r.lastInsertRowid });
       }
     }
@@ -2377,6 +2378,7 @@ ${user?.name || ''}`.trim();
       const ks = ['name', 'email', 'role', 'active'].filter(k => b[k] !== undefined);
       if (ks.length) db.prepare(`UPDATE users SET ${ks.map(k => k + '=?')} WHERE id=?`).run(...ks.map(k => b[k]), id);
       if (b.password || b.active === 0 || b.role !== undefined) closeUserStreams(id);
+      broadcast('change', { table: 'users' });
       return json(res, 200, { saved: true });
     }
     if (p === '/api/custom-fields') {
@@ -3021,7 +3023,9 @@ const graceful = (sig) => {
   for (const res of clients) { try { res.end(); } catch {} }
   clients.clear();
   scheduler && clearInterval(scheduler);
-  server.close(() => { try { db.exec('PRAGMA wal_checkpoint(TRUNCATE)'); db.close(); } catch {} process.exit(0); });
+  // PRAGMA optimize обновляет статистику для планировщика запросов: следующая
+  // версия стартует с актуальными данными о том, как быстрее читать базу
+  server.close(() => { try { db.exec('PRAGMA optimize'); db.exec('PRAGMA wal_checkpoint(TRUNCATE)'); db.close(); } catch {} process.exit(0); });
   // если что-то зависло — принудительный выход через 5 секунд
   setTimeout(() => process.exit(0), 5000).unref();
 };
