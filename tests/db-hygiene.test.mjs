@@ -199,3 +199,16 @@ test('лента активности ограничена 20 000 события
   assert.ok(removed >= 5, 'лишние события удалены');
   assert.equal(db.prepare('SELECT COUNT(*) n FROM activities').get().n, 20);
 });
+
+
+test('счётчик непрочитанного опирается на покрывающий индекс', () => {
+  const row = db.prepare("SELECT name FROM sqlite_master WHERE type='index' AND name='idx_msg_conv_dir'").get();
+  assert.ok(row, 'индекс messages(conversation_id,direction,id) создан при старте');
+  const plan = db.prepare(`EXPLAIN QUERY PLAN
+    SELECT COUNT(*) n FROM conversations cv
+    WHERE EXISTS (SELECT 1 FROM messages m
+      WHERE m.conversation_id=cv.id AND m.direction='in'
+        AND m.id > COALESCE((SELECT rm.last_msg_id FROM read_marks rm WHERE rm.conversation_id=cv.id AND rm.user_id=1),0))`).all()
+    .map(r => r.detail).join(' | ');
+  assert.match(plan, /idx_msg_conv_dir/, 'планировщик использует индекс, а не перебор сообщений');
+});
