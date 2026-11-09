@@ -241,7 +241,8 @@ test('копия уходит в хранилище один раз и не ду
   try {
     const first = await run(process.execPath, ['scripts/upload-backup.mjs'], { cwd: root, env });
     assert.match(first.stdout, /Отправлено сейчас: 1/);
-    assert.equal(seen.length, 1);
+    const puts = () => seen.filter(x => x.method === 'PUT');
+    assert.equal(puts().length, 1);
     assert.equal(seen[0].method, 'PUT');
     // path-style: ведро входит в путь. Без него хранилище ответило бы
     // SignatureDoesNotMatch или NoSuchBucket, и копия осталась бы только на сервере
@@ -254,11 +255,48 @@ test('копия уходит в хранилище один раз и не ду
 
     const second = await run(process.execPath, ['scripts/upload-backup.mjs'], { cwd: root, env });
     assert.match(second.stdout, /Отправлено сейчас: 0/);
-    assert.equal(seen.length, 1, 'повторный запуск не заливает тот же файл снова');
+    assert.equal(puts().length, 1, 'повторный запуск не заливает тот же файл снова');
     assert.ok(existsSync(join(dir, '.uploaded.json')));
     assert.ok(JSON.parse(readFileSync(join(dir, '.uploaded.json'), 'utf8'))['crm-2026-10-20-0300.db']);
   } finally {
     await new Promise(r => server.close(r));
+  }
+});
+
+test('скрипт выгрузки хранит в ведре только последние копии и не копит состояние', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'karkas-s3keep-'));
+  mkdirSync(join(dir, 'backups'), { recursive: true });
+  writeFileSync(join(dir, 'backups', 'crm-2026-10-20-0300.db'), Buffer.alloc(64, 3));
+  // запись о файле, которого давно нет: состояние скрипта не должно расти годами
+  writeFileSync(join(dir, '.uploaded.json'), JSON.stringify({ 'crm-2020-01-01.db': '1-1' }));
+
+  const s3 = fakeS3({ pageSize: 5 });
+  await s3.start();
+  // в ведре уже 16 старых копий — как после года ежедневных выгрузок
+  for (let i = 1; i <= 16; i++) {
+    const day = String(i).padStart(2, '0');
+    s3.store.set(`/karkas-backups/karkascrm/crm-2026-09-${day}.db`, Buffer.alloc(8));
+  }
+  const env = {
+    ...process.env, S3_ENDPOINT: `http://127.0.0.1:${s3.port()}`, S3_BUCKET: 'karkas-backups',
+    S3_ACCESS_KEY: 'key', S3_SECRET_KEY: 'secret', DATA_DIR: dir, S3_KEEP: '14',
+  };
+  try {
+    const out = await run(process.execPath, ['scripts/upload-backup.mjs'], { cwd: root, env });
+    assert.match(out.stdout, /Отправлено сейчас: 1/);
+    assert.equal(s3.stats.puts, 1, 'новая копия загружена');
+    assert.match(out.stdout, /Удалено старых копий в хранилище: 3/, 'лишние копии удалены');
+    assert.equal(s3.stats.deletes, 3);
+    assert.ok(s3.stats.lists >= 4, 'список дособран по страницам: ' + s3.stats.lists);
+    const left = [...s3.store.keys()].filter(k => k.endsWith('.db')).sort();
+    assert.equal(left.length, 14);
+    assert.ok(!left.some(k => k.includes('crm-2026-09-01')), 'самая старая копия удалена');
+    assert.ok(left.some(k => k.includes('crm-2026-10-20')), 'свежая копия на месте');
+    const state = JSON.parse(readFileSync(join(dir, '.uploaded.json'), 'utf8'));
+    assert.ok(!('crm-2020-01-01.db' in state), 'запись о пропавшем файле убрана');
+    assert.ok(state['crm-2026-10-20-0300.db'], 'загруженный файл отмечен');
+  } finally {
+    await new Promise(r => s3.srv.close(r));
   }
 });
 

@@ -46,6 +46,12 @@ fi
 # PROFILE намеренно без кавычек: пустая строка должна исчезнуть, а не стать аргументом
 docker compose ${PROFILE} up -d --build
 
+# Мусор после пересборки не копится: удаляем висячие образы (без тега, не нужны
+# ни одному контейнеру) и устаревший кэш сборки, оставляя 1 ГБ для быстрых
+# повторных сборок. На старых docker команды могут отсутствовать — пропускаем.
+docker image prune -f >/dev/null 2>&1 || true
+docker builder prune -f --keep-storage 1GB >/dev/null 2>&1 || true
+
 PORT=$(grep -E '^CRM_PORT=' .env 2>/dev/null | cut -d= -f2- || true); PORT=${PORT:-8080}
 sleep 2
 if curl -fsS --max-time 5 "http://127.0.0.1:${PORT}/api/health" >/dev/null 2>&1; then
