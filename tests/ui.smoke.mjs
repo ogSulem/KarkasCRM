@@ -52,7 +52,7 @@ window.__state = state;
 window.__setTeam = t => { __team.length = 0; __team.push(...t); };
 Object.assign(window, {
   SKELETONS, toggleTheme, applyTheme, openPalette, closePalette, toggleSel, clearSel,
-  siteFormCode, bulkApply, openContactCard, openDealCard, api, get token() { return token },
+  siteFormCode, bulkApply, openContactCard, openDealCard, openCompanyCard, api, get token() { return token },
   icon, normalizeDue, taskDueMeta, isAscii, endSession, togglePass,
   toggleUserMenu, closeUserMenu, userOptions, bulkOwner, ICON_PATHS, msgHtml, channelOptions,
   uploadChatFile, toggleDeadChannels, checkHealth,
@@ -671,6 +671,9 @@ try {
   check('отмеченная строка компании подсвечена', $(`#view tr input[data-selkey="companies"][data-selid="${selComp.id}"]`).checked && $(`#view tr input[data-selkey="companies"][data-selid="${selComp.id}"]`).closest('tr').classList.contains('selected'));
   window.clearSel('companies'); await wait(150);
   check('после снятия выбора галочка компании сброшена', $(`#view tr input[data-selkey="companies"][data-selid="${selComp.id}"]`).checked === false && !/bulkbar/.test($('#view').innerHTML));
+  await window.openCompanyCard(selComp.id); await wait(350);
+  check('карточка компании показывает сотрудников клиента и сделки', /Сотрудники клиента/.test($('#modalBody').textContent) && /Сделки/.test($('#modalBody').textContent) && /ООО «Проверка выбора»/.test($('#modalBody').textContent));
+  window.closeModal(); await wait(120);
   await window.api('/api/companies/' + selComp.id, { method: 'DELETE' });
   const selRival = await window.api('/api/competitors', { method: 'POST', body: JSON.stringify({ name: 'ООО «Проверка панели»' }) });
   window.go('competitors'); await wait(500);
