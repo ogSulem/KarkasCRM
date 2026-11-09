@@ -1452,6 +1452,31 @@ try {
       window.viewCaresAbout('tasks', 'tasks') && window.viewCaresAbout('pipe', 'contacts')
       && !window.viewCaresAbout('tasks', 'products') && !window.viewCaresAbout('settings', 'deals')
       && window.viewCaresAbout('dashboard', 'all') && window.viewCaresAbout('contacts', 'новая-таблица'));
+    // Чаты перечитываются только на событиях про переписку, клиентов, каналы,
+    // сотрудников, шаблоны и настройки; ценник и задачи диалоги не дёргают
+    check('чаты обновляются только на событии про переписку и её окружение',
+      window.inboxCaresAbout('conversations') && window.inboxCaresAbout('contacts')
+      && window.inboxCaresAbout('templates') && window.inboxCaresAbout('settings')
+      && window.inboxCaresAbout('all') && window.inboxCaresAbout('новая-таблица')
+      && !window.inboxCaresAbout('products') && !window.inboxCaresAbout('tasks')
+      && !window.inboxCaresAbout('competitors') && !window.inboxCaresAbout('deals'));
+    // Не-админ не должен на каждой перерисовке чатов запрашивать настройки:
+    // сервер ему их всё равно не отдаёт, а лишний 403 на каждый заход — шум
+    {
+      const prevRole = window.__state.me.role, prevView = window.__state.view;
+      let settingsHits = 0;
+      const inner = window.fetch;
+      window.fetch = async (url, opt) => {
+        if (String(url).includes('/api/settings') && String((opt || {}).method || 'GET').toUpperCase() === 'GET') settingsHits++;
+        return inner(url, opt);
+      };
+      window.__state.me.role = 'manager';
+      window.go('inbox'); await wait(700);
+      window.fetch = inner;
+      window.__state.me.role = prevRole;
+      window.go(prevView); await wait(400);
+      check('менеджер в чатах не запрашивает админские настройки', settingsHits === 0, 'запросов: ' + settingsHits);
+    }
     // расшифровка нужна только там, где адрес читает человек. Вебхук и код для
     // сайта уходят машинам: им нужен валидный домен, а не красивые буквы.
     // ── входящие из Wazzup: админ видит, доходят ли сообщения ────────────────

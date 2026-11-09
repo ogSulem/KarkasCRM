@@ -1208,6 +1208,10 @@ function startScheduler() {
           const n = Object.values(m.orphans).reduce((a, b) => a + b, 0);
           if (n || m.activitiesTrimmed || m.reportsTrimmed || m.uploads.removed) console.log(`Обслуживание базы: строк убрано ${n}, событий ленты ${m.activitiesTrimmed}, отчётов конкурентов ${m.reportsTrimmed}, файлов ${m.uploads.removed}.`);
         } catch (e) { console.error('maintenance', e) }
+        // Статистика для планировщика запросов сохраняется ежедневно, а не
+        // только при штатной остановке: контейнер могут убить сигналом, и
+        // тогда SQLite не останется без данных об индексах
+        try { db.exec('PRAGMA optimize') } catch {}
       }
       await overdueTick();
       // отложенные действия правил: «напомнить клиенту через 3 дня»
@@ -2776,6 +2780,9 @@ ${user?.name || ''}`.trim();
           setSetting('FRAME_ANCESTORS', fa);
         }
         log('Настройки обновлены', null, null, user.name);
+        // другие окна узнают об изменении настроек и перечитают свой кэш:
+        // баннер регистрации вебхука и адрес CRM не устареют до перезагрузки
+        broadcast('change', { table: 'settings' });
         return json(res, 200, { saved: true });
       }
     }

@@ -1737,8 +1737,9 @@ async function inbox(v) {
   // пока входящих не было, настройки перечитываются: баннер должен исчезнуть
   // сразу после первого сообщения, а не после ручного захода в настройки
   // баннер про регистрацию вебхука чинится в настройках, а они только у админа:
-  // остальным показывать его бессмысленно, и настройки перечитывать не нужно
-  if (!state.cache.settings || (amAdmin() && !(state.cache.settings.wazzup && state.cache.settings.wazzup.hook_msgs))) {
+  // остальным показывать его бессмысленно, и настройки им сервер не отдаёт —
+  // без этой оговорки каждый не-админ тянул бы 403 на каждой перерисовке чатов
+  if (amAdmin() && (!state.cache.settings || !(state.cache.settings.wazzup && state.cache.settings.wazzup.hook_msgs))) {
     state.cache.settings = await api('/api/settings').catch(() => state.cache.settings);
   }
   const wzN = amAdmin() ? (state.cache.settings && state.cache.settings.wazzup) : null;
@@ -4328,6 +4329,15 @@ const VIEW_TABLES = {
 };
 const KNOWN_TABLES = new Set(['tasks', 'deals', 'contacts', 'companies', 'products', 'templates',
   'automations', 'notes', 'pipelines', 'competitors', 'channels', 'conversations', 'settings', 'users']);
+// Чаты обновляются только на событиях, которые их касаются: диалог взял
+// коллега, изменилась карточка клиента, канал или шаблон ответа. Ценник,
+// задачи и доска сделок переписку не перечитывают.
+const INBOX_TABLES = ['conversations', 'channels', 'contacts', 'companies', 'users', 'settings', 'templates'];
+function inboxCaresAbout(table) {
+  if (!table || table === 'all') return true;
+  if (!KNOWN_TABLES.has(table)) return true; // незнакомая таблица — лучше лишнее обновление
+  return INBOX_TABLES.includes(table);
+}
 function viewCaresAbout(view, table) {
   const list = VIEW_TABLES[view];
   if (!list) return false;
@@ -4416,6 +4426,10 @@ function connectSSE() {
     // команду перечитываем при любом изменении сотрудников: кэш имён
     // устарел бы до перезагрузки страницы
     if (d.table === 'users') __team.length = 0;
+    // чужие правки шаблонов и настроек не видны до перезагрузки: кэш
+    // сбрасывается, и следующая отрисовка берёт свежие данные с сервера
+    if (d.table === 'templates') state.cache.templates = null;
+    if (d.table === 'settings') state.cache.settings = null;
     // совместная работа: списки обновляются у всех, но открытую карточку не сбиваем.
     // Перерисовку склеиваем: при массовом импорте событий приходит много, а запрос нужен один.
     clearTimeout(__changeTimer);
@@ -4423,8 +4437,9 @@ function connectSSE() {
       const modalOpen = !$('#modal').classList.contains('hidden');
       if (modalOpen) return;
       // чаты обновляем и при чужих сообщениях-событиях: коллега взял диалог
-      // или ответил — список «Мои/Все» должен это отражать без F5
-      if (state.view === 'inbox') { refreshInbox(); return; }
+      // или ответил — список «Мои/Все» должен это отражать без F5;
+      // события чужих разделов (ценник, задачи) переписку не перечитывают
+      if (state.view === 'inbox') { if (inboxCaresAbout(d.table)) refreshInbox(); return; }
       // раздел перечитывается, только когда изменение касается его таблиц;
       // в настройках живым остаётся лишь список команды — формы не сбиваются
       if (state.view === 'settings') {
