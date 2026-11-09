@@ -76,6 +76,15 @@ vConsole.on('jsdomError', e => pageErrors.push(String((e && e.message) || e)));
 const dom = new JSDOM(htmlClean, { runScripts: 'dangerously', url: BASE + '/', pretendToBeVisual: true, virtualConsole: vConsole });
 const { window } = dom;
 window.addEventListener('error', e => pageErrors.push(String((e && e.message) || e)));
+// Сценарии делают изменяющие запросы мимо api() приложения (настройки через
+// fetch, вебхуки вендора): микрокэш ответов GET в приложении гасится и после
+// них, чтобы следующая перерисовка не увидела прежние данные
+const nodeFetch = globalThis.fetch;
+globalThis.fetch = async (url, opt) => {
+  const r = await nodeFetch(url, opt);
+  if (String((opt || {}).method || 'GET').toUpperCase() !== 'GET' && window.__clearGetCache) window.__clearGetCache();
+  return r;
+};
 window.__token = '';
 let inflight = 0; // сколько запросов приложения ещё не завершилось
 window.fetch = async (url, opt) => {
@@ -274,6 +283,18 @@ try {
     window.selectAllVisible('deals');
     check('«Выбрать все» отмечает все сделки на экране', dBoxes > 0 && window.__state.sel.deals.size === dBoxes, `size=${window.__state.sel.deals.size}, карточек=${dBoxes}`);
     window.clearSel('deals');
+
+    // Перенос карточки: новое место показывается сразу из локальных данных,
+    // а сохранение на сервере не откатывает карточку назад
+    const mvDeal = await window.api('/api/deals', { method: 'POST', body: JSON.stringify({ title: 'Сделка переноса' }) });
+    await window.render(); await wait(500);
+    const stageBefore = (window.__state.deals.find(x => x.id === mvDeal.id) || {}).stage;
+    await window.moveDeal(mvDeal.id, 1); await wait(400);
+    const movedCard = (await window.api('/api/deals/' + mvDeal.id)).deal;
+    check('перенос карточки сразу показывает новый этап и сохраняет его',
+      !!stageBefore && movedCard.stage !== stageBefore && /Сделка переноса/.test($('#view').innerHTML),
+      `before=${stageBefore} after=${movedCard.stage}`);
+    await window.api('/api/deals/' + mvDeal.id, { method: 'DELETE' });
   }
 
   // ── шаблоны: только текст ответа, без привязки к каналу ──────────────────
@@ -348,7 +369,13 @@ try {
       };
       const openers = {
         contacts: () => window.openContact(),
-        deals: () => { window.__state.dealTab = 'details'; return window.openDealCard(window.__state.deals[0].id) },
+        deals: async () => {
+          // сделку берём с сервера, а не из кэша состояния: прежние сценарии
+          // создают и удаляют записи, и state.deals[0] может уже не существовать
+          const d = await window.api('/api/deals?pipeline=1');
+          window.__state.dealTab = 'details';
+          return window.openDealCard(d.deals[0].id);
+        },
         companies: () => window.openCompany(),
         tasks: () => window.openTask(),
       };
@@ -675,6 +702,12 @@ try {
   check('карточка компании показывает сотрудников клиента и сделки', /Сотрудники клиента/.test($('#modalBody').textContent) && /Сделки/.test($('#modalBody').textContent) && /ООО «Проверка выбора»/.test($('#modalBody').textContent));
   window.closeModal(); await wait(120);
   await window.api('/api/companies/' + selComp.id, { method: 'DELETE' });
+  // Одинаковый экран не перерисовывается: эхо серверных событий и фоновые
+  // обновления не должны дёргать DOM, когда данные не изменились
+  window.go('companies'); await wait(500);
+  const anchorNode = $('#view').firstElementChild;
+  await window.render(); await wait(600);
+  check('повторная отрисовка тех же данных не заменяет показанный DOM', !!anchorNode && anchorNode.isConnected);
   const selRival = await window.api('/api/competitors', { method: 'POST', body: JSON.stringify({ name: 'ООО «Проверка панели»' }) });
   window.go('competitors'); await wait(500);
   check('у конкурентов есть чекбоксы, панели без отметок нет', $$('#view tr input[data-selkey="competitors"]').length > 0 && !/bulkbar/.test($('#view').innerHTML));
@@ -911,7 +944,11 @@ try {
   check('выставлен Content-Security-Policy', (root.headers.get('content-security-policy') || '').includes("default-src 'self'"));
   check('встраивание в чужие фреймы запрещено', root.headers.get('x-frame-options') === 'DENY');
   const jsHead = await fetch(BASE + '/app.js');
-  check('скрипты не кэшируются (no-store)', (jsHead.headers.get('cache-control') || '').includes('no-store'));
+  const jsEtag = jsHead.headers.get('etag') || '';
+  check('интерфейс переиспользуется со сверкой свежести (no-cache + ETag)',
+    (jsHead.headers.get('cache-control') || '').includes('no-cache') && !!jsEtag);
+  const js304 = await fetch(BASE + '/app.js', { headers: { 'If-None-Match': jsEtag } });
+  check('повторный запрос интерфейса получает 304 и не качает файл заново', js304.status === 304);
 
   // ── интерфейс реагирует на клики, а не только на прямые вызовы ───────────
   {

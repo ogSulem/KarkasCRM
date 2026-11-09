@@ -419,7 +419,20 @@ function plural(n, one, few, many) {
   return many;
 }
 
+// Микрокэш ответов GET: живой поиск и эхо серверных событий не должны тянуть
+// один и тот же список по несколько раз за доли секунды. Любое изменение
+// очищает кэш, поэтому после сохранения экран не может показать старые данные.
+const GET_CACHE_TTL = 350;
+const __getCache = new Map();
+// служебный вход для проверок: внешние изменения мимо api() тоже гасят кэш
+window.__clearGetCache = () => __getCache.clear();
 async function api(path, opt = {}) {
+  const method = String(opt.method || 'GET').toUpperCase();
+  if (method !== 'GET') __getCache.clear();
+  else if (!opt.signal && !opt.raw) {
+    const hit = __getCache.get(path);
+    if (hit && Date.now() - hit.at < GET_CACHE_TTL) return hit.data;
+  }
   let r;
   try {
     r = await fetch(path, {
@@ -453,6 +466,7 @@ async function api(path, opt = {}) {
     unlockBusyForms();
     throw err;
   }
+  if (method === 'GET' && !opt.signal && !opt.raw) __getCache.set(path, { at: Date.now(), data: d });
   return d;
 }
 
@@ -727,6 +741,7 @@ window.addEventListener('keydown', e => {
 function endSession(reason = '') {
   token = '';
   totalStop();
+  __getCache.clear(); // следующий вход может быть другим сотрудником
   try { localStorage.removeItem('karkas_token'); } catch {}
   loginScreen(reason);
 }
@@ -803,6 +818,7 @@ async function boot() {
     $('#uAva').textContent = (me.user.name || 'A')[0].toUpperCase();
     state.me = me.user;
     loadDrafts(); // черновики читаются заново: ключ зависит от сотрудника
+    guardIdenticalHtml($('#view')); // одинаковый экран не перерисовывается
     // роль на теле страницы: для наблюдателя прячем кнопки создания в шапке
     document.body.classList.remove('role-admin', 'role-manager', 'role-viewer');
     document.body.classList.add('role-' + (['admin', 'manager', 'viewer'].includes(me.user.role) ? me.user.role : 'manager'));
@@ -891,6 +907,23 @@ async function go(view, subTab) {
   await render();
 }
 
+// Эхо своего же действия и фоновые обновления перерисовывают раздел, даже когда
+// содержимое не изменилось: браузер гасит экран, прокрутка дёргается, курсор
+// мигает. Если новый HTML совпадает с уже показанным, запись в DOM пропускается.
+function guardIdenticalHtml(el) {
+  if (!el || el.__htmlGuarded) return;
+  const desc = Object.getOwnPropertyDescriptor(Element.prototype, 'innerHTML');
+  if (!desc || !desc.set || !desc.get) return;
+  try {
+    Object.defineProperty(el, 'innerHTML', {
+      configurable: true,
+      get() { return desc.get.call(this); },
+      set(html) { if (html === this.__lastHtml) return; this.__lastHtml = html; desc.set.call(this, html); },
+    });
+    el.__htmlGuarded = true;
+  } catch { /* среда без переопределяемого innerHTML — работаем как раньше */ }
+}
+
 // Поле поиска перерисовывается вместе с таблицей — возвращаем в него курсор,
 // иначе после каждого символа приходилось кликать в поле заново.
 function captureFocus() {
@@ -947,8 +980,17 @@ function closeConv() { state.conv = null; state.listOnly = true; render(); }
 // Очередь отрисовки: если пользователь быстро переключает разделы, ответ старого
 // запроса не должен перетереть новый экран. Каждый вызов видит актуальный state.view.
 let renderQueue = Promise.resolve();
+let renderQueued = false;
 function render() {
-  renderQueue = renderQueue.then(renderNow, renderNow);
+  // Шквал вызовов (своё действие плюс эхо серверного события, быстрое
+  // переключение разделов) схлопывается в одну отрисовку: повторные вызовы
+  // пока идёт текущая не плодят лишние запросы и перерисовки.
+  if (!renderQueued) {
+    renderQueued = true;
+    renderQueue = renderQueue.then(
+      () => { renderQueued = false; return renderNow(); },
+      () => { renderQueued = false; return renderNow(); });
+  }
   return renderQueue;
 }
 async function renderNow() {
@@ -1175,6 +1217,12 @@ function showMoreCol(code) { state.colLimits = state.colLimits || {}; state.colL
 async function pipe(v) {
   const d = await api('/api/deals?pipeline=' + state.pipeline);
   Object.assign(state, { deals: d.deals, stages: d.stages, pipelines: d.pipelines });
+  pipeDraw(v, d);
+}
+// Доска рисуется и без свежей выборки — из текущего состояния: перенос
+// карточки показывает новое место сразу, а повторный запрос не может
+// вернуть прежнюю позицию и отбросить карточку назад
+function pipeDraw(v, d) {
   $('#navDeals').textContent = d.deals.filter(x => !['won', 'lost'].includes(x.stage)).length;
   const q = (state.dealQuery || '').toLowerCase();
   let baseDeals = state.dealScope === 'mine' ? d.deals.filter(x => x.responsible_id === meId())
@@ -1236,9 +1284,12 @@ async function moveDeal(id, dir, stage) {
   if (!stage) { const i = state.stages.findIndex(s => s.code === card.stage); stage = state.stages[Math.min(state.stages.length - 1, i + dir)].code; }
   const stageName = (state.stages.find(s => s.code === stage) || {}).name || stage;
   const before = card.stage;
-  card.stage = stage; if (state.view === 'pipe') pipe($('#view'));
+  card.stage = stage;
+  if (state.view === 'pipe') pipeDraw($('#view'), state);
+  // После сохранения доску не перечитываем: она уже показывает новое место,
+  // а эхо серверного события пропустит страж одинакового содержимого
   try { await api('/api/deals/' + id, { method: 'PATCH', body: JSON.stringify({ stage }) }); toast('Сделка переведена: ' + stageName); }
-  catch (e) { card.stage = before; if (state.view === 'pipe') pipe($('#view')); toast(e.message, 'err'); }
+  catch (e) { card.stage = before; if (state.view === 'pipe') pipeDraw($('#view'), state); toast(e.message, 'err'); }
   if (stage === 'lost' && before !== 'lost') askInput({ title: 'Причина отказа', label: 'Почему сделка не реализована? Это видно в аналитике', value: '', okText: 'Сохранить' }, reason => { if (reason) api('/api/deals/' + id, { method: 'PATCH', body: JSON.stringify({ loss_reason: reason }) }).catch(() => {}); });
 }
 
@@ -1736,16 +1787,22 @@ async function refreshInbox() {
     const box = $('#chatMsgs');
     if (box) {
       const atBottom = box.scrollHeight - box.scrollTop - box.clientHeight < 60;
+      guardIdenticalHtml(box);
       box.innerHTML = olderBtnHtml(state.msgWin && state.msgWin[state.conv]) + (msgsHtml(msgs) || '<div class="empty">Диалог пуст</div>');
       // дочитали до низа — лента остаётся внизу; ушли вверх читать историю —
       // новые сообщения не дёргают прокрутку, а ждут кнопкой
       if (atBottom) { box.scrollTop = box.scrollHeight; $('#jumpNew')?.remove(); }
       else if (msgs.some(m => m.direction === 'in')) showJumpNew();
     }
-    state.cache.convs = await api('/api/conversations');
-    filterConvs($('#convSearch')?.value || '');
+    await refreshConvList();
     refreshSendAccount(state.conv);
   } catch { }
+}
+// Список бесед обновляется сам по себе: чужое сообщение в другом диалоге
+// меняет превью и счётчики, но открытую ленту перечитывать для этого не нужно
+async function refreshConvList() {
+  state.cache.convs = await api('/api/conversations');
+  if (state.view === 'inbox') filterConvs($('#convSearch')?.value || '');
 }
 
 // «Мои» — диалоги, где сотрудник ответственный: по беседе или по клиенту.
@@ -1812,7 +1869,8 @@ function filterConvs(q, keepLimit) {
   const list = convScopeList(state.cache.convs);
   const qL = q.toLowerCase();
   const filtered = list.filter(c => `${c.title} ${c.last_body || ''} ${c.phone || ''}`.toLowerCase().includes(qL));
-  $('#convList').innerHTML = convListHtml(filtered, state.conv, state.cache.convs, qL);
+  const cl = $('#convList');
+  if (cl) { guardIdenticalHtml(cl); cl.innerHTML = convListHtml(filtered, state.conv, state.cache.convs, qL); }
 }
 
 async function attachContact(cid) { if (cid) openContactCard(cid); }
@@ -1822,7 +1880,24 @@ async function saveQuickNote(e, cid) { e.preventDefault(); await api('/api/notes
 
 // Черновик живёт между разделами и перезагрузкой страницы: недописанный ответ
 // не пропадает, когда сотрудник убежал смотреть карточку клиента.
-function saveDraft(cid) { const t = $('#msgText'); if (!t) return; const v = t.value; if (v.trim()) state.drafts[cid] = v; else delete state.drafts[cid]; pruneDrafts(); try { localStorage.setItem(draftKey(), JSON.stringify(state.drafts)); } catch {} }
+function saveDraft(cid) {
+  const t = $('#msgText'); if (!t) return;
+  const v = t.value;
+  if (v.trim()) state.drafts[cid] = v; else delete state.drafts[cid];
+  // В постоянное хранилище не пишем на каждый символ: строка JSON со всеми
+  // черновиками собирается и сохраняется пачкой, когда ввод стих, и сразу —
+  // при уходе со страницы. Память черновик держит без задержки.
+  clearTimeout(__draftTimer);
+  __draftTimer = setTimeout(flushDrafts, 400);
+}
+let __draftTimer = null;
+function flushDrafts() {
+  clearTimeout(__draftTimer); __draftTimer = null;
+  pruneDrafts();
+  try { localStorage.setItem(draftKey(), JSON.stringify(state.drafts)); } catch {}
+}
+window.addEventListener('beforeunload', flushDrafts);
+document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'hidden') flushDrafts(); });
 // Черновики давно закрытых диалогов не должны вечно копиться в браузере:
 // держим последние 50, первыми выбываем самые старые
 function pruneDrafts(max = 50) { const keys = Object.keys(state.drafts); while (keys.length > max) delete state.drafts[keys.shift()]; }
@@ -1858,7 +1933,7 @@ async function sendMsg(e, cid) {
   if (body.length > 4096) { toast('Сообщение длиннее 4096 символов: мессенджеры такие не принимают. Разбейте текст на части.', 'err'); unlockForm(e.target); input.focus(); return false; }
   const channel = $('#msgChannel').value;
   input.value = '';
-  delete state.drafts[cid]; try { localStorage.setItem('karkas-drafts', JSON.stringify(state.drafts)); } catch {}
+  delete state.drafts[cid]; flushDrafts();
   autoGrow(input);
   try {
     const r = await api(`/api/conversations/${cid}/messages`, { method: 'POST', body: JSON.stringify({ body, channel }) });
@@ -4232,6 +4307,9 @@ function totalStop() {
 }
 function connectSSE() {
   const es = new EventSource('/api/events');
+  // после переподключения события за время обрыва не придут задним числом:
+  // счётчики сверяются с сервером сразу, как соединение снова открыто
+  es.addEventListener('open', () => { api('/api/dashboard').then(navCounts).catch(() => {}); });
   es.addEventListener('notify', e => {
     const d = JSON.parse(e.data);
     if (d.type === 'overdue_tasks') {
@@ -4277,8 +4355,10 @@ function connectSSE() {
       });
       api('/api/dashboard').then(navCounts).catch(() => {});
     }
-    if (state.view === 'inbox') { refreshInbox(); api('/api/dashboard').then(navCounts).catch(() => {}); }
-    else if (state.view === 'dashboard') render();
+    // уведомления касаются задач и передач: ленту чатов они не меняют,
+    // на рабочем столе плитки «Требует внимания» перерисовываем
+    api('/api/dashboard').then(navCounts).catch(() => {});
+    if (state.view === 'dashboard') render();
   });
   es.addEventListener('message', e => {
     const d = JSON.parse(e.data);
@@ -4297,7 +4377,10 @@ function connectSSE() {
         onAction: () => { state.conv = d.conversation_id; state.listOnly = false; go('inbox'); },
       });
     }
-    if (state.view === 'inbox') refreshInbox();
+    if (state.view === 'inbox') {
+      if (Number(d.conversation_id) === Number(state.conv)) refreshInbox();
+      else refreshConvList();
+    }
     api('/api/dashboard').then(navCounts).catch(() => {});
   });
   es.addEventListener('change', () => {
@@ -4318,8 +4401,13 @@ function connectSSE() {
 function initRealtime() {
   totalStop();
   realtime = connectSSE();
-  // резервный опрос счётчиков: работает и на cookie-сессии, когда токена в localStorage нет
-  navTimer = setInterval(() => { api('/api/dashboard').then(navCounts).catch(() => {}); }, 30000);
+  // Резервный опрос счётчиков (работает и на cookie-сессии) нужен, только когда
+  // живое соединение не работает: при открытом SSE счётчики и так приходят
+  // событиями, и лишний запрос каждые полминуты на каждого сотрудника не нужен
+  navTimer = setInterval(() => {
+    if (realtime && realtime.readyState === 1) return;
+    api('/api/dashboard').then(navCounts).catch(() => {});
+  }, 30000);
 }
 
 // любая необработанная ошибка видна пользователю, а не только в консоли
