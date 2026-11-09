@@ -138,6 +138,12 @@ export function seedDemo(db, adminId, adminName) {
   // ── заметки и активность ──
   db.prepare("INSERT INTO notes(entity_type,entity_id,body,author,demo) VALUES('contacts',?,?,?,?)").run(c1, 'Перезвонить после обеда: поинтересоваться выбором фундамента', adminName, demo);
   db.prepare("INSERT INTO activities(text,entity_type,entity_id,user_name) VALUES(?,?,?,?)").run('Демонстрационные данные загружены: клиенты, сделки, задачи, чаты', null, null, adminName);
+  // Примеры записей в ленте «Последние события компании»: блок показывает
+  // действия сотрудников, и на демо-базе это видно сразу, а не пустым местом
+  const qa = db.prepare("INSERT INTO activities(text,entity_type,entity_id,user_name,created_at) VALUES(?,?,?,?,datetime('now',?))");
+  qa.run('Обращение «Ольга Соколова» → сделка в этапе «Предложение / расчёт»', 'deals', d1, adminName, '-1 day');
+  qa.run('Клиенту «Сергей Волков» отправлено коммерческое предложение', 'contacts', c5, adminName, '-6 hours');
+  qa.run('Сделка «Баня 4×6 для посёлка» → этап «Неразобранное»', 'deals', d3, adminName, '-2 hours');
 
   // ── конкуренты: карточки, проверки, отчёт, отзывы, прайсы ──
   const qk = 'INSERT INTO competitors(name,inn,ogrn,city,website,phone,notes,price_url,demo) VALUES(?,?,?,?,?,?,?,?,?)';
@@ -197,6 +203,7 @@ export function cleanDemo(db) {
   const run = sql => { n += db.prepare(sql).run().changes; };
   db.exec('BEGIN IMMEDIATE');
   try {
+    run("DELETE FROM activities WHERE (entity_type='contacts' AND entity_id IN (SELECT id FROM contacts WHERE demo=1)) OR (entity_type='deals' AND entity_id IN (SELECT id FROM deals WHERE demo=1))");
     run('DELETE FROM tasks WHERE demo=1');
     run('DELETE FROM notes WHERE demo=1');
     run('DELETE FROM deals WHERE demo=1');          // deal_products уходит каскадом
