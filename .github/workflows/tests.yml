@@ -39,10 +39,26 @@ jobs:
           node --check tests/ui.smoke.mjs
           node --check tests/migrate.test.mjs
           node --check tests/routes.test.mjs
+          node --check tests/notifications.test.mjs
+          node --check tests/db-hygiene.test.mjs
+          node --check tests/backup-s3.test.mjs
+          node --check tests/seed.test.mjs
+          node --check tests/docker-smoke.mjs
           for sh in install.sh run-local.sh run-tests.sh scripts/update.sh scripts/pack.sh deploy/start-caddy.sh; do bash -n "$sh"; done
 
       - name: Интеграционные тесты (API и конкуренты)
         run: node --experimental-sqlite --test tests/api.test.js tests/competitors.test.js
+
+      # адресность уведомлений, права на настройки и гигиена базы: эти файлы
+      # раньше прогонялись только локальным run-tests.sh и не проверялись в CI
+      - name: Уведомления — адресность и состав ответов API
+        run: node --experimental-sqlite --test-force-exit --test tests/notifications.test.mjs
+
+      - name: Гигиена базы — уборка сирот и пределы хранения
+        run: node --experimental-sqlite --test tests/db-hygiene.test.mjs
+
+      - name: Резервные копии — создание, хранение и выгрузка в S3
+        run: node --experimental-sqlite --test tests/backup-s3.test.mjs
 
       # Мок отвечает так, как описано в документации Wazzup: каналы голым массивом,
       # при регистрации вебхука приходит проверочный POST и требуется ответ 200.

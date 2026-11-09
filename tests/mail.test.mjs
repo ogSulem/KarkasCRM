@@ -234,3 +234,19 @@ test('адрес с переводом строки отклоняется: CRLF
     sendMail({ host: '127.0.0.1', port: 1, to: 'один@адрес.ru,два@адрес.ru', from: 'crm@test.local', subject: 'x', text: 'y' }),
     /Некорректный e-mail получателя/, 'список адресов вместо одного отклоняется');
 });
+
+test('отправка писем ограничена по частоте: после предела внятная просьба сделать паузу', async () => {
+  // Предел на сотрудника проверяется до отправки: поток писем грозил бы
+  // блокировкой релея у почтового провайдера для всей компании
+  const contact = await call('/api/contacts', { method: 'POST', token: admin, body: { name: 'Клиент Лимита', email: 'rate@mail.example' } });
+  const conv = await call('/api/conversations', { method: 'POST', token: admin, body: { contact_id: contact.data.id, chat_type: 'whatsapp', chat_id: '79990000000' } });
+  assert.ok(conv.data.id, 'чат создан');
+  let limited = null;
+  for (let i = 0; i < 25; i++) {
+    const r = await call(`/api/conversations/${conv.data.id}/email`, { method: 'POST', token: admin, body: { subject: 'Лимит', body: 'Письмо ' + i } });
+    if (r.status === 429) { limited = r; break }
+    assert.equal(r.status, 201, 'первые отправки проходят без ограничения: ' + JSON.stringify(r.data));
+  }
+  assert.ok(limited, '429 пришёл не позже двадцать первой отправки');
+  assert.match(String(limited.data.error), /пауз/i, 'текст объясняет, что делать: ' + limited.data.error);
+});
