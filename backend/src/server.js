@@ -2304,7 +2304,7 @@ ${user?.name || ''}`.trim();
           if (b.loss_reason !== undefined && String(b.loss_reason || '').trim() !== String(old.loss_reason || '').trim()) changes.push(`причина проигрыша: ${String(b.loss_reason || '').trim() || 'не указана'}`);
           for (const ch of changes) log(`Сделка «${title}»: ${ch}`, 'deals', Number(id), user.name);
         }
-        if (b.stage && old && b.stage !== old.stage) { const s = db.prepare('SELECT name FROM stages WHERE code=?').get(b.stage); log(`Сделка «${old.title}» → этап «${s?.name || b.stage}»`, 'deals', Number(id), user.name); await runAutomations('stage_changed', { deal_id: Number(id), contact_id: old.contact_id, stage: b.stage, actor_id: user.id }); } broadcast('change', { table: 'deals' }); return json(res, 200, db.prepare('SELECT * FROM deals WHERE id=?').get(id)); }
+        if (b.stage && old && b.stage !== old.stage) { const sname = (dealStages.find(x => x.code === b.stage) || {}).name || b.stage; log(`Сделка «${old.title}» → этап «${sname}»`, 'deals', Number(id), user.name); await runAutomations('stage_changed', { deal_id: Number(id), contact_id: old.contact_id, stage: b.stage, actor_id: user.id }); } broadcast('change', { table: 'deals' }); return json(res, 200, db.prepare('SELECT * FROM deals WHERE id=?').get(id)); }
       if (req.method === 'DELETE') {
         const d = db.prepare('SELECT * FROM deals WHERE id=?').get(id);
         if (!d) return json(res, 404, { error: 'Сделка не найдена' });

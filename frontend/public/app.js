@@ -2357,12 +2357,17 @@ function bulkRescheduleTasks() {
   if (!ids.length) return;
   askInput({ title: 'Перенос выбранных задач', label: 'На сколько дней перенести срок выполнения?', value: '1', type: 'number', okText: 'Перенести' }, days => {
     if (!days || isNaN(days)) return;
+    const n = Number(days);
+    if (!Number.isFinite(n) || n < 0 || n > 365) return toast('Срок переноса: от 0 до 365 дней', 'err');
     (async () => {
+      // один тост и одна перерисовка на всю пачку: иначе двадцать задач
+      // давали бы двадцать всплывающих сообщений подряд
+      let ok = 0, failed = 0;
       for (const id of ids) {
-        await reschedule(id, Number(days));
+        try { await reschedule(id, n, true); ok++; } catch { failed++; }
       }
       clearSel('tasks');
-      toast(`Перенесено задач: ${ids.length}`);
+      toast(failed ? `Перенесено задач: ${ok}, не удалось: ${failed}` : `Перенесено задач: ${ok}`);
       render();
     })();
   });
@@ -2379,7 +2384,7 @@ async function toggleTask(id, done, refreshId) {
   }
 }
 
-async function reschedule(id, days) {
+async function reschedule(id, days, quiet = false) {
   try {
     const t = await api('/api/tasks/' + id);
     const curDue = normalizeDue(t.due);
@@ -2390,9 +2395,10 @@ async function reschedule(id, days) {
     const nextDate = new Date(baseDate.getFullYear(), baseDate.getMonth(), baseDate.getDate() + days);
     const iso = `${isoDate(nextDate)} ${time}`;
     await api('/api/tasks/' + id, { method: 'PATCH', body: JSON.stringify({ due: iso }) });
+    if (quiet) return;
     toast(`Задача перенесена на ${fmtDayMonth(iso.slice(0, 10))}`);
     render();
-  } catch (e) { toast(e.message, 'err'); }
+  } catch (e) { if (quiet) throw e; toast(e.message, 'err'); }
 }
 
 async function openTask(id, p = {}) {
@@ -4194,11 +4200,9 @@ function connectSSE() {
     // исходящие из другого окна не анонсируем; входящее показываем только если
     // сотрудник не смотрит прямо сейчас этот чат — иначе уведомление мешает
     const sameChat = state.view === 'inbox' && Number(state.conv) === Number(d.conversation_id) && document.hasFocus();
-    // чужой клиент не должен отрывать весь офис: уведомление видят ответственный
-    // за беседу или клиента и администраторы; остальные получают только счётчик
-    // как в amoCRM: сообщение уведомляет ответственного за беседу или клиента
-    // и администраторов; чат, который ещё никто не взял, админу — весь офис
-    // отрывать уведомлением о каждой строчке переписки нельзя
+    // чужой клиент не должен отрывать весь офис: как в amoCRM, уведомление
+    // видят ответственный за беседу или клиента и администраторы, а чат,
+    // который ещё никто не взял, — только админ; остальные получают счётчик
     const mine = Number(d.for_user) === Number(meId()) || (!d.for_user && amAdmin());
     if (d.direction !== 'out' && !sameChat && mine) {
       notify({
