@@ -25,7 +25,7 @@ const BASH = lookPath('bash') || '/bin/bash';
 // Один прогон update.sh в отдельном временном каталоге.
 // caddyContainer — существует ли контейнер karkascrm-caddy (для старой установки
 // без отметки режима). Возвращает аргументы, которые получил docker.
-function runUpdate({ envFile, caddyContainer = false }) {
+function runUpdate({ envFile, caddyContainer = false, dirtyTree = false }) {
   const dir = mkdtempSync(join(tmpdir(), 'karkas-update-'));
   const bin = join(dir, 'bin');
   mkdirSync(bin);
@@ -39,7 +39,10 @@ function runUpdate({ envFile, caddyContainer = false }) {
   sh('docker', `if [ "$1" = ps ]; then [ "\${CADDY_EXISTS:-0}" = 1 ] && echo karkascrm-caddy; exit 0; fi
 printf '%s\\n' "$*" >> "$FAKE_LOG"
 exit 0`);
-  sh('git', 'exit 0');
+  // dirtyTree: git status показывает правку файла — обновление должно остановиться
+  sh('git', dirtyTree
+    ? 'if [ "$1" = status ]; then echo " M backend/src/server.js"; fi\nexit 0'
+    : 'exit 0');
   sh('curl', 'echo \'{"ok":true,"version":"1.0.1"}\'; exit 0');
   sh('sleep', 'exit 0');
   for (const tool of ['grep', 'cut', 'cat', 'head', 'tr', 'sed', 'basename', 'dirname']) {
@@ -98,6 +101,20 @@ test('после пересборки висячие образы и кэш сб
   assert.ok(r.calls.some(c => c.startsWith('builder prune -f')), 'кэш сборки подчищен');
   const upIdx = r.calls.findIndex(c => c.includes('up -d --build'));
   assert.ok(r.calls.indexOf('image prune -f') > upIdx, 'уборка идёт после перезапуска');
+});
+
+test('локальные правки на сервере останавливают обновление до git pull', () => {
+  // файлы системы правили вручную: pull поверх правок потерял бы их вместе с
+  // невнятной ошибкой git — скрипт обязан показать, что мешает, и остановиться
+  let err = null;
+  try { runUpdate({ envFile: PROXY, dirtyTree: true }) } catch (e) { err = e }
+  assert.ok(err, 'скрипт завершается с ошибкой, а не обновляет поверх правок');
+  assert.equal(err.status, 1);
+  assert.match(err.stdout, /локальные изменения/i, 'причина названа по-человечески');
+  assert.match(err.stdout, /backend\/src\/server\.js/, 'показано, какой файл мешает');
+  assert.match(err.stdout, /git stash/, 'сказано, куда спрятать правки');
+  assert.ok(!err.stdout.includes('Забираем изменения'), 'до git pull дело не дошло');
+  assert.ok(!err.stdout.includes('Пересобираем'), 'пересборка не начиналась');
 });
 
 test('обновление сообщает версию и не теряет данные', () => {

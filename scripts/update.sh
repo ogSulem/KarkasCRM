@@ -15,6 +15,16 @@ if [ ! -d .git ]; then
   exit 1
 fi
 
+# Локальные правки файлов на сервере не дадут забрать обновление, а git ответит
+# невнятной ошибкой. Показываем, что именно мешает, и останавливаемся: лучше не
+# обновляться сейчас, чем потерять чужие правки при pull.
+if [ -n "$(git status --porcelain 2>/dev/null)" ]; then
+  echo "В папке CRM найдены локальные изменения — они мешают забрать обновление:"
+  git status --short
+  echo "Отмените их (git checkout -- файл) или спрячьте (git stash), затем повторите обновление."
+  exit 1
+fi
+
 echo "Забираем изменения из git"
 git pull --ff-only
 
@@ -53,8 +63,15 @@ docker image prune -f >/dev/null 2>&1 || true
 docker builder prune -f --keep-storage 1GB >/dev/null 2>&1 || true
 
 PORT=$(grep -E '^CRM_PORT=' .env 2>/dev/null | cut -d= -f2- || true); PORT=${PORT:-8080}
-sleep 2
-if curl -fsS --max-time 5 "http://127.0.0.1:${PORT}/api/health" >/dev/null 2>&1; then
+# Первый старт после пересборки иногда занимает десятки секунд (обновление
+# схемы, прогрев контейнера): проверяем не один раз, а полминуты, чтобы
+# сообщение «не отвечает» не появлялось на живой и работающей CRM.
+HEALTH=""
+for _ in 1 2 3 4 5 6 7 8 9 10; do
+  sleep 3
+  if curl -fsS --max-time 5 "http://127.0.0.1:${PORT}/api/health" >/dev/null 2>&1; then HEALTH=1; break; fi
+done
+if [ -n "$HEALTH" ]; then
   echo "Обновление завершено: $(curl -s "http://127.0.0.1:${PORT}/api/health")"
 else
   echo "CRM пока не отвечает — смотрите логи: docker compose logs -f crm"
