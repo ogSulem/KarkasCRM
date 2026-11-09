@@ -124,7 +124,7 @@ const SCHEMA_COLUMNS = [...SCHEMA,
   ['tasks', 'done', 'INTEGER DEFAULT 0'], ['tasks', 'repeat', "TEXT DEFAULT 'none'"],
   ['messages', 'content_uri', 'TEXT'], ['messages', 'status', 'TEXT'], ['messages', 'external_id', 'TEXT'],
   ['messages', 'channel', "TEXT DEFAULT 'whatsapp'"], ['messages', 'direction', "TEXT DEFAULT 'in'"], ['messages', 'author', 'TEXT'],
-  ['messages', 'content_name', 'TEXT'], ['messages', 'content_type', 'TEXT'], ['messages', 'channel_id', 'TEXT'],
+  ['messages', 'content_name', 'TEXT'], ['messages', 'content_type', 'TEXT'], ['messages', 'content_size', 'INTEGER'], ['messages', 'channel_id', 'TEXT'],
   ['conversations', 'channel_id', 'TEXT'], ['conversations', 'external_chat_id', 'TEXT'], ['conversations', 'chat_type', 'TEXT'],
   ['conversations', 'last_at', 'TEXT'], ['conversations', 'assigned_id', 'INTEGER'], ['conversations', 'title', 'TEXT'], ['conversations', 'channels', "TEXT DEFAULT ''"],
   ['contacts', 'phone_norm', 'TEXT'], ['templates', 'user_id', 'INTEGER'],
@@ -364,6 +364,9 @@ const clearSessionCookie = req => `karkas_token=; HttpOnly; SameSite=Lax; Path=/
 const safeDecode = v => { try { return decodeURIComponent(v) } catch { return v } };
 const cookieOf = req => Object.fromEntries((req.headers.cookie || '').split(';').map(x => x.trim().split('=').map(safeDecode)).filter(([k]) => k));
 const digits = s => String(s || '').replace(/\D/g, '').replace(/^8(?=\d{10}$)/, '7');
+// Сырой номер вместо имени читается в списках как мусор: если клиент не
+// представился, пишем человеком читаемый номер — по нему контакт узнаваем
+const fmtPhoneRu = s => { const d = digits(s); return /^7\d{10}$/.test(d) ? '+7 ' + d.slice(1, 4) + ' ' + d.slice(4, 7) + '-' + d.slice(7, 9) + '-' + d.slice(9) : ''; };
 // нормализованные телефоны для быстрой связи входящих с карточками (миграция)
 {
   const cols = db.prepare('PRAGMA table_info(contacts)').all().map(r => r.name);
@@ -711,7 +714,7 @@ export async function upsertIncoming({ channel = 'whatsapp', chatType = '', phon
   }
   if (!contact && email) contact = db.prepare('SELECT * FROM contacts WHERE lower(email)=lower(?)').get(String(email).trim());
   if (!contact && chatId) { const conv0 = db.prepare('SELECT * FROM conversations WHERE external_chat_id=?').get(String(chatId)); if (conv0) contact = db.prepare('SELECT * FROM contacts WHERE id=?').get(conv0.contact_id); }
-  if (!contact) { const r = db.prepare('INSERT INTO contacts(name,phone,email,source,phone_norm) VALUES(?,?,?,?,?)').run(String(name || ph || chatId || email || 'Новый клиент').slice(0, 120), String(ph || '').slice(0, 64), String(email || '').slice(0, 254), channel === 'email' ? 'email' : 'wazzup-' + (chatType || channel), phNorm || null); contact = db.prepare('SELECT * FROM contacts WHERE id=?').get(r.lastInsertRowid); log(`Новый контакт (${channel === 'email' ? 'email' : chatType || channel}): ${contact.name}`, 'contacts', contact.id); }
+  if (!contact) { const r = db.prepare('INSERT INTO contacts(name,phone,email,source,phone_norm) VALUES(?,?,?,?,?)').run(String(name || fmtPhoneRu(ph) || ph || chatId || email || 'Новый клиент').slice(0, 120), String(ph || '').slice(0, 64), String(email || '').slice(0, 254), channel === 'email' ? 'email' : 'wazzup-' + (chatType || channel), phNorm || null); contact = db.prepare('SELECT * FROM contacts WHERE id=?').get(r.lastInsertRowid); log(`Новый контакт (${channel === 'email' ? 'email' : chatType || channel}): ${contact.name}`, 'contacts', contact.id); }
   // Клиент написал на аккаунт конкретного сотрудника — значит, обращением
   // занимается он, а не тот, кому выпало по очереди. Привязку канала к сотруднику
   // задаёт администратор один раз в настройках; без привязки работает прежнее
@@ -857,7 +860,15 @@ function queueAttachmentDownload(convId, uri, externalId) {
       const local = await fetchAttachment(uri);
       if (!local) return;
       const r = db.prepare('UPDATE messages SET content_uri=? WHERE external_id=? AND content_uri=?').run(local, externalId, uri);
-      if (r.changes) broadcast('message', { conversation_id: convId, direction: 'out' });
+      if (r.changes) {
+        // размер скачанного файла сразу уезжает в сообщение: чип в чате
+        // показывает «смета.pdf · 2,4 МБ», а не безликое «вложение»
+        try {
+          const st = statSync(join(UPLOAD_DIR, basename(local)));
+          if (st.isFile()) db.prepare('UPDATE messages SET content_size=? WHERE external_id=? AND content_uri=?').run(st.size, externalId, local);
+        } catch { }
+        broadcast('message', { conversation_id: convId, direction: 'out' });
+      }
     } catch { /* ссылка вендора осталась — показываем её как есть */ }
   }, 50);
 }
@@ -2467,13 +2478,19 @@ ${user?.name || ''}`.trim();
     }
 
     // ===== inbox =====
-    if (p === '/api/conversations' && req.method === 'GET') return json(res, 200, db.prepare(`SELECT cv.*,c.phone,c.email,c.responsible_id AS contact_responsible_id,
-      (SELECT substr(body,1,200) FROM messages WHERE conversation_id=cv.id ORDER BY id DESC LIMIT 1) last_body,
+    if (p === '/api/conversations' && req.method === 'GET') return json(res, 200, db.prepare(`SELECT cv.*,c.phone,c.email,c.company,c.source,c.position,
+      c.responsible_id AS contact_responsible_id, ru.name AS contact_responsible_name,
+      (SELECT CASE
+         WHEN COALESCE(body,'') <> '' AND body <> '[вложение]' THEN substr(body,1,200)
+         WHEN COALESCE(content_name,'') <> '' THEN 'Файл: ' || substr(content_name,1,80)
+         WHEN COALESCE(content_uri,'') <> '' THEN 'Файл'
+         ELSE body END
+       FROM messages WHERE conversation_id=cv.id ORDER BY id DESC LIMIT 1) last_body,
       (SELECT direction FROM messages WHERE conversation_id=cv.id ORDER BY id DESC LIMIT 1) last_direction,
       (SELECT author FROM messages WHERE conversation_id=cv.id ORDER BY id DESC LIMIT 1) last_author,
       (SELECT d.amount FROM deals d WHERE d.contact_id=cv.contact_id AND d.stage NOT IN ('won','lost') ORDER BY d.id DESC LIMIT 1) deal_amount,
       (SELECT COUNT(*) FROM messages m WHERE m.conversation_id=cv.id AND m.direction='in' AND m.id > COALESCE((SELECT rm.last_msg_id FROM read_marks rm WHERE rm.conversation_id=cv.id AND rm.user_id=?),0)) unread
-      FROM conversations cv LEFT JOIN contacts c ON c.id=cv.contact_id ORDER BY cv.last_at DESC, cv.id DESC`).all(user.id).map(r => ({ ...r, unread: r.unread || 0 })));
+      FROM conversations cv LEFT JOIN contacts c ON c.id=cv.contact_id LEFT JOIN users ru ON ru.id=c.responsible_id ORDER BY cv.last_at DESC, cv.id DESC`).all(user.id).map(r => ({ ...r, unread: r.unread || 0 })));
     // Начать переписку первым. Беседа появлялась только из входящего сообщения,
     // поэтому менеджер не мог написать клиенту, который ещё не обращался.
     if (p === '/api/conversations' && req.method === 'POST') {
@@ -2550,7 +2567,7 @@ ${user?.name || ''}`.trim();
           else { status = 'error'; send = { delivered: false, mode: 'error: ' + e.message }; }
         }
         const body = msgText.trim() || (file ? '[вложение]' : '');
-        const insertOut = ext => db.prepare('INSERT INTO messages(conversation_id,channel,direction,body,content_uri,content_name,content_type,status,external_id,author,channel_id) VALUES(?,?,?,?,?,?,?,?,?,?,?)').run(id, wantChannel, 'out', body, file?.contentUri || null, b.contentName ? safeFileName(b.contentName) : null, b.contentType || null, status, ext, user.name, send.channelId || conv.channel_id || null);
+        const insertOut = ext => db.prepare('INSERT INTO messages(conversation_id,channel,direction,body,content_uri,content_name,content_type,content_size,status,external_id,author,channel_id) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)').run(id, wantChannel, 'out', body, file?.contentUri || null, b.contentName ? safeFileName(b.contentName) : null, b.contentType || null, Number.isFinite(Number(b.contentSize)) && Number(b.contentSize) > 0 ? Math.min(Math.round(Number(b.contentSize)), 1e9) : null, status, ext, user.name, send.channelId || conv.channel_id || null);
         // внешний id уникален (защита от повторной доставки входящих), но если провайдер
         // вернул уже встречавшийся id, сообщение всё равно должно сохраниться в CRM
         let r; try { r = insertOut(send.id || null); }

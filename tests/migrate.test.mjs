@@ -72,7 +72,7 @@ const expect = {
   contacts: ['demo', 'custom', 'responsible_id', 'position', 'company_id'],
   deals: ['demo', 'custom', 'pipeline_id', 'priority', 'loss_reason', 'company_id'],
   tasks: ['demo', 'notified_at', 'type', 'priority', 'responsible_id'],
-  messages: ['subject', 'content_uri', 'content_name', 'content_type', 'status'],
+  messages: ['subject', 'content_uri', 'content_name', 'content_type', 'content_size', 'status'],
   conversations: ['demo', 'channel_id', 'external_chat_id', 'chat_type'],
 };
 for (const [table, names] of Object.entries(expect)) {

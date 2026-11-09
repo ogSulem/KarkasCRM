@@ -260,7 +260,8 @@ try {
     check('выход из режима выбора убирает чекбоксы', !$('#convList').innerHTML.includes('conv-check'));
     // длинное имя клиента не ломает счётчик непрочитанных
     check('длинное имя обрезается многоточием, счётчик на месте', cssText.includes('.conv b>span:first-child{min-width:0') && cssText.includes('.conv b .badge{flex-shrink:0}'));
-    window.go('inbox'); await wait(500);
+
+    check('эмодзи рисуются картинками: в стеке шрифтов есть эмодзи-гарнитуры', /Apple Color Emoji/.test(cssText) && /Noto Color Emoji/.test(cssText));    window.go('inbox'); await wait(500);
     check('чат: после перерисовки сообщение на месте', /Проверка сохранения сообщения/.test($('#chatMsgs').textContent));
   }
   // Панель массовых действий и «Выбрать все» появляются после первой отметки
@@ -591,11 +592,19 @@ try {
   // когда менеджер ответил через вторую CRM, команда видит, кто именно ответил
   const byColleague = window.msgHtml({ direction: 'out', body: 'ответил коллега', author: 'Коллега из Амо', created_at: '2026-10-27 10:00:00', status: 'delivered' });
   check('в исходящем от коллеги подписано, кто ответил', byColleague.includes('Коллега из Амо'), byColleague);
+  check('подпись автора стоит над текстом сообщения, а не в строке времени', byColleague.includes('msg-author') && byColleague.indexOf('msg-author') < byColleague.indexOf('ответил коллега'), byColleague);
+  const byAuto = window.msgHtml({ direction: 'out', body: 'автоответ', author: 'Автоматизация', created_at: '2026-10-27 10:00:00' });
+  check('автоответ подписан — его не спутать с ответом человека', byAuto.includes('msg-author') && byAuto.includes('Автоматизация'), byAuto);
   const myName = (window.__state.me && window.__state.me.name) || '';
   const byMe = window.msgHtml({ direction: 'out', body: 'мой ответ', author: myName, created_at: '2026-10-27 10:00:00' });
   check('своё исходящее собственным именем не подписывается', !myName || !byMe.includes(myName));
   const fileMsg = window.msgHtml({ direction: 'in', body: 'Документ', content_uri: '/uploads/a.pdf', content_type: 'application/pdf', content_name: 'смета.pdf', channel: 'whatsapp', created_at: '2026-01-01 10:00' });
   check('msgHtml рисует файл-вложение ссылкой с именем', fileMsg.includes('chat-attach file') && fileMsg.includes('смета.pdf'));
+  const sizeMsg = window.msgHtml({ direction: 'in', body: '', content_uri: '/uploads/a.pdf', content_type: 'application/pdf', content_name: 'смета.pdf', content_size: 2516582, created_at: '2026-10-27 10:00:00' });
+  check('чип файла показывает формат и размер, а не просто «Документ»', sizeMsg.includes('PDF') && sizeMsg.includes('2,4 МБ'), sizeMsg);
+  const capMsg = window.msgHtml({ direction: 'in', body: '', content_uri: '/uploads/x.png', content_type: 'image/png', content_name: 'plan-doma.png', content_size: 20480, created_at: '2026-10-27 10:00:00' });
+  check('картинка подписана именем и размером', capMsg.includes('plan-doma.png') && capMsg.includes('20 КБ') && capMsg.includes('attach-cap'), capMsg);
+  check('голый номер приводится к читаемому формату', window.prettyPhone('79223334455') === '+7 922 333-44-55' && window.displayTitle('79223334455') === '+7 922 333-44-55' && window.displayTitle('Строй Дом') === 'Строй Дом');
   // пузырь как в нормальном мессенджере: канал один раз, только время, без номера аккаунта и полной даты
   {
     const oldChans = window.__state.channels;
@@ -809,6 +818,15 @@ try {
     check('у шапки зарезервировано место под крестик', /padding-right:3[0-9]px/.test(headCss), headCss);
     check('шапка чуть опущена ниже крестика', /margin:6px 0/.test(headCss), headCss);
     check('в шапке остались кнопки проверки и загрузки прайса', /Проверить сейчас/.test(head.textContent) && /Загрузить прайс/.test(head.textContent));
+    check('отчёт объясняет, откуда данные и кто не ответил', /Откуда отчёт/.test($('#modalBody').textContent));
+    // В карточке смоук-конкурента сохранённых проверок может не быть, поэтому
+    // вкладки проверяются детерминированно: рендер вызывается с готовыми данными.
+    window.__state.compTab = 'sources';
+    const srcFake = window.competitorTab({ id: 1, name: 'Проверка', checks: [{ source: 'fssp', title: 'ФССП', status: 'error', summary: 'источник не ответил', links: [{ url: 'https://fssp.gov.example/search', title: 'Реестр ФССП' }] }], report: {} });
+    check('источники — именованные ссылки вместо стены одинаковых кнопок', /report-links/.test(srcFake) && /Реестр ФССП/.test(srcFake) && !/Открыть источник/.test(srcFake), srcFake.slice(0, 200));
+    window.__state.compTab = 'report';
+    const repFake = window.competitorTab({ id: 1, name: 'Проверка', checks: [], report: { noData: true, dataQuality: { ok: 2, skipped: 5 } } });
+    check('пустой отчёт объясняет, откуда данные и чего не хватает', /Реестры не отдали данные автоматически/.test(repFake) && /ждут ключ API/.test(repFake) && /Откуда отчёт/.test(repFake), repFake.slice(0, 200));
     window.closeModal(); await wait(150);
   }
   check('шапка контакта тоже не заходит под крестик', /padding-right:3[0-9]px/.test((cssText.match(/\.contact-head\{[^}]*\}/) || [''])[0]));
