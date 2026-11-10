@@ -337,6 +337,18 @@ const setSetting = (k, v) => db.prepare('INSERT INTO settings(key,value) VALUES(
 // «Последние события компании» на рабочем столе: там нужны действия людей,
 // а не поток событий из чатов
 const logActivity = (text, et = null, eid = null, user = '', feed = 1) => db.prepare('INSERT INTO activities(text,entity_type,entity_id,user_name,feed) VALUES(?,?,?,?,?)').run(text, et, eid, user, feed ? 1 : 0);
+// Склонение числительных: 1 запись, 2 записи, 5 записей
+const ruPlural = (n, one, few, many) => {
+  const x = Math.abs(Math.round(Number(n) || 0)), l2 = x % 100, l = x % 10;
+  if (l2 >= 11 && l2 <= 14) return many;
+  if (l === 1) return one;
+  if (l >= 2 && l <= 4) return few;
+  return many;
+};
+// Русские названия таблиц и полей для журнала: строка вида «Массовое изменение
+// (contacts): 3 записей — responsible_id» читалась как отладочный вывод
+const TABLE_RU = { contacts: 'клиентов', companies: 'компаний', tasks: 'задач', deals: 'сделок', products: 'позиций каталога', templates: 'шаблонов', automations: 'правил автоматизации', notes: 'заметок', users: 'сотрудников', pipelines: 'воронок' };
+const FIELD_RU = { responsible_id: 'ответственный', responsible: 'ответственный', tags: 'теги', stage: 'этап', priority: 'приоритет', done: 'выполнение', amount: 'сумма', deadline: 'срок', active: 'активность', price: 'цена', source: 'источник', pipeline_id: 'воронка', loss_reason: 'причина проигрыша', company_id: 'компания', position: 'должность', type: 'тип', repeat: 'повтор', result: 'результат', due: 'срок', name: 'название', title: 'название', phone: 'телефон', email: 'почта', notes: 'примечание', custom: 'дополнительные поля' };
 const hashPass = (p, salt = randomBytes(16).toString('hex')) => `${salt}:${scryptSync(p, salt, 64).toString('hex')}`;
 function checkPass(p, s) { try { const [salt, h] = String(s).split(':'); const a = Buffer.from(h, 'hex'), b = scryptSync(p, salt, 64); return a.length === b.length && timingSafeEqual(a, b); } catch { return false; } }
 // Проверка пароля при входе — асинхронная: 50 одновременных входов утром не
@@ -1554,13 +1566,9 @@ try {
 // только строки с явным чатовым происхождением, повторный запуск ничего не меняет.
 try {
   const hushed = db.prepare(`UPDATE activities SET feed=0 WHERE feed=1 AND (text LIKE 'Wazzup: получено сообщений%'
-      OR text LIKE 'Новое обращение «%' OR text LIKE 'Обращение «%' OR text LIKE 'Новый контакт (%')`).run().changes;
-  if (hushed) {
-    const w = hushed % 10 === 1 && hushed % 100 !== 11 ? 'запись перенесена'
-      : [2, 3, 4].includes(hushed % 10) && ![12, 13, 14].includes(hushed % 100) ? 'записи перенесены'
-      : 'записей перенесено';
-    console.log(`Лента событий: ${hushed} ${w} из чатов в историю карточек.`);
-  }
+      OR text LIKE 'Новое обращение «%' OR text LIKE 'Обращение «%' OR text LIKE 'Новый контакт (%'
+      OR text LIKE 'Автоматизация «%' OR text LIKE 'Файл загружен в чат #%' OR text LIKE 'Создано (%')`).run().changes;
+  if (hushed) console.log(`Лента событий: ${hushed} ${ruPlural(hushed, 'запись перенесена', 'записи перенесены', 'записей перенесено')} из чатов в историю карточек.`);
 } catch (e) { console.error('Не удалось почистить ленту событий:', e.message) }
 
 // Разовая уборка при старте: если старая версия оставила заметки удалённых
@@ -1986,7 +1994,7 @@ export const server = http.createServer(async (req, res) => {
           // канал у шаблона больше не спрашивается: куда отправить, выбирается в чате
           const r = db.prepare("INSERT INTO templates(name,body,channel,user_id) VALUES(?,?,'any',?)")
             .run(String(b.name || '').slice(0, 80) || 'Шаблон', String(b.body || '').slice(0, 20000), user.id);
-          logActivity('Создан шаблон', 'templates', Number(r.lastInsertRowid), user.name);
+          logActivity(`Создан шаблон «${String(b.name || '').slice(0, 80) || 'без названия'}»`, 'templates', Number(r.lastInsertRowid), user.name);
           broadcast('change', { table });
           return json(res, 201, db.prepare('SELECT * FROM templates WHERE id=?').get(r.lastInsertRowid));
         }
@@ -2058,7 +2066,17 @@ export const server = http.createServer(async (req, res) => {
         const ks = fields.filter(f => b[f] !== undefined), vals = ks.map(k => b[k]);
         if (table === 'contacts' && b.phone !== undefined) { ks.push('phone_norm'); vals.push(digits(b.phone) || null); }
         const r = db.prepare(`INSERT INTO ${table}(${ks}) VALUES(${ks.map(() => '?')})`).run(...vals);
-        logActivity(`Создано (${table} #${r.lastInsertRowid})`, table, Number(r.lastInsertRowid), user.name);
+        // Лента читается людьми: «Создано (contacts #123)» с техническим именем
+        // таблицы занимало в ней место и ничего не говорило о том, что сделано
+        const createdText = {
+          contacts: () => `Клиент «${b.name || fmtPhoneRu(b.phone) || b.phone || 'без имени'}» добавлен`,
+          companies: () => `Компания «${b.name || 'без названия'}» добавлена`,
+          tasks: () => `Задача «${b.title || 'без названия'}» создана`,
+          products: () => `Позиция каталога «${b.name || 'без названия'}» добавлена`,
+          automations: () => `Правило автоматизации «${b.name || 'без названия'}» добавлено`,
+          notes: () => 'Добавлена заметка',
+        }[table];
+        logActivity(createdText ? createdText() : `Новая запись (${table})`, table, Number(r.lastInsertRowid), user.name);
         // задачу поставили коллеге — он сразу увидит всплывающее уведомление
         if (table === 'tasks' && b.responsible_id && Number(b.responsible_id) !== Number(user.id)) {
           broadcastTo(b.responsible_id, 'notify', { type: 'task_assigned', id: Number(r.lastInsertRowid), title: String(b.title || 'Задача'), due: b.due || '' });
@@ -2648,7 +2666,9 @@ ${user?.name || ''}`.trim();
       const stored = `${localDate().replace(/-/g, '')}-${randomBytes(6).toString('hex')}-${asciiFileName(b.filename || ('file.' + ext))}`;
       mkdir(UPLOAD_DIR, { recursive: true });
       writeFileSync(join(UPLOAD_DIR, stored), raw);
-      logActivity(`Файл загружен в чат #${cid}: ${safeName}`, 'conversations', cid, user.name);
+      // В журнал загрузка не пишется: файл тут же становится сообщением чата
+      // с именем, форматом и размером — след живёт в самой переписке, а
+      // недоотправленные остатки убирает ночная чистка сиротских файлов
       return json(res, 201, { url: '/uploads/' + stored, name: safeName, contentType, size: raw.length });
     }
     // CSV export/import
@@ -2896,6 +2916,9 @@ ${user?.name || ''}`.trim();
           }
           db.exec('COMMIT');
         } catch (e) { db.exec('ROLLBACK'); throw e }
+        // удаление пачки записей — заметное действие: без строки в журнале
+        // пропажа нескольких клиентов выглядела бы необъяснимой
+        logActivity(`Массовое удаление (${TABLE_RU[table] || table}): ${applied} ${ruPlural(applied, 'запись', 'записи', 'записей')}`, table, null, user.name);
       }
       else {
         const patch = {}; for (const k of Object.keys(b.patch || {})) if (fields.includes(k) && b.patch[k] !== undefined) patch[k] = b.patch[k];
@@ -2988,7 +3011,7 @@ ${user?.name || ''}`.trim();
           // одна сводка вместо сотни одинаковых тостов при массовой передаче
           broadcastTo(assignedTo, 'notify', { type: 'bulk_assigned', table, count: assignedCount });
         }
-        logActivity(`Массовое изменение (${table}): ${ids.length} записей — ${ks.join(', ')}`, table, null, user.name);
+        logActivity(`Массовое изменение (${TABLE_RU[table] || table}): ${ids.length} ${ruPlural(ids.length, 'запись', 'записи', 'записей')} — ${ks.map(k => FIELD_RU[k] || k).join(', ')}`, table, null, user.name);
       }
       broadcast('change', { table });
       return json(res, 200, { table, action: b.action === 'delete' ? 'delete' : 'update', count: applied });
