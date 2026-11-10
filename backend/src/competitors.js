@@ -185,6 +185,9 @@ export function createCompetitors(ctx) {
 
   const SOURCE_URL_DEFAULTS = {
     RUSPROFILE_URL: 'https://www.rusprofile.ru',
+    // открытый поиск ФНС «Прозрачный бизнес»: по названию находим ИНН, когда
+    // карточку завели без номера
+    FNS_SEARCH_URL: 'https://pb.nalog.ru',
     FNS_API_URL: 'https://api-fns.ru/api',
     FEDRESURS_API_URL: 'https://bankrot.fedresurs.ru',
     KAD_API_URL: 'https://kad.arbitr.ru',
@@ -313,6 +316,40 @@ export function createCompetitors(ctx) {
   }
 
   // ─────────────────────────── источники ───────────────────────────
+  // ИНН по названию из открытого поиска ФНС «Прозрачный бизнес»: ключ не нужен,
+  // ответ тот же, что получает собственный поиск сайта. Без номера реестры
+  // молчат, поэтому перед проверкой пробуем найти номер сами. Любая осечка —
+  // не ошибка источника: карточка просто остаётся без ИНН, а отчёт объясняет,
+  // что номер можно внести вручную.
+  async function resolveInnByName(name) {
+    const clean = String(name || '').trim();
+    if (!clean || digits(clean).length >= 10) return null;
+    const res = await http(`${srcUrl('FNS_SEARCH_URL')}/search-proc.json`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Accept: 'application/json' },
+      body: JSON.stringify({ query: clean, rows: 10, page: 1 }),
+    }, 9000);
+    if (!res.ok || !res.data) return null;
+    const items = Array.isArray(res.data.items) ? res.data.items : Array.isArray(res.data.docs) ? res.data.docs : [];
+    const norm = v => String(v || '').toLowerCase().replace(/[^a-zа-яё0-9]/gi, '');
+    const want = norm(clean);
+    if (!want) return null;
+    const take = o => {
+      const inn = digits(o?.inn || '');
+      if (!inn || !validInn(inn)) return null;
+      return { inn, ogrn: digits(o?.ogrn || '') || '', name: o?.nmcl?.shortName || o?.nmcl?.fullName || o?.name || o?.shortName || '' };
+    };
+    for (const it of items) {
+      const o = it?.o || it;
+      const nm = norm(o?.nmcl?.shortName || o?.nmcl?.fullName || o?.name || o?.shortName);
+      const r = take(o);
+      if (r && nm && (nm === want || nm.includes(want) || want.includes(nm))) return r;
+    }
+    // совпала ровно одна строка выдачи — это и есть ответ реестра
+    if (items.length === 1) return take(items[0]?.o || items[0]);
+    return null;
+  }
+
   async function srcRusprofile({ name, inn, ogrn }) {
     const q = digits(inn) || digits(ogrn) || name;
     const res = await http(`${srcUrl('RUSPROFILE_URL')}/search?query=${encodeURIComponent(q)}`);
@@ -725,6 +762,17 @@ export function createCompetitors(ctx) {
 
   // ─────────────────────────── проверка конкурента ───────────────────────────
   async function runCheck(comp, opts = {}) {
+    // карточка заведена по названию: номер ищем сами, чтобы реестры, которым
+    // нужен ИНН, получили запрос уже в этой проверке
+    if (!comp.inn && !opts.skipResolve) {
+      try {
+        const r = await resolveInnByName(comp.name);
+        if (r) {
+          db.prepare("UPDATE competitors SET inn=?, ogrn=COALESCE(NULLIF(?,''),ogrn) WHERE id=?").run(r.inn, r.ogrn, comp.id);
+          comp.inn = r.inn; if (r.ogrn) comp.ogrn = r.ogrn;
+        }
+      } catch { /* реестр недоступен — проверка пройдёт без номера */ }
+    }
     const sources = opts.sources?.length ? opts.sources : SOURCE_DEFS.filter(s => ['rusprofile', 'fns', 'fedresurs', 'fssp', 'kad', 'google', '2gis', 'yandex'].includes(s.key)).map(s => s.key);
     const results = await Promise.all(sources.map(async key => {
       const runner = RUNNERS[key] || (async () => ({ source: key, title: key, status: 'error', summary: 'неизвестный источник', data: {}, links: [] }));
@@ -1047,9 +1095,18 @@ export function createCompetitors(ctx) {
       }
       // лимит проверяется до создания карточки: отклонённый запрос не оставляет следов
       if (!checkLimit(res, user)) return;
+      // название без номера: пробуем найти ИНН в открытом поиске ФНС, чтобы
+      // карточка сразу получила номер и реестры опрашивались по нему
+      let ogrnFound = '';
+      if (!inn) {
+        try {
+          const r = await resolveInnByName(name);
+          if (r) { inn = r.inn; ogrnFound = r.ogrn; }
+        } catch { /* поиск номера недоступен — карточка останется без ИНН */ }
+      }
       let comp = inn ? db.prepare('SELECT * FROM competitors WHERE inn=?').get(inn) : db.prepare('SELECT * FROM competitors WHERE lower(name)=lower(?)').get(name);
       let created = false;
-      if (!comp) { const r = db.prepare('INSERT INTO competitors(name,inn,city,website) VALUES(?,?,?,?)').run(name.replace(/\s*ИНН\s*\d+.*/i, '').trim() || name, inn || null, b.city || '', b.website || ''); comp = db.prepare('SELECT * FROM competitors WHERE id=?').get(r.lastInsertRowid); created = true; log(`Новый конкурент для проверки: ${comp.name}`, 'competitors', comp.id, user.name); }
+      if (!comp) { const r = db.prepare('INSERT INTO competitors(name,inn,ogrn,city,website) VALUES(?,?,?,?,?)').run(name.replace(/\s*ИНН\s*\d+.*/i, '').trim() || name, inn || null, ogrnFound || null, b.city || '', b.website || ''); comp = db.prepare('SELECT * FROM competitors WHERE id=?').get(r.lastInsertRowid); created = true; log(`Новый конкурент для проверки: ${comp.name}`, 'competitors', comp.id, user.name); }
       else if (inn && !comp.inn) { db.prepare('UPDATE competitors SET inn=? WHERE id=?').run(inn, comp.id); comp.inn = inn }
       const out = await runCheck(comp, { sources: b.sources });
       return json(res, 200, { created, ...out, competitor: competitorFull(comp.id) });

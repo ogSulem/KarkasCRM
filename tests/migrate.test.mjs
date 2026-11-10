@@ -49,6 +49,10 @@ INSERT INTO activities(text,entity_type,entity_id,user_name) VALUES('Сделк�
 INSERT INTO deals(title,amount,stage,contact_id) VALUES('Старая сделка',777000,'new',1);
 INSERT INTO conversations(contact_id,title,channels) VALUES(1,'Клиент из старой базы','whatsapp');
 INSERT INTO messages(conversation_id,direction,body) VALUES(1,'in','Сообщение из старой базы');
+INSERT INTO messages(conversation_id,direction,body,created_at) VALUES(1,'in','Дубль из старой базы',datetime('now'));
+INSERT INTO messages(conversation_id,direction,body,created_at) VALUES(1,'in','Дубль из старой базы',datetime('now'));
+INSERT INTO messages(conversation_id,direction,body,created_at) VALUES(1,'out','Ответ из старой базы',datetime('now'));
+INSERT INTO messages(conversation_id,direction,body,created_at) VALUES(1,'in','Ответ из старой базы',datetime('now','-30 seconds'));
 INSERT INTO pipelines(name) VALUES('Основная воронка');
 INSERT INTO stages(pipeline_id,code,name,color,sort,kind) VALUES(1,'new','Неразобранное','#f97316',0,'open');
 INSERT INTO settings(key,value) VALUES('COMPANY_NAME','Старая компания');
@@ -68,7 +72,7 @@ const before = {
 };
 old.close();
 console.log(`\n=== Миграции базы KarkasCRM (${DATA}) ===`);
-ok('подготовлена база прежней схемы', before.contacts === 1 && before.deals === 1 && before.messages === 1 && before.ourPrices === 2, JSON.stringify(before));
+ok('подготовлена база прежней схемы', before.contacts === 1 && before.deals === 1 && before.messages === 5 && before.ourPrices === 2, JSON.stringify(before));
 
 // ── 2. Открываем её текущим сервером ─────────────────────────────────────────
 const { server, db } = await import('../backend/src/server.js');
@@ -105,7 +109,14 @@ const after = {
   deals: db.prepare('SELECT COUNT(*) n FROM deals').get().n,
   messages: db.prepare('SELECT COUNT(*) n FROM messages').get().n,
 };
-ok('данные не потеряны', after.contacts === before.contacts && after.deals === before.deals && after.messages === before.messages, JSON.stringify(after));
+ok('данные не потеряны', after.contacts === before.contacts && after.deals === before.deals && after.messages === before.messages - 2, JSON.stringify(after));
+
+// повторы сообщений из старых доставок схлопнуты: одна копия вместо двух,
+// входящая копия своего исходящего удалена — оригинал остался справа
+const dupLeft = db.prepare("SELECT COUNT(*) n FROM messages WHERE body='Дубль из старой базы'").get().n;
+const shadowIn = db.prepare("SELECT COUNT(*) n FROM messages WHERE body='Ответ из старой базы' AND direction='in'").get().n;
+const shadowOut = db.prepare("SELECT COUNT(*) n FROM messages WHERE body='Ответ из старой базы' AND direction='out'").get().n;
+ok('старые повторы сообщений схлопнуты', dupLeft === 1 && shadowIn === 0 && shadowOut === 1, JSON.stringify({ dupLeft, shadowIn, shadowOut }));
 const c = db.prepare('SELECT * FROM contacts WHERE id=1').get();
 ok('карточка клиента читается полностью', c.name === 'Клиент из старой базы' && c.email === 'old@mail.ru', c.name);
 ok('новые поля у старых записей заполнены значениями по умолчанию', c.demo === 0 && (c.custom === '{}' || c.custom === null), `demo=${c.demo}, custom=${c.custom}`);

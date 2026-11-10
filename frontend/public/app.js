@@ -1644,7 +1644,11 @@ function msgHtml(m) {
   const st = own && !failed && m.status ? esc(statusLabel(m.status)) : '';
   // исходящее подписал коллега (например, ответил через вторую CRM) — имя в подписи:
   // сразу видно, кто именно ответил клиенту; свои сообщения именем не помечаем
-  const who = own && m.author && m.author !== (state.me && state.me.name) ? esc(m.author) : '';
+  // в групповом чате входящие подписываем именем участника: иначе в общей
+  // беседе невозможно понять, кто именно написал; в личной беседе подпись
+  // не нужна — там собеседник один
+  const group = /group/i.test(String(m.chat_type || ''));
+  const who = own ? (m.author && m.author !== (state.me && state.me.name) ? esc(m.author) : '') : (group && m.author ? esc(m.author) : '');
   // Ответ коллеги или автоматизации виден сразу: имя стоит над текстом, а не
   // в тонкой строке меты. Одна правая сторона не говорит «это не моё» —
   // отсюда путаница «вроде от меня, вроде мне»
@@ -2921,7 +2925,8 @@ async function openCompetitorCard(id) {
   state.compTab = state.compTab || 'report';
   openModal(`
    <div class="modal-head">
-     <div><h3>${esc(c.name)}</h3><small>ИНН: ${esc(c.inn || '—')} · ${esc(c.city || '')}</small></div>
+     <div><h3>${esc(c.name)}</h3><small>ИНН: ${esc(c.inn || '—')} · ${esc(c.city || '')}</small>
+       ${c.inn ? '' : '<div class="form-hint" style="max-width:52ch">Номер не указан: реестры, которые ищут по ИНН, молчат. При проверке система пытается найти номер по названию сама; если поиск не справился, внесите ИНН в карточку вручную.</div>'}</div>
      <div style="display:flex;gap:6px;flex-wrap:wrap">
        ${canEdit() ? `<button class="btn sm primary" onclick="checkCompetitor(${c.id})">${icon('refresh', 13)} Проверить сейчас</button>
        <button class="btn sm" onclick="openPriceImport(${c.id},'theirs')">${icon('excel', 13)} Загрузить прайс</button>` : ''}
