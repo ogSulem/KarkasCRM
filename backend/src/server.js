@@ -737,7 +737,15 @@ export async function upsertIncoming({ channel = 'whatsapp', chatType = '', phon
       || db.prepare('SELECT * FROM contacts WHERE phone_norm LIKE ?').get('%' + tail10);
   }
   if (!contact && email) contact = db.prepare('SELECT * FROM contacts WHERE lower(email)=lower(?)').get(String(email).trim());
-  if (!contact && chatId) { const conv0 = db.prepare('SELECT * FROM conversations WHERE external_chat_id=?').get(String(chatId)); if (conv0) contact = db.prepare('SELECT * FROM contacts WHERE id=?').get(conv0.contact_id); }
+  // групповой чат привязан к адресу чата, а не к участнику: иначе сообщение
+  // каждого участника заводило бы собственную беседу и история группы
+  // разлеталась бы по карточкам. Беседу ищем сначала по адресу чата.
+  let conv = chatId ? db.prepare('SELECT * FROM conversations WHERE external_chat_id=?').get(String(chatId)) : null;
+  if (!contact && conv) contact = db.prepare('SELECT * FROM contacts WHERE id=?').get(conv.contact_id);
+  // имя пришло позже карточки: карточка успела завестись по одному номеру и
+  // выглядела телефонным номером. Как только отправитель представился —
+  // поправляем имя на карточке, чтобы клиент был подписан по-человечески.
+  if (contact && name && /^[\d\s()+-]{7,}$/.test(String(contact.name || '').trim())) { db.prepare('UPDATE contacts SET name=? WHERE id=?').run(name, contact.id); contact.name = name; }
   if (!contact) { const r = db.prepare('INSERT INTO contacts(name,phone,email,source,phone_norm) VALUES(?,?,?,?,?)').run(String(name || fmtPhoneRu(ph) || ph || chatId || email || 'Новый клиент').slice(0, 120), String(ph || '').slice(0, 64), String(email || '').slice(0, 254), channel === 'email' ? 'email' : 'wazzup-' + (chatType || channel), phNorm || null); contact = db.prepare('SELECT * FROM contacts WHERE id=?').get(r.lastInsertRowid); logActivity(`Новый контакт (${channel === 'email' ? 'email' : chatType || channel}): ${contact.name}`, 'contacts', contact.id, '', 0); }
   // Клиент написал на аккаунт конкретного сотрудника — значит, обращением
   // занимается он, а не тот, кому выпало по очереди. Привязку канала к сотруднику
@@ -753,7 +761,7 @@ export async function upsertIncoming({ channel = 'whatsapp', chatType = '', phon
       logActivity(`Обращение «${contact.name}» пришло на аккаунт ${bound.name} и назначено на него`, 'contacts', contact.id, '', 0);
     }
   }
-  let conv = db.prepare('SELECT * FROM conversations WHERE contact_id=?').get(contact.id);
+  if (!conv) conv = db.prepare('SELECT * FROM conversations WHERE contact_id=?').get(contact.id);
   let dealId = null;
   if (!conv) {
     const r = db.prepare('INSERT INTO conversations(contact_id,title,channels,channel_id,external_chat_id,chat_type) VALUES(?,?,?,?,?,?)').run(contact.id, contact.name, channel, channelId, String(chatId || ph || ''), chatType || channel);
@@ -761,12 +769,19 @@ export async function upsertIncoming({ channel = 'whatsapp', chatType = '', phon
     dealId = await ensureDeal(contact);
   }
   const channels = [...new Set([...(conv.channels || '').split(',').filter(Boolean), channel])].join(',');
-  // Ретраи вендора без идентификатора: Wazzup повторяет событие, если ответ
-  // задержался или потерялся. Сообщение с external_id защищено уникальным
-  // индексом, а событие без id проверяем по содержимому за последние две минуты.
-  if (!external_id) {
-    const recent = db.prepare("SELECT id FROM messages WHERE conversation_id=? AND direction=? AND body=? AND COALESCE(content_uri,'')=? AND created_at > datetime('now','-120 seconds')").get(conv.id, direction, body || '[вложение]', contentUri);
-    if (recent) return conv;
+  // Ретраи вендора и двойная доставка: Wazzup повторяет событие, если ответ
+  // задержался или потерялся, а групповое сообщение порой приходит дважды и
+  // с разными идентификаторами — уникальный индекс такое не ловит, в чате
+  // вырастал второй такой же пузырь. Проверяем содержимое за короткое окно
+  // независимо от того, пришёл идентификатор или нет.
+  const sameText = body || '[вложение]';
+  const recent = db.prepare("SELECT id FROM messages WHERE conversation_id=? AND direction=? AND body=? AND COALESCE(content_uri,'')=? AND created_at > datetime('now','-120 seconds')").get(conv.id, direction, sameText, contentUri);
+  if (recent) return conv;
+  // собственное отправление вернулось групповой доставкой: пузырь уже стоит
+  // справа, «входящая» копия продублировала бы его и запустила автоматизации
+  if (direction !== 'out') {
+    const own = db.prepare("SELECT id FROM messages WHERE conversation_id=? AND direction='out' AND body=? AND COALESCE(content_uri,'')=? AND created_at > datetime('now','-120 seconds')").get(conv.id, sameText, contentUri);
+    if (own) return conv;
   }
   try { db.prepare('INSERT INTO messages(conversation_id,channel,direction,body,subject,content_uri,content_name,status,external_id,author,channel_id) VALUES(?,?,?,?,?,?,?,?,?,?,?)').run(conv.id, channel, direction, body || '[вложение]', subject, contentUri, contentName || null, direction === 'out' ? 'sent' : (channel === 'email' ? 'received' : 'inbound'), external_id, author, channelId || null); }
   catch (e) { if (/UNIQUE/i.test(e.message)) return conv; console.error('message insert', e); throw e; }
@@ -814,6 +829,21 @@ async function upsertOutgoing(m) {
   if (!m.messageId) {
     const recent = db.prepare("SELECT id FROM messages WHERE conversation_id=? AND direction='out' AND body=? AND created_at > datetime('now','-120 seconds')").get(conv.id, body || '[вложение]');
     if (recent) return conv;
+  }
+  // Эхо догоняет случайную групповую доставку: сообщение уже попало в чат
+  // входящим (пузырь слева). Второй пузырь не создаём — переносим имеющийся
+  // на свою сторону и ставим статус доставки. Берём только безымянные копии
+  // или копии с именем отправителя эха: настоящую цитату клиента не трогаем.
+  const stray = db.prepare("SELECT id, author FROM messages WHERE conversation_id=? AND direction='in' AND body=? AND COALESCE(content_uri,'')=? AND created_at > datetime('now','-120 seconds') ORDER BY id").get(conv.id, body || '[вложение]', safeContentUri(m.contentUri) || '');
+  if (stray && (!stray.author || !m.authorName || stray.author === m.authorName)) {
+    const outDup = db.prepare("SELECT id FROM messages WHERE conversation_id=? AND direction='out' AND body=? AND created_at > datetime('now','-120 seconds')").get(conv.id, body || '[вложение]');
+    if (!outDup) {
+      try { db.prepare("UPDATE messages SET direction='out', status=?, external_id=?, author=? WHERE id=?").run(st, m.messageId || null, m.authorName || '', stray.id); }
+      catch (e) { if (/UNIQUE/i.test(e.message)) return conv; throw e; }
+      db.prepare("UPDATE conversations SET last_at=datetime('now') WHERE id=?").run(conv.id);
+      broadcast('message', { conversation_id: conv.id, direction: 'out' });
+      return conv;
+    }
   }
   try {
     db.prepare('INSERT INTO messages(conversation_id,channel,direction,body,content_uri,content_name,status,external_id,author,channel_id) VALUES(?,?,?,?,?,?,?,?,?,?)')
@@ -1571,6 +1601,27 @@ try {
   if (hushed) console.log(`Лента событий: ${hushed} ${ruPlural(hushed, 'запись перенесена', 'записи перенесены', 'записей перенесено')} из чатов в историю карточек.`);
 } catch (e) { console.error('Не удалось почистить ленту событий:', e.message) }
 
+// Разовая уборка дублей сообщений в чатах: ретраи вендора с новым номером и
+// групповая доставка собственных отправлений оставляли в истории второй такой
+// же пузырь. В пределах минуты оставляем первую копию; входящую копию своего
+// исходящего убираем совсем — оригинал уже стоит справа. История остаётся
+// читаемой, ничего кроме повторов не удаляется.
+try {
+  const dups = db.prepare(`SELECT m.id FROM messages m JOIN (
+      SELECT conversation_id, direction, body, COALESCE(content_uri,'') cu, strftime('%Y-%m-%d %H:%M', created_at) mn, MIN(id) keep
+      FROM messages GROUP BY 1,2,3,4,5 HAVING COUNT(*) > 1) d
+    ON m.conversation_id=d.conversation_id AND m.direction=d.direction AND m.body=d.body
+    AND COALESCE(m.content_uri,'')=d.cu AND strftime('%Y-%m-%d %H:%M', m.created_at)=d.mn AND m.id<>d.keep`).all();
+  for (const r of dups) db.prepare('DELETE FROM messages WHERE id=?').run(r.id);
+  const shadows = db.prepare(`SELECT m.id FROM messages m WHERE m.direction='in' AND EXISTS (
+      SELECT 1 FROM messages o WHERE o.conversation_id=m.conversation_id AND o.direction='out'
+      AND o.body=m.body AND COALESCE(o.content_uri,'')=COALESCE(m.content_uri,'')
+      AND ABS(julianday(o.created_at)-julianday(m.created_at))*86400 <= 120)`).all();
+  for (const r of shadows) db.prepare('DELETE FROM messages WHERE id=?').run(r.id);
+  const gone = dups.length + shadows.length;
+  if (gone) console.log(`Чаты: убрано повторов сообщений: ${gone}.`);
+} catch (e) { console.error('Не удалось убрать повторы сообщений:', e.message) }
+
 // Разовая уборка при старте: если старая версия оставила заметки удалённых
 // сделок или ссылки задач на несуществующие записи, они не должны копиться.
 try {
@@ -1618,12 +1669,19 @@ export const server = http.createServer(async (req, res) => {
       // оба формата входа вендора приводим одной картой: в старом messages[]
       // вложение лежит в attachment.url, и без приведения файл без подписи
       // молча терялся — история показывала только текстовые сообщения
-      const mapMsg = m => ({
+      const mapMsg = m => {
+        // отправитель группового сообщения в разных форматах вендора лежит в
+        // разных ключах: без него сообщения участников группы обезличены
+        const snd = m.sender || (m.from && typeof m.from === 'object' ? m.from : null)
+          || (m.user && typeof m.user === 'object' ? m.user : null)
+          || (m.author && typeof m.author === 'object' ? m.author : null) || {};
+        const sndName = snd.name || [snd.first_name, snd.last_name].filter(Boolean).join(' ').trim() || '';
+        return {
         messageId: m.message_id || m.messageId, channelId: m.channel_id || m.channelId,
         // тип чата берём только из данных: подставлять 'whatsapp' вместо отсутствующего
         // нельзя, ответ ушёл бы клиенту не в тот мессенджер, а выглядело бы как доставка
-        chatType: m.recipient?.chat_type || m.sender?.chat_type || m.chatType || '',
-        chatId: m.recipient?.chat_id || m.sender?.chat_id || m.chatId, isEcho: m.isEcho === true, outbound: m.direction === 'outbound',
+        chatType: m.recipient?.chat_type || snd.chat_type || m.chatType || '',
+        chatId: m.recipient?.chat_id || snd.chat_id || m.chatId, isEcho: m.isEcho === true, outbound: m.direction === 'outbound',
         // в исходящем событии клиент — получатель: карточка и поиск беседы
         // идут по его данным, а не по данным отправившего сотрудника
         recipient: m.recipient,
@@ -1632,8 +1690,8 @@ export const server = http.createServer(async (req, res) => {
         cli: { name: m.recipient?.name || m.contact?.name || '', phone: m.recipient?.phone || m.contact?.phone || '' },
         text: m.text, type: m.attachment ? 'file' : (WZ_TYPE_BODY[m.type] ? m.type : 'text'), contentUri: m.attachment?.url || m.contentUri, status: m.direction === 'inbound' ? 'inbound' : (m.status || ''),
         fileName: m.attachment?.name || m.attachment?.fileName || m.fileName || '',
-        authorName: m.sender?.name, contact: { name: m.sender?.name || m.recipient?.name || m.contact?.name, phone: m.sender?.phone || m.recipient?.phone || m.contact?.phone }
-      });
+        authorName: sndName || m.authorName, contact: { name: sndName || m.recipient?.name || m.contact?.name, phone: snd.phone || m.recipient?.phone || m.contact?.phone }
+      }; };
       // щедрые пределы на число событий в одном запросе: обычный пакет вендора
       // содержит единицы сообщений, а огромный запрос не должен надолго занимать базу
       const legacy = (Array.isArray(b.messages) ? b.messages.slice(0, 200) : []).map(mapMsg);
@@ -2322,7 +2380,7 @@ ${user?.name || ''}`.trim();
         const products = db.prepare('SELECT dp.*,pr.name product_name FROM deal_products dp LEFT JOIN products pr ON pr.id=dp.product_id WHERE dp.deal_id=?').all(id);
         // переписка клиента по этой сделке — единый диалог прямо в карточке
         const conv = deal?.contact_id ? db.prepare('SELECT id,title,channels,unread,chat_type FROM conversations WHERE contact_id=? ORDER BY last_at DESC').get(deal.contact_id) : null;
-        const messages = conv ? db.prepare('SELECT * FROM messages WHERE conversation_id=? ORDER BY id DESC LIMIT 40').all(conv.id).reverse() : [];
+        const messages = conv ? db.prepare('SELECT m.*, cv.chat_type AS chat_type FROM messages m JOIN conversations cv ON cv.id=m.conversation_id WHERE m.conversation_id=? ORDER BY m.id DESC LIMIT 40').all(conv.id).reverse() : [];
         // в историю берём и события клиента: обращение, назначение, переписка
         // относятся к той же продаже, а в отдельной вкладке их никто не найдёт
         const history = db.prepare(`SELECT * FROM (
@@ -2590,9 +2648,9 @@ ${user?.name || ''}`.trim();
         const before = Math.max(0, Math.trunc(Number(u.searchParams.get('before')) || 0));
         const rows = lim
           ? (before
-            ? db.prepare('SELECT * FROM (SELECT * FROM messages WHERE conversation_id=? AND id<? ORDER BY id DESC LIMIT ?) ORDER BY id').all(id, before, lim)
-            : db.prepare('SELECT * FROM (SELECT * FROM messages WHERE conversation_id=? ORDER BY id DESC LIMIT ?) ORDER BY id').all(id, lim))
-          : db.prepare('SELECT * FROM messages WHERE conversation_id=? ORDER BY id').all(id);
+            ? db.prepare('SELECT m.*, cv.chat_type AS chat_type FROM (SELECT * FROM messages WHERE conversation_id=? AND id<? ORDER BY id DESC LIMIT ?) m JOIN conversations cv ON cv.id=m.conversation_id ORDER BY m.id').all(id, before, lim)
+            : db.prepare('SELECT m.*, cv.chat_type AS chat_type FROM (SELECT * FROM messages WHERE conversation_id=? ORDER BY id DESC LIMIT ?) m JOIN conversations cv ON cv.id=m.conversation_id ORDER BY m.id').all(id, lim))
+          : db.prepare('SELECT m.*, cv.chat_type AS chat_type FROM messages m JOIN conversations cv ON cv.id=m.conversation_id WHERE m.conversation_id=? ORDER BY m.id').all(id);
         // прочитанность личная: коллега, открывший чат раньше, не стирает метку у ответственного
         const lastId = db.prepare('SELECT MAX(id) m FROM messages WHERE conversation_id=?').get(id)?.m || 0;
         if (user?.id) db.prepare("INSERT INTO read_marks(user_id,conversation_id,last_msg_id,updated_at) VALUES(?,?,?,datetime('now')) ON CONFLICT(user_id,conversation_id) DO UPDATE SET last_msg_id=MAX(last_msg_id,excluded.last_msg_id),updated_at=datetime('now')").run(user.id, Number(id), lastId);

@@ -55,6 +55,13 @@ before(async () => {
     if (/textsearch/.test(req.url)) return jsonReply(r, { results: [{ place_id: 'p1', name: 'Конкурент', rating: 3.2, user_ratings_total: 41 }] });
     jsonReply(r, { result: { rating: 3.2, user_ratings_total: 41, formatted_address: 'Москва, Стройная 1', url: 'https://maps.google.com/p1', reviews: [{ author_name: 'Пётр', rating: 1, text: 'Сорвали сроки, дом поставили на месяц позже', relative_time_description: 'месяц назад' }, { author_name: 'Ольга', rating: 5, text: 'Всё ок', relative_time_description: 'год назад' }] } });
   });
+  // открытый поиск ФНС «Прозрачный бизнес»: по названию отдаёт ИНН и ОГРН —
+  // так система находит номер конкурента, которого в карточке не было
+  await mock('fnssearch', (req, r, b) => {
+    const q = JSON.parse(b || '{}').query || '';
+    if (/Каркас Тайги/i.test(q)) return jsonReply(r, { totalCount: 1, items: [{ o: { inn: '7700000016', ogrn: '1177745000116', nmcl: { shortName: 'ООО «Каркас Тайги»' } } }] });
+    jsonReply(r, { totalCount: 0, items: [] });
+  });
   await mock('2gis', (req, r) => jsonReply(r, { result: { items: [{ id: 'g1', name: 'Конкурент', address_name: 'Москва, Стройная 1', reviews: { general_rating: 3.4, general_review_count: 18 } }] } }));
   await mock('yandex', (req, r) => jsonReply(r, { features: [{ properties: { name: 'Конкурент', CompanyMetaData: { address: 'Москва, Стройная 1', url: 'http://konkurent.ru', rating: 3.6, reviews: 22, Phones: [{ formatted: '+7 495 000-00-00' }] } } }] }));
   await new Promise(r => server.listening ? r() : server.once('listening', r));
@@ -67,7 +74,8 @@ const url = n => `http://127.0.0.1:${mocks[n].port}`;
 test('настройка источников: ключи и адреса, статус «настроен»', async () => {
   const r = await call('/api/competitor-sources', { method: 'PUT', body: JSON.stringify({
     FNS_API_KEY: 'test-fns-key', GOOGLE_PLACES_KEY: 'test-google-key', TWOGIS_KEY: 'test-2gis-key', YANDEX_API_KEY: 'test-yandex-key',
-    FNS_API_URL: url('fns'), FEDRESURS_API_URL: url('fedresurs'), KAD_API_URL: url('kad'), RUSPROFILE_URL: url('rusprofile'), GOOGLE_API_URL: url('google'), TWOGIS_API_URL: url('2gis'), YANDEX_API_URL: url('yandex'),
+    FNS_API_URL: url('fns'), FEDRESURS_API_URL: url('fedresurs'), KAD_API_URL: url('kad'), RUSPROFILE_URL: url('rusprofile'), GOOGLE_API_URL: url('google'), TWOGIS_API_URL: url('2gis'),
+    FNS_SEARCH_URL: url('fnssearch'), YANDEX_API_URL: url('yandex'),
   }) });
   assert.equal(r.body.saved, true);
   const s = await call('/api/competitor-sources');
@@ -338,6 +346,16 @@ test('прайс можно не только загрузить, но и ска
   assert.equal((await fetch(base + '/api/prices/export?scope=ours')).status, 401);
 });
 
+test('карточка без ИНН: номер находится по названию в открытом поиске ФНС', async () => {
+  const r = await call('/api/competitors/find', { method: 'POST', body: JSON.stringify({ query: 'Каркас Тайги' }) });
+  assert.equal(r.status, 200);
+  assert.equal(r.body.created, true, 'карточка заведена по названию');
+  assert.equal(r.body.competitor.inn, '7700000016', 'ИНН найден по названию и сохранён в карточке');
+  assert.equal(r.body.competitor.ogrn, '1177745000116', 'ОГРН из того же ответа реестра');
+  const miss = await call('/api/competitors/find', { method: 'POST', body: JSON.stringify({ query: 'ООО «Без Номера План»' }) });
+  assert.equal(miss.body.competitor.inn, null, 'реестр молчит — карточка остаётся без номера, без ошибки');
+});
+
 test('поиск конкурента понимает поле query из интерфейса', async () => {
   const r = await call('/api/competitors/find', { method: 'POST', body: JSON.stringify({ query: 'ООО «Запрос Query»', city: 'Тула' }) });
   assert.equal(r.status, 200);
@@ -352,7 +370,7 @@ test('поиск конкурента понимает поле query из ин�
 test('диагностика источников: видно, кто отвечает, а кто просит ключ', async () => {
   await call('/api/competitor-sources', { method: 'PUT', body: JSON.stringify({
     RUSPROFILE_URL: url('rusprofile'), FEDRESURS_API_URL: url('fedresurs'), KAD_API_URL: url('kad'),
-    FNS_API_URL: url('fns'), GOOGLE_API_URL: url('google'),
+    FNS_API_URL: url('fns'), GOOGLE_API_URL: url('google'), FNS_SEARCH_URL: url('fnssearch'),
     TWOGIS_API_URL: url('2gis'), YANDEX_API_URL: url('yandex'), COMPETITOR_TIMEOUT_MS: '5000',
     FNS_API_KEY: 'test-fns-key', GOOGLE_PLACES_KEY: 'test-google-key',
     TWOGIS_KEY: 'test-2gis-key', YANDEX_API_KEY: 'test-yandex-key',

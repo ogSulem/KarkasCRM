@@ -115,6 +115,28 @@ test('объединение чатов WhatsApp + Telegram в один диал
   assert.equal(deals.length, 1, 'автосоздана сделка на первом обращении');
 });
 
+test('групповой чат: одна история, участники с именами, повторы схлопнуты', async () => {
+  // событие группы приходит с именем отправителя: пузырь подписывается участником
+  await call('/webhooks/wazzup', { method: 'POST', body: JSON.stringify({ messages: [{ messageId: 'grp-1', channelId: 'ch-g', chatType: 'maxgroup', chatId: 'group-77', text: 'Всем привет из группы', sender: { name: 'Надежда', phone: '79001110001' } }] }) });
+  // второй участник пишет в ту же группу: история не разделяется по карточкам
+  await call('/webhooks/wazzup', { method: 'POST', body: JSON.stringify({ messages: [{ messageId: 'grp-2', channelId: 'ch-g', chatType: 'maxgroup', chatId: 'group-77', text: 'А это от меня', sender: { name: 'Сергей', phone: '79001110002' } }] }) });
+  // двойная доставка того же сообщения с другим идентификатором: один пузырь
+  await call('/webhooks/wazzup', { method: 'POST', body: JSON.stringify({ messages: [{ messageId: 'grp-2-retry', channelId: 'ch-g', chatType: 'maxgroup', chatId: 'group-77', text: 'А это от меня', sender: { name: 'Сергей', phone: '79001110002' } }] }) });
+  const convs = (await call('/api/conversations')).body.filter(c => (c.external_chat_id || '') === 'group-77');
+  assert.equal(convs.length, 1, 'у группы одна беседа на всех участников');
+  const msgs = (await call(`/api/conversations/${convs[0].id}/messages`)).body;
+  assert.equal(msgs.filter(m => m.body === 'А это от меня').length, 1, 'двойная доставка не создала второй пузырь');
+  assert.equal(msgs.find(m => m.body === 'Всем привет из группы').author, 'Надежда', 'сообщение подписано именем участника');
+  assert.equal(msgs.find(m => m.body === 'Всем привет из группы').chat_type, 'maxgroup', 'тип чата приходит вместе с сообщением');
+  // своё отправление вернулось групповой доставкой чужим: эхо переносит копию на нашу сторону
+  await call('/webhooks/wazzup', { method: 'POST', body: JSON.stringify({ messages: [{ messageId: 'grp-3', channelId: 'ch-g', chatType: 'maxgroup', chatId: 'group-77', text: 'Спецификация готова', sender: { name: 'Расим' } }] }) });
+  await call('/webhooks/wazzup', { method: 'POST', body: JSON.stringify({ data: [{ message_id: 'grp-3-echo', direction: 'outbound', recipient: { chat_id: 'group-77', chat_type: 'maxgroup' }, sender: { name: 'Расим' }, text: 'Спецификация готова' }] }) });
+  const msgs2 = (await call(`/api/conversations/${convs[0].id}/messages`)).body;
+  const spec = msgs2.filter(m => m.body === 'Спецификация готова');
+  assert.equal(spec.length, 1, 'своё сообщение видно в чате ровно один раз');
+  assert.equal(spec[0].direction, 'out', 'своё сообщение стоит на нашей стороне');
+});
+
 test('фирменный лист: вектор отдаётся без входа и кэшируется по ETag', async () => {
   const first = await fetch(base + '/favicon.svg');
   const text = await first.text(); // тело обязательно читаем: иначе сокет держит процесс
