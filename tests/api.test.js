@@ -1292,7 +1292,7 @@ test('лента рабочего стола не тонет в чатах, ис
   assert.equal(await hook({ messages: [{ messageId: 'feed-noise-1', channelId: 'ch-feed', chatType: 'whatsapp', chatId, type: 'text', text: 'Здравствуйте, хочу баню', direction: 'inbound', contact: { name: 'Лента Тест', phone: chatId }, timestamp: Date.now() }] }), 200, 'входящее обращение принято');
   const dash = (await call('/api/dashboard')).body;
   const texts = dash.activities.map(a => a.text).join(' | ');
-  assert.ok(!/Новое обращение|пришло на аккаунт|назначено на/.test(texts), 'поток чатов не заполняет ленту рабочего стола: ' + texts.slice(0, 240));
+  assert.ok(!/Новое обращение|пришло на аккаунт|назначено на|Новый контакт \(/.test(texts), 'поток чатов не заполняет ленту рабочего стола: ' + texts.slice(0, 240));
   const deals = (await call('/api/deals')).body.deals;
   const deal = deals.find(d => /Лента Тест/.test(d.title || ''));
   assert.ok(deal, 'сделка обращения создана и видна на доске');

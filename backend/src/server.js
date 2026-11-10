@@ -687,6 +687,7 @@ export async function ensureDeal(contact) {
   const firstStage = getStages(1)[0]?.code || 'new';
   const wantedStage = getSetting('AUTO_DEAL_STAGE', '');
   const stage = (wantedStage && db.prepare('SELECT 1 x FROM stages WHERE code=? AND pipeline_id=1').get(wantedStage)) ? wantedStage : firstStage;
+  const stageName = (getStages(1).find(x => x.code === stage) || {}).name || stage;
   let ownerId = contact.responsible_id || null, ownerName = '';
   if (ownerId) ownerName = db.prepare('SELECT name FROM users WHERE id=?').get(ownerId)?.name || '';
   if (!ownerId && getSetting('AUTO_ASSIGN', '0') === '1') {
@@ -694,7 +695,7 @@ export async function ensureDeal(contact) {
     if (m) { ownerId = m.id; ownerName = m.name; db.prepare('UPDATE contacts SET responsible_id=? WHERE id=?').run(ownerId, contact.id); logActivity(`Обращение «${contact.name}» назначено на ${m.name}`, 'contacts', contact.id, '', 0); }
   }
   const dr = db.prepare('INSERT INTO deals(title,amount,stage,contact_id,responsible,responsible_id) VALUES(?,?,?,?,?,?)').run('Обращение: ' + contact.name, 0, stage, contact.id, ownerName, ownerId);
-  logActivity(`Новое обращение «${contact.name}» → сделка в этапе «${stage}»`, 'deals', Number(dr.lastInsertRowid), '', 0);
+  logActivity(`Новое обращение «${contact.name}» → сделка в этапе «${stageName}»`, 'deals', Number(dr.lastInsertRowid), '', 0);
   await runAutomations('deal_created', { deal_id: Number(dr.lastInsertRowid), contact_id: contact.id, quiet: true });
   broadcast('change', { table: 'deals' });
   return Number(dr.lastInsertRowid);
@@ -725,7 +726,7 @@ export async function upsertIncoming({ channel = 'whatsapp', chatType = '', phon
   }
   if (!contact && email) contact = db.prepare('SELECT * FROM contacts WHERE lower(email)=lower(?)').get(String(email).trim());
   if (!contact && chatId) { const conv0 = db.prepare('SELECT * FROM conversations WHERE external_chat_id=?').get(String(chatId)); if (conv0) contact = db.prepare('SELECT * FROM contacts WHERE id=?').get(conv0.contact_id); }
-  if (!contact) { const r = db.prepare('INSERT INTO contacts(name,phone,email,source,phone_norm) VALUES(?,?,?,?,?)').run(String(name || fmtPhoneRu(ph) || ph || chatId || email || 'Новый клиент').slice(0, 120), String(ph || '').slice(0, 64), String(email || '').slice(0, 254), channel === 'email' ? 'email' : 'wazzup-' + (chatType || channel), phNorm || null); contact = db.prepare('SELECT * FROM contacts WHERE id=?').get(r.lastInsertRowid); logActivity(`Новый контакт (${channel === 'email' ? 'email' : chatType || channel}): ${contact.name}`, 'contacts', contact.id); }
+  if (!contact) { const r = db.prepare('INSERT INTO contacts(name,phone,email,source,phone_norm) VALUES(?,?,?,?,?)').run(String(name || fmtPhoneRu(ph) || ph || chatId || email || 'Новый клиент').slice(0, 120), String(ph || '').slice(0, 64), String(email || '').slice(0, 254), channel === 'email' ? 'email' : 'wazzup-' + (chatType || channel), phNorm || null); contact = db.prepare('SELECT * FROM contacts WHERE id=?').get(r.lastInsertRowid); logActivity(`Новый контакт (${channel === 'email' ? 'email' : chatType || channel}): ${contact.name}`, 'contacts', contact.id, '', 0); }
   // Клиент написал на аккаунт конкретного сотрудника — значит, обращением
   // занимается он, а не тот, кому выпало по очереди. Привязку канала к сотруднику
   // задаёт администратор один раз в настройках; без привязки работает прежнее
@@ -1553,8 +1554,13 @@ try {
 // только строки с явным чатовым происхождением, повторный запуск ничего не меняет.
 try {
   const hushed = db.prepare(`UPDATE activities SET feed=0 WHERE feed=1 AND (text LIKE 'Wazzup: получено сообщений%'
-      OR text LIKE 'Новое обращение «%' OR text LIKE 'Обращение «%')`).run().changes;
-  if (hushed) console.log(`Лента событий: ${hushed} записей из чатов перенесены в историю карточек.`);
+      OR text LIKE 'Новое обращение «%' OR text LIKE 'Обращение «%' OR text LIKE 'Новый контакт (%')`).run().changes;
+  if (hushed) {
+    const w = hushed % 10 === 1 && hushed % 100 !== 11 ? 'запись перенесена'
+      : [2, 3, 4].includes(hushed % 10) && ![12, 13, 14].includes(hushed % 100) ? 'записи перенесены'
+      : 'записей перенесено';
+    console.log(`Лента событий: ${hushed} ${w} из чатов в историю карточек.`);
+  }
 } catch (e) { console.error('Не удалось почистить ленту событий:', e.message) }
 
 // Разовая уборка при старте: если старая версия оставила заметки удалённых

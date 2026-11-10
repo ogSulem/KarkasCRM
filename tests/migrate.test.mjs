@@ -41,6 +41,7 @@ old.exec(`
 INSERT INTO contacts(name,phone,email,source) VALUES('Клиент из старой базы','+7 900 123-45-67','old@mail.ru','avito');
 INSERT INTO activities(text,entity_type,entity_id,user_name) VALUES('Wazzup: получено сообщений: 2',NULL,NULL,'Wazzup');
 INSERT INTO activities(text,entity_type,entity_id,user_name) VALUES('Новое обращение «Клиент из старой базы» → сделка в этапе «Неразобранное»','deals',1,'');
+INSERT INTO activities(text,entity_type,entity_id,user_name) VALUES('Новый контакт (whatsapp): Клиент из старой базы','contacts',1,'');
 INSERT INTO activities(text,entity_type,entity_id,user_name) VALUES('Сделка «Старая сделка» → этап «Переговоры»','deals',1,'Ирина');
 INSERT INTO deals(title,amount,stage,contact_id) VALUES('Старая сделка',777000,'new',1);
 INSERT INTO conversations(contact_id,title,channels) VALUES(1,'Клиент из старой базы','whatsapp');
@@ -90,7 +91,7 @@ ok('разведка конкурентов: таблицы созданы', col
 // из рабочего стола, но остаются в истории карточек; людские строки живут в ленте
 const feedOf = t => db.prepare('SELECT feed FROM activities WHERE text LIKE ?').get(t)?.feed;
 ok('старая лента: чат-строки стали тихими, людские остались',
-  feedOf('Wazzup: получено%') === 0 && feedOf('Новое обращение%') === 0 && feedOf('Сделка «Старая сделка»%') === 1,
+  feedOf('Wazzup: получено%') === 0 && feedOf('Новое обращение%') === 0 && feedOf('Новый контакт (%') === 0 && feedOf('Сделка «Старая сделка»%') === 1,
   JSON.stringify({ wazzup: feedOf('Wazzup: получено%'), obr: feedOf('Новое обращение%'), deal: feedOf('Сделка «Старая сделка»%') }));
 
 // ── 3. Данные на месте, старые записи не помечены как демо ───────────────────
