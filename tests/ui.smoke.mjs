@@ -848,6 +848,16 @@ try {
       && /А40-1\/2026/.test(fullFake) && /Google Карты/.test(fullFake) && /Средняя разница к нашим ценам/.test(fullFake)
       && /Построили быстро и по смете/.test(fullFake), fullFake.slice(0, 160));
     check('сводку отчёта можно скопировать текстом из шапки карточки', /copyReportSummary/.test(appJsRaw) && /Скопировать сводку/.test(appJsRaw));
+    // сортировка таблиц: порядок по возрастанию, по убыванию и стрелка в заголовке
+    window.__state.sorts = { t: { key: 'name', dir: 1 } };
+    const sortedAsc = window.applySort([{ name: 'Яков' }, { name: 'Анна' }], 't', { name: x => x.name });
+    const thHtml = window.sortTh('t', 'name', 'Клиент');
+    check('сортировка таблиц: порядок по возрастанию и стрелка в заголовке',
+      sortedAsc[0].name === 'Анна' && /sortable/.test(thHtml) && /↑/.test(thHtml), JSON.stringify(sortedAsc) + thHtml);
+    window.__state.sorts.t.dir = 2;
+    const sortedDesc = window.applySort([{ name: 'Яков' }, { name: 'Анна' }], 't', { name: x => x.name });
+    check('сортировка таблиц: второй клик разворачивает порядок', sortedDesc[0].name === 'Яков');
+    delete window.__state.sorts.t;
     window.closeModal(); await wait(150);
   }
   check('шапка контакта тоже не заходит под крестик', /padding-right:3[0-9]px/.test((cssText.match(/\.contact-head\{[^}]*\}/) || [''])[0]));

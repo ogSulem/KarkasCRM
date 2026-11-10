@@ -120,6 +120,11 @@ th,td{overflow-wrap:break-word}
    а колонки не сжимаются до нечитаемых. На узком экране это клиенты, компании,
    конкуренты, сотрудники и каталог — там от шести до восьми колонок */
 .tbl-scroll{overflow-x:auto;-webkit-overflow-scrolling:touch}
+/* сортируемые заголовки таблиц: стрелка показывает направление, порядок
+   переключается кликом, как в привычных офисных таблицах */
+th.sortable{cursor:pointer;user-select:none;white-space:nowrap}
+th.sortable:hover{color:var(--green)}
+.sort-arrow{color:var(--green)}
 tr:hover td{background:#fafcfb}
 tr.selected td,tr.selected:hover td{background:var(--green-l)}
 .tag{display:inline-block;background:var(--green-l);color:#166534;border-radius:999px;padding:2px 9px;font-size:12.5px;margin:1px 3px 1px 0}

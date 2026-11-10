@@ -2177,8 +2177,8 @@ async function contacts(v) {
    <button class="btn sm" onclick="openMenu(event, contactsMoreMenu())" title="Дубли, экспорт и импорт">${icon('more', 13)} Ещё</button>
    ${canEdit() ? `<button class="btn sm primary" onclick="openContact()">${icon('plus', 13)} Новый контакт</button>` : ''}</div>
   ${canEdit() ? bulkSlot('contacts', `${bulkOwner('contacts')}<button class="btn sm" onclick="bulkAddTag()">${icon('tag', 13)} Добавить тег</button><button class="btn sm danger" onclick="bulkApply('contacts','delete')">${icon('trash', 13)} Удалить</button>`) : ''}
-  <div class="card"><div class="tbl-scroll"><table><tr><th class="sel"></th><th>Клиент</th><th>Телефон / E-mail</th><th>Компания</th><th>Источник</th><th>Теги</th><th>Ответственный</th><th></th></tr>
-   ${filtered.slice(0, state.contactLimit || 50).map(c => `<tr class="${selSet('contacts').has(c.id) ? 'selected' : ''}"><td class="sel">${canEdit() ? `<input type="checkbox" title="Выбрать для массового действия" data-selkey="contacts" data-selid="${c.id}" ${selSet('contacts').has(c.id) ? 'checked' : ''} onchange="toggleSel('contacts',${c.id})">` : ''}</td>
+  <div class="card"><div class="tbl-scroll"><table><tr><th class="sel"></th>${sortTh('contacts','name','Клиент')}<th>Телефон / E-mail</th>${sortTh('contacts','company','Компания')}${sortTh('contacts','source','Источник')}<th>Теги</th>${sortTh('contacts','owner','Ответственный')}<th></th></tr>
+   ${applySort(filtered, 'contacts', { name: c => c.name, company: c => c.company || '', source: c => c.source || '', owner: c => __team.find(u => u.id === c.responsible_id)?.name || '' }).slice(0, state.contactLimit || 50).map(c => `<tr class="${selSet('contacts').has(c.id) ? 'selected' : ''}"><td class="sel">${canEdit() ? `<input type="checkbox" title="Выбрать для массового действия" data-selkey="contacts" data-selid="${c.id}" ${selSet('contacts').has(c.id) ? 'checked' : ''} onchange="toggleSel('contacts',${c.id})">` : ''}</td>
     <td><a href="#" onclick="openContactCard(${c.id});return false"><b>${esc(c.name)}</b></a></td><td>${esc(c.phone || '—')}<br><small>${esc(c.email || '')}</small></td><td>${esc(c.company || '—')}</td><td><span class="tag grey">${esc(sourceLabel(c.source))}</span></td>
     <td>${(c.tags || '').split(',').filter(Boolean).map(t => `<span class="tag">${esc(t.trim())}</span>`).join('')}</td>
     <td><small>${esc(__team.find(u => u.id === c.responsible_id)?.name || '—')}</small></td>
@@ -2187,6 +2187,35 @@ async function contacts(v) {
 }
 
 function resetContactFilter() { state.contactFilter = { q: '', owner: '', source: '', tag: '' }; render(); }
+/* Сортировка таблиц кликом по заголовку: первый клик — по возрастанию,
+   второй — по убыванию, третий возвращает исходный порядок списка.
+   Сортируем уже выбранный список на клиенте, без лишних запросов:
+   данные раздела и так загружены целиком. */
+function sortOf(view) { state.sorts = state.sorts || {}; return state.sorts[view] = state.sorts[view] || { key: '', dir: 0 }; }
+function setSort(view, key) {
+  const s = sortOf(view);
+  if (s.key !== key) { s.key = key; s.dir = 1; } else s.dir = (s.dir + 1) % 3;
+  render();
+}
+function sortTh(view, key, label) {
+  const s = sortOf(view);
+  const arrow = s.key === key && s.dir === 1 ? ' ↑' : s.key === key && s.dir === 2 ? ' ↓' : '';
+  return `<th class="sortable" title="Сортировать: ещё клик меняет порядок" onclick="setSort('${view}','${key}')">${label}${arrow ? `<span class="sort-arrow">${arrow.trim()}</span>` : ''}</th>`;
+}
+function applySort(list, view, getters) {
+  const s = sortOf(view);
+  const g = getters[s.key];
+  if (!s.dir || !g) return list;
+  // dir: 1 — по возрастанию, 2 — по убыванию; в сравнение уходит знак
+  const mul = s.dir === 2 ? -1 : 1;
+  const arr = [...list];
+  arr.sort((a, b) => {
+    const va = g(a), vb = g(b);
+    if (typeof va === 'number' && typeof vb === 'number') return (va - vb) * mul;
+    return String(va ?? '').localeCompare(String(vb ?? ''), 'ru') * mul;
+  });
+  return arr;
+}
 // Пункты меню «Ещё» в контактах: чтение доступно всем, загрузка — не наблюдателю.
 function contactsMoreMenu() {
   return `<button type="button" onclick="closeMenu();openDuplicates()">${icon('search', 13)} Найти дубли клиентов</button>
@@ -2425,8 +2454,8 @@ async function companies(v) {
    <input id="companySearch" style="flex:1 1 320px;min-width:240px;max-width:480px" placeholder="Поиск: название, ИНН, телефон, почта" value="${esc(state.companyQuery || '')}" oninput="liveSearch('companies',()=>setCompanyQuery(this.value))">
    ${canEdit() ? `<button class="btn sm primary" style="margin-left:auto" onclick="openCompany()">+ Компания</button>` : ''}</div>
   ${canEdit() ? bulkSlot('companies', `<button class="btn sm danger" onclick="bulkApply('companies','delete')">${icon('trash', 13)} Удалить</button>`) : ''}
-  <div class="tbl-scroll"><table><tr><th class="sel"></th><th>Компания</th><th>ИНН</th><th>Телефон</th><th>E-mail</th><th>Сайт</th><th></th></tr>
-   ${shown.slice(0, state.companyLimit || 100).map(c => `<tr class="${selSet('companies').has(c.id) ? 'selected' : ''}"><td class="sel">${canEdit() ? `<input type="checkbox" data-selkey="companies" data-selid="${c.id}" title="Выбрать для массового действия" ${selSet('companies').has(c.id) ? 'checked' : ''} onchange="toggleSel('companies',${c.id})">` : ''}</td><td><a href="#" onclick="openCompanyCard(${c.id});return false"><b>${esc(c.name)}</b></a></td><td>${esc(c.inn || '—')}</td><td>${esc(c.phone || '—')}</td><td>${esc(c.email || '—')}</td><td>${siteHref(c.site) ? `<a href="${esc(siteHref(c.site))}" target="_blank" rel="noopener">${esc(c.site)}</a>` : '—'}</td><td style="white-space:nowrap">${canEdit() ? `<button class="btn sm" title="Открыть карточку компании" onclick="openCompany(${c.id})">${icon('edit', 13)} Изменить</button> <button class="btn sm danger" title="Удалить компанию" onclick="del('companies',${c.id})">${icon('close', 13)}</button>` : `<button class="btn sm" onclick="openCompanyCard(${c.id})">Открыть</button>`}</td></tr>`).join('') || '<tr><td colspan="7"><div class="empty">Компаний не найдено — измените поиск или добавьте компанию</div></td></tr>'}</table></div>
+  <div class="tbl-scroll"><table><tr><th class="sel"></th>${sortTh('companies','name','Компания')}${sortTh('companies','inn','ИНН')}<th>Телефон</th><th>E-mail</th><th>Сайт</th><th></th></tr>
+   ${applySort(shown, 'companies', { name: c => c.name, inn: c => c.inn || '' }).slice(0, state.companyLimit || 100).map(c => `<tr class="${selSet('companies').has(c.id) ? 'selected' : ''}"><td class="sel">${canEdit() ? `<input type="checkbox" data-selkey="companies" data-selid="${c.id}" title="Выбрать для массового действия" ${selSet('companies').has(c.id) ? 'checked' : ''} onchange="toggleSel('companies',${c.id})">` : ''}</td><td><a href="#" onclick="openCompanyCard(${c.id});return false"><b>${esc(c.name)}</b></a></td><td>${esc(c.inn || '—')}</td><td>${esc(c.phone || '—')}</td><td>${esc(c.email || '—')}</td><td>${siteHref(c.site) ? `<a href="${esc(siteHref(c.site))}" target="_blank" rel="noopener">${esc(c.site)}</a>` : '—'}</td><td style="white-space:nowrap">${canEdit() ? `<button class="btn sm" title="Открыть карточку компании" onclick="openCompany(${c.id})">${icon('edit', 13)} Изменить</button> <button class="btn sm danger" title="Удалить компанию" onclick="del('companies',${c.id})">${icon('close', 13)}</button>` : `<button class="btn sm" onclick="openCompanyCard(${c.id})">Открыть</button>`}</td></tr>`).join('') || '<tr><td colspan="7"><div class="empty">Компаний не найдено — измените поиск или добавьте компанию</div></td></tr>'}</table></div>
    ${shown.length > (state.companyLimit || 100) ? `<div style="text-align:center;margin-top:10px"><button class="btn" onclick="showMoreCompanies()">Показать ещё</button></div>` : ''}</div>`;
 }
 // Карточка компании: кто у неё работает и что с ней продаётся.
@@ -2678,8 +2707,8 @@ async function products(v) {
   <p class="form-hint" style="margin:-2px 0 10px">Это <b>один список</b>: отсюда позиции берутся в сделки, и эти же цены CRM сравнивает с ценами конкурентов (раздел «Конкуренты» → «Наш прайс-лист»). В продаже: <b>${onSale.length}</b>${archived ? ` · в архиве: ${archived}` : ''}${noPrice ? ` · без цены: ${noPrice} — в сравнении они не участвуют` : ''}.</p>
   ${amAdmin() ? '' : '<p class="form-hint" style="margin:-6px 0 10px">Прайс-лист меняет администратор. Нужной позиции нет? Добавьте её прямо в сделку — сумма пересчитается, а общий прайс останется неизменным.</p>'}
   ${amAdmin() ? bulkSlot('products', `<button class="btn sm" onclick="bulkApply('products','update',{active:0})">Снять с продажи</button><button class="btn sm" onclick="bulkApply('products','update',{active:1})">Вернуть в продажу</button><button class="btn sm danger" onclick="bulkApply('products','delete')">${icon('trash', 13)} Удалить</button>`) : ''}
-  <div class="tbl-scroll"><table><tr><th class="sel"></th><th>Артикул</th><th>Название</th><th>Цена</th><th>Ед.</th><th>В продаже</th><th></th></tr>
-   ${shown.map(p => `<tr class="${selSet('products').has(p.id) ? 'selected' : ''}"><td class="sel">${amAdmin() ? `<input type="checkbox" data-selkey="products" data-selid="${p.id}" title="Выбрать для массового действия" ${selSet('products').has(p.id) ? 'checked' : ''} onchange="toggleSel('products',${p.id})">` : ''}</td><td><code>${esc(p.sku || '—')}</code></td><td><b>${esc(p.name)}</b>${p.note ? `<br><small>${esc(p.note)}</small>` : ''}</td><td>${Number(p.price) > 0 ? fmt(p.price) : '<span class="tag grey">цена не указана</span>'}</td><td>${esc(p.unit || 'шт')}</td><td>${p.active ? 'Да' : '<span class="tag grey">Архив</span>'}</td><td style="white-space:nowrap">${amAdmin() ? `<button class="btn sm" title="Изменить позицию" onclick="openProduct(${p.id})">${icon('edit', 13)} Изменить</button> <button class="btn sm danger" title="Удалить из каталога" onclick="del('products',${p.id})">${icon('close', 13)}</button>` : `<button class="btn sm" title="Посмотреть позицию" onclick="openProduct(${p.id})">Открыть</button>`}</td></tr>`).join('') || '<tr><td colspan="7"><div class="empty">Ничего не найдено — измените фильтр или добавьте позицию</div></td></tr>'}</table></div></div>`;
+  <div class="tbl-scroll"><table><tr><th class="sel"></th>${sortTh('products','sku','Артикул')}${sortTh('products','name','Название')}${sortTh('products','price','Цена')}<th>Ед.</th><th>В продаже</th><th></th></tr>
+   ${applySort(shown, 'products', { sku: p => p.sku || '', name: p => p.name, price: p => Number(p.price) || 0 }).map(p => `<tr class="${selSet('products').has(p.id) ? 'selected' : ''}"><td class="sel">${amAdmin() ? `<input type="checkbox" data-selkey="products" data-selid="${p.id}" title="Выбрать для массового действия" ${selSet('products').has(p.id) ? 'checked' : ''} onchange="toggleSel('products',${p.id})">` : ''}</td><td><code>${esc(p.sku || '—')}</code></td><td><b>${esc(p.name)}</b>${p.note ? `<br><small>${esc(p.note)}</small>` : ''}</td><td>${Number(p.price) > 0 ? fmt(p.price) : '<span class="tag grey">цена не указана</span>'}</td><td>${esc(p.unit || 'шт')}</td><td>${p.active ? 'Да' : '<span class="tag grey">Архив</span>'}</td><td style="white-space:nowrap">${amAdmin() ? `<button class="btn sm" title="Изменить позицию" onclick="openProduct(${p.id})">${icon('edit', 13)} Изменить</button> <button class="btn sm danger" title="Удалить из каталога" onclick="del('products',${p.id})">${icon('close', 13)}</button>` : `<button class="btn sm" title="Посмотреть позицию" onclick="openProduct(${p.id})">Открыть</button>`}</td></tr>`).join('') || '<tr><td colspan="7"><div class="empty">Ничего не найдено — измените фильтр или добавьте позицию</div></td></tr>'}</table></div></div>`;
 }
 async function openProduct(id) {
   const p = id ? await api('/api/products/' + id) : {};
