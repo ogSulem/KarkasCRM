@@ -234,6 +234,9 @@ html[data-theme=dark] .send-btn{background:#16a34a;border-color:#16a34a;color:#f
 .modal{position:fixed;inset:0;background:rgba(15,23,42,.45);display:grid;place-items:center;z-index:50;padding:16px;backdrop-filter:blur(2px)}
 .modal-card{background:#fff;border-radius:16px;padding:22px;width:min(720px,100%);max-height:90vh;overflow:auto;position:relative;box-shadow:0 30px 70px -20px rgba(0,0,0,.5)}
 .modal-card .x{position:absolute;top:10px;right:14px;font-size:22px;border:0;background:none;cursor:pointer;color:var(--muted)}
+/* карточка конкурента шире обычных окон: сводный отчёт раскладывается
+   колонками, таблицы судов и цен не сжимаются в столбик */
+.modal-card.wide{width:min(1080px,100%)}
 /* Крестик закрытия висит в правом верхнем углу окна. Первая строка карточки
    (название, ИНН и кнопки «Проверить сейчас» / «Загрузить прайс») получает запас
    справа и чуть опущена — иначе кнопки наезжают на крестик и его не нажать. */
@@ -705,4 +708,13 @@ html[data-theme=dark] *::-webkit-scrollbar-thumb:hover{background:#465c69;backgr
 
 /* Ссылки на реестры в отчёте о конкуренте: компактный переносимый список */
 .report-links { display: flex; flex-wrap: wrap; gap: 6px 14px; font-size: 13px }
+/* сводный отчёт конкурента: паспорт и блоки данных в колонках, на узком
+   экране складываются в одну — таблицы не уходят за край */
+.rep-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; margin-bottom: 12px }
+.rep-grid3 { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 12px; margin-bottom: 12px }
+@media (max-width: 960px) { .rep-grid3 { grid-template-columns: 1fr } }
+@media (max-width: 860px) { .rep-grid { grid-template-columns: 1fr } }
+.passport { display: grid; grid-template-columns: max-content 1fr; gap: 5px 16px; margin: 0; font-size: 13.5px }
+.passport dt { color: var(--muted) }
+.passport dd { margin: 0 }
 .report-links a { white-space: nowrap }
