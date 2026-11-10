@@ -2568,7 +2568,7 @@ ${user?.name || ''}`.trim();
       copyFileSync(tmp, join(DATA_DIR, 'crm.db'));
       unlinkSync(tmp);
       for (const suffix of ['-wal', '-shm']) { const f = join(DATA_DIR, 'crm.db' + suffix); if (existsSync(f)) unlinkSync(f) }
-      json(res, 200, { ok: true, restored: name, safety_copy: safety, restarting: true, message: 'База восстановлена из копии, служба перезапускается — обновите страницу через несколько секунд' });
+      json(res, 200, { ok: true, restored: name, safety_copy: safety, restarting: true, message: 'База восстановлена из копии. В Docker служба перезапустится сама; если запускали без Docker — перезапустите её своей командой запуска. Страницу обновите через несколько секунд' });
       setTimeout(() => process.exit(0), 400);
       return;
     }
