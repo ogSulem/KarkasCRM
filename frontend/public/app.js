@@ -822,6 +822,9 @@ async function boot() {
     $('#uEmail').textContent = me.user.email;
     $('#uAva').textContent = (me.user.name || 'A')[0].toUpperCase();
     state.me = me.user;
+    // открываем раздел, на котором сотрудник закончил в прошлый раз: ежедневная
+    // работа начинается сразу со своих чатов или сделок, а не с пустого стола
+    if (me.user.pref_view && me.user.pref_view !== 'dashboard' && state.view === 'dashboard') go(me.user.pref_view);
     loadDrafts(); // черновики читаются заново: ключ зависит от сотрудника
     guardIdenticalHtml($('#view')); // одинаковый экран не перерисовывается
     // роль на теле страницы: для наблюдателя прячем кнопки создания в шапке
@@ -904,6 +907,7 @@ const SKELETONS = {
 async function go(view, subTab) {
   const prevView = state.view;
   state.view = view;
+  rememberPref(view);
   if (subTab) state.settingsTab = subTab;
   $$('#nav button').forEach(b => b.classList.toggle('active', b.dataset.view === view));
   const [t, sub] = TITLES[view] || [view, ''];
@@ -951,6 +955,13 @@ function restoreFocus(f) {
 // Живой поиск: не дёргаем сервер и перерисовку на каждый символ.
 const __liveTimers = {};
 function liveSearch(key, run, ms = 160) { clearTimeout(__liveTimers[key]); __liveTimers[key] = setTimeout(run, ms); }
+// любимый раздел сохраняется у сотрудника: переходы частые, а писать на сервер
+// достаточно один раз, когда человек остановился на разделе
+let __prefTimer = 0;
+function rememberPref(view) {
+  clearTimeout(__prefTimer);
+  __prefTimer = setTimeout(() => { api('/api/me/pref', { method: 'PATCH', body: JSON.stringify({ view }) }).catch(() => {}); }, 600);
+}
 
 /* ---------- переключатели состояния ----------
    Кнопки и вкладки вызывают функции, а не пишут в state напрямую: так обработчики

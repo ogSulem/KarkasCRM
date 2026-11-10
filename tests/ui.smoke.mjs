@@ -816,7 +816,7 @@ try {
     const headCss = (cssText.match(/\.modal-head\{[^}]*\}/) || [''])[0];
     check('шапка карточки конкурента — общий класс, а не разовые инлайн-стили', Boolean(head) && !head.getAttribute('style'));
     check('у шапки зарезервировано место под крестик', /padding-right:3[0-9]px/.test(headCss), headCss);
-    check('шапка чуть опущена ниже крестика', /margin:6px 0/.test(headCss), headCss);
+    check('шапка липкая и держит место под крестик', /position:sticky/.test(headCss) && /padding-right:34px/.test(headCss), headCss);
     check('в шапке остались кнопки проверки и загрузки прайса', /Проверить сейчас/.test(head.textContent) && /Загрузить прайс/.test(head.textContent));
     check('отчёт объясняет, откуда данные и кто не ответил', /Откуда отчёт/.test($('#modalBody').textContent));
     // В карточке смоук-конкурента сохранённых проверок может не быть, поэтому
@@ -848,6 +848,10 @@ try {
       && /А40-1\/2026/.test(fullFake) && /Google Карты/.test(fullFake) && /Средняя разница к нашим ценам/.test(fullFake)
       && /Построили быстро и по смете/.test(fullFake), fullFake.slice(0, 160));
     check('сводку отчёта можно скопировать текстом из шапки карточки', /copyReportSummary/.test(appJsRaw) && /Скопировать сводку/.test(appJsRaw));
+    // комфорт: CRM открывается на разделе, где сотрудник закончил, а шапка длинных
+    // окон и крестик остаются видимыми при прокрутке
+    check('любимый раздел сохраняется на сервере и открывается после входа', /rememberPref/.test(appJsRaw) && /\/api\/me\/pref/.test(appJsRaw) && /pref_view/.test(appJsRaw));
+    check('шапка модального окна и крестик липкие: видны при прокрутке длинных карточек', /\.modal-head\{[^}]*position:sticky/.test(cssText) && /\.modal-card \.x\{[^}]*position:sticky/.test(cssText));
     // сортировка таблиц: порядок по возрастанию, по убыванию и стрелка в заголовке
     window.__state.sorts = { t: { key: 'name', dir: 1 } };
     const sortedAsc = window.applySort([{ name: 'Яков' }, { name: 'Анна' }], 't', { name: x => x.name });
