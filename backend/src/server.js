@@ -113,7 +113,7 @@ const SCHEMA = [
 ];
 const SCHEMA_COLUMNS = [...SCHEMA,
   ['users', 'must_change_password', 'INTEGER NOT NULL DEFAULT 0'],
-  ['users', 'session_version', 'INTEGER NOT NULL DEFAULT 0'],
+  ['users', 'session_version', 'INTEGER NOT NULL DEFAULT 0'], ['users', 'pref_view', "TEXT DEFAULT ''"],
   ['users', 'last_login', 'TEXT'],
   ['users', 'theme', "TEXT DEFAULT ''"],
   ['contacts', 'company_id', 'INTEGER'], ['contacts', 'position', 'TEXT'], ['contacts', 'responsible_id', 'INTEGER'],
@@ -367,7 +367,7 @@ function verify(t) {
     if (got.length !== expected.length || !timingSafeEqual(got, expected)) return null;
     const p = JSON.parse(Buffer.from(b, 'base64url'));
     if (p.exp <= Date.now()) return null;
-    const user = db.prepare('SELECT id,name,email,role,must_change_password,session_version,theme FROM users WHERE id=? AND active=1').get(p.id);
+    const user = db.prepare('SELECT id,name,email,role,must_change_password,session_version,theme,pref_view FROM users WHERE id=? AND active=1').get(p.id);
     return user && (p.sv ?? 0) === user.session_version ? user : null;
   } catch { return null; }
 }
@@ -1839,6 +1839,15 @@ export const server = http.createServer(async (req, res) => {
       if (!['light', 'dark', 'auto'].includes(t)) return json(res, 400, { error: 'Неизвестная тема: доступна светлая, тёмная и «как в системе»' });
       db.prepare('UPDATE users SET theme=? WHERE id=?').run(t === 'auto' ? '' : t, user.id);
       return json(res, 200, { ok: true, theme: t });
+    }
+    // любимый раздел: CRM открывается на том экране, где сотрудник работал,
+    // а не каждый раз на рабочем столе; хранится у сотрудника, как тема
+    if (p === '/api/me/pref' && req.method === 'PATCH') {
+      const b = await readBody(req);
+      const v = String(b.view || '');
+      if (!['dashboard', 'pipe', 'inbox', 'contacts', 'companies', 'tasks', 'products', 'competitors', 'analytics', 'settings'].includes(v)) return json(res, 400, { error: 'Неизвестный раздел' });
+      db.prepare('UPDATE users SET pref_view=? WHERE id=?').run(v, user.id);
+      return json(res, 200, { ok: true });
     }
     if (p === '/api/meta') return json(res, 200, {
       version: VERSION, schema: SCHEMA_VERSION, user,

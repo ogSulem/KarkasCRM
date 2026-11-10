@@ -115,6 +115,16 @@ test('объединение чатов WhatsApp + Telegram в один диал
   assert.equal(deals.length, 1, 'автосоздана сделка на первом обращении');
 });
 
+test('любимый раздел сотрудника сохраняется и возвращается в meta', async () => {
+  const save = await call('/api/me/pref', { method: 'PATCH', body: JSON.stringify({ view: 'contacts' }) });
+  assert.equal(save.status, 200, 'раздел сохранён');
+  const meta = (await call('/api/meta')).body;
+  assert.equal(meta.user.pref_view, 'contacts', 'meta отдаёт любимый раздел');
+  const bad = await call('/api/me/pref', { method: 'PATCH', body: JSON.stringify({ view: 'no-such-view' }) });
+  assert.equal(bad.status, 400, 'неизвестный раздел отклоняется');
+  await call('/api/me/pref', { method: 'PATCH', body: JSON.stringify({ view: 'dashboard' }) });
+});
+
 test('групповой чат: одна история, участники с именами, повторы схлопнуты', async () => {
   // событие группы приходит с именем отправителя: пузырь подписывается участником
   await call('/webhooks/wazzup', { method: 'POST', body: JSON.stringify({ messages: [{ messageId: 'grp-1', channelId: 'ch-g', chatType: 'maxgroup', chatId: 'group-77', text: 'Всем привет из группы', sender: { name: 'Надежда', phone: '79001110001' } }] }) });

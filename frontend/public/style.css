@@ -237,15 +237,16 @@ html[data-theme=dark] .send-btn{background:#16a34a;border-color:#16a34a;color:#f
 .profile{padding:14px}
 /* misc */
 .modal{position:fixed;inset:0;background:rgba(15,23,42,.45);display:grid;place-items:center;z-index:50;padding:16px;backdrop-filter:blur(2px)}
-.modal-card{background:#fff;border-radius:16px;padding:22px;width:min(720px,100%);max-height:90vh;overflow:auto;position:relative;box-shadow:0 30px 70px -20px rgba(0,0,0,.5)}
-.modal-card .x{position:absolute;top:10px;right:14px;font-size:22px;border:0;background:none;cursor:pointer;color:var(--muted)}
+.modal-card{background:#fff;border-radius:16px;padding:22px;--mpad:22px;width:min(720px,100%);max-height:90vh;overflow:auto;position:relative;box-shadow:0 30px 70px -20px rgba(0,0,0,.5)}
+.modal-card .x{position:sticky;top:6px;float:right;z-index:7;margin:-12px -6px 0 0;font-size:22px;border:0;background:none;cursor:pointer;color:var(--muted)}
 /* карточка конкурента шире обычных окон: сводный отчёт раскладывается
    колонками, таблицы судов и цен не сжимаются в столбик */
 .modal-card.wide{width:min(1080px,100%)}
-/* Крестик закрытия висит в правом верхнем углу окна. Первая строка карточки
-   (название, ИНН и кнопки «Проверить сейчас» / «Загрузить прайс») получает запас
-   справа и чуть опущена — иначе кнопки наезжают на крестик и его не нажать. */
-.modal-head{display:flex;justify-content:space-between;align-items:flex-start;gap:10px;flex-wrap:wrap;margin:6px 0 12px;padding-right:34px}
+/* Крестик закрытия висит в правом верхнем углу окна и вместе с шапкой
+   (название, ИНН и кнопки «Проверить сейчас» / «Загрузить прайс») прилипает к
+   верху при прокрутке — в длинных карточках закрытие и заголовок всегда под
+   рукой. У шапки запас справа, чтобы кнопки не наезжали на крестик. */
+.modal-head{display:flex;justify-content:space-between;align-items:flex-start;gap:10px;flex-wrap:wrap;position:sticky;top:0;z-index:6;background:var(--card);margin:calc(-1*var(--mpad)) calc(-1*var(--mpad)) 12px;padding:calc(var(--mpad) - 8px) 34px 12px var(--mpad);border-bottom:1px solid var(--line);padding-right:34px}
 .modal-head h3{margin:0}
 #modalBody>h3:first-child,#modalBody>p:first-child{padding-right:34px}
 .tabs{display:flex;gap:6px;flex-wrap:wrap;margin-bottom:14px}
@@ -357,7 +358,7 @@ code{background:#eef2f7}
      открывается вниз, иначе оно уходило бы за верхний край экрана */
   .user-menu{bottom:auto;top:calc(100% + 8px)}
   .col{min-width:230px;max-width:230px;max-height:none}
-  .modal-card{padding:16px;border-radius:14px}
+  .modal-card{padding:16px;--mpad:16px;border-radius:14px}
   .settings-cols{grid-template-columns:1fr}
   .grid{grid-template-columns:repeat(auto-fit,minmax(150px,1fr))}
   .kpi b{font-size:18px}
