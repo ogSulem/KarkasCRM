@@ -730,6 +730,8 @@ test('массовые действия: одна операция на пачк
   assert.equal(upd.status, 200); assert.equal(upd.body.count, 3);
   const all = (await call('/api/contacts')).body.filter(c => String(c.tags || '').includes('пачка'));
   assert.equal(all.length, 3, 'тег проставился всем выбранным');
+  const bulkDash = (await call('/api/dashboard')).body;
+  assert.match(bulkDash.activities[0].text, /Массовое изменение \(клиентов\): 3 записи — теги/, 'массовая операция читается по-русски: ' + bulkDash.activities[0].text);
   assert.equal((await call('/api/bulk', { method: 'POST', body: JSON.stringify({ table: 'contacts', ids: [], patch: { tags: 'x' } }) })).status, 400, 'пустой список — ошибка');
   assert.equal((await call('/api/bulk', { method: 'POST', body: JSON.stringify({ table: 'contacts', ids, patch: { role: 'admin' } }) })).status, 400, 'недопустимое поле отброшено');
   const linked = (await call('/api/contacts', { method: 'POST', body: JSON.stringify({ name: 'Связанный для пачки' }) })).body;
@@ -741,6 +743,8 @@ test('массовые действия: одна операция на пачк
   const del = await call('/api/bulk', { method: 'POST', body: JSON.stringify({ table: 'contacts', ids, action: 'delete' }) });
   assert.equal(del.status, 200);
   assert.equal((await call('/api/contacts')).body.filter(c => ids.includes(c.id)).length, 0, 'записи удалены');
+  const delDash = (await call('/api/dashboard')).body;
+  assert.match(delDash.activities[0].text, /Массовое удаление \(клиентов\): 3 записи/, 'массовое удаление осталось в журнале: ' + delDash.activities[0].text);
 });
 
 test('сделка, заведённая сразу закрытой, получает дату закрытия', async () => {
@@ -1298,6 +1302,18 @@ test('лента рабочего стола не тонет в чатах, ис
   assert.ok(deal, 'сделка обращения создана и видна на доске');
   const card = (await call(`/api/deals/${deal.id}`)).body;
   assert.ok((card.history || []).some(h => /Новое обращение/.test(h.text)), 'в истории карточки событие обращения осталось');
+  // ручное создание видно в ленте человеческим текстом, а не «Создано (table #1)»
+  const created = await call('/api/contacts', { method: 'POST', body: JSON.stringify({ name: 'Ленточный Клиент' }) });
+  assert.equal(created.status, 201, 'клиент создан');
+  const dash2 = (await call('/api/dashboard')).body;
+  assert.match(dash2.activities[0].text, /Клиент «Ленточный Клиент» добавлен/, 'создание записи читается по-человечески: ' + dash2.activities[0].text);
+  // файл в чате не оставляет строки в ленте: след живёт в самом сообщении
+  const convForFile = (await call('/api/conversations')).body.find(c => c.contact_id) || (await call('/api/conversations')).body[0];
+  const up = await call(`/api/conversations/${convForFile.id}/upload`, { method: 'POST', body: JSON.stringify({ filename: 'фото-дома.png', contentType: 'image/png', dataBase64: Buffer.from('fake-png-bytes').toString('base64') }) });
+  assert.equal(up.status, 201, 'файл загружен');
+  assert.equal(up.body.name, 'фото-дома.png', 'имя файла с кириллицей сохранено');
+  const dash3 = (await call('/api/dashboard')).body;
+  assert.ok(!dash3.activities.some(a => /[Фф]айл загружен|загружен в переписку/.test(a.text)), 'загрузка файла в чат не попала в ленту компании');
 });
 
 test('файл в сообщении хранит имя, тип и размер, превью списка читается', async () => {
