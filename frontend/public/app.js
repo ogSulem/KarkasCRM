@@ -546,6 +546,9 @@ function pushToast({ title = '', text = '', kind = 'ok', actionLabel = '', onAct
 }
 function openModal(html) {
   closeMenu();
+  // широким окно делает только карточка конкурента: без сброса класс остался бы
+  // на следующих окнах и формы контактов разъехались бы
+  $('.modal-card')?.classList.remove('wide');
   $('#modalBody').innerHTML = html;
   lockFormsForViewer($('#modalBody'));
   $('#modal').classList.remove('hidden');
@@ -2921,6 +2924,7 @@ async function saveCompetitor(e, id) {
 
 async function openCompetitorCard(id) {
   const c = await api('/api/competitors/' + id);
+  state.compCard = c; // сводка копируется из уже загруженной карточки, без лишнего запроса
   if (!state.ourPrices) state.ourPrices = (await api('/api/prices?scope=ours').catch(() => ({ rows: [] }))).rows || [];
   state.compTab = state.compTab || 'report';
   openModal(`
@@ -2931,6 +2935,7 @@ async function openCompetitorCard(id) {
        ${canEdit() ? `<button class="btn sm primary" onclick="checkCompetitor(${c.id})">${icon('refresh', 13)} Проверить сейчас</button>
        <button class="btn sm" onclick="openPriceImport(${c.id},'theirs')">${icon('excel', 13)} Загрузить прайс</button>` : ''}
        ${(c.prices || []).length ? `<button class="btn sm" title="Скачать прайс конкурента таблицей CSV" onclick="download('/api/prices/export?scope=competitor&competitor=${c.id}','competitor-prices.csv')">${icon('download', 13)} Скачать прайс</button>` : ''}
+       <button class="btn sm" title="Скопировать сводку отчёта текстом: риск, вердикт, аргументы, суды, рейтинг, цены" onclick="copyReportSummary(${c.id})">${icon('copy', 13)} Скопировать сводку</button>
      </div>
    </div>
    <div class="tabs" style="margin-bottom:12px">
@@ -2942,6 +2947,8 @@ async function openCompetitorCard(id) {
      <button class="${state.compTab === 'history' ? 'active' : ''}" onclick=\"setCompTab('history',${id})\">История</button>
    </div>
    <div id="compTabBody">${competitorTab(c)}</div>`);
+  // сводный отчёт раскладывается колонками: окно конкурента шире стандартного
+  document.querySelector('.modal-card')?.classList.add('wide');
 }
 
 // Отзывов здесь нет намеренно: для них есть своя вкладка «Отзывы» с автором и
@@ -2993,6 +3000,28 @@ function deleteFinding(fid, cid) {
   });
 }
 
+// Сводка отчёта одним текстом: менеджер вставляет её в письмо или чат, не
+// пересказывая цифры руками. Берём только то, что источники действительно отдали.
+async function copyReportSummary(cid) {
+  const c = (state.compCard && state.compCard.id === cid) ? state.compCard : await api('/api/competitors/' + cid).catch(() => null);
+  if (!c) return;
+  const rep = c.report || {};
+  const gs = k => (c.checks || []).find(x => x.source === k) || {};
+  const lines = [`Конкурент: ${c.name}${c.inn ? ' · ИНН ' + c.inn : ''}${c.city ? ' · ' + c.city : ''}`];
+  lines.push(`Риск-оценка: ${rep.risk ?? '—'} из 100, уровень ${RISK_LABELS[String(rep.level || '').toLowerCase()] || rep.level || 'не оценён'}`);
+  if (rep.verdict) lines.push(`Вердикт: ${rep.verdict}`);
+  const tp = rep.talking_points || [];
+  if (tp.length) lines.push('Аргументы в переговорах:', ...tp.map(t => '— ' + t));
+  const kad = gs('kad');
+  if (kad.status === 'ok') lines.push(`Арбитражные дела: ${Number((kad.data || {}).total || 0)}`);
+  const fssp = gs('fssp');
+  if (fssp.status === 'ok' && (fssp.data || {}).total != null) lines.push(`Исполнительные производства: ${(fssp.data || {}).total}`);
+  if (rep.reviews && rep.reviews.avgRating) lines.push(`Средний рейтинг на картах: ${rep.reviews.avgRating} из 5 (${rep.reviews.totalReviews || 0} отзывов)`);
+  if (rep.pricing) lines.push(`Цены конкурента: в среднем ${rep.pricing.avgDiff > 0 ? '+' : ''}${rep.pricing.avgDiff}% к нашим по ${rep.pricing.pairs.length} позициям`);
+  try { await navigator.clipboard.writeText(lines.join('\n')); toast('Сводка скопирована — можно вставить в письмо или чат'); }
+  catch { toast('Браузер не дал доступ к буферу обмена', 'err'); }
+}
+
 // Ссылки на реестры берём из отчёта: их уже собрал сервер по ИНН, ОГРН и названию.
 // Держать два зашитых адреса в разметке — значит показывать меньше, чем CRM знает.
 function reportLinks(rep, c) {
@@ -3012,24 +3041,88 @@ function competitorTab(c) {
     const color = rep.color || riskColor(rep.level);
     // Нули вместо прочерка читались бы как «долгов и судов нет». Если источник
     // не ответил, показываем прочерк и причину.
-    const fsspChk = g('fssp'), kadChk = g('kad');
+    const fsspChk = g('fssp'), kadChk = g('kad'), fedChk = g('fedresurs');
     const debtsTotal = (fsspChk.data || {}).total;
     const debtsKnown = fsspChk.status === 'ok' && debtsTotal != null;
     const kadKnown = kadChk.status === 'ok';
     const kadTotal = Number((kadChk.data || {}).total || 0);
+    const kadCases = ((kadChk.data || {}).cases || []).slice(0, 5);
+    const fedCases = ((fedChk.data || {}).cases || []).slice(0, 4);
+    // Паспорт компании собран из ответов реестров: карточка предприятия уже
+    // приходит в проверке источников, но в отчёте до сих пор не показывалась
+    const fCard = (g('fns').data || {}).card || {};
+    const rCard = (g('rusprofile').data || {}).card || {};
+    const pget = (...vals) => { for (const v of vals) if (v !== undefined && v !== null && v !== '') return v; return ''; };
+    const num = v => { const n = Number(v); return Number.isFinite(n) ? n : 0; };
+    const status = String(pget(fCard.status, rCard.status));
+    const statusTag = !status ? '' : /недейств|прекращ|ликвидац|банкрот/i.test(status)
+      ? `<span class="tag orange">${esc(status)}</span>` : `<span class="tag">${esc(status)}</span>`;
+    const passport = [
+      ['Статус', statusTag],
+      ['ИНН / ОГРН', [c.inn || fCard.inn || rCard.inn, c.ogrn || fCard.ogrn || rCard.ogrn].filter(Boolean).map(esc).join(' · ')],
+      ['Регистрация', [pget(fCard.regDate), pget(fCard.region)].filter(Boolean).map(esc).join(' · ')],
+      ['Адрес', esc(pget(fCard.address, rCard.address))],
+      ['Руководитель', esc(pget(fCard.director))],
+      ['Учредители', esc((fCard.founders || []).join(', '))],
+      ['Численность', fCard.employees ? esc(numFmt(fCard.employees)) + ' чел.' : ''],
+      ['Уставный капитал', num(fCard.capital) ? esc(fmt(num(fCard.capital))) : ''],
+      ['ОКВЭД', [pget(fCard.okved), pget(fCard.okvedText)].filter(Boolean).map(esc).join(' · ')],
+      ['Недоимка налогов', num(fCard.arrears) > 0 ? `<b style="color:var(--danger)">${esc(fmt(num(fCard.arrears)))}</b>` : ''],
+      ['Записи ЕГРЮЛ', esc(String(pget(fCard.invalid)))],
+    ].filter(r => r[1]);
+    const SRC_SHORT = { fns: 'ФНС', rusprofile: 'Rusprofile', fedresurs: 'Федресурс', fssp: 'ФССП', kad: 'картотека судов', google: 'Google', '2gis': '2ГИС', yandex: 'Яндекс', reviews: 'карты и отзывы', pricing: 'сравнение цен', manual: 'вручную' };
+    const factors = rep.factors || [];
+    const factorRow = f => `<div class="row"><span>${f.type === 'risk' ? '<b style="color:var(--danger)">Риск</b>' : f.type === 'plus' ? '<b style="color:var(--green)">Сильная сторона</b>' : '<span class="tag grey">Факт</span>'} ${esc(f.text)}</span><small>${esc(SRC_SHORT[f.source] || f.source || '')}</small></div>`;
+    const factorList = [...factors.filter(f => f.type === 'risk'), ...factors.filter(f => f.type === 'plus'), ...factors.filter(f => f.type === 'info')];
+    const rev = rep.reviews || {};
+    const REV_NAMES = { google: 'Google Карты', '2gis': '2ГИС', yandex: 'Яндекс Карты' };
+    const revRows = Object.entries(rev.sources || {}).map(([k, v]) => ({ name: REV_NAMES[k] || k, rating: v && v.rating, count: num(v && (v.count || v.user_ratings_total)) })).filter(r => r.rating != null || r.count);
+    const reviewList = (c.reviews || []).slice(0, 3);
+    const pricing = rep.pricing || null;
     return `
      <div class="grid" style="margin-bottom:12px">
-       <div class="kpi"><span>Риск-оценка</span><b class="risk-value" style="--risk:${esc(color)}">${rep.risk ?? '—'} / 100</b><small>${esc(RISK_LABELS[String(rep.level || '').toLowerCase()] || rep.level || 'проверок не было')}</small></div>
-       <div class="kpi"><span>Исполнительные производства</span><b>${debtsKnown ? fmt(debtsTotal) : '—'}</b><small>${debtsKnown ? 'по базе ФССП' : 'API ФССП закрыт — по ссылке'}</small></div>
-       <div class="kpi"><span>Арбитражные дела</span><b>${kadKnown ? numFmt(kadTotal) + ' ' + plural(kadTotal, 'дело', 'дела', 'дел') : '—'}</b><small>${kadKnown ? 'Кад.Арбитр' : 'картотека не ответила'}</small></div>
-       <div class="kpi"><span>Средний рейтинг</span><b>${(rep.reviews && rep.reviews.avgRating) ? rep.reviews.avgRating + ' ' + icon('star', 12) : '—'}</b><small>карты и отзывы</small></div>
+       <div class="kpi"><span>Риск-оценка</span><b class="risk-value" style="--risk:${esc(color)}">${rep.risk ?? '—'} / 100</b><small>${esc(RISK_LABELS[String(rep.level || '').toLowerCase()] || rep.level || 'оценка риска')}</small></div>
+       <div class="kpi"><span>Исполнительные производства</span><b>${debtsKnown ? fmt(debtsTotal) : '—'}</b><small>${debtsKnown ? 'по банку данных ФССП' : 'API ФССП закрыт — по ссылке'}</small></div>
+       <div class="kpi"><span>Арбитражные дела</span><b>${kadKnown ? numFmt(kadTotal) + ' ' + plural(kadTotal, 'дело', 'дела', 'дел') : '—'}</b><small>${kadKnown ? 'картотека kad.arbitr.ru' : 'картотека не ответила'}</small></div>
+       <div class="kpi"><span>Средний рейтинг</span><b>${(rev.avgRating) ? rev.avgRating + ' ' + icon('star', 12) : '—'}</b><small>${rev.totalReviews ? rev.totalReviews + ' ' + plural(rev.totalReviews, 'отзыв', 'отзыва', 'отзывов') + ' на картах' : 'карты и отзывы'}</small></div>
+     </div>
+     <div class="rep-grid">
+       <div class="card" style="box-shadow:none;border-color:var(--line)">
+         <h4>Паспорт компании</h4>
+         ${passport.length ? `<dl class="passport">${passport.map(([k, v]) => `<dt>${k}</dt><dd>${v}</dd>`).join('')}</dl>`
+           : '<p class="form-hint">Реестры ещё не отдали карточку компании. Задайте ключи API в настройках или откройте ссылки внизу отчёта: всё, что найдёте, можно внести в карточку, и это попадёт сюда и в оценку риска.</p>'}
+       </div>
+       <div class="card" style="box-shadow:none;border-color:var(--line)">
+         <h4>Вердикт разведки</h4>
+         <p>${esc(rep.verdict || 'Запустите проверку конкурента для получения сводки.')}</p>
+         <h4 style="margin-top:12px">Аргументы для менеджера в переговорах:</h4>
+         <div class="list">${(rep.talking_points || []).map(p => `<div class="row"><span>• ${esc(p)}</span></div>`).join('') || '<small>Факторы риска не выявлены — аргументов пока нет</small>'}</div>
+         <h4 style="margin-top:12px">Из чего сложилась оценка</h4>
+         <div class="list">${factorList.length ? factorList.map(factorRow).join('') : '<small>Факторов пока нет: источники ещё не отдали данные для оценки</small>'}</div>
+       </div>
+     </div>
+     <div class="rep-grid3">
+       <div class="card" style="box-shadow:none;border-color:var(--line)">
+         <h4>Суды и долги</h4>
+         ${kadCases.length ? `<div class="list">${kadCases.map(k => `<div class="row"><span><b>${esc(k.number || 'дело')}</b> · ${esc(k.role || 'участник')}<br><small>${[k.date ? esc(k.date) : '', esc(k.court || '')].filter(Boolean).join(' · ')}</small></span>${k.url ? `<a href="${esc(k.url)}" target="_blank" rel="noopener">карточка</a>` : ''}</div>`).join('')}</div>` : ''}
+         <p class="form-hint">${kadKnown ? (kadTotal ? 'Выше последние дела из картотеки, весь список во вкладке «Долги и суды».' : 'Арбитражных дел в картотеке не найдено.') : 'Картотека судов не ответила — проверьте по ссылке внизу отчёта.'}</p>
+         ${fedCases.length ? `<h4 style="margin-top:10px">Банкротство</h4><div class="list">${fedCases.map(f => `<div class="row"><span>${esc(f.case || 'дело')}<br><small>${esc(f.status || '')}</small></span></div>`).join('')}</div>` : `<p class="form-hint">${(fedChk.status === 'ok') ? 'Записей в реестре банкротств не найдено.' : 'Реестр банкротств не ответил — проверьте по ссылке.'}</p>`}
+       </div>
+       <div class="card" style="box-shadow:none;border-color:var(--line)">
+         <h4>Репутация</h4>
+         ${revRows.length ? `<div class="list">${revRows.map(r => `<div class="row"><span>${esc(r.name)}</span><span>${r.rating != null ? '<b>' + r.rating + '</b> ' + icon('star', 12) : ''}${r.count ? '<small> · ' + numFmt(r.count) + ' ' + plural(r.count, 'отзыв', 'отзыва', 'отзывов') + '</small>' : ''}</span></div>`).join('')}</div>` : '<p class="form-hint">Рейтингов на картах пока нет: источники отзывов не отдали данные или ключи не заданы.</p>'}
+         ${reviewList.length ? `<div class="list" style="margin-top:8px">${reviewList.map(r => `<div class="row"><span>${r.rating != null ? '<b>' + r.rating + '</b> ' + icon('star', 12) + ' ' : ''}${esc(String(r.text || '').slice(0, 140))}<br><small>${esc(r.author || 'Клиент')} · ${esc(r.source || '')}</small></span></div>`).join('')}</div>` : ''}
+       </div>
+       <div class="card" style="box-shadow:none;border-color:var(--line)">
+         <h4>Цены</h4>
+         ${pricing ? `<p class="form-hint">Средняя разница к нашим ценам: <b>${pricing.avgDiff > 0 ? '+' : ''}${pricing.avgDiff}%</b> по ${numFmt(pricing.pairs.length)} ${plural(pricing.pairs.length, 'позиции', 'позициям', 'позициям')}; у конкурента дороже в ${pricing.expensive}, дешевле в ${pricing.cheaper}.</p>
+         <div class="list">${pricing.pairs.slice(0, 6).map(pr => { const d = pr.ours ? Math.round((pr.theirs - pr.ours) / pr.ours * 100) : 0; return `<div class="row"><span>${esc(pr.item)}<br><small>у нас ${esc(fmt(pr.ours))} · у них ${esc(fmt(pr.theirs))}</small></span><b style="color:${d > 0 ? 'var(--green)' : d < 0 ? 'var(--danger)' : 'var(--muted)'}">${d > 0 ? '+' : ''}${d}%</b></div>` }).join('')}</div>
+         <p class="form-hint" style="margin-top:6px">Полное сравнение — во вкладке «Сравнение цен».</p>`
+         : '<p class="form-hint">Для сравнения цен нужен прайс конкурента: загрузите файл кнопкой «Загрузить прайс» или добавьте позиции во вкладке сравнения.</p>'}
+       </div>
      </div>
      <div class="card" style="box-shadow:none;border-color:var(--line)">
-       <h4>Вердикт разведки</h4>
-       <p>${esc(rep.verdict || 'Запустите проверку конкурента для получения сводки.')}</p>
-       <h4 style="margin-top:12px">Аргументы для менеджера в переговорах:</h4>
-       <div class="list">${(rep.talking_points || []).map(p => `<div class="row"><span>• ${esc(p)}</span></div>`).join('') || '<small>Факторы риска не выявлены — аргументов пока нет</small>'}</div>
-       <h4 style="margin-top:12px">Откуда отчёт</h4>
+       <h4>Откуда отчёт</h4>
        <p class="form-hint">${(() => {
          const dq = rep.dataQuality || {};
          const parts = [];

@@ -832,6 +832,22 @@ try {
     const kad21 = window.competitorTab({ id: 1, name: 'Проверка', checks: [{ source: 'kad', status: 'ok', data: { total: 21 } }], report: {} });
     check('число арбитражных дел согласовано с числом', /2 дела/.test(kad2) && /21 дело/.test(kad21), kad2.match(/Арбитражные дела.{0,120}/)?.[0] || '');
     check('число дел в ручной находке тоже согласуется', /plural\(f\.amount, 'дело', 'дела', 'дел'\)/.test(appJsRaw));
+    // сводный отчёт показывает всё, что источники отдали: паспорт компании,
+    // факторы оценки, последние дела, рейтинги карт и сравнение цен
+    const fullFake = window.competitorTab({ id: 1, name: 'ООО «Полный»', checks: [
+      { source: 'fns', status: 'ok', data: { card: { status: 'действующая', director: 'Иванов И.И.', inn: '7700000009', employees: 24, regDate: '2010-05-20' } } },
+      { source: 'kad', status: 'ok', data: { total: 3, cases: [{ number: 'А40-1/2026', date: '2026-01-10', court: 'АС города Москвы', role: 'ответчик', url: 'https://kad.arbitr.ru/Card/1' }] } },
+    ], report: { risk: 35, level: 'низкий', verdict: 'Стабильный конкурент.', factors: [
+        { type: 'risk', text: 'Арбитражные дела: 3', weight: 8, source: 'kad' },
+        { type: 'info', text: 'Руководитель: Иванов И.И.', weight: 0, source: 'fns' } ],
+      pricing: { pairs: [{ item: 'Дом под ключ', ours: 1000000, theirs: 1200000 }], avgDiff: 20, cheaper: 0, expensive: 1 },
+      reviews: { avgRating: 4.2, totalReviews: 10, sources: { google: { rating: 4.2, count: 10 } } } },
+      reviews: [{ id: 1, rating: 5, text: 'Построили быстро и по смете', author: 'Клиент', source: 'вручную' }] });
+    check('сводный отчёт: паспорт, факторы, суды, репутация и цены на одном экране',
+      /Паспорт компании/.test(fullFake) && /Иванов И.И./.test(fullFake) && /Из чего сложилась оценка/.test(fullFake)
+      && /А40-1\/2026/.test(fullFake) && /Google Карты/.test(fullFake) && /Средняя разница к нашим ценам/.test(fullFake)
+      && /Построили быстро и по смете/.test(fullFake), fullFake.slice(0, 160));
+    check('сводку отчёта можно скопировать текстом из шапки карточки', /copyReportSummary/.test(appJsRaw) && /Скопировать сводку/.test(appJsRaw));
     window.closeModal(); await wait(150);
   }
   check('шапка контакта тоже не заходит под крестик', /padding-right:3[0-9]px/.test((cssText.match(/\.contact-head\{[^}]*\}/) || [''])[0]));
