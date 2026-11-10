@@ -1286,6 +1286,20 @@ test('входящее вложение подписано именем файл
   assert.ok(unreadBefore >= 0);
 });
 
+test('лента рабочего стола не тонет в чатах, история обращения сохраняется', async () => {
+  const hook = body => fetch(base + '/webhooks/wazzup?secret=hook-secret-1', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) }).then(r => r.status);
+  const chatId = '79000000099';
+  assert.equal(await hook({ messages: [{ messageId: 'feed-noise-1', channelId: 'ch-feed', chatType: 'whatsapp', chatId, type: 'text', text: 'Здравствуйте, хочу баню', direction: 'inbound', contact: { name: 'Лента Тест', phone: chatId }, timestamp: Date.now() }] }), 200, 'входящее обращение принято');
+  const dash = (await call('/api/dashboard')).body;
+  const texts = dash.activities.map(a => a.text).join(' | ');
+  assert.ok(!/Новое обращение|пришло на аккаунт|назначено на|Новый контакт \(/.test(texts), 'поток чатов не заполняет ленту рабочего стола: ' + texts.slice(0, 240));
+  const deals = (await call('/api/deals')).body.deals;
+  const deal = deals.find(d => /Лента Тест/.test(d.title || ''));
+  assert.ok(deal, 'сделка обращения создана и видна на доске');
+  const card = (await call(`/api/deals/${deal.id}`)).body;
+  assert.ok((card.history || []).some(h => /Новое обращение/.test(h.text)), 'в истории карточки событие обращения осталось');
+});
+
 test('файл в сообщении хранит имя, тип и размер, превью списка читается', async () => {
   const conv = (await call('/api/conversations')).body[0];
   assert.ok(conv, 'есть чат для проверки');

@@ -827,6 +827,11 @@ try {
     window.__state.compTab = 'report';
     const repFake = window.competitorTab({ id: 1, name: 'Проверка', checks: [], report: { noData: true, dataQuality: { ok: 2, skipped: 5 } } });
     check('пустой отчёт объясняет, откуда данные и чего не хватает', /Реестры не отдали данные автоматически/.test(repFake) && /ждут ключ API/.test(repFake) && /Откуда отчёт/.test(repFake), repFake.slice(0, 200));
+    // число дел в отчёте согласуется: «2 дела», «21 дело», а не «2 дел»
+    const kad2 = window.competitorTab({ id: 1, name: 'Проверка', checks: [{ source: 'kad', status: 'ok', data: { total: 2 } }], report: {} });
+    const kad21 = window.competitorTab({ id: 1, name: 'Проверка', checks: [{ source: 'kad', status: 'ok', data: { total: 21 } }], report: {} });
+    check('число арбитражных дел согласовано с числом', /2 дела/.test(kad2) && /21 дело/.test(kad21), kad2.match(/Арбитражные дела.{0,120}/)?.[0] || '');
+    check('число дел в ручной находке тоже согласуется', /plural\(f\.amount, 'дело', 'дела', 'дел'\)/.test(appJsRaw));
     window.closeModal(); await wait(150);
   }
   check('шапка контакта тоже не заходит под крестик', /padding-right:3[0-9]px/.test((cssText.match(/\.contact-head\{[^}]*\}/) || [''])[0]));

@@ -141,7 +141,7 @@ export function seedDemo(db, adminId, adminName) {
   // Примеры записей в ленте «Последние события компании»: блок показывает
   // действия сотрудников, и на демо-базе это видно сразу, а не пустым местом
   const qa = db.prepare("INSERT INTO activities(text,entity_type,entity_id,user_name,created_at) VALUES(?,?,?,?,datetime('now',?))");
-  qa.run('Обращение «Ольга Соколова» → сделка в этапе «Предложение / расчёт»', 'deals', d1, adminName, '-1 day');
+  qa.run('Сделка «Дом 8×10 «Север» под ключ» → этап «Предложение / расчёт»', 'deals', d1, adminName, '-1 day');
   qa.run('Клиенту «Сергей Волков» отправлено коммерческое предложение', 'contacts', c5, adminName, '-6 hours');
   qa.run('Сделка «Баня 4×6 для посёлка» → этап «Неразобранное»', 'deals', d3, adminName, '-2 hours');
 

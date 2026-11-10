@@ -39,6 +39,10 @@ CREATE TABLE competitors(id INTEGER PRIMARY KEY,name TEXT NOT NULL,inn TEXT,ogrn
 `);
 old.exec(`
 INSERT INTO contacts(name,phone,email,source) VALUES('Клиент из старой базы','+7 900 123-45-67','old@mail.ru','avito');
+INSERT INTO activities(text,entity_type,entity_id,user_name) VALUES('Wazzup: получено сообщений: 2',NULL,NULL,'Wazzup');
+INSERT INTO activities(text,entity_type,entity_id,user_name) VALUES('Новое обращение «Клиент из старой базы» → сделка в этапе «Неразобранное»','deals',1,'');
+INSERT INTO activities(text,entity_type,entity_id,user_name) VALUES('Новый контакт (whatsapp): Клиент из старой базы','contacts',1,'');
+INSERT INTO activities(text,entity_type,entity_id,user_name) VALUES('Сделка «Старая сделка» → этап «Переговоры»','deals',1,'Ирина');
 INSERT INTO deals(title,amount,stage,contact_id) VALUES('Старая сделка',777000,'new',1);
 INSERT INTO conversations(contact_id,title,channels) VALUES(1,'Клиент из старой базы','whatsapp');
 INSERT INTO messages(conversation_id,direction,body) VALUES(1,'in','Сообщение из старой базы');
@@ -74,6 +78,8 @@ const expect = {
   tasks: ['demo', 'notified_at', 'type', 'priority', 'responsible_id'],
   messages: ['subject', 'content_uri', 'content_name', 'content_type', 'content_size', 'status'],
   conversations: ['demo', 'channel_id', 'external_chat_id', 'chat_type'],
+  activities: ['feed'],
+  automation_queue: ['quiet'],
 };
 for (const [table, names] of Object.entries(expect)) {
   const have = cols(table);
@@ -81,6 +87,12 @@ for (const [table, names] of Object.entries(expect)) {
   ok(`таблица ${table}: новые колонки добавлены`, missing.length === 0, missing.length ? 'нет: ' + missing.join(', ') : names.join(', '));
 }
 ok('разведка конкурентов: таблицы созданы', cols('competitors').includes('demo') && cols('price_rows').includes('demo'));
+// старая лента была залита строками из чатов: после обновления они уходят
+// из рабочего стола, но остаются в истории карточек; людские строки живут в ленте
+const feedOf = t => db.prepare('SELECT feed FROM activities WHERE text LIKE ?').get(t)?.feed;
+ok('старая лента: чат-строки стали тихими, людские остались',
+  feedOf('Wazzup: получено%') === 0 && feedOf('Новое обращение%') === 0 && feedOf('Новый контакт (%') === 0 && feedOf('Сделка «Старая сделка»%') === 1,
+  JSON.stringify({ wazzup: feedOf('Wazzup: получено%'), obr: feedOf('Новое обращение%'), deal: feedOf('Сделка «Старая сделка»%') }));
 
 // ── 3. Данные на месте, старые записи не помечены как демо ───────────────────
 const after = {
