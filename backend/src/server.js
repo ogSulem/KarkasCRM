@@ -102,8 +102,8 @@ CREATE TABLE IF NOT EXISTS messages(id INTEGER PRIMARY KEY,conversation_id INTEG
 CREATE TABLE IF NOT EXISTS settings(key TEXT PRIMARY KEY,value TEXT);
 CREATE TABLE IF NOT EXISTS read_marks(user_id INTEGER NOT NULL,conversation_id INTEGER NOT NULL REFERENCES conversations(id) ON DELETE CASCADE,
   last_msg_id INTEGER NOT NULL DEFAULT 0,updated_at TEXT DEFAULT (datetime('now')),PRIMARY KEY(user_id,conversation_id));
-CREATE TABLE IF NOT EXISTS activities(id INTEGER PRIMARY KEY,text TEXT,entity_type TEXT,entity_id INTEGER,user_name TEXT,created_at TEXT DEFAULT (datetime('now')));
-CREATE TABLE IF NOT EXISTS automation_queue(id INTEGER PRIMARY KEY,automation_id INTEGER,trigger_type TEXT,deal_id INTEGER,contact_id INTEGER,run_at TEXT,created_at TEXT DEFAULT (datetime('now')));
+CREATE TABLE IF NOT EXISTS activities(id INTEGER PRIMARY KEY,text TEXT,entity_type TEXT,entity_id INTEGER,user_name TEXT,feed INTEGER DEFAULT 1,created_at TEXT DEFAULT (datetime('now')));
+CREATE TABLE IF NOT EXISTS automation_queue(id INTEGER PRIMARY KEY,automation_id INTEGER,trigger_type TEXT,deal_id INTEGER,contact_id INTEGER,run_at TEXT,quiet INTEGER DEFAULT 0,created_at TEXT DEFAULT (datetime('now')));
 `);
 // мягкие миграции: дополняем ранее созданные таблицы недостающими колонками
 const SCHEMA = [
@@ -137,6 +137,10 @@ const SCHEMA_COLUMNS = [...SCHEMA,
   // сотрудник, чей это аккаунт: с него отвечаем, когда клиент ещё не писал,
   // и на него назначается обращение, пришедшее на этот аккаунт
   ['channels', 'user_id', 'INTEGER'],
+  // строки журнала, рождённые чатами, живут в истории карточек, но ленту
+  // рабочего стола не заполняют; quiet у очереди хранит этот признак через выдержку
+  ['activities', 'feed', 'INTEGER DEFAULT 1'],
+  ['automation_queue', 'quiet', 'INTEGER DEFAULT 0'],
   // выдержка правила: действие срабатывает не сразу, а через N дней
   ['automations', 'delay_days', 'INTEGER'],
   // каким правилом отправлено сообщение: по нему работает защита от потоковой рассылки
@@ -329,7 +333,10 @@ function clientIp(req) {
   return list.length ? list[list.length - 1] : remote;
 }
 const setSetting = (k, v) => db.prepare('INSERT INTO settings(key,value) VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value').run(k, String(v ?? ''));
-const log = (text, et = null, eid = null, user = '') => db.prepare('INSERT INTO activities(text,entity_type,entity_id,user_name) VALUES(?,?,?,?)').run(text, et, eid, user);
+// feed=0 — строка остаётся в истории карточек, но не показывается в ленте
+// «Последние события компании» на рабочем столе: там нужны действия людей,
+// а не поток событий из чатов
+const logActivity = (text, et = null, eid = null, user = '', feed = 1) => db.prepare('INSERT INTO activities(text,entity_type,entity_id,user_name,feed) VALUES(?,?,?,?,?)').run(text, et, eid, user, feed ? 1 : 0);
 const hashPass = (p, salt = randomBytes(16).toString('hex')) => `${salt}:${scryptSync(p, salt, 64).toString('hex')}`;
 function checkPass(p, s) { try { const [salt, h] = String(s).split(':'); const a = Buffer.from(h, 'hex'), b = scryptSync(p, salt, 64); return a.length === b.length && timingSafeEqual(a, b); } catch { return false; } }
 // Проверка пароля при входе — асинхронная: 50 одновременных входов утром не
@@ -388,7 +395,7 @@ if (!db.prepare('SELECT id FROM pipelines LIMIT 1').get()) {
 if (!db.prepare('SELECT id FROM users LIMIT 1').get()) {
   db.prepare('INSERT INTO users(name,email,pass,role) VALUES(?,?,?,?)').run('Администратор', ADMIN_EMAIL, hashPass(ADMIN_PASSWORD), 'admin');
   if (!getSetting('COMPANY_NAME')) { setSetting('COMPANY_NAME', 'Каркас — каркасные дома'); setSetting('CURRENCY', '₽'); setSetting('AUTO_DEAL', '1'); setSetting('AUTO_DEAL_STAGE', 'new'); }
-  log('Система инициализирована: создана чистая база и учётная запись администратора');
+  logActivity('Система инициализирована: создана чистая база и учётная запись администратора');
 }
 export function getStages(pipeline_id = 1) { return db.prepare('SELECT * FROM stages WHERE pipeline_id=? ORDER BY sort,id').all(pipeline_id); }
 export function getCustomFields() {
@@ -519,6 +526,10 @@ const wzHookHuman = v => v ? ruDate(v) + ' ' + String(v).slice(11, 16) : '';
 // Одно действие правила. Отдельной функцией — потому что его выполняют и сразу,
 // и по очереди, если задана выдержка.
 async function applyAction(a, ctx) {
+  // Правило, сработавшее из чата, не пишется в ленту компании: иначе в активный
+  // день на рабочем столе стоят только строки автоматизации. Полная история
+  // сохраняется в журнале и видна в карточках сделки и клиента.
+  const alog = (t, et = null, eid = null, user = '') => logActivity(t, et, eid, user, ctx.quiet ? 0 : 1);
   {
       if (a.action_type === 'create_task') {
         if (!ctx.contact_id && !ctx.deal_id) return;
@@ -526,7 +537,7 @@ async function applyAction(a, ctx) {
           || (ctx.contact_id && db.prepare('SELECT responsible_id FROM contacts WHERE id=?').get(ctx.contact_id)?.responsible_id) || null;
         const r = db.prepare('INSERT INTO tasks(title,due,contact_id,deal_id,responsible_id) VALUES(?,?,?,?,?)')
           .run(a.action_value || a.name, normalizeDue('сегодня'), ctx.contact_id || null, ctx.deal_id || null, owner);
-        log(`Автоматизация «${a.name}»: создана задача`, 'tasks', Number(r.lastInsertRowid));
+        alog(`Автоматизация «${a.name}»: создана задача`, 'tasks', Number(r.lastInsertRowid));
         if (owner && Number(owner) !== Number(ctx.actor_id)) broadcastTo(owner, 'notify', { type: 'task_assigned', id: Number(r.lastInsertRowid), title: String(a.action_value || a.name), due: normalizeDue('сегодня') });
         broadcast('change', { table: 'tasks' });
       }
@@ -538,7 +549,7 @@ async function applyAction(a, ctx) {
         if (!st) { console.warn(`Автоматизация «${a.name}»: этап ${a.action_value} не найден в воронке сделки`); return; }
         const closed = ['won', 'lost'].includes(st.code) ? ",closed_at=datetime('now')" : ',closed_at=NULL';
         db.prepare(`UPDATE deals SET stage=?,updated_at=datetime('now')${closed} WHERE id=?`).run(st.code, d.id);
-        log(`Автоматизация «${a.name}»: сделка «${d.title}» → этап «${st.name}»`, 'deals', d.id);
+        alog(`Автоматизация «${a.name}»: сделка «${d.title}» → этап «${st.name}»`, 'deals', d.id);
         broadcast('change', { table: 'deals' });
       }
       if (a.action_type === 'add_tag' && ctx.contact_id && a.action_value) {
@@ -547,7 +558,7 @@ async function applyAction(a, ctx) {
         const tags = [...new Set([...(c.tags || '').split(',').map(x => x.trim()).filter(Boolean), a.action_value])].join(',');
         if (tags === (c.tags || '')) return;
         db.prepare('UPDATE contacts SET tags=? WHERE id=?').run(tags, ctx.contact_id);
-        log(`Автоматизация «${a.name}»: клиенту добавлен тег «${a.action_value}»`, 'contacts', ctx.contact_id);
+        alog(`Автоматизация «${a.name}»: клиенту добавлен тег «${a.action_value}»`, 'contacts', ctx.contact_id);
         broadcast('change', { table: 'contacts' });
       }
       // передать сделку и клиента другому сотруднику
@@ -559,7 +570,7 @@ async function applyAction(a, ctx) {
           const d = db.prepare('SELECT id,title,responsible_id FROM deals WHERE id=?').get(ctx.deal_id);
           if (d && Number(d.responsible_id) !== u.id) {
             db.prepare("UPDATE deals SET responsible_id=?,responsible=?,updated_at=datetime('now') WHERE id=?").run(u.id, u.name, d.id);
-            log(`Автоматизация «${a.name}»: сделка «${d.title}» передана сотруднику ${u.name}`, 'deals', d.id);
+            alog(`Автоматизация «${a.name}»: сделка «${d.title}» передана сотруднику ${u.name}`, 'deals', d.id);
             if (Number(u.id) !== Number(ctx.actor_id)) broadcastTo(u.id, 'notify', { type: 'deal_assigned', id: d.id, title: d.title });
             changed = true;
           }
@@ -568,7 +579,7 @@ async function applyAction(a, ctx) {
           const c = db.prepare('SELECT id,name,responsible_id FROM contacts WHERE id=?').get(ctx.contact_id);
           if (c && Number(c.responsible_id) !== u.id) {
             db.prepare('UPDATE contacts SET responsible_id=? WHERE id=?').run(u.id, c.id);
-            log(`Автоматизация «${a.name}»: клиент «${c.name}» передан сотруднику ${u.name}`, 'contacts', c.id);
+            alog(`Автоматизация «${a.name}»: клиент «${c.name}» передан сотруднику ${u.name}`, 'contacts', c.id);
             changed = true;
           }
         }
@@ -579,8 +590,8 @@ async function applyAction(a, ctx) {
         const body = fillVars(a.action_value, autoVars(ctx)).trim();
         if (!body) return;
         const conv = ctx.contact_id ? db.prepare('SELECT cv.*,c.phone FROM conversations cv LEFT JOIN contacts c ON c.id=cv.contact_id WHERE cv.contact_id=?').get(ctx.contact_id) : null;
-        if (!conv) { log(`Автоматизация «${a.name}»: переписки с клиентом нет, сообщение не отправлено`, 'contacts', ctx.contact_id || null); return; }
-        if (autoSentRecently(a, conv.id)) { log(`Автоматизация «${a.name}»: клиенту уже уходило сообщение этого правила меньше трёх часов назад — повтор пропущен`, 'contacts', ctx.contact_id || null); return; }
+        if (!conv) { alog(`Автоматизация «${a.name}»: переписки с клиентом нет, сообщение не отправлено`, 'contacts', ctx.contact_id || null); return; }
+        if (autoSentRecently(a, conv.id)) { alog(`Автоматизация «${a.name}»: клиенту уже уходило сообщение этого правила меньше трёх часов назад — повтор пропущен`, 'contacts', ctx.contact_id || null); return; }
         const channel = conv.chat_type || '';
         let status = 'error';
         try {
@@ -589,32 +600,32 @@ async function applyAction(a, ctx) {
         } catch (e) {
           // без подключённого Wazzup текст остаётся в переписке: правило не «молчит»
           status = String(e.message) === 'WAZZUP_NOT_CONFIGURED' ? 'local' : 'error';
-          log(`Автоматизация «${a.name}»: сообщение клиенту не ушло — ${e.message}`, 'contacts', ctx.contact_id || null);
+          alog(`Автоматизация «${a.name}»: сообщение клиенту не ушло — ${e.message}`, 'contacts', ctx.contact_id || null);
         }
         db.prepare('INSERT INTO messages(conversation_id,channel,direction,body,status,author,automation_id) VALUES(?,?,?,?,?,?,?)')
           .run(conv.id, channel || 'whatsapp', 'out', body, status, 'Автоматизация', a.id);
         db.prepare("UPDATE conversations SET last_at=datetime('now') WHERE id=?").run(conv.id);
         broadcast('message', { conversation_id: conv.id, direction: 'out' });
-        if (status === 'sent') log(`Автоматизация «${a.name}»: клиенту отправлено сообщение`, 'contacts', ctx.contact_id || null);
+        if (status === 'sent') alog(`Автоматизация «${a.name}»: клиенту отправлено сообщение`, 'contacts', ctx.contact_id || null);
       }
       // отправить письмо: тема — название правила, текст — значение действия
       if (a.action_type === 'send_email') {
         const c = ctx.contact_id ? db.prepare('SELECT id,name,email FROM contacts WHERE id=?').get(ctx.contact_id) : null;
-        if (!c?.email) { log(`Автоматизация «${a.name}»: у клиента нет e-mail, письмо не отправлено`, 'contacts', ctx.contact_id || null); return; }
-        if (!getSetting('SMTP_HOST')) { log(`Автоматизация «${a.name}»: почта не настроена, письмо не отправлено`, 'contacts', c.id); return; }
+        if (!c?.email) { alog(`Автоматизация «${a.name}»: у клиента нет e-mail, письмо не отправлено`, 'contacts', ctx.contact_id || null); return; }
+        if (!getSetting('SMTP_HOST')) { alog(`Автоматизация «${a.name}»: почта не настроена, письмо не отправлено`, 'contacts', c.id); return; }
         const body = fillVars(a.action_value, autoVars(ctx)).trim();
         const conv = db.prepare('SELECT id FROM conversations WHERE contact_id=?').get(c.id);
-        if (conv && autoSentRecently(a, conv.id)) { log(`Автоматизация «${a.name}»: клиенту уже уходило письмо этого правила меньше трёх часов назад — повтор пропущен`, 'contacts', c.id); return; }
+        if (conv && autoSentRecently(a, conv.id)) { alog(`Автоматизация «${a.name}»: клиенту уже уходило письмо этого правила меньше трёх часов назад — повтор пропущен`, 'contacts', c.id); return; }
         let status = 'sent';
         try { await sendMail({ ...smtpSettings(), to: c.email, toName: c.name || undefined, subject: a.name, text: body }); }
-        catch (e) { status = 'error'; log(`Автоматизация «${a.name}»: письмо не ушло — ${e.message}`, 'contacts', c.id); }
+        catch (e) { status = 'error'; alog(`Автоматизация «${a.name}»: письмо не ушло — ${e.message}`, 'contacts', c.id); }
         if (conv) {
           db.prepare("INSERT INTO messages(conversation_id,channel,direction,body,subject,status,author,automation_id) VALUES(?,?,?,?,?,?,?,?)")
             .run(conv.id, 'email', 'out', body, a.name, status, 'Автоматизация', a.id);
           db.prepare("UPDATE conversations SET last_at=datetime('now') WHERE id=?").run(conv.id);
           broadcast('message', { conversation_id: conv.id, direction: 'out' });
         }
-        if (status === 'sent') log(`Автоматизация «${a.name}»: клиенту отправлено письмо на ${c.email}`, 'contacts', c.id);
+        if (status === 'sent') alog(`Автоматизация «${a.name}»: клиенту отправлено письмо на ${c.email}`, 'contacts', c.id);
       }
   }
 }
@@ -632,10 +643,10 @@ async function runAutomations(trigger, ctx = {}) {
         // действие с выдержкой: планировщик выполнит его в срок. Ставим в очередь
         // и сразу выходим — иначе «напомнить через 3 дня» сработало бы сейчас.
         const runAt = localNow(new Date(Date.now() + delay * 864e5));
-        db.prepare('INSERT INTO automation_queue(automation_id,trigger_type,deal_id,contact_id,run_at) VALUES(?,?,?,?,?)')
-          .run(a.id, trigger, ctx.deal_id || null, ctx.contact_id || null, runAt);
-        log(`Автоматизация «${a.name}»: сработает ${ruDate(runAt)}, через ${delay} дн.`,
-          ctx.deal_id ? 'deals' : 'contacts', ctx.deal_id || ctx.contact_id || null);
+        db.prepare('INSERT INTO automation_queue(automation_id,trigger_type,deal_id,contact_id,run_at,quiet) VALUES(?,?,?,?,?,?)')
+          .run(a.id, trigger, ctx.deal_id || null, ctx.contact_id || null, runAt, ctx.quiet ? 1 : 0);
+        logActivity(`Автоматизация «${a.name}»: сработает ${ruDate(runAt)}, через ${delay} дн.`,
+          ctx.deal_id ? 'deals' : 'contacts', ctx.deal_id || ctx.contact_id || null, '', ctx.quiet ? 0 : 1);
         continue;
       }
       await applyAction(a, ctx);
@@ -652,7 +663,7 @@ export async function queueTick() {
     const a = db.prepare('SELECT * FROM automations WHERE id=? AND active=1').get(q.automation_id);
     // правило выключили или удалили — выполнять уже нечего
     if (!a) continue;
-    try { await applyAction(a, { deal_id: q.deal_id, contact_id: q.contact_id }) }
+    try { await applyAction(a, { deal_id: q.deal_id, contact_id: q.contact_id, quiet: !!q.quiet }) }
     catch (e) { console.error('automation queue', e) }
   }
   return due.length;
@@ -680,11 +691,11 @@ export async function ensureDeal(contact) {
   if (ownerId) ownerName = db.prepare('SELECT name FROM users WHERE id=?').get(ownerId)?.name || '';
   if (!ownerId && getSetting('AUTO_ASSIGN', '0') === '1') {
     const m = nextManager();
-    if (m) { ownerId = m.id; ownerName = m.name; db.prepare('UPDATE contacts SET responsible_id=? WHERE id=?').run(ownerId, contact.id); log(`Обращение «${contact.name}» назначено на ${m.name}`, 'contacts', contact.id); }
+    if (m) { ownerId = m.id; ownerName = m.name; db.prepare('UPDATE contacts SET responsible_id=? WHERE id=?').run(ownerId, contact.id); logActivity(`Обращение «${contact.name}» назначено на ${m.name}`, 'contacts', contact.id, '', 0); }
   }
   const dr = db.prepare('INSERT INTO deals(title,amount,stage,contact_id,responsible,responsible_id) VALUES(?,?,?,?,?,?)').run('Обращение: ' + contact.name, 0, stage, contact.id, ownerName, ownerId);
-  log(`Новое обращение «${contact.name}» → сделка в этапе «${stage}»`, 'deals', Number(dr.lastInsertRowid));
-  await runAutomations('deal_created', { deal_id: Number(dr.lastInsertRowid), contact_id: contact.id });
+  logActivity(`Новое обращение «${contact.name}» → сделка в этапе «${stage}»`, 'deals', Number(dr.lastInsertRowid), '', 0);
+  await runAutomations('deal_created', { deal_id: Number(dr.lastInsertRowid), contact_id: contact.id, quiet: true });
   broadcast('change', { table: 'deals' });
   return Number(dr.lastInsertRowid);
 }
@@ -714,7 +725,7 @@ export async function upsertIncoming({ channel = 'whatsapp', chatType = '', phon
   }
   if (!contact && email) contact = db.prepare('SELECT * FROM contacts WHERE lower(email)=lower(?)').get(String(email).trim());
   if (!contact && chatId) { const conv0 = db.prepare('SELECT * FROM conversations WHERE external_chat_id=?').get(String(chatId)); if (conv0) contact = db.prepare('SELECT * FROM contacts WHERE id=?').get(conv0.contact_id); }
-  if (!contact) { const r = db.prepare('INSERT INTO contacts(name,phone,email,source,phone_norm) VALUES(?,?,?,?,?)').run(String(name || fmtPhoneRu(ph) || ph || chatId || email || 'Новый клиент').slice(0, 120), String(ph || '').slice(0, 64), String(email || '').slice(0, 254), channel === 'email' ? 'email' : 'wazzup-' + (chatType || channel), phNorm || null); contact = db.prepare('SELECT * FROM contacts WHERE id=?').get(r.lastInsertRowid); log(`Новый контакт (${channel === 'email' ? 'email' : chatType || channel}): ${contact.name}`, 'contacts', contact.id); }
+  if (!contact) { const r = db.prepare('INSERT INTO contacts(name,phone,email,source,phone_norm) VALUES(?,?,?,?,?)').run(String(name || fmtPhoneRu(ph) || ph || chatId || email || 'Новый клиент').slice(0, 120), String(ph || '').slice(0, 64), String(email || '').slice(0, 254), channel === 'email' ? 'email' : 'wazzup-' + (chatType || channel), phNorm || null); contact = db.prepare('SELECT * FROM contacts WHERE id=?').get(r.lastInsertRowid); logActivity(`Новый контакт (${channel === 'email' ? 'email' : chatType || channel}): ${contact.name}`, 'contacts', contact.id); }
   // Клиент написал на аккаунт конкретного сотрудника — значит, обращением
   // занимается он, а не тот, кому выпало по очереди. Привязку канала к сотруднику
   // задаёт администратор один раз в настройках; без привязки работает прежнее
@@ -726,7 +737,7 @@ export async function upsertIncoming({ channel = 'whatsapp', chatType = '', phon
     if (bound) {
       db.prepare('UPDATE contacts SET responsible_id=? WHERE id=?').run(bound.id, contact.id);
       contact.responsible_id = bound.id;
-      log(`Обращение «${contact.name}» пришло на аккаунт ${bound.name} и назначено на него`, 'contacts', contact.id);
+      logActivity(`Обращение «${contact.name}» пришло на аккаунт ${bound.name} и назначено на него`, 'contacts', contact.id, '', 0);
     }
   }
   let conv = db.prepare('SELECT * FROM conversations WHERE contact_id=?').get(contact.id);
@@ -758,7 +769,7 @@ export async function upsertIncoming({ channel = 'whatsapp', chatType = '', phon
     return conv;
   }
   const openDeal = db.prepare("SELECT id FROM deals WHERE contact_id=? AND stage NOT IN ('won','lost') ORDER BY id DESC").get(contact.id);
-  await runAutomations('message_in', { contact_id: contact.id, deal_id: dealId || openDeal?.id, text: body });
+  await runAutomations('message_in', { contact_id: contact.id, deal_id: dealId || openDeal?.id, text: body, quiet: true });
   // в событии есть имя и превью: интерфейс показывает понятное уведомление
   // всплывающее уведомление о чужом клиенте мешало бы остальным: событие
   // помечается адресатом, а интерфейс сам решит, кому показать
@@ -1047,7 +1058,7 @@ function makeBackup(force = false) {
     // обрывок прерванного снимка не должен лежать вечно: чистим старые .part
     for (const f of readdirSync(dir).filter(x => x.endsWith('.part'))) { try { if (statSync(join(dir, f)).mtimeMs < Date.now() - 864e5) unlinkSync(join(dir, f)) } catch {} }
   }
-  log(`Резервная копия базы создана: ${name}`);
+  logActivity(`Резервная копия базы создана: ${name}`);
   return name;
 }
 // ----- выгрузка резервных копий в S3 -----
@@ -1163,7 +1174,7 @@ export async function uploadBackupToS3(name) {
     setSetting('S3_LAST_OK', localNow());
     setSetting('S3_LAST_FILE', name);
     setSetting('S3_LAST_ERROR', '');
-    log(`Резервная копия ${name} выгружена в хранилище${pruned.removed ? `, старых удалено: ${pruned.removed}` : ''}`);
+    logActivity(`Резервная копия ${name} выгружена в хранилище${pruned.removed ? `, старых удалено: ${pruned.removed}` : ''}`);
     return { ok: true, name, key, bucket: c.bucket, ...pruned };
   } catch (e) {
     setSetting('S3_LAST_ERROR', String(e.message).slice(0, 300));
@@ -1182,7 +1193,7 @@ async function overdueTick() {
   const ids = overdue.map(t => t.id);
   db.prepare(`UPDATE tasks SET notified_at=? WHERE id IN (${ids.map(() => '?').join(',')})`).run(today, ...ids);
   const list = overdue.map(t => ({ id: t.id, title: t.title, due: t.due, contact: t.contact_name || '', responsible_id: t.responsible_id }));
-  log(`Просроченные задачи: ${list.length} (${list.map(t => t.title).slice(0, 3).join('; ')})`);
+  logActivity(`Просроченные задачи: ${list.length} (${list.map(t => t.title).slice(0, 3).join('; ')})`);
   // Адресная рассылка: каждому сотруднику приходят только его собственные
   // просрочки и неназначенные (их должен кто-то взять). Раньше полный список
   // уходил всем подключённым, а клиент отсекал чужие задачи — названия чужих
@@ -1468,7 +1479,7 @@ function extendRepeatingTask(id, byName) {
   const due = `${localDate(next)} ${time}`;
   const r = db.prepare('INSERT INTO tasks(title,type,due,priority,done,deal_id,contact_id,responsible_id,result,repeat) VALUES(?,?,?,?,0,?,?,?,?,?)')
     .run(t.title, t.type, due, t.priority || 'normal', t.deal_id, t.contact_id, t.responsible_id, t.result, t.repeat);
-  log(`Повторяющаяся задача «${t.title}» продлена до ${due}`, 'tasks', Number(r.lastInsertRowid), byName);
+  logActivity(`Повторяющаяся задача «${t.title}» продлена до ${due}`, 'tasks', Number(r.lastInsertRowid), byName);
   return Number(r.lastInsertRowid);
 }
 
@@ -1484,7 +1495,7 @@ function validateUser(b, creating = false) {
   if (b.email !== undefined) b.email = String(b.email).trim().slice(0, 254);
 }
 
-const competitorsApi = createCompetitors({ db, json, readBody, log, broadcast, getSetting, setSetting, rateLimit });
+const competitorsApi = createCompetitors({ db, json, readBody, log: logActivity, broadcast, getSetting, setSetting, rateLimit });
 
 // «Наш прайс» прошлых версий переезжает в каталог: это один и тот же список
 // (что продаём и по какой цене), вести его в двух местах больше не нужно.
@@ -1535,6 +1546,16 @@ try {
     } catch (e) { db.exec('ROLLBACK'); throw e }
   }
 } catch (e) { console.error('Не удалось проверить шаблоны:', e.message) }
+
+// Разовая отметка в старых базах: до этой версии строки, рождённые чатами
+// («Wazzup: получено сообщений», «Новое обращение …», «Обращение …»), писались
+// в общую ленту, и после обновления она состояла бы только из них. Правим
+// только строки с явным чатовым происхождением, повторный запуск ничего не меняет.
+try {
+  const hushed = db.prepare(`UPDATE activities SET feed=0 WHERE feed=1 AND (text LIKE 'Wazzup: получено сообщений%'
+      OR text LIKE 'Новое обращение «%' OR text LIKE 'Обращение «%')`).run().changes;
+  if (hushed) console.log(`Лента событий: ${hushed} записей из чатов перенесены в историю карточек.`);
+} catch (e) { console.error('Не удалось почистить ленту событий:', e.message) }
 
 // Разовая уборка при старте: если старая версия оставила заметки удалённых
 // сделок или ссылки задач на несуществующие записи, они не должны копиться.
@@ -1624,7 +1645,7 @@ export const server = http.createServer(async (req, res) => {
       // и к другой CRM, копия пачки уходит туда же, и чаты живут в обеих системах
       if (fwd && !b.test) {
         fetch(fwd, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: rawBody, signal: AbortSignal.timeout(8000) })
-          .catch(e => log(`Не удалось продублировать входящие на второй адрес: ${e.message}`, null, null, 'Wazzup'));
+          .catch(e => logActivity(`Не удалось продублировать входящие на второй адрес: ${e.message}`, null, null, 'Wazzup'));
       }
       const inbound = legacy.concat(modern).filter(m => !(m.status && m.status !== 'inbound' && !(m.text || m.contentUri)) && !String(m.messageId || '').startsWith('karkas-') && !m.outbound && !m.isEcho).length;
       if (inbound) {
@@ -1809,7 +1830,9 @@ export const server = http.createServer(async (req, res) => {
         myTasksToday,
         conversion: (() => { const w = cntWhere("stage='won'"), l = cntWhere("stage='lost'"); return w + l ? Math.round(w / (w + l) * 100) : 0 })(),
         monthRevenue: sumWhere(`stage='won' AND ${DEAL_MONTH_SQL}=substr(datetime('now','localtime'),1,7)`),
-        activities: db.prepare('SELECT * FROM activities ORDER BY id DESC LIMIT 10').all(),
+        // в ленте рабочего стола — только действия людей и значимые события (feed=1);
+        // строки, рождённые потоком чатов, остаются в истории карточек
+        activities: db.prepare('SELECT * FROM activities WHERE feed=1 ORDER BY id DESC LIMIT 10').all(),
         recentDeals: db.prepare('SELECT d.*,c.name contact_name FROM deals d LEFT JOIN contacts c ON c.id=d.contact_id ORDER BY d.id DESC LIMIT 6').all()
       });
     }
@@ -1888,7 +1911,7 @@ export const server = http.createServer(async (req, res) => {
         db.prepare('UPDATE contacts SET phone_norm=? WHERE id=?').run(digits(keep.phone) || null, keepId);
         db.exec('COMMIT');
       } catch (e) { db.exec('ROLLBACK'); throw e }
-      log(`Контакты объединены: ${others.map(o => o.name).join(', ')} → ${keep.name}`, 'contacts', keepId, user.name);
+      logActivity(`Контакты объединены: ${others.map(o => o.name).join(', ')} → ${keep.name}`, 'contacts', keepId, user.name);
       broadcast('change', { table: 'contacts' });
       return json(res, 200, { kept: keepId, merged: mergeIds.length, contact: db.prepare('SELECT * FROM contacts WHERE id=?').get(keepId) });
     }
@@ -1940,7 +1963,7 @@ export const server = http.createServer(async (req, res) => {
       if (!q) return json(res, 404, { error: 'Запланированного действия нет — возможно, оно уже выполнилось' });
       db.prepare('DELETE FROM automation_queue WHERE id=?').run(q.id);
       const rule = db.prepare('SELECT name FROM automations WHERE id=?').get(q.automation_id);
-      log(`Запланированное действие отменено: «${rule?.name || 'правило удалено'}»`, q.deal_id ? 'deals' : 'contacts', q.deal_id || q.contact_id || null, user.name);
+      logActivity(`Запланированное действие отменено: «${rule?.name || 'правило удалено'}»`, q.deal_id ? 'deals' : 'contacts', q.deal_id || q.contact_id || null, user.name);
       broadcast('change', { table: 'automations' });
       return json(res, 200, { cancelled: q.id });
     }
@@ -1957,7 +1980,7 @@ export const server = http.createServer(async (req, res) => {
           // канал у шаблона больше не спрашивается: куда отправить, выбирается в чате
           const r = db.prepare("INSERT INTO templates(name,body,channel,user_id) VALUES(?,?,'any',?)")
             .run(String(b.name || '').slice(0, 80) || 'Шаблон', String(b.body || '').slice(0, 20000), user.id);
-          log('Создан шаблон', 'templates', Number(r.lastInsertRowid), user.name);
+          logActivity('Создан шаблон', 'templates', Number(r.lastInsertRowid), user.name);
           broadcast('change', { table });
           return json(res, 201, db.prepare('SELECT * FROM templates WHERE id=?').get(r.lastInsertRowid));
         }
@@ -1970,7 +1993,7 @@ export const server = http.createServer(async (req, res) => {
             if (b.name !== undefined) b.name = String(b.name).slice(0, 80);
             if (b.body !== undefined) b.body = String(b.body).slice(0, 20000);
             const ks = Object.keys(b).filter(k => ['name', 'body'].includes(k)); if (ks.length) db.prepare(`UPDATE templates SET ${ks.map(k => k + '=?')} WHERE id=?`).run(...ks.map(k => k === 'name' ? String(b[k]).slice(0, 80) : String(b[k]).slice(0, 20000)), id); broadcast('change', { table }); return json(res, 200, db.prepare('SELECT * FROM templates WHERE id=?').get(id)); }
-          if (req.method === 'DELETE') { db.prepare('DELETE FROM templates WHERE id=?').run(id); log('Шаблон удалён', 'templates', Number(id), user.name); broadcast('change', { table }); return json(res, 200, { deleted: true }); }
+          if (req.method === 'DELETE') { db.prepare('DELETE FROM templates WHERE id=?').run(id); logActivity('Шаблон удалён', 'templates', Number(id), user.name); broadcast('change', { table }); return json(res, 200, { deleted: true }); }
         }
         return json(res, 405, { error: 'Метод не поддерживается' });
       }
@@ -2029,7 +2052,7 @@ export const server = http.createServer(async (req, res) => {
         const ks = fields.filter(f => b[f] !== undefined), vals = ks.map(k => b[k]);
         if (table === 'contacts' && b.phone !== undefined) { ks.push('phone_norm'); vals.push(digits(b.phone) || null); }
         const r = db.prepare(`INSERT INTO ${table}(${ks}) VALUES(${ks.map(() => '?')})`).run(...vals);
-        log(`Создано (${table} #${r.lastInsertRowid})`, table, Number(r.lastInsertRowid), user.name);
+        logActivity(`Создано (${table} #${r.lastInsertRowid})`, table, Number(r.lastInsertRowid), user.name);
         // задачу поставили коллеге — он сразу увидит всплывающее уведомление
         if (table === 'tasks' && b.responsible_id && Number(b.responsible_id) !== Number(user.id)) {
           broadcastTo(b.responsible_id, 'notify', { type: 'task_assigned', id: Number(r.lastInsertRowid), title: String(b.title || 'Задача'), due: b.due || '' });
@@ -2143,7 +2166,7 @@ export const server = http.createServer(async (req, res) => {
         clean.forEach((x, i) => st.run(pid, x.code, x.name, x.color, i, x.kind));
         db.exec('COMMIT');
       } catch (e) { db.exec('ROLLBACK'); throw e }
-      log('Воронка и этапы обновлены', 'pipelines', pid, user.name);
+      logActivity('Воронка и этапы обновлены', 'pipelines', pid, user.name);
       broadcast('change', { table: 'pipelines' });
       return json(res, 200, { saved: true, stages: getStages(pid) });
     }
@@ -2200,7 +2223,7 @@ export const server = http.createServer(async (req, res) => {
         // было бы нельзя, хотя поле для неё разрешено.
         if (['won', 'lost'].includes(stage)) b.closed_at = normalizeStamp(b.closed_at) || new Date().toISOString().slice(0, 19).replace('T', ' ');
         else delete b.closed_at; // открытая сделка дату закрытия не хранит
-        const fields = ['title', 'amount', 'stage', 'pipeline_id', 'contact_id', 'company_id', 'responsible', 'responsible_id', 'priority', 'loss_reason', 'deadline', 'closed_at', 'custom']; const ks = fields.filter(f => b[f] !== undefined); const r = db.prepare(`INSERT INTO deals(${ks}) VALUES(${ks.map(() => '?')})`).run(...ks.map(k => b[k])); log(`Сделка создана: ${b.title}`, 'deals', Number(r.lastInsertRowid), user.name); runAutomations('deal_created', { deal_id: Number(r.lastInsertRowid), contact_id: b.contact_id }); broadcast('change', { table: 'deals' }); return json(res, 201, db.prepare('SELECT * FROM deals WHERE id=?').get(r.lastInsertRowid)); }
+        const fields = ['title', 'amount', 'stage', 'pipeline_id', 'contact_id', 'company_id', 'responsible', 'responsible_id', 'priority', 'loss_reason', 'deadline', 'closed_at', 'custom']; const ks = fields.filter(f => b[f] !== undefined); const r = db.prepare(`INSERT INTO deals(${ks}) VALUES(${ks.map(() => '?')})`).run(...ks.map(k => b[k])); logActivity(`Сделка создана: ${b.title}`, 'deals', Number(r.lastInsertRowid), user.name); runAutomations('deal_created', { deal_id: Number(r.lastInsertRowid), contact_id: b.contact_id }); broadcast('change', { table: 'deals' }); return json(res, 201, db.prepare('SELECT * FROM deals WHERE id=?').get(r.lastInsertRowid)); }
     }
     // ===== печать документов по сделке: коммерческое предложение или счёт =====
     if (/^\/api\/deals\/\d+\/print$/.test(p) && req.method === 'GET') {
@@ -2245,7 +2268,7 @@ ${user?.name || ''}`.trim();
       } catch (e) {
         return json(res, 502, { error: 'Письмо не ушло: ' + e.message });
       }
-      log(`Клиенту отправлен ${kind.toLowerCase()} по сделке «${deal.title}» на ${to}`, 'deals', id, user.name);
+      logActivity(`Клиенту отправлен ${kind.toLowerCase()} по сделке «${deal.title}» на ${to}`, 'deals', id, user.name);
       // письмо видно и в переписке клиента, если она уже есть
       const conv = deal.contact_id ? db.prepare('SELECT id FROM conversations WHERE contact_id=?').get(deal.contact_id) : null;
       if (conv) {
@@ -2339,9 +2362,9 @@ ${user?.name || ''}`.trim();
           if (b.pipeline_id !== undefined && Number(b.pipeline_id || 0) !== Number(old.pipeline_id || 0)) changes.push(`воронка: ${what('pipelines', old.pipeline_id)} → ${what('pipelines', b.pipeline_id)}`);
           if (b.deadline !== undefined && String(b.deadline || '') !== String(old.deadline || '')) changes.push(`срок: ${day(old.deadline)} → ${day(b.deadline)}`);
           if (b.loss_reason !== undefined && String(b.loss_reason || '').trim() !== String(old.loss_reason || '').trim()) changes.push(`причина проигрыша: ${String(b.loss_reason || '').trim() || 'не указана'}`);
-          for (const ch of changes) log(`Сделка «${title}»: ${ch}`, 'deals', Number(id), user.name);
+          for (const ch of changes) logActivity(`Сделка «${title}»: ${ch}`, 'deals', Number(id), user.name);
         }
-        if (b.stage && old && b.stage !== old.stage) { const sname = (dealStages.find(x => x.code === b.stage) || {}).name || b.stage; log(`Сделка «${old.title}» → этап «${sname}»`, 'deals', Number(id), user.name); await runAutomations('stage_changed', { deal_id: Number(id), contact_id: old.contact_id, stage: b.stage, actor_id: user.id }); } broadcast('change', { table: 'deals' }); return json(res, 200, db.prepare('SELECT * FROM deals WHERE id=?').get(id)); }
+        if (b.stage && old && b.stage !== old.stage) { const sname = (dealStages.find(x => x.code === b.stage) || {}).name || b.stage; logActivity(`Сделка «${old.title}» → этап «${sname}»`, 'deals', Number(id), user.name); await runAutomations('stage_changed', { deal_id: Number(id), contact_id: old.contact_id, stage: b.stage, actor_id: user.id }); } broadcast('change', { table: 'deals' }); return json(res, 200, db.prepare('SELECT * FROM deals WHERE id=?').get(id)); }
       if (req.method === 'DELETE') {
         const d = db.prepare('SELECT * FROM deals WHERE id=?').get(id);
         if (!d) return json(res, 404, { error: 'Сделка не найдена' });
@@ -2354,7 +2377,7 @@ ${user?.name || ''}`.trim();
           db.prepare('DELETE FROM deals WHERE id=?').run(id);
           db.exec('COMMIT');
         } catch (e) { db.exec('ROLLBACK'); throw e }
-        log(`Сделка удалена: ${d.title}`, 'deals', Number(id), user.name);
+        logActivity(`Сделка удалена: ${d.title}`, 'deals', Number(id), user.name);
         broadcast('change', { table: 'deals' });
         return json(res, 200, { deleted: true });
       }
@@ -2407,7 +2430,7 @@ ${user?.name || ''}`.trim();
     }
     if (p === '/api/custom-fields') {
       if (req.method === 'GET') return json(res, 200, { fields: getCustomFields() });
-      if (req.method === 'PUT') { if (!requireAdmin(user, res)) return; const b = await readBody(req); const fields = sanitizeFields(b.fields); setSetting('CUSTOM_FIELDS', JSON.stringify(fields)); log(`Настраиваемые поля обновлены (${fields.length})`, null, null, user.name); return json(res, 200, { saved: true, fields }) }
+      if (req.method === 'PUT') { if (!requireAdmin(user, res)) return; const b = await readBody(req); const fields = sanitizeFields(b.fields); setSetting('CUSTOM_FIELDS', JSON.stringify(fields)); logActivity(`Настраиваемые поля обновлены (${fields.length})`, null, null, user.name); return json(res, 200, { saved: true, fields }) }
     }
     if (p === '/api/backups') {
       const dir = join(DATA_DIR, 'backups');
@@ -2475,7 +2498,7 @@ ${user?.name || ''}`.trim();
       if (checkPass(nextPass, me.pass)) return json(res, 400, { error: 'Новый пароль должен отличаться от временного или текущего' });
       db.prepare('UPDATE users SET pass=?,must_change_password=0,session_version=session_version+1 WHERE id=?').run(hashPass(nextPass), user.id);
       closeUserStreams(user.id);
-      log('Пользователь сменил пароль', 'users', user.id, user.name);
+      logActivity('Пользователь сменил пароль', 'users', user.id, user.name);
       const token = sign({ id: user.id });
       res.setHeader('Set-Cookie', sessionCookie(req, token));
       return json(res, 200, { saved: true, token });
@@ -2518,7 +2541,7 @@ ${user?.name || ''}`.trim();
       const r = db.prepare("INSERT INTO conversations(contact_id,title,channels,channel_id,external_chat_id,chat_type,assigned_id,last_at) VALUES(?,?,?,?,?,?,?,datetime('now'))")
         .run(cid, contact.name || 'Клиент', chatType, '', chatId, chatType, user?.id || null);
       const conv = db.prepare('SELECT * FROM conversations WHERE id=?').get(r.lastInsertRowid);
-      log(`Начата переписка с «${conv.title}» (${chatType})`, 'contacts', cid, user?.name || '');
+      logActivity(`Начата переписка с «${conv.title}» (${chatType})`, 'contacts', cid, user?.name || '');
       return json(res, 201, conv);
     }
     // отметить прочитанными несколько бесед сразу: сотрудник выделил список и закрыл хвосты
@@ -2619,7 +2642,7 @@ ${user?.name || ''}`.trim();
       const stored = `${localDate().replace(/-/g, '')}-${randomBytes(6).toString('hex')}-${asciiFileName(b.filename || ('file.' + ext))}`;
       mkdir(UPLOAD_DIR, { recursive: true });
       writeFileSync(join(UPLOAD_DIR, stored), raw);
-      log(`Файл загружен в чат #${cid}: ${safeName}`, 'conversations', cid, user.name);
+      logActivity(`Файл загружен в чат #${cid}: ${safeName}`, 'conversations', cid, user.name);
       return json(res, 201, { url: '/uploads/' + stored, name: safeName, contentType, size: raw.length });
     }
     // CSV export/import
@@ -2734,7 +2757,7 @@ ${user?.name || ''}`.trim();
       if (!to) return json(res, 400, { error: 'Укажите адрес получателя тестового письма' });
       try {
         const out = await sendMail({ ...smtpSettings(), to, subject: 'КаркасCRM: проверка почты', text: `Почта настроена верно. Письмо отправлено ${new Date().toLocaleString('ru-RU')}.` });
-        setSetting('SMTP_TEST_TO', to); log(`Проверочное письмо отправлено на ${to}`, null, null, user.name);
+        setSetting('SMTP_TEST_TO', to); logActivity(`Проверочное письмо отправлено на ${to}`, null, null, user.name);
         return json(res, 200, { ok: true, to, messageId: out.messageId });
       } catch (e) { return json(res, 400, { ok: false, error: e.message }) }
     }
@@ -2805,7 +2828,7 @@ ${user?.name || ''}`.trim();
           const fa = String(b.FRAME_ANCESTORS).replace(/[\r\n\t]/g, ' ').replace(/[^a-zA-Z0-9\s:'"*,.\/-]/g, '').trim().slice(0, 512);
           setSetting('FRAME_ANCESTORS', fa);
         }
-        log('Настройки обновлены', null, null, user.name);
+        logActivity('Настройки обновлены', null, null, user.name);
         // другие окна узнают об изменении настроек и перечитают свой кэш:
         // баннер регистрации вебхука и адрес CRM не устареют до перезагрузки
         broadcast('change', { table: 'settings' });
@@ -2819,7 +2842,7 @@ ${user?.name || ''}`.trim();
       // после демо-сделок могли остаться заметки и ссылки задач без родителя
       try { cleanupOrphans(db) } catch (e) { console.error('cleanup after demo', e) }
       setSetting('SEED_DONE', '1'); // после очистки примеры не вернутся при перезапуске
-      log('Демонстрационные данные удалены (' + removed + ' записей)', null, null, user.name);
+      logActivity('Демонстрационные данные удалены (' + removed + ' записей)', null, null, user.name);
       broadcast('change', { table: 'all' });
       return json(res, 200, { removed });
     }
@@ -2959,7 +2982,7 @@ ${user?.name || ''}`.trim();
           // одна сводка вместо сотни одинаковых тостов при массовой передаче
           broadcastTo(assignedTo, 'notify', { type: 'bulk_assigned', table, count: assignedCount });
         }
-        log(`Массовое изменение (${table}): ${ids.length} записей — ${ks.join(', ')}`, table, null, user.name);
+        logActivity(`Массовое изменение (${table}): ${ids.length} записей — ${ks.join(', ')}`, table, null, user.name);
       }
       broadcast('change', { table });
       return json(res, 200, { table, action: b.action === 'delete' ? 'delete' : 'update', count: applied });

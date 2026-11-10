@@ -343,6 +343,8 @@ applyTheme();
 
 const CUR = () => (state.meta && state.meta.company && state.meta.company.currency) || '₽';
 const fmt = n => new Intl.NumberFormat('ru-RU').format(Math.round(n || 0)) + ' ' + CUR();
+// Чистое число с разделителями: для количеств (дел, позиций), где знак валюты был бы ошибкой
+const numFmt = n => new Intl.NumberFormat('ru-RU').format(Math.round(Number(n) || 0));
 const esc = (s = '') => String(s ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 // Отметки времени база хранит в UTC (datetime('now')) — показываем в местном поясе.
 // Сроки задач (due) и дедлайны — уже местное настенное время, для них dueText.
@@ -2950,7 +2952,7 @@ function findingsBlock(c) {
   return `<hr><div class="row" style="border:0"><h4>Найдено вручную (${finds.length})</h4></div>
    <p class="form-hint">Запишите, что увидели в реестре: сумма долга, число дел, связанные организации. Запись учитывается в оценке риска.</p>
    <div class="list">${finds.map(f => `<div class="row"><span><b>${esc(f.kind || 'прочее')}</b>${f.title ? ': ' + esc(f.title) : ''}
-      ${f.amount ? `<br><small>${f.kind === 'суды' ? esc(String(Math.round(f.amount))) + ' дел' : esc(fmt(f.amount))}</small>` : ''}
+      ${f.amount ? `<br><small>${f.kind === 'суды' ? esc(numFmt(f.amount) + ' ' + plural(f.amount, 'дело', 'дела', 'дел')) : esc(fmt(f.amount))}</small>` : ''}
       ${f.note ? `<br><small>${esc(f.note)}</small>` : ''}
       <br><small>${esc(f.author || '')} · ${esc(dt(f.created_at))}${f.source_url ? ` · <a href="${esc(f.source_url)}" target="_blank" rel="noopener">источник</a>` : ''}</small></span>
       ${canEdit() ? `<button class="btn sm ghost" onclick="deleteFinding(${f.id},${c.id})">Удалить</button>` : ''}</div>`).join('') || '<small>Записей пока нет</small>'}</div>
@@ -3009,11 +3011,12 @@ function competitorTab(c) {
     const debtsTotal = (fsspChk.data || {}).total;
     const debtsKnown = fsspChk.status === 'ok' && debtsTotal != null;
     const kadKnown = kadChk.status === 'ok';
+    const kadTotal = Number((kadChk.data || {}).total || 0);
     return `
      <div class="grid" style="margin-bottom:12px">
        <div class="kpi"><span>Риск-оценка</span><b class="risk-value" style="--risk:${esc(color)}">${rep.risk ?? '—'} / 100</b><small>${esc(RISK_LABELS[String(rep.level || '').toLowerCase()] || rep.level || 'проверок не было')}</small></div>
        <div class="kpi"><span>Исполнительные производства</span><b>${debtsKnown ? fmt(debtsTotal) : '—'}</b><small>${debtsKnown ? 'по базе ФССП' : 'API ФССП закрыт — по ссылке'}</small></div>
-       <div class="kpi"><span>Арбитражные дела</span><b>${kadKnown ? Number((kadChk.data || {}).total || 0) + ' дел' : '—'}</b><small>${kadKnown ? 'Кад.Арбитр' : 'картотека не ответила'}</small></div>
+       <div class="kpi"><span>Арбитражные дела</span><b>${kadKnown ? numFmt(kadTotal) + ' ' + plural(kadTotal, 'дело', 'дела', 'дел') : '—'}</b><small>${kadKnown ? 'Кад.Арбитр' : 'картотека не ответила'}</small></div>
        <div class="kpi"><span>Средний рейтинг</span><b>${(rep.reviews && rep.reviews.avgRating) ? rep.reviews.avgRating + ' ' + icon('star', 12) : '—'}</b><small>карты и отзывы</small></div>
      </div>
      <div class="card" style="box-shadow:none;border-color:var(--line)">
