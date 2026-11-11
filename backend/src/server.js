@@ -208,6 +208,9 @@ CREATE INDEX IF NOT EXISTS idx_notes_entity ON notes(entity_type, entity_id);
 CREATE INDEX IF NOT EXISTS idx_activities_entity ON activities(entity_type, entity_id);
 CREATE INDEX IF NOT EXISTS idx_contacts_email ON contacts(lower(email));
 CREATE INDEX IF NOT EXISTS idx_conv_external ON conversations(external_chat_id);
+CREATE INDEX IF NOT EXISTS idx_camp_items ON campaign_items(campaign_id, status, id);
+CREATE INDEX IF NOT EXISTS idx_camp_queue ON campaigns(status, scheduled_at);
+CREATE INDEX IF NOT EXISTS idx_training_sort ON training_items(sort, id);
 `);
 try { db.exec('CREATE UNIQUE INDEX IF NOT EXISTS idx_msg_ext ON messages(external_id) WHERE external_id IS NOT NULL'); }
 catch (e) { console.error('Не удалось создать уникальный индекс по external_id (в базе есть дубли внешних id):', e.message); }
@@ -358,13 +361,18 @@ export function mirrorSettingsToFile() {
       '# База остаётся источником истины; при старте файл дополняет базу недостающими ключами.',
       ...rows.map(r => `${r.key}=${JSON.stringify(String(r.value ?? ''))}`)];
     const tmp = SETTINGS_FILE + '.part';
-    writeFileSync(tmp, lines.join('\n') + '\n', 'utf8');
+    // в копии ключи интеграций и пароли почты: читать файл должен только
+    // владелец сервиса, поэтому права сжимаются до 0600 до переименования
+    writeFileSync(tmp, lines.join('\n') + '\n', { encoding: 'utf8', mode: 0o600 });
+    chmodSync(tmp, 0o600);
     renameSync(tmp, SETTINGS_FILE);
   } catch (e) { console.error('Не удалось сохранить копию настроек в settings.env:', e.message); }
 }
 export function seedSettingsFromFile() {
   try {
     if (!existsSync(SETTINGS_FILE)) return 0;
+    // файл прежней версии мог остаться доступным для чтения всем на сервере
+    try { chmodSync(SETTINGS_FILE, 0o600); } catch { /* права поправит следующая запись */ }
     const ins = db.prepare('INSERT OR IGNORE INTO settings(key,value) VALUES(?,?)');
     let n = 0;
     for (const line of readFileSync(SETTINGS_FILE, 'utf8').split('\n')) {
@@ -503,7 +511,24 @@ const sanitizeFields = list => {
 const clients = new Set();
 function closeUserStreams(id) { for (const res of clients) if (res.userId === id) { clients.delete(res); res.end(); } }
 const staticGzip = new Map(); // кэш сжатых ассетов: gzip считается один раз на версию файла
-export function broadcast(ev, data) { const s = `event: ${ev}\ndata: ${JSON.stringify(data)}\n\n`; clients.forEach(r => { try { r.write(s); } catch {} }); }
+// Партнёр видит только свои лиды, поэтому общий поток ему не подходит: в событии
+// нового сообщения есть имя клиента и начало текста, а обновление списков зовёт
+// клиента перечитать раздел, которого у партнёра нет. Партнёрским соединениям
+// уходят события о его собственных диалогах и обновления тех таблиц, которые он
+// действительно может перечитать.
+const PARTNER_SSE_TABLES = new Set(['deals', 'contacts', 'tasks', 'notes', 'conversations', 'training_items', 'pipelines', 'products', 'prices', 'custom_fields', 'all']);
+export function partnerSeesEvent(r, ev, data) {
+  if (!r || r.role !== 'partner') return true;
+  const d = data && typeof data === 'object' ? data : {};
+  if (ev === 'change') return PARTNER_SSE_TABLES.has(String(d.table || ''));
+  if (ev === 'message') return !!d.conversation_id && partnerOwns({ id: r.userId }, 'conversations', Number(d.conversation_id));
+  if (ev === 'notify') return Number(d.for_user || 0) === Number(r.userId) || !d.for_user;
+  return false;
+}
+export function broadcast(ev, data) {
+  const s = `event: ${ev}\ndata: ${JSON.stringify(data)}\n\n`;
+  clients.forEach(r => { if (!partnerSeesEvent(r, ev, data)) return; try { r.write(s); } catch {} });
+}
 // Личное уведомление: «вам поставили задачу» должен увидеть только исполнитель,
 // а не вся команда. Соединения знают своего пользователя (res.userId).
 export function broadcastTo(userId, ev, data) {
@@ -1387,7 +1412,8 @@ async function overdueTick() {
     byUser.get(k).push(t);
   }
   for (const c of [...clients]) {
-    const tasks = [...(byUser.get(Number(c.userId)) || []), ...unassigned];
+    // неназначенные дела разбирает офис: партнёр со своим входом их не видит
+    const tasks = [...(byUser.get(Number(c.userId)) || []), ...(c.role === 'partner' ? [] : unassigned)];
     if (!tasks.length) continue;
     try { c.write(`event: notify\ndata: ${JSON.stringify({ type: 'overdue_tasks', count: tasks.length, tasks })}\n\n`); } catch {}
   }
@@ -1980,7 +2006,7 @@ export const server = http.createServer(async (req, res) => {
       for (const r of clients) if (r.userId === Number(user.id) && ++n >= 10) { clients.delete(r); try { r.end(); } catch {} }
       res.writeHead(200, { 'Content-Type': 'text/event-stream', 'Cache-Control': 'no-cache', Connection: 'keep-alive' });
       res.write('event: ready\ndata: {}\n\n');
-      res.userId = user.id; clients.add(res);
+      res.userId = user.id; res.role = user.role; clients.add(res);
       // heartbeat: прокси не рвут «молчащие» соединения
       const hb = setInterval(() => { try { res.write(': ping\n\n'); } catch {} }, 25000);
       res.on('close', () => { clearInterval(hb); clients.delete(res); });
@@ -2024,8 +2050,8 @@ export const server = http.createServer(async (req, res) => {
     // контроль качества, настройки и чужие карточки закрыты здесь централизованно,
     // а списки ниже дополнительно фильтруются по владельцу.
     if (user && user.role === 'partner' && p.startsWith('/api/')) {
-      const PARTNER_GET = [/^\/api\/me$/, /^\/api\/meta$/, /^\/api\/events$/, /^\/api\/training$/, /^\/api\/pipelines$/, /^\/api\/users$/, /^\/api\/deals(\/\d+)?$/, /^\/api\/contacts(\/\d+)?$/, /^\/api\/tasks(\/\d+)?$/, /^\/api\/notes(\/\d+)?$/, /^\/api\/conversations$/, /^\/api\/conversations\/\d+\/messages$/, /^\/api\/custom-fields$/, /^\/api\/prices$/, /^\/api\/products$/];
-      const PARTNER_WRITE = [/^\/api\/me\/(password|theme|pref)$/, /^\/api\/deals(\/\d+)?$/, /^\/api\/contacts(\/\d+)?$/, /^\/api\/tasks(\/\d+)?$/, /^\/api\/notes(\/\d+)?$/, /^\/api\/conversations\/read$/];
+      const PARTNER_GET = [/^\/api\/me$/, /^\/api\/meta$/, /^\/api\/events$/, /^\/api\/training(\/\d+)?$/, /^\/api\/pipelines$/, /^\/api\/users$/, /^\/api\/deals(\/\d+)?$/, /^\/api\/contacts(\/\d+)?$/, /^\/api\/tasks(\/\d+)?$/, /^\/api\/notes(\/\d+)?$/, /^\/api\/conversations$/, /^\/api\/conversations\/\d+\/messages$/, /^\/api\/custom-fields$/, /^\/api\/prices$/, /^\/api\/products$/, /^\/api\/templates$/];
+      const PARTNER_WRITE = [/^\/api\/me\/(password|theme|pref)$/, /^\/api\/deals(\/\d+)?$/, /^\/api\/contacts(\/\d+)?$/, /^\/api\/tasks(\/\d+)?$/, /^\/api\/notes(\/\d+)?$/, /^\/api\/conversations$/, /^\/api\/conversations\/read$/, /^\/api\/conversations\/\d+\/(messages|upload|email)$/];
       if (!(req.method === 'GET' || req.method === 'HEAD' ? PARTNER_GET : PARTNER_WRITE).some(re => re.test(p)))
         return json(res, 403, { error: 'Партнёру доступны его сделки, клиенты, задачи и раздел «Обучение»' });
       if (!partnerOwnsPath(user, p)) return json(res, 403, { error: 'Это чужая карточка: партнёр видит только свои лиды' });
@@ -2430,7 +2456,9 @@ export const server = http.createServer(async (req, res) => {
             const t = new Date(String(b.scheduled_at));
             if (isNaN(t.getTime())) return json(res, 400, { error: 'Не поняли время отправки' });
             if (t.getTime() < Date.now() - 60000) return json(res, 400, { error: 'Время отправки уже прошло — выберите будущее или отправьте сразу' });
-            scheduledAt = String(b.scheduled_at).slice(0, 16);
+            // храним момент времени в UTC: рассылка уходит в выбранную минуту
+            // независимо от того, в каком поясе работает сервер и сотрудник
+            scheduledAt = t.toISOString();
           }
           const rows = campaignRecipients(b.audience, channel);
           if (!rows.length) return json(res, 400, { error: 'Под фильтр не подходит ни один клиент с заполненным ' + (channel === 'email' ? 'e-mail' : 'телефоном') + '. Проверьте сегмент или выберите другой канал' });
@@ -2439,7 +2467,7 @@ export const server = http.createServer(async (req, res) => {
             .run(name, channel, subject, message, JSON.stringify(b.audience || {}), scheduledAt ? 'scheduled' : 'queued', scheduledAt, user.name, user.id, rows.length);
           const ins = db.prepare('INSERT INTO campaign_items(campaign_id,contact_id,address) VALUES(?,?,?)');
           for (const row of rows) ins.run(Number(r.lastInsertRowid), row.id, String(row.address));
-          logActivity(`Рассылка «${name}»: ${rows.length} получателей, канал ${channel === 'email' ? 'почта' : 'WhatsApp'}${scheduledAt ? ', запланирована на ' + scheduledAt.replace('T', ' ') : ''}`, 'campaigns', Number(r.lastInsertRowid), user.name);
+          logActivity(`Рассылка «${name}»: ${rows.length} получателей, канал ${channel === 'email' ? 'почта' : 'WhatsApp'}${scheduledAt ? ', запланирована на ' + localNow(new Date(scheduledAt)) : ''}`, 'campaigns', Number(r.lastInsertRowid), user.name);
           broadcast('change', { table: 'campaigns' });
           return json(res, 201, db.prepare('SELECT * FROM campaigns WHERE id=?').get(r.lastInsertRowid));
         }
@@ -2451,6 +2479,7 @@ export const server = http.createServer(async (req, res) => {
         if (!camp) return json(res, 404, { error: 'Рассылка не найдена — обновите страницу' });
         if (req.method === 'GET') return json(res, 200, { ...camp, items: db.prepare('SELECT ci.*, c.name contact_name FROM campaign_items ci LEFT JOIN contacts c ON c.id=ci.contact_id WHERE ci.campaign_id=? ORDER BY ci.id LIMIT 1000').all(cid) });
         if (req.method === 'POST' && mCamp[2] === 'start') {
+          if (user.role !== 'admin' && Number(camp.created_by_id) !== Number(user.id)) return json(res, 403, { error: 'Запустить рассылку может её автор или администратор' });
           if (camp.status !== 'scheduled') return json(res, 400, { error: 'Отправить сразу можно только запланированную рассылку' });
           db.prepare("UPDATE campaigns SET status='queued', scheduled_at=NULL WHERE id=?").run(cid);
           logActivity(`Рассылка «${camp.name}» запущена вручную`, 'campaigns', cid, user.name);
@@ -2458,6 +2487,7 @@ export const server = http.createServer(async (req, res) => {
           return json(res, 200, { ok: true });
         }
         if (req.method === 'POST' && mCamp[2] === 'cancel') {
+          if (user.role !== 'admin' && Number(camp.created_by_id) !== Number(user.id)) return json(res, 403, { error: 'Отменить рассылку может её автор или администратор' });
           if (!['scheduled', 'queued', 'running'].includes(camp.status)) return json(res, 400, { error: 'Эта рассылка уже завершена' });
           db.prepare("UPDATE campaigns SET status='canceled' WHERE id=?").run(cid);
           db.prepare("UPDATE campaign_items SET status='canceled' WHERE campaign_id=? AND status='queued'").run(cid);
@@ -2482,22 +2512,30 @@ export const server = http.createServer(async (req, res) => {
       // время в базе — UTC (datetime('now')): границу периода считаем в том же формате
       const since = new Date(Date.now() - days * 864e5).toISOString().slice(0, 19).replace('T', ' ');
       const managers = db.prepare("SELECT id,name FROM users WHERE active=1 AND role IN ('admin','manager') ORDER BY id").all();
-      const convQ = db.prepare('SELECT cv.id FROM conversations cv JOIN contacts c ON c.id=cv.contact_id WHERE c.responsible_id=? OR EXISTS(SELECT 1 FROM deals d WHERE d.contact_id=cv.contact_id AND d.responsible_id=?)');
-      const msgQ = db.prepare('SELECT direction,created_at FROM messages WHERE conversation_id=? AND created_at>=? ORDER BY id');
+      // один запрос на менеджера вместо запроса на каждый диалог: отчёт по
+      // команде и году истории не должен превращаться в тысячи обращений к базе.
+      // Автоматические исходящие (правила и рассылки) в зачёт не идут: качество
+      // измеряется ответами живого сотрудника.
+      const convMsgQ = db.prepare(`SELECT cv.id AS cid, m.direction, m.created_at FROM conversations cv
+        JOIN contacts c ON c.id=cv.contact_id
+        JOIN messages m ON m.conversation_id=cv.id AND m.created_at>=?
+        WHERE (c.responsible_id=? OR EXISTS(SELECT 1 FROM deals d WHERE d.contact_id=cv.contact_id AND d.responsible_id=?))
+          AND (m.direction='in' OR (COALESCE(m.automation_id,0)=0 AND COALESCE(m.author,'')<>'Рассылка'))
+        ORDER BY cv.id, m.id`);
+      const median = arr => { if (!arr.length) return null; const mid = Math.floor(arr.length / 2); return arr.length % 2 ? arr[mid] : Math.round((arr[mid - 1] + arr[mid]) / 2); };
       const rows = managers.map(m => {
         const deals = db.prepare('SELECT stage FROM deals WHERE responsible_id=?').all(m.id);
         const won = deals.filter(d => d.stage === 'won').length, lost = deals.filter(d => d.stage === 'lost').length;
         let unanswered = 0; const resp = [];
-        for (const cv of convQ.all(m.id, m.id)) {
-          let pendingIn = null;
-          for (const msg of msgQ.all(cv.id, since)) {
-            if (msg.direction === 'in') { if (!pendingIn) { pendingIn = msg.created_at; unanswered++; } }
-            else if (pendingIn) { resp.push((Date.parse(msg.created_at.replace(' ', 'T') + 'Z') - Date.parse(pendingIn.replace(' ', 'T') + 'Z')) / 60000); pendingIn = null; unanswered--; }
-          }
+        let curCid = null, pendingIn = null;
+        for (const msg of convMsgQ.all(since, m.id, m.id)) {
+          if (msg.cid !== curCid) { curCid = msg.cid; pendingIn = null; }
+          if (msg.direction === 'in') { if (!pendingIn) { pendingIn = msg.created_at; unanswered++; } }
+          else if (pendingIn) { resp.push((Date.parse(msg.created_at.replace(' ', 'T') + 'Z') - Date.parse(pendingIn.replace(' ', 'T') + 'Z')) / 60000); pendingIn = null; unanswered--; }
         }
         unanswered = Math.max(0, unanswered);
         resp.sort((a, b) => a - b);
-        const medianResponseMin = resp.length ? Math.round(resp[Math.floor(resp.length / 2)]) : null;
+        const medianResponseMin = median(resp.map(x => Math.round(x)));
         const stalled = db.prepare("SELECT COUNT(*) n FROM deals WHERE responsible_id=? AND stage NOT IN ('won','lost') AND COALESCE(updated_at,created_at) < datetime('now','-14 days')").get(m.id).n;
         const overdueTasks = db.prepare("SELECT COUNT(*) n FROM tasks WHERE done=0 AND due IS NOT NULL AND due != '' AND (CASE WHEN length(due)=10 THEN due || ' 23:59:59' ELSE due END) < datetime('now','localtime') AND (responsible_id=? OR EXISTS(SELECT 1 FROM deals d WHERE d.id=tasks.deal_id AND d.responsible_id=?))").get(m.id, m.id).n;
         const slowPenalty = medianResponseMin === null ? 0 : medianResponseMin > 60 ? 15 : medianResponseMin > 30 ? 10 : medianResponseMin > 15 ? 5 : 0;
@@ -2989,6 +3027,8 @@ ${user?.name || ''}`.trim();
       if (!cid) return json(res, 400, { error: 'Не указан клиент' });
       const contact = db.prepare('SELECT * FROM contacts WHERE id=?').get(cid);
       if (!contact) return json(res, 404, { error: 'Клиент не найден' });
+      // партнёр начинает переписку только со своим клиентом
+      if (user.role === 'partner' && !partnerOwns(user, 'contacts', cid)) return json(res, 403, { error: 'Это чужой клиент: партнёр переписывается только со своими' });
       const chatType = normChatType(String(b.chat_type || 'whatsapp').trim().toLowerCase());
       if (!chatType) return json(res, 400, { error: `Мессенджер «${b.chat_type}» не поддерживается. Доступны: ${WZ_CHAT_TYPES.join(', ')}` });
       // у беседы один клиент (UNIQUE по contact_id): вторая ветка разделила бы историю

@@ -829,8 +829,9 @@ async function boot() {
     // работа начинается сразу со своих чатов или сделок, а не с пустого стола
     if (me.user.role === 'partner') {
       // партнёр начинает со своих сделок: рабочий стол с цифрами всей компании
-      // для него закрыт, из личных разделов доступны воронка и обучение
-      if (!['pipe', 'training'].includes(state.view)) go(['pipe', 'training'].includes(me.user.pref_view) ? me.user.pref_view : 'pipe');
+      // для него закрыт, из личных разделов доступны воронка, переписка с его
+      // клиентами и обучение
+      if (!PARTNER_VIEWS.includes(state.view)) go(PARTNER_VIEWS.includes(me.user.pref_view) ? me.user.pref_view : 'pipe');
     } else if (me.user.pref_view && me.user.pref_view !== 'dashboard' && state.view === 'dashboard') go(me.user.pref_view);
     loadDrafts(); // черновики читаются заново: ключ зависит от сотрудника
     guardIdenticalHtml($('#view')); // одинаковый экран не перерисовывается
@@ -917,7 +918,20 @@ const SKELETONS = {
   training: () => `<div class="grid">${'<div class="skeleton sk-kpi"></div>'.repeat(3)}</div>`
 };
 
+// Разделы по ролям: качество — РОПу, рассылки — менеджеру и администратору,
+// партнёру — его воронка, переписка и обучение. Проверка стоит перед отрисовкой,
+// поэтому переход по старой ссылке или из палитры не заканчивается экраном ошибки.
+const PARTNER_VIEWS = ['pipe', 'inbox', 'training', 'settings'];
+const VIEW_ROLES = { quality: ['admin'], campaigns: ['admin', 'manager'] };
+function viewAllowed(view) {
+  const role = state.me && state.me.role;
+  if (!role) return true;
+  if (role === 'partner') return PARTNER_VIEWS.includes(view);
+  const need = VIEW_ROLES[view];
+  return !need || need.includes(role);
+}
 async function go(view, subTab) {
+  if (!viewAllowed(view)) view = (state.me && state.me.role) === 'partner' ? 'pipe' : 'dashboard';
   const prevView = state.view;
   state.view = view;
   rememberPref(view);
@@ -2804,10 +2818,17 @@ const CAMPAIGN_STATUS = {
   done: ['Завершена', ''], canceled: ['Отменена', 'grey']
 };
 const campaignStatusTag = c => { const [t, cls] = CAMPAIGN_STATUS[c.status] || [c.status, 'grey']; return `<span class="tag ${cls}">${esc(t)}</span>`; };
+// Время в базе хранится в UTC, а показывается в поясе сотрудника — так же, как
+// в чатах. Момент отправки рассылки и отметка о доставке проходят через одну
+// функцию, поэтому расписание и журнал не расходятся на часы.
 function fmtSchedule(iso) {
   if (!iso) return '';
-  const m = String(iso).match(/^(\d{4})-(\d{2})-(\d{2})[T ](\d{2}):(\d{2})/);
-  return m ? `${m[3]}.${m[2]}.${m[1]} ${m[4]}:${m[5]}` : String(iso);
+  const v = String(iso).trim();
+  const m = v.match(/^(\d{4})-(\d{2})-(\d{2})[T ](\d{2}):(\d{2})/);
+  const d = new Date(m ? `${m[1]}-${m[2]}-${m[3]}T${m[4]}:${m[5]}:00${/Z$|[+-]\d{2}:?\d{2}$/.test(v) ? '' : 'Z'}` : v);
+  if (isNaN(d.getTime())) return v;
+  const p = n => String(n).padStart(2, '0');
+  return `${p(d.getDate())}.${p(d.getMonth() + 1)}.${d.getFullYear()} ${p(d.getHours())}:${p(d.getMinutes())}`;
 }
 async function campaignsView(v) {
   const list = await api('/api/campaigns');
@@ -2914,7 +2935,10 @@ async function campaignSubmit(e) {
   const body = { name: b.name, channel: b.channel, subject: b.subject, message: b.message, audience: b.audience };
   if (b.when === 'later') {
     if (!b.scheduled_at) { toast('Выберите дату и время отправки', 'err'); return false; }
-    body.scheduled_at = b.scheduled_at;
+    const when = new Date(b.scheduled_at);
+    if (isNaN(when.getTime())) { toast('Не поняли время отправки — выберите дату и время заново', 'err'); return false; }
+    if (when.getTime() < Date.now() - 60000) { toast('Это время уже прошло: выберите будущее или отправьте сразу', 'err'); return false; }
+    body.scheduled_at = when.toISOString(); // момент в UTC, не зависит от пояса сервера
   }
   await api('/api/campaigns', { method: 'POST', body: JSON.stringify(body) });
   toast(body.scheduled_at ? 'Рассылка запланирована' : 'Рассылка создана и встанет в очередь');
@@ -2923,7 +2947,9 @@ async function campaignSubmit(e) {
 const CAMPAIGN_ITEM = { queued: 'В очереди', sent: 'Отправлено', failed: 'Ошибка', canceled: 'Отменено' };
 async function openCampaignCard(id) {
   const c = await api('/api/campaigns/' + id);
-  const can = ['admin', 'manager'].includes(state.me?.role);
+  // рассылкой распоряжается автор или администратор: чужую очередь менеджер не
+  // останавливает, поэтому кнопок у него нет и ошибкой это не заканчивается
+  const can = state.me?.role === 'admin' || Number(c.created_by_id) === Number(state.me?.id);
   const items = c.items || [];
   const shown = items.slice(0, 200);
   const pct = c.total ? Math.round((c.sent || 0) / c.total * 100) : 0;
@@ -3671,7 +3697,9 @@ async function settings(v) {
   // Наблюдателю остаётся только «Профиль»: шаблоны ответов — рабочий
   // инструмент менеджера, а менять что-либо наблюдатель не может вовсе
   const isViewer = (state.me && state.me.role) === 'viewer';
-  const tabs = Object.fromEntries(Object.entries(allTabs).filter(([k]) => isAdmin ? true : (isViewer ? k === 'profile' : !adminOnly.includes(k))));
+  // партнёру тоже остаётся только «Профиль»: справочники офиса — не его инструмент
+  const isPartner = (state.me && state.me.role) === 'partner';
+  const tabs = Object.fromEntries(Object.entries(allTabs).filter(([k]) => isAdmin ? true : ((isViewer || isPartner) ? k === 'profile' : !adminOnly.includes(k))));
   if (!tabs[state.settingsTab]) state.settingsTab = isAdmin ? 'integrations' : 'profile';
   let body = '';
 
@@ -4408,7 +4436,7 @@ async function openUser(id) {
      ${fld('E-mail', `<input name="email" type="email" required value="${esc(x.email || '')}">`, true)}`)}
    ${fld(id ? 'Новый пароль (оставьте пустым, чтобы не менять)' : 'Пароль (мин. 12 символов)', `<div class="pw-wrap"><input name="password" type="password" minlength="12" autocomplete="new-password" ${id ? '' : 'required'} placeholder="минимум 12 знаков"><button type="button" class="pw-eye" title="Показать/скрыть пароль" onclick="togglePass(this)">${icon('eye', 16)}</button></div>`, !id)}
    <button type="button" class="btn w" onclick="generateUserPassword(this.form)">Сгенерировать пароль</button>
-   ${fld('Роль', `<select name="role">${Object.entries({ admin: 'Администратор — всё, включая настройки', manager: 'Менеджер — клиенты, сделки, задачи, чаты', viewer: 'Наблюдатель — только просмотр', partner: 'Партнёр — только свои лиды и обучение' }).map(([k, n]) => `<option value="${k}" ${k === (x.role || 'manager') ? 'selected' : ''}>${n}</option>`).join('')}</select>`)}
+   ${fld('Роль', `<select name="role">${Object.entries({ admin: 'Администратор — всё, включая настройки', manager: 'Менеджер — клиенты, сделки, задачи, чаты', viewer: 'Наблюдатель — только просмотр', partner: 'Партнёр — свои лиды, их переписка и обучение' }).map(([k, n]) => `<option value="${k}" ${k === (x.role || 'manager') ? 'selected' : ''}>${n}</option>`).join('')}</select>`)}
    <label style="display:flex;gap:8px;align-items:center"><input type="checkbox" name="active" style="width:auto" ${x.active === 0 ? '' : 'checked'}> Сотрудник может входить в CRM</label>
    <p><small>Сохраните пароль и передайте сотруднику по защищённому каналу. Он сможет изменить его в профиле.</small></p>
    <button class="btn primary w">Сохранить</button></form>`);
