@@ -509,6 +509,36 @@ try {
   check('выбор канала подписан «Куда отправить»', /Куда отправить/.test($('.composer-sub').textContent));
   check('в композере ровно три действия: файл, поле, отправка', $$('.composer-row:first-child > *').length === 4);
   check('есть быстрый переход к настройке шаблонов', Boolean($('.tmpl-settings')));
+
+  // ── загрузка файла: время на отправку и обратная связь ────────────────────
+  // Файл до 15 МБ уходит в теле примерно на 20 МБ: на мобильной сети с объекта
+  // тридцати секунд ему не хватает, а без отметки на скрепке человек выбирает
+  // файл второй раз и получает два одинаковых вложения в чате.
+  check('скрепка занята, пока файл уходит', appJsRaw.includes("clip.classList.add('loading')") && appJsRaw.includes('clip.disabled = true') && appJsRaw.includes('finally { clipDone(); }'));
+  check('большому телу запроса даётся больше времени, чем обычному', appJsRaw.includes('bigBody ? 600000 : 30000') && appJsRaw.includes('Загрузка не успела завершиться: соединение слишком медленное'));
+  check('сервер ждёт тело запроса не меньше клиента', serverJsRaw.includes('server.requestTimeout = 600000') && serverJsRaw.includes('server.headersTimeout = 30000'));
+  check('столбец кнопок в карточке клиента задан классом, а не встроенным стилем',
+    cssText.replace(/\s+/g, '').includes('.profile-actions{display:flex;flex-direction:column;gap:6px}') && appJsRaw.includes('class="profile-actions"'));
+  check('заголовка «Быстрые действия» в интерфейсе нет', !appJsRaw.includes('Быстрые действия'));
+  check('в подписях статусов нет слова «входящее»', !appJsRaw.includes("inbound: 'входящее'"));
+  check('правила автоматизации говорят о сообщении клиента', !appJsRaw.includes('любое входящее сообщение') && appJsRaw.includes('любое сообщение клиента'));
+
+  // ── одни правила на все пути: удаление, ответственный, сумма сделки ───────
+  // Каскады удаления были переписаны в трёх маршрутах, список полей собирался
+  // на каждом запросе, а сумма по позициям писалась в базу без округления.
+  check('связи при удалении рвёт один помощник на всех трёх маршрутах', (serverJsRaw.match(/detachChildren\(/g) || []).length === 3 && serverJsRaw.includes('const DETACH_SQL = {'));
+  check('список записываемых полей объявлен один раз на модуль', (serverJsRaw.match(/const CRUD = \{ contacts:/g) || []).length === 1);
+  check('ответственный приводится одним правилом на создание и правку', (serverJsRaw.match(/normalizeResponsible\(b\)/g) || []).length === 3);
+  check('сумма сделки по позициям округляется до рублей', serverJsRaw.includes('SUM(CAST(ROUND(price*qty) AS INTEGER))') && (serverJsRaw.match(/dealSumByProducts/g) || []).length === 3);
+  check('цена позиции сделки пишется целыми рублями', (serverJsRaw.match(/Math\.round\(Math\.max\(0, Number\(b\.price/g) || []).length === 2);
+  check('старые дробные суммы приводятся к рублям при запуске', serverJsRaw.includes('CAST(ROUND(amount) AS INTEGER)') && serverJsRaw.includes("typeof(amount) <> 'integer'"));
+  check('итог документа и карточки складывается из округлённых строк',
+    serverJsRaw.includes('const lineSum = x => Math.round(') && appJsRaw.includes('const lineSum = p => Math.round(')
+    && !serverJsRaw.includes('x.price * x.qty') && !appJsRaw.includes('p.price * p.qty'));
+  check('список конкурентов читается одним запросом, а не тремя на строку',
+    competitorsJsRaw.includes('FROM competitors c') && competitorsJsRaw.includes('MAX(id) mid FROM competitor_reports')
+    && !/list\.map\(c => \{\s*const r = db\.prepare/.test(competitorsJsRaw));
+  check('последние отчёты конкурентов ищутся по индексу', competitorsJsRaw.includes('idx_reports_comp ON competitor_reports(competitor_id,id)'));
   // Список «Куда отправить» строится из того, что у заказчика реально подключено.
   // Зашитый перечень показывал WhatsApp тому, у кого только Авито и MAX, и прятал
   // сами Авито с MAX — ответ ушёл бы не в тот мессенджер.
@@ -1130,7 +1160,7 @@ try {
     $('#modalBody select[name=trigger_type]').dispatchEvent(new window.Event('change', { bubbles: true })); await wait(60);
     $('#modalBody select[name=action_type]').value = 'send_message';
     $('#modalBody select[name=action_type]').dispatchEvent(new window.Event('change', { bubbles: true })); await wait(60);
-    check('правило «отвечать на всё» предупреждает о рассылке', /каждому клиенту на каждое входящее/.test($('#autoWarn').textContent));
+    check('правило «отвечать на всё» предупреждает о рассылке', /каждому клиенту на каждое его сообщение/.test($('#autoWarn').textContent));
     $('#modalBody [name=trigger_value]').value = 'смета';
     window.autoWarn($('#modalBody form'));
     check('с ключевым словом предупреждение о рассылке исчезает', $('#autoWarn').textContent.trim() === '');
@@ -1581,16 +1611,16 @@ try {
   // ключ вставили, а адрес у Wazzup не зарегистрировали: в чатах пусто, и
   // человек должен видеть причину и выход, а не гадать
   window.go('inbox'); await wait(700);
-  check('в чатах видна подсказка о незарегистрированном адресе', /входящий адрес этой CRM/.test($('#view').textContent), $('#view').textContent.replace(/\s+/g, ' ').slice(0, 180));
+  check('в чатах видна подсказка о незарегистрированном адресе', /не указан адрес этой CRM/.test($('#view').textContent), $('#view').textContent.replace(/\s+/g, ' ').slice(0, 180));
   check('подсказка ведёт в настройки одной кнопкой', /Открыть настройки/.test($('#view').textContent));
   const whTest = await fetch(BASE + '/webhooks/wazzup?secret=smoke-hook', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{"test":true}' });
   check('проверочный запрос Wazzup проходит', whTest.status === 200);
   const whMsg = await fetch(BASE + '/webhooks/wazzup?secret=smoke-hook', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ messages: [{ messageId: 'smoke-wz-1', channelId: 'c1', chatType: 'whatsapp', chatId: '79000000009', type: 'text', text: 'Здравствуйте', contact: { name: 'Дым Incoming', phone: '+7 900 000-00-09' } }] }) });
   check('входящее сообщение принимается вебхуком', whMsg.status === 200);
   window.__state.settingsTab = 'integrations'; window.go('settings'); await wait(700);
-  check('в карточке интеграций виден счётчик входящих', /Входящих получено: 1/.test($('#view').textContent), $('#view').textContent.replace(/\s+/g, ' ').slice(0, 160));
+  check('в карточке интеграций виден счётчик принятых сообщений', /Сообщений получено: 1/.test($('#view').textContent), $('#view').textContent.replace(/\s+/g, ' ').slice(0, 160));
   window.go('inbox'); await wait(700);
-  check('после первого входящего подсказка исчезает', !/входящий адрес этой CRM/.test($('#view').textContent));
+  check('после первого сообщения подсказка исчезает', !/не указан адрес этой CRM/.test($('#view').textContent));
   check('непрочитанный диалог помечен в списке меткой и фоном', Boolean($('.conv.unread')) && Boolean($('.conv.unread .badge')));
   check('под списком мессенджеров видно, с какого аккаунта уйдёт ответ', Boolean($('#sendAccountHint')) && /Ответ уйдёт с аккаунта|Рабочего аккаунта/.test($('#sendAccountHint').textContent), $('#sendAccountHint') ? $('#sendAccountHint').textContent : 'нет подсказки');
   // вложение в пузыре: чип с именем файла без технической подписи рядом

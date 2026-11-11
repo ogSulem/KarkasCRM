@@ -217,10 +217,10 @@ function normalizeDue(raw) {
   const s = raw.trim();
   if (!s) return '';
   const now = new Date();
-  const pad = n => String(n).padStart(2, '0');
-  const todayStr = `${now.getFullYear()}-${pad(now.getMonth() + 1)}-${pad(now.getDate())}`;
-  const tmrw = new Date(now.getTime() + 86400000);
-  const tmrwStr = `${tmrw.getFullYear()}-${pad(tmrw.getMonth() + 1)}-${pad(tmrw.getDate())}`;
+  // формат даты один на весь интерфейс (isoDate): «сегодня» и «завтра» должны
+  // совпадать с тем, что показывают списки задач и календарь
+  const todayStr = isoDate(now);
+  const tmrwStr = isoDate(new Date(now.getTime() + 86400000));
 
   const mSeg = s.match(/^сегодня(?:\s+(\d{1,2}:\d{2}))?$/i);
   if (mSeg) {
@@ -249,9 +249,8 @@ function taskDueMeta(due, done = false) {
   const norm = normalizeDue(due);
   const now = new Date();
   const pad = n => String(n).padStart(2, '0');
-  const todayStr = `${now.getFullYear()}-${pad(now.getMonth() + 1)}-${pad(now.getDate())}`;
-  const tmrw = new Date(now.getTime() + 86400000);
-  const tmrwStr = `${tmrw.getFullYear()}-${pad(tmrw.getMonth() + 1)}-${pad(tmrw.getDate())}`;
+  const todayStr = isoDate(now);
+  const tmrwStr = isoDate(new Date(now.getTime() + 86400000));
 
   const parts = norm.split(' ');
   const datePart = parts[0] || '';
@@ -448,10 +447,16 @@ async function api(path, opt = {}) {
     if (hit && Date.now() - hit.at < GET_CACHE_TTL) return hit.data;
   }
   let r;
+  // Большому телу нужно больше времени. Файл на 15 МБ уходит в запросе примерно
+  // на 20 МБ (base64 внутри JSON), и на слабой мобильной сети тридцати секунд ему
+  // не хватает: загрузка обрывалась почти на середине. Обычные запросы остаются
+  // короткими — зависший ответ не должен держать интерфейс.
+  const bigBody = typeof opt.body === 'string' && opt.body.length > 262144;
+  const timeoutMs = Number(opt.timeoutMs) || (bigBody ? 600000 : 30000);
   try {
     r = await fetch(path, {
       ...opt,
-      signal: opt.signal || AbortSignal.timeout(30000),
+      signal: opt.signal || AbortSignal.timeout(timeoutMs),
       headers: {
         'Content-Type': 'application/json',
         ...(token ? { Authorization: 'Bearer ' + token } : {}),
@@ -460,7 +465,9 @@ async function api(path, opt = {}) {
     });
   } catch (e) {
     unlockBusyForms();
-    if (e.name === 'TimeoutError' || e.name === 'AbortError') throw new Error('Сервер не ответил вовремя — возможно, внешние источники работают медленно. Повторите попытку чуть позже.');
+    if (e.name === 'TimeoutError' || e.name === 'AbortError') throw new Error(bigBody
+      ? 'Загрузка не успела завершиться: соединение слишком медленное. Повторите отправку или выберите файл поменьше.'
+      : 'Сервер не ответил вовремя — возможно, внешние источники работают медленно. Повторите попытку чуть позже.');
     throw new Error('Нет связи с сервером. Проверьте подключение к интернету и обновите страницу.');
   }
   if (r.status === 401) {
@@ -1535,8 +1542,10 @@ function dealTab(deal, d) {
     <div class="msgs" style="max-height:360px">${d.messages.map(msgHtml).join('') || '<small>Сообщений пока нет</small>'}</div>`;
   }
   if (state.dealTab === 'products') {
-    const total = d.products.reduce((a, p) => a + p.price * p.qty, 0);
-    return `<table><tr><th>Товар / проект</th><th>Цена</th><th>Кол-во</th><th>Сумма</th><th></th></tr>${d.products.map(p => `<tr><td>${esc(p.name)}</td><td>${fmt(p.price)}</td><td>${p.qty}</td><td><b>${fmt(p.price * p.qty)}</b></td><td>${canEdit() ? `<button class="btn sm danger" onclick="delRow('deal_products',${p.id},${deal.id})">${icon('close', 13)}</button>` : ''}</td></tr>`).join('') || '<tr><td colspan="5"><small>Позиций нет — добавьте проект дома или доп. опцию</small></td></tr>'}${d.products.length ? `<tr><td colspan="3" style="text-align:right"><b>Итого по позициям:</b></td><td><b>${fmt(total)}</b></td><td></td></tr>${Math.abs(total - deal.amount) >= 1 && canEdit() ? `<tr><td colspan="5"><small>Сумма сделки — ${fmt(deal.amount)}. <button class="btn sm" onclick="syncDealAmount(${deal.id},${total})">Подставить ${fmt(total)} в сделку</button></small></td></tr>` : ''}` : ''}</table>
+    // строка и итог считаются по тому же правилу, что документ и сумма сделки
+    const lineSum = p => Math.round((Number(p.price) || 0) * (Number(p.qty) || 0));
+    const total = d.products.reduce((a, p) => a + lineSum(p), 0);
+    return `<table><tr><th>Товар / проект</th><th>Цена</th><th>Кол-во</th><th>Сумма</th><th></th></tr>${d.products.map(p => `<tr><td>${esc(p.name)}</td><td>${fmt(p.price)}</td><td>${p.qty}</td><td><b>${fmt(lineSum(p))}</b></td><td>${canEdit() ? `<button class="btn sm danger" onclick="delRow('deal_products',${p.id},${deal.id})">${icon('close', 13)}</button>` : ''}</td></tr>`).join('') || '<tr><td colspan="5"><small>Позиций нет — добавьте проект дома или доп. опцию</small></td></tr>'}${d.products.length ? `<tr><td colspan="3" style="text-align:right"><b>Итого по позициям:</b></td><td><b>${fmt(total)}</b></td><td></td></tr>${Math.abs(total - deal.amount) >= 1 && canEdit() ? `<tr><td colspan="5"><small>Сумма сделки — ${fmt(deal.amount)}. <button class="btn sm" onclick="syncDealAmount(${deal.id},${total})">Подставить ${fmt(total)} в сделку</button></small></td></tr>` : ''}` : ''}</table>
      ${canEdit() ? `<hr><button class="btn sm primary" onclick="addDealProduct(${deal.id})">+ Добавить товар / услугу</button>` : ''}`;
   }
   if (state.dealTab === 'tasks') {
@@ -1655,7 +1664,9 @@ function attachmentHtml(m) {
   const sub = [ext, fmtBytes(m.content_size)].filter(Boolean).join(' · ');
   return `<a href="${url}" target="_blank" rel="noopener" class="chat-attach file">${icon('file', 14)}<span><span class="attach-name">${esc(nm)}</span>${sub ? `<small class="attach-meta">${esc(sub)}</small>` : ''}</span></a>`;
 }
-const MSG_STATUS = { sent: 'отправлено', delivered: 'доставлено', read: 'прочитано', inbound: 'входящее', received: 'получено', local: 'сохранено в CRM', error: 'не отправлено' };
+// Слово «входящее» в подписях не используется: направление видно по стороне
+// пузыря, а лишнее слово только путает. Статусы — про доставку своего сообщения.
+const MSG_STATUS = { sent: 'отправлено', delivered: 'доставлено', read: 'прочитано', inbound: 'получено', received: 'получено', local: 'сохранено в CRM', error: 'не отправлено' };
 const statusLabel = s => MSG_STATUS[s] || s || '';
 // имя файла из ссылки: пригодится, если файл пришёл без имени
 function nameFromUri(u) { try { const last = String(u || '').split('?')[0].split('/').pop() || ''; const d = decodeURIComponent(last); return d && /\./.test(d) ? d.slice(0, 80) : ''; } catch { return ''; } }
@@ -1853,7 +1864,7 @@ async function inbox(v) {
   }
   const wzN = amAdmin() ? (state.cache.settings && state.cache.settings.wazzup) : null;
   const wzNudge = wzN && wzN.configured && !wzN.hook_msgs && !wzN.hook_test_at
-    ? `<div class="card tint-warn" style="margin:0 0 10px"><p><small>Wazzup подключён, но сообщения ещё не приходили: у Wazzup не указан входящий адрес этой CRM. Нажмите «Зарегистрировать адрес автоматически» — и входящие появятся здесь. <button type="button" class="btn sm" onclick="state.settingsTab='integrations';go('settings')">Открыть настройки</button></small></p></div>`
+    ? `<div class="card tint-warn" style="margin:0 0 10px"><p><small>Wazzup подключён, но сообщения ещё не приходили: у Wazzup не указан адрес этой CRM. Нажмите «Зарегистрировать адрес автоматически» — и переписка появится здесь. <button type="button" class="btn sm" onclick="state.settingsTab='integrations';go('settings')">Открыть настройки</button></small></p></div>`
     : '';
 
   if (seq !== inboxSeq) return;
@@ -1882,7 +1893,7 @@ async function inbox(v) {
        <button type="button" class="tmpl-settings" onclick="go('settings','templates')">${icon('settings', 12)} настроить шаблоны</button>
      </div>
      <p class="form-hint" id="sendAccountHint" style="margin:-2px 0 0"></p></form>` : `<div class="composer"><p class="form-hint" style="margin:0">${icon('eye', 14)} Режим просмотра: переписка доступна для чтения, отвечает менеджер или администратор.</p></div>`}` : '<div class="empty">Выберите диалог</div>'}</div>
-   <div class="profile">${cur ? `<h3>Клиент</h3><p><b>${esc(displayTitle(cur.title))}</b>${cur.position ? `<br><small>${esc(cur.position)}</small>` : ''}</p><p>${icon('phone', 13)} ${esc(cur.phone ? prettyPhone(cur.phone) : '—')}<br>${icon('email', 13)} ${esc(cur.email || '—')}${cur.company ? `<br>${icon('company', 13)} ${esc(cur.company)}` : ''}${cur.source ? `<br>${icon('info', 13)} Источник: ${esc(sourceLabel(cur.source))}` : ''}${cur.contact_responsible_name ? `<br>${icon('user', 13)} Ответственный: ${esc(cur.contact_responsible_name)}` : ''}</p><p>Каналы: ${chan(cur.channels)}${(cur.channels || '').includes('email') ? ' <span class="tag grey">почта подключена</span>' : ''}</p><p><button class="btn sm" onclick="attachContact(${cur.contact_id})">Открыть карточку клиента</button></p><hr><h3>Быстрые действия</h3><div style="display:flex;flex-direction:column;gap:6px">${cur.phone ? `<a class="btn sm" href="tel:${esc(String(cur.phone).replace(/[^+\d]/g, ''))}">${icon('phone', 13)} Позвонить</a>` : ''}${canEdit() ? `<button class="btn sm" onclick="openTask(null,{contact_id:${cur.contact_id}})">+ Задача</button><button class="btn sm" onclick="quickDeal(${cur.contact_id})">+ Сделка</button><button class="btn sm" onclick="quickNote(${cur.contact_id})">+ Заметка</button>` : ''}</div>` : '<div class="empty">Выберите чат</div>'}</div></div>`;
+   <div class="profile">${cur ? `<h3>Клиент</h3><p><b>${esc(displayTitle(cur.title))}</b>${cur.position ? `<br><small>${esc(cur.position)}</small>` : ''}</p><p>${icon('phone', 13)} ${esc(cur.phone ? prettyPhone(cur.phone) : '—')}<br>${icon('email', 13)} ${esc(cur.email || '—')}${cur.company ? `<br>${icon('company', 13)} ${esc(cur.company)}` : ''}${cur.source ? `<br>${icon('info', 13)} Источник: ${esc(sourceLabel(cur.source))}` : ''}${cur.contact_responsible_name ? `<br>${icon('user', 13)} Ответственный: ${esc(cur.contact_responsible_name)}` : ''}</p><p>Каналы: ${chan(cur.channels)}${(cur.channels || '').includes('email') ? ' <span class="tag grey">почта подключена</span>' : ''}</p><p><button class="btn sm" onclick="attachContact(${cur.contact_id})">Открыть карточку клиента</button></p><hr><div class="profile-actions">${cur.phone ? `<a class="btn sm" href="tel:${esc(String(cur.phone).replace(/[^+\d]/g, ''))}">${icon('phone', 13)} Позвонить</a>` : ''}${canEdit() ? `<button class="btn sm" onclick="openTask(null,{contact_id:${cur.contact_id}})">+ Задача</button><button class="btn sm" onclick="quickDeal(${cur.contact_id})">+ Сделка</button><button class="btn sm" onclick="quickNote(${cur.contact_id})">+ Заметка</button>` : ''}</div>` : '<div class="empty">Выберите чат</div>'}</div></div>`;
   if (cur && canEdit()) { refreshSendAccount(cur.id); const t = $('#msgText'); if (t) { t.value = state.drafts[cur.id] || ''; autoGrow(t); } }
   const mDiv = $('#chatMsgs');
   if (mDiv) mDiv.scrollTop = mDiv.scrollHeight;
@@ -2076,7 +2087,14 @@ async function uploadChatFile(input, cid) {
   input.value = '';
   if (!file) return;
   if (file.size > 15 * 1024 * 1024) return toast('Файл больше 15 МБ — выберите файл поменьше');
+  // На слабой сети файл уходит минуты. Без отметки человек решает, что кнопка не
+  // сработала, и выбирает файл ещё раз — в чате появляется два одинаковых
+  // вложения. Поэтому скрепка на время загрузки занята и показывает ожидание.
+  const clip = $('.composer-ico');
+  const clipDone = () => { if (clip) { clip.classList.remove('loading'); clip.disabled = false; } };
+  if (clip) { clip.classList.add('loading'); clip.disabled = true; }
   const reader = new FileReader();
+  reader.onerror = () => { clipDone(); toast('Файл не прочитался. Попробуйте ещё раз.', 'err'); };
   reader.onload = async () => {
     try {
       const dataBase64 = String(reader.result).split(',').pop();
@@ -2084,6 +2102,7 @@ async function uploadChatFile(input, cid) {
       await api(`/api/conversations/${cid}/messages`, { method: 'POST', body: JSON.stringify({ body: (file.type || '').startsWith('image/') ? '' : (file.name || 'Файл'), contentUri: up.url, contentName: up.name, contentType: up.contentType, contentSize: up.size, channel: $('#msgChannel')?.value || 'whatsapp' }) });
       toast('Файл отправлен'); refreshInbox();
     } catch (err) { toast(err.message, 'err'); }
+    finally { clipDone(); }
   };
   reader.readAsDataURL(file);
 }
@@ -3773,15 +3792,15 @@ async function settings(v) {
       <p class="form-hint">Код подставляется в адрес вебхука и защищает от поддельных сообщений.</p>
       <label>Адрес сервера Wazzup<input id="wzUrl" value="${esc(s.wazzup.api_url)}"></label>
       <p class="form-hint">Адрес API Wazzup. Менять обычно не нужно.</p>
-      <label>Дублировать входящие на второй адрес (необязательно)<input id="wzForward" value="${esc(s.wazzup.forward_url || '')}" placeholder="https://вторая-crm.ru/webhooks/wazzup"></label>
-      <p class="form-hint">Wazzup присылает входящие на один адрес. Если те же мессенджеры подключены ещё к одной CRM, укажите её вебхук: каждая пачка входящих будет продублирована туда, чаты живут в обеих системах.</p>
+      <label>Дублировать сообщения клиентов на вторую CRM (необязательно)<input id="wzForward" value="${esc(s.wazzup.forward_url || '')}" placeholder="https://вторая-crm.ru/webhooks/wazzup"></label>
+      <p class="form-hint">Wazzup присылает сообщения клиентов на один адрес. Если те же мессенджеры подключены ещё к одной CRM, укажите её вебхук: каждая пачка сообщений будет продублирована туда, чаты живут в обеих системах.</p>
       <div style="display:flex;gap:8px;flex-wrap:wrap"><button class="btn primary" onclick="saveWazzup()">Сохранить</button><button class="btn" onclick="testWazzup()">${icon('sync', 13)} Проверить и синхронизировать каналы</button></div>
       <hr><p><b>Адрес, по которому Wazzup присылает сообщения</b></p>
       ${hookLine(wazzupHookUrl(s))}
-      ${s.wazzup.webhook_url ? `<p><small>У Wazzup зарегистрирован адрес: <code>${esc(s.wazzup.webhook_url)}</code> — входящие сообщения приходят на него.</small></p>` : ''}
+      ${s.wazzup.webhook_url ? `<p><small>У Wazzup зарегистрирован адрес: <code>${esc(s.wazzup.webhook_url)}</code> — сообщения клиентов приходят на него.</small></p>` : ''}
       <p><small>${s.wazzup.webhook_secret ? 'Секрет в адресе — пароль от этой двери: без него чужие люди не смогут присылать поддельные сообщения.' : 'Секрет не задан: адрес примет сообщение от любого, кто его узнает. Нажмите «Зарегистрировать адрес автоматически» — секрет создастся сам и встроится в адрес, либо задайте его вручную выше.'}</small></p>
       ${s.wazzup.configured ? `<p><small>${s.wazzup.hook_msgs
-        ? `Входящих получено: ${s.wazzup.hook_msgs}, последнее — ${esc(s.wazzup.hook_last_human)}.`
+        ? `Сообщений получено: ${s.wazzup.hook_msgs}, последнее — ${esc(s.wazzup.hook_last_human)}.`
         : s.wazzup.hook_test_at ? `Проверочный запрос Wazzup прошёл ${esc(s.wazzup.hook_test_human)}, сообщений пока не было.`
         : 'Wazzup ещё не присылал сообщений: зарегистрируйте адрес кнопкой ниже.'}</small></p>` : ''}
       <div style="display:flex;gap:8px;flex-wrap:wrap"><button class="btn sm" onclick="registerWazzupWebhook()">${icon('sync', 13)} Зарегистрировать адрес автоматически</button></div>
@@ -3811,7 +3830,7 @@ async function settings(v) {
       <p><small>Если код задан, заявка без него отклоняется. Готовая форма для сайта уже содержит код — её можно вставлять как есть. Другим сервисам добавьте код в адрес: <code>?secret=…</code> (подробность для программиста: можно и заголовком <code>x-webhook-secret</code>).</small></p>
       <div style="display:flex;gap:8px;flex-wrap:wrap"><button class="btn primary sm" onclick="saveWebhookSecret()">Сохранить секрет</button><button class="btn sm" onclick="copySiteFormCode()">${icon('copy', 13)} Скопировать код формы для сайта</button></div></div>
     </div><div>
-     <div class="card"><h3>Проверка связи</h3><button class="btn orange w" onclick="checkHealth()">Проверить работу сервера</button><p style="margin-top:8px"><small>Проверка доступности сервера и базы данных. Диалоги и входящие сообщения появляются автоматически при подключённых каналах связи.</small></p></div>
+     <div class="card"><h3>Проверка связи</h3><button class="btn orange w" onclick="checkHealth()">Проверить работу сервера</button><p style="margin-top:8px"><small>Проверка доступности сервера и базы данных. Диалоги и сообщения клиентов появляются автоматически при подключённых каналах связи.</small></p></div>
      <div class="card"><h3>Адрес CRM в интернете</h3>
       <p><small>По этому адресу CRM открывают сотрудники, и сюда же обращаются Wazzup и формы с сайта. Он подставляется во все ссылки ниже.</small></p>
       <label>Публичный адрес<input id="publicUrl" value="${esc(s.public_url || '')}" placeholder="https://crm.вашдомен.ру"></label>
@@ -3819,7 +3838,7 @@ async function settings(v) {
       ${localOrigin ? `<div class="notice warn" style="margin-top:12px"><b>Сейчас открыт локальный адрес</b><br><small>${esc(origin)} виден только на этом компьютере. Wazzup и формы с сайта не смогут сюда достучаться — укажите публичный адрес выше (например, https://crm.вашдомен.ру) или откройте CRM по домену.</small></div>` : ''}
      </div>  
      <div class="card"><h3>Электронная почта</h3>
-      <p><small>После настройки письма клиентам отправляются прямо из карточки чата, а входящие письма попадают в ту же переписку.</small></p>
+      <p><small>После настройки письма клиентам отправляются прямо из карточки чата, а письма клиентов попадают в ту же переписку.</small></p>
       <p><small><b>Что такое «пароль приложения».</b> Яндекс Почта, Mail.ru и Gmail не разрешают сторонним программам входить по обычному паролю. В настройках безопасности ящика создаётся отдельный одноразовый пароль для CRM: он выглядит как <code>abcd efgh ijkl mnop</code> и вводится в поле «Пароль приложения» ниже. Обычный пароль от почты останется только у вас.</small></p>
       <p>Статус: <b class="${s.email.configured ? 'green' : ''}">${s.email.configured ? 'почта настроена' : 'не настроена'}</b></p>
       <form onsubmit="return saveEmail(event)">
@@ -3829,9 +3848,9 @@ async function settings(v) {
        <div class="form-grid2"><label>Защита соединения<select name="SMTP_SECURE"><option value="" ${!s.email.secure ? 'selected' : ''}>Авто: STARTTLS</option><option value="1" ${s.email.secure === '1' ? 'selected' : ''}>SSL/TLS сразу (обычно 465)</option><option value="0" ${s.email.secure === '0' ? 'selected' : ''}>Без шифрования (внутренний сервер)</option></select></label><label>Адрес отправителя<input name="MAIL_FROM" value="${esc(s.email.from || '')}" placeholder="crm@company.ru"></label></div>
        <label>Адрес для проверочного письма<input name="SMTP_TEST_TO" value="${esc(s.email.test_to || '')}" placeholder="admin@company.ru"></label>
        <div class="btn-row"><button class="btn primary">Сохранить почту</button><button class="btn" type="button" onclick="testEmail(this.form)">Отправить проверочное письмо</button></div></form>
-      <hr><p><b>Приём входящих писем</b></p>
-      <p><small><b>Входящие письма.</b> Письма приходят не сами по себе: в почтовом ящике нужно включить пересылку (фильтр «пересылать все письма на адрес…») на адрес ниже. CRM разберёт отправителя, тему и текст и добавит письмо в чат клиента. Код защиты спасает адрес от чужого спама; если он пуст, письма принимаются без проверки.</small></p>
-      <div class="field-row"><input id="emailSecret" value="${esc(s.email.webhook_secret || '')}" placeholder="секрет для входящих писем"><button type="button" class="btn sm" style="white-space:nowrap" onclick="genEmailSecret()">Сгенерировать</button><button type="button" class="btn sm primary" style="white-space:nowrap" onclick="saveEmailSecret()">Сохранить</button></div>
+      <hr><p><b>Приём писем клиентов</b></p>
+      <p><small><b>Как письма попадают в CRM.</b> Письма приходят не сами по себе: в почтовом ящике нужно включить пересылку (фильтр «пересылать все письма на адрес…») на адрес ниже. CRM разберёт отправителя, тему и текст и добавит письмо в чат клиента. Код защиты спасает адрес от чужого спама; если он пуст, письма принимаются без проверки.</small></p>
+      <div class="field-row"><input id="emailSecret" value="${esc(s.email.webhook_secret || '')}" placeholder="секрет для приёма писем"><button type="button" class="btn sm" style="white-space:nowrap" onclick="genEmailSecret()">Сгенерировать</button><button type="button" class="btn sm primary" style="white-space:nowrap" onclick="saveEmailSecret()">Сохранить</button></div>
       ${hookLine(origin + '/webhooks/email' + (s.email.webhook_secret ? '?secret=' + encodeURIComponent(s.email.webhook_secret) : ''))}
      </div>
      </div></div>`;
@@ -4308,7 +4327,7 @@ function genEmailSecret() {
 async function saveEmailSecret() {
   const v = ($('#emailSecret')?.value || '').trim();
   await api('/api/settings', { method: 'PUT', body: JSON.stringify({ EMAIL_WEBHOOK_SECRET: v }) });
-  toast(v ? 'Секрет входящих писем сохранён' : 'Секрет убран: письма принимаются без него');
+  toast(v ? 'Секрет приёма писем сохранён' : 'Секрет убран: письма принимаются без него');
   state.cache.settings = null; render();
 }
 async function saveWebhookSecret() {
@@ -4370,7 +4389,7 @@ function autoTriggerField(a) {
   if (t === 'stage_changed') return `<label>На какой этап перевели<select name="trigger_value"><option value="">Любой этап</option>${autoStageOptions(a.trigger_value)}</select></label>
    <p class="form-hint" style="margin:-6px 0 10px">«Любой этап» — правило сработает на каждом переходе. Выберите конкретный этап, чтобы правило не повторялось лишний раз.</p>`;
   if (t === 'message_in') return `<label>Слово или фраза в сообщении (необязательно)<input name="trigger_value" value="${esc(a.trigger_value || '')}" placeholder="смета, цена, ипотека" oninput="autoWarn(this.form)"></label>
-   <p class="form-hint" style="margin:-6px 0 10px">Пусто — правило срабатывает на любое входящее сообщение. Можно несколько слов через запятую — хватит любого из них. Слово ищется по основе: «смета» находит и «смету», и «сметы», регистр не важен.</p>`;
+   <p class="form-hint" style="margin:-6px 0 10px">Пусто — правило срабатывает на любое сообщение клиента. Можно несколько слов через запятую — хватит любого из них. Слово ищется по основе: «смета» находит и «смету», и «сметы», регистр не важен.</p>`;
   return `<input type="hidden" name="trigger_value" value="">`;
 }
 // Значение действия: этап выбирается из воронки, тег и текст задачи пишутся словами.
@@ -4404,7 +4423,7 @@ function autoWarn(form) {
   const t = form.elements.trigger_type?.value, a = form.elements.action_type?.value;
   const kw = (form.elements.trigger_value?.value || '').trim();
   const risky = t === 'message_in' && (a === 'send_message' || a === 'send_email') && !kw;
-  box.innerHTML = risky ? `<div class="card err" style="box-shadow:none;margin:0 0 12px"><b>Правило будет отправлять ${a === 'send_email' ? 'письмо' : 'сообщение'} каждому клиенту на каждое входящее сообщение.</b> Так легко устроить рассылку, которая клиентам не нужна. Укажите слово или фразу (например «смета, цена») — правило сработает только на подходящие обращения. Дополнительно CRM ограничивает частоту: одно правило пишет в одну беседу не чаще раза за три часа.</div>` : '';
+  box.innerHTML = risky ? `<div class="card err" style="box-shadow:none;margin:0 0 12px"><b>Правило будет отправлять ${a === 'send_email' ? 'письмо' : 'сообщение'} каждому клиенту на каждое его сообщение.</b> Так легко устроить рассылку, которая клиентам не нужна. Укажите слово или фразу (например «смета, цена») — правило сработает только на подходящие обращения. Дополнительно CRM ограничивает частоту: одно правило пишет в одну беседу не чаще раза за три часа.</div>` : '';
 }
 async function openAutomation(id) {
   // список сотрудников нужен действию «передать сделку»: выбирать из живых,

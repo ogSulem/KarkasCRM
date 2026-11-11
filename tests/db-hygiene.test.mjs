@@ -212,3 +212,42 @@ test('счётчик непрочитанного опирается на пок
     .map(r => r.detail).join(' | ');
   assert.match(plan, /idx_msg_conv_dir/, 'планировщик использует индекс, а не перебор сообщений');
 });
+
+test('список конкурентов опирается на индекс последних отчётов', () => {
+  const row = db.prepare("SELECT name FROM sqlite_master WHERE type='index' AND name='idx_reports_comp'").get();
+  assert.ok(row, 'индекс competitor_reports(competitor_id,id) создан при старте');
+  const plan = db.prepare('EXPLAIN QUERY PLAN SELECT id,risk,level,verdict,created_at FROM competitor_reports WHERE competitor_id=1 ORDER BY id DESC LIMIT 1')
+    .all().map(r => r.detail).join(' | ');
+  assert.match(plan, /idx_reports_comp/, 'последний отчёт ищется по индексу, а не перебором таблицы');
+});
+
+test('сумма сделки по дробному количеству остаётся целым числом рублей', async () => {
+  const deal = await call('/api/deals', { method: 'POST', body: { title: 'Сделка с дробным количеством', amount: 0 } });
+  const pos = await call('/api/deals/' + deal.data.id + '/products', { method: 'POST', body: { name: 'Дом', price: 999, qty: 0.001 } });
+  assert.equal(pos.status, 201);
+  const row = db.prepare('SELECT amount, typeof(amount) t FROM deals WHERE id=?').get(deal.data.id);
+  assert.equal(row.t, 'integer', 'в базе целое число: дробь с хвостом уехала бы в выгрузку для Excel');
+  assert.equal(row.amount, 1, '0,001 × 999 округлено до рубля');
+  const patch = await call('/api/deal_products/' + pos.data.id, { method: 'PATCH', body: { qty: 0.3 } });
+  assert.equal(patch.status, 200);
+  assert.equal(patch.data.amount, 300, 'пересчёт после правки количества тоже целый');
+  assert.equal(db.prepare('SELECT typeof(amount) t FROM deals WHERE id=?').get(deal.data.id).t, 'integer', 'после правки тип не поменялся');
+  const gone = await call('/api/deal_products/' + pos.data.id, { method: 'DELETE' });
+  assert.equal(gone.status, 200, 'позиция удалена');
+  assert.equal(db.prepare('SELECT amount FROM deals WHERE id=?').get(deal.data.id).amount, 0, 'без позиций сумма нулевая');
+});
+
+test('массовое удаление рвёт те же связи, что и одиночное', async () => {
+  const c1 = await call('/api/contacts', { method: 'POST', body: { name: 'Клиент на массовое удаление' } });
+  const c2 = await call('/api/contacts', { method: 'POST', body: { name: 'Второй клиент на удаление' } });
+  const deal = await call('/api/deals', { method: 'POST', body: { title: 'Сделка этих клиентов', contact_id: c1.data.id } });
+  const task = await call('/api/tasks', { method: 'POST', body: { title: 'Задача по клиенту', contact_id: c1.data.id } });
+  await call('/api/notes', { method: 'POST', body: { entity_type: 'contacts', entity_id: c2.data.id, body: 'Заметка клиента' } });
+  const bulk = await call('/api/bulk', { method: 'POST', body: { table: 'contacts', action: 'delete', ids: [c1.data.id, c2.data.id], confirm: true } });
+  assert.equal(bulk.status, 200, 'массовое удаление с подтверждением прошло');
+  assert.equal(bulk.data.count, 2, 'удалены обе карточки');
+  assert.ok(!db.prepare("SELECT 1 x FROM notes WHERE entity_type='contacts' AND entity_id=?").get(c2.data.id), 'заметки удалённых клиентов убраны');
+  assert.equal(db.prepare('SELECT contact_id FROM tasks WHERE id=?').get(task.data.id).contact_id, null, 'задача осталась в списке дел, но без ссылки на клиента');
+  assert.equal(db.prepare('SELECT contact_id FROM deals WHERE id=?').get(deal.data.id).contact_id, null, 'сделка осталась в воронке без клиента');
+  assert.equal(auditDatabase(db).orphanTotal, 0, 'после массового удаления строк-сирот нет');
+});

@@ -75,6 +75,7 @@ export function ensureCompetitorsSchema(db) {
   CREATE INDEX IF NOT EXISTS idx_checks_comp ON competitor_checks(competitor_id,source);
   CREATE TABLE IF NOT EXISTS competitor_findings(id INTEGER PRIMARY KEY,competitor_id INTEGER REFERENCES competitors(id) ON DELETE CASCADE,kind TEXT DEFAULT 'прочее',title TEXT,amount REAL,note TEXT,source_url TEXT,author TEXT,created_at TEXT DEFAULT (datetime('now')));
   CREATE INDEX IF NOT EXISTS idx_reviews_comp ON reviews(competitor_id);
+  CREATE INDEX IF NOT EXISTS idx_reports_comp ON competitor_reports(competitor_id,id);
   CREATE INDEX IF NOT EXISTS idx_findings_comp ON competitor_findings(competitor_id);
   CREATE INDEX IF NOT EXISTS idx_prices_comp ON price_rows(competitor_id,scope);
   `);
@@ -935,13 +936,21 @@ export function createCompetitors(ctx) {
     }
     if (p === '/api/competitors') {
       if (req.method === 'GET') {
-        const list = db.prepare('SELECT * FROM competitors ORDER BY id DESC').all();
-        return json(res, 200, list.map(c => {
-          const r = db.prepare('SELECT id,risk,level,verdict,created_at FROM competitor_reports WHERE competitor_id=? ORDER BY id DESC LIMIT 1').get(c.id);
-          const cnt = db.prepare('SELECT COUNT(*) n, AVG(rating) a FROM reviews WHERE competitor_id=? AND rating IS NOT NULL').get(c.id);
-          const prices = db.prepare('SELECT COUNT(*) n FROM price_rows WHERE competitor_id=?').get(c.id).n;
-          return { ...c, risk: r?.risk ?? null, level: r?.level ?? null, verdict: r?.verdict ?? '', checked_at: r?.created_at ?? null, reviews: cnt.n, avg_rating: cnt.a ? Math.round(cnt.a * 10) / 10 : null, prices };
-        }));
+        // Список открывается одним запросом. Прежде на каждого конкурента
+        // приходилось ещё три (последний отчёт, отзывы, строки прайса), и с
+        // десятками конкурентов страница открывалась сотнями обращений к базе.
+        const rows = db.prepare(`SELECT c.*, r.risk, r.level, r.verdict, r.created_at AS checked_at,
+            COALESCE(rv.n,0) AS reviews, rv.a AS avg_rating, COALESCE(pr.n,0) AS prices
+          FROM competitors c
+          LEFT JOIN (SELECT competitor_id, MAX(id) mid FROM competitor_reports GROUP BY competitor_id) last ON last.competitor_id=c.id
+          LEFT JOIN competitor_reports r ON r.id=last.mid
+          LEFT JOIN (SELECT competitor_id, COUNT(*) n, AVG(rating) a FROM reviews WHERE rating IS NOT NULL GROUP BY competitor_id) rv ON rv.competitor_id=c.id
+          LEFT JOIN (SELECT competitor_id, COUNT(*) n FROM price_rows GROUP BY competitor_id) pr ON pr.competitor_id=c.id
+          ORDER BY c.id DESC`).all();
+        return json(res, 200, rows.map(({ risk, level, verdict, checked_at, reviews, avg_rating, prices, ...c }) => ({
+          ...c, risk: risk ?? null, level: level ?? null, verdict: verdict || '', checked_at: checked_at ?? null,
+          reviews, avg_rating: avg_rating ? Math.round(avg_rating * 10) / 10 : null, prices,
+        })));
       }
       if (req.method === 'POST') { const b = await readBody(req);
         const purl = normPriceUrl(b.price_url);
