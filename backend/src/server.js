@@ -218,6 +218,16 @@ CREATE INDEX IF NOT EXISTS idx_training_sort ON training_items(sort, id);
 `);
 try { db.exec('CREATE UNIQUE INDEX IF NOT EXISTS idx_msg_ext ON messages(external_id) WHERE external_id IS NOT NULL'); }
 catch (e) { console.error('Не удалось создать уникальный индекс по external_id (в базе есть дубли внешних id):', e.message); }
+// Деньги в базе — целые рубли. До версии 1.2.5 сумма сделки пересчитывалась по
+// позициям без округления, и при дробном количестве в старых базах оставался
+// хвост вида 300.00000000000004: он уходил в выгрузку для Excel и в ответ API.
+// Правка одноразовая и повторяется безопасно: целые строки условие не трогает.
+try {
+  const moneyFix = db.prepare(`UPDATE deals SET amount = CAST(ROUND(amount) AS INTEGER)
+    WHERE amount IS NOT NULL AND typeof(amount) <> 'integer'`).run();
+  if (moneyFix.changes) console.log(`Суммы сделок приведены к целым рублям: строк исправлено ${moneyFix.changes}`);
+} catch (e) { console.error('Не удалось привести суммы сделок к целым рублям:', e.message) }
+
 const SCHEMA_VERSION = 8;
 
 // Дата в местном часовом поясе (в базе время хранится в UTC, а сроки задач —
@@ -1564,13 +1574,17 @@ function displayDate(value) {
 }
 function dealDocument({ deal, items, doc, company }) {
   const isInvoice = doc === 'invoice';
-  const sum = items.reduce((a, x) => a + x.price * x.qty, 0);
+  // Строка документа округляется до рубля, а итог складывается из округлённых
+  // строк. При дробном количестве иначе «Итого» расходится со сложением строк,
+  // и бухгалтерия возвращает счёт; сумма сделки в базе считается тем же правилом.
+  const lineSum = x => Math.round((Number(x.price) || 0) * (Number(x.qty) || 0));
+  const sum = items.reduce((a, x) => a + lineSum(x), 0);
   const vat = Math.round(sum * 20 / 120);
   // Префикс задаёт пользователь, разделитель добавляет документ. Хвостовой дефис
   // убираем, чтобы и «КП», и «К-» давали «КП-0001» и «К-0001», а не «К--0001».
   const prefix = String(company.doc_prefix || 'КП').trim().replace(/[-\s]+$/, '');
   const number = `${prefix}-${String(deal.id).padStart(4, '0')}`;
-  const rows = items.map((x, i) => `<tr><td>${i + 1}</td><td>${escHtml(x.name)}</td><td>шт</td><td class="r">${money(x.price, company.currency)}</td><td class="r">${x.qty}</td><td class="r">${money(x.price * x.qty, company.currency)}</td></tr>`).join('');
+  const rows = items.map((x, i) => `<tr><td>${i + 1}</td><td>${escHtml(x.name)}</td><td>шт</td><td class="r">${money(x.price, company.currency)}</td><td class="r">${x.qty}</td><td class="r">${money(lineSum(x), company.currency)}</td></tr>`).join('');
   return `<!doctype html><html lang="ru"><head><meta charset="utf-8"><title>${isInvoice ? 'Счёт' : 'КП'} № ${escHtml(number)} — ${escHtml(company.name)}</title>
 <style>
   @page{margin:16mm}
@@ -1737,6 +1751,44 @@ function deleteImpact(table, ids) {
     }
     return out && Object.values(out).some(v => v > 0) ? out : null;
   } catch { return null; }
+}
+
+/* Какие поля таблицы можно писать. Список задан кодом, а не телом запроса:
+   он же решает, какие таблицы принимает универсальный маршрут, поэтому имена
+   колонок не могут прийти снаружи. Объявлен один раз на модуль: прежде объект
+   собирался заново на каждом запросе. */
+const CRUD = { contacts: ['name', 'phone', 'email', 'company', 'company_id', 'position', 'source', 'tags', 'notes', 'responsible_id', 'custom'], companies: ['name', 'inn', 'phone', 'email', 'site', 'notes'], tasks: ['title', 'type', 'due', 'priority', 'done', 'deal_id', 'contact_id', 'responsible_id', 'result', 'repeat'], deals: ['title', 'amount', 'stage', 'pipeline_id', 'contact_id', 'company_id', 'responsible', 'responsible_id', 'priority', 'loss_reason', 'deadline', 'custom'], products: ['name', 'sku', 'price', 'unit', 'active', 'note'], templates: ['name', 'body'], automations: ['name', 'trigger_type', 'trigger_value', 'action_type', 'action_value', 'active', 'delay_days'], notes: ['entity_type', 'entity_id', 'body', 'author'] };
+
+/* Связи, которые схема не рвёт каскадом: у задач нет внешнего ключа на клиента
+   и на сделку, заметки привязаны парой «тип + идентификатор», позиции сделки
+   живут отдельной таблицей. Правила собраны в одном месте, и их применяют
+   одиночное удаление, массовое и удаление сделки. Прежде один и тот же набор
+   запросов был переписан в трёх местах: новое правило легко было добавить
+   только в одно из них, и часть записей оставалась с «висячей» ссылкой. */
+const DETACH_SQL = {
+  contacts: ['UPDATE tasks SET contact_id=NULL WHERE contact_id=?', 'UPDATE deals SET contact_id=NULL WHERE contact_id=?', "DELETE FROM notes WHERE entity_type='contacts' AND entity_id=?"],
+  companies: ['UPDATE deals SET company_id=NULL WHERE company_id=?', 'UPDATE contacts SET company_id=NULL WHERE company_id=?', "DELETE FROM notes WHERE entity_type='companies' AND entity_id=?"],
+  deals: ['UPDATE tasks SET deal_id=NULL WHERE deal_id=?', 'DELETE FROM deal_products WHERE deal_id=?', "DELETE FROM notes WHERE entity_type='deals' AND entity_id=?"],
+};
+const detachChildren = (table, id) => { for (const sql of DETACH_SQL[table] || []) db.prepare(sql).run(id); };
+
+/* Сумма сделки по её позициям. Количество бывает дробным (полтора этажа, 0,3
+   сотни), а деньги в базе целые: без округления в deals.amount ложился хвост
+   вида 300.00000000000004, и он уезжал в выгрузку для Excel и в ответ API.
+   Правило одно на добавление позиции, её правку и удаление: строка округляется
+   до рубля, сумма складывается из округлённых строк — ровно так же считает
+   итог документ и карточка сделки, поэтому цифры везде совпадают. */
+const dealSumByProducts = dealId => Number(
+  db.prepare('SELECT COALESCE(SUM(CAST(ROUND(price*qty) AS INTEGER)),0) s FROM deal_products WHERE deal_id=?').get(dealId).s);
+
+/* Ответственный в сделке хранится дважды: идентификатором и именем, потому что
+   имя читают аналитика и поиск. Приведение одно на создание и на правку, иначе
+   два поля расходятся, и сделка показывает одного человека, а фильтрует по
+   другому. */
+function normalizeResponsible(b) {
+  if (b.responsible_id === undefined) return;
+  b.responsible_id = b.responsible_id ? Number(b.responsible_id) : null;
+  b.responsible = b.responsible_id ? (db.prepare('SELECT name FROM users WHERE id=?').get(b.responsible_id)?.name || null) : null;
 }
 
 function partnerOwnsPath(user, p) {
@@ -1955,7 +2007,7 @@ export const server = http.createServer(async (req, res) => {
       // и к другой CRM, копия пачки уходит туда же, и чаты живут в обеих системах
       if (fwd && !b.test) {
         fetch(fwd, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: rawBody, signal: AbortSignal.timeout(8000) })
-          .catch(e => logActivity(`Не удалось продублировать входящие на второй адрес: ${e.message}`, null, null, 'Wazzup'));
+          .catch(e => logActivity(`Не удалось продублировать сообщения клиентов на вторую CRM: ${e.message}`, null, null, 'Wazzup'));
       }
       const inbound = legacy.concat(modern).filter(m => !(m.status && m.status !== 'inbound' && !(m.text || m.contentUri)) && !String(m.messageId || '').startsWith('karkas-') && !m.outbound && !m.isEcho).length;
       if (inbound) {
@@ -2320,7 +2372,6 @@ export const server = http.createServer(async (req, res) => {
     }
 
     // ===== generic CRUD =====
-    const CRUD = { contacts: ['name', 'phone', 'email', 'company', 'company_id', 'position', 'source', 'tags', 'notes', 'responsible_id', 'custom'], companies: ['name', 'inn', 'phone', 'email', 'site', 'notes'], tasks: ['title', 'type', 'due', 'priority', 'done', 'deal_id', 'contact_id', 'responsible_id', 'result', 'repeat'], deals: ['title', 'amount', 'stage', 'pipeline_id', 'contact_id', 'company_id', 'responsible', 'responsible_id', 'priority', 'loss_reason', 'deadline', 'custom'], products: ['name', 'sku', 'price', 'unit', 'active', 'note'], templates: ['name', 'body'], automations: ['name', 'trigger_type', 'trigger_value', 'action_type', 'action_value', 'active', 'delay_days'], notes: ['entity_type', 'entity_id', 'body', 'author'] };
     const mCrud = p.match(/^\/api\/(contacts|companies|tasks|products|templates|automations|notes)(?:\/(\d+))?$/);
     if (mCrud) { const [, table, id] = mCrud; const fields = CRUD[table];
       if (table === 'templates') {
@@ -2511,16 +2562,7 @@ export const server = http.createServer(async (req, res) => {
         if (impact && u.searchParams.get('confirm') !== '1')
           return json(res, 409, { error: 'Требуется подтверждение удаления', confirmDelete: true, impact });
         // связанные записи не должны оставаться с «висячими» ссылками
-        if (table === 'contacts') {
-          db.prepare('UPDATE tasks SET contact_id=NULL WHERE contact_id=?').run(id);
-          db.prepare('UPDATE deals SET contact_id=NULL WHERE contact_id=?').run(id);
-          db.prepare("DELETE FROM notes WHERE entity_type='contacts' AND entity_id=?").run(id);
-        }
-        if (table === 'companies') {
-          db.prepare('UPDATE deals SET company_id=NULL WHERE company_id=?').run(id);
-          db.prepare('UPDATE contacts SET company_id=NULL WHERE company_id=?').run(id);
-          db.prepare("DELETE FROM notes WHERE entity_type='companies' AND entity_id=?").run(id);
-        }
+        detachChildren(table, id);
         const before = db.prepare(`SELECT * FROM ${table} WHERE id=?`).get(id);
         const gone = db.prepare(`DELETE FROM ${table} WHERE id=?`).run(id).changes;
         if (!gone) return json(res, 404, { error: 'Запись не найдена — обновите страницу' });
@@ -2669,7 +2711,7 @@ export const server = http.createServer(async (req, res) => {
         },
         managers: rows,
         factors: [
-          'Сообщения без ответа: входящее от клиента, за которым не ответил менеджер (−5 за каждое, не больше −30)',
+          'Сообщения без ответа: сообщение клиента, за которое никто не ответил (−5 за каждое, не больше −30)',
           'Медиана первого ответа дольше 15 / 30 / 60 минут (−5 / −10 / −15)',
           'Сделки без движения больше 14 дней (−3 за каждую, не больше −15)',
           'Просроченные открытые задачи (−2 за каждую, не больше −15)',
@@ -2819,10 +2861,7 @@ export const server = http.createServer(async (req, res) => {
         // имя ответственного дублируется в старом поле responsible: аналитика и поиск
         // читают его, поэтому не позволяем ему разойтись с responsible_id
         if (user.role === 'partner') b.responsible_id = user.id; // партнёр создаёт лид только себе
-        if (b.responsible_id !== undefined) {
-          b.responsible_id = b.responsible_id ? Number(b.responsible_id) : null;
-          b.responsible = b.responsible_id ? (db.prepare('SELECT name FROM users WHERE id=?').get(b.responsible_id)?.name || null) : null;
-        }
+        normalizeResponsible(b);
         { const err = missingRequiredCustom('deals', b.custom); if (err) return json(res, 400, { error: err }); }
         clampTexts(b);
         // сделку можно завести сразу закрытой («продали давно»). Дата закрытия нужна
@@ -2899,9 +2938,11 @@ ${user?.name || ''}`.trim();
           if (!db.prepare('SELECT id FROM deals WHERE id=?').get(id)) return json(res, 404, { error: 'Сделка не найдена' });
           const b = await readBody(req);
           const pr = b.product_id ? db.prepare('SELECT * FROM products WHERE id=?').get(b.product_id) : null;
-          const price = Math.max(0, Number(b.price ?? pr?.price ?? 0) || 0), qty = Math.max(0.001, Number(b.qty) || 1);
+          // цена позиции — целые рубли, как в каталоге: иначе в базе остаётся
+          // дробь, а в документе и карточке человек видит округлённое число
+          const price = Math.round(Math.max(0, Number(b.price ?? pr?.price ?? 0) || 0)), qty = Math.max(0.001, Number(b.qty) || 1);
           const name = String(b.name || pr?.name || 'Позиция').slice(0, 200);
-          const r = db.prepare('INSERT INTO deal_products(deal_id,product_id,name,price,qty) VALUES(?,?,?,?,?)').run(id, b.product_id || null, name, price, qty); const sum = db.prepare('SELECT COALESCE(SUM(price*qty),0) s FROM deal_products WHERE deal_id=?').get(id).s; db.prepare('UPDATE deals SET amount=? WHERE id=?').run(sum, id); broadcast('change', { table: 'deals' }); return json(res, 201, db.prepare('SELECT * FROM deal_products WHERE id=?').get(r.lastInsertRowid)); }
+          const r = db.prepare('INSERT INTO deal_products(deal_id,product_id,name,price,qty) VALUES(?,?,?,?,?)').run(id, b.product_id || null, name, price, qty); const sum = dealSumByProducts(id); db.prepare('UPDATE deals SET amount=? WHERE id=?').run(sum, id); broadcast('change', { table: 'deals' }); return json(res, 201, db.prepare('SELECT * FROM deal_products WHERE id=?').get(r.lastInsertRowid)); }
         return json(res, 405, { error: 'Метод не поддерживается' });
       }
       if (req.method === 'GET') {
@@ -2938,10 +2979,7 @@ ${user?.name || ''}`.trim();
         if (b.company_id !== undefined) { b.company_id = b.company_id ? Number(b.company_id) : null; if (b.company_id !== null && (!Number.isInteger(b.company_id) || b.company_id <= 0)) return json(res, 400, { error: 'Некорректная компания — выберите из списка' }); if (b.company_id && !db.prepare('SELECT 1 x FROM companies WHERE id=?').get(b.company_id)) return json(res, 400, { error: 'Компания не найдена — обновите страницу и выберите из списка' }); }
         if (b.responsible_id !== undefined && b.responsible_id !== null && b.responsible_id !== '' && !db.prepare('SELECT 1 x FROM users WHERE id=?').get(b.responsible_id)) return json(res, 400, { error: 'Ответственный не найден — обновите страницу и выберите сотрудника' });
         if (user.role === 'partner' && b.responsible_id !== undefined && Number(b.responsible_id) !== Number(user.id)) return json(res, 400, { error: 'Партнёр не может передать лид другому сотруднику' });
-        if (b.responsible_id !== undefined) {
-          b.responsible_id = b.responsible_id ? Number(b.responsible_id) : null;
-          b.responsible = b.responsible_id ? (db.prepare('SELECT name FROM users WHERE id=?').get(b.responsible_id)?.name || null) : null;
-        }
+        normalizeResponsible(b);
         if (b.custom !== undefined) { const err = missingRequiredCustom('deals', b.custom); if (err) return json(res, 400, { error: err }); }
         clampTexts(b);
         const fields = ['title', 'amount', 'stage', 'pipeline_id', 'contact_id', 'company_id', 'responsible', 'responsible_id', 'priority', 'loss_reason', 'deadline', 'custom']; const ks = Object.keys(b).filter(k => fields.includes(k));
@@ -2984,9 +3022,7 @@ ${user?.name || ''}`.trim();
         db.exec('BEGIN IMMEDIATE');
         try {
           // задачи не удаляем: они остаются в списке дел и у клиента, просто без привязки к сделке
-          db.prepare('UPDATE tasks SET deal_id=NULL WHERE deal_id=?').run(id);
-          db.prepare('DELETE FROM deal_products WHERE deal_id=?').run(id);
-          db.prepare("DELETE FROM notes WHERE entity_type='deals' AND entity_id=?").run(id);
+          detachChildren('deals', id);
           db.prepare('DELETE FROM deals WHERE id=?').run(id);
           db.exec('COMMIT');
         } catch (e) { db.exec('ROLLBACK'); throw e }
@@ -2999,9 +3035,9 @@ ${user?.name || ''}`.trim();
     if (mDp) { const id = mDp[1]; const row = db.prepare('SELECT * FROM deal_products WHERE id=?').get(id); if (!row) return json(res, 404, { error: 'Позиция не найдена' });
       // позиция меняет сумму сделки, поэтому проверяем владельца сделки, а не только роль
       if (user.role === 'partner' && !partnerOwns(user, 'deals', Number(row.deal_id))) return json(res, 403, { error: 'Это чужая сделка: партнёр меняет состав только своих' });
-      if (req.method === 'PATCH') { const b = await readBody(req); const qty = b.qty === undefined ? row.qty : Math.max(0.001, Number(b.qty) || row.qty), price = b.price === undefined ? row.price : Math.max(0, Number(b.price) || 0); db.prepare('UPDATE deal_products SET qty=?,price=? WHERE id=?').run(qty, price, id); }
+      if (req.method === 'PATCH') { const b = await readBody(req); const qty = b.qty === undefined ? row.qty : Math.max(0.001, Number(b.qty) || row.qty), price = b.price === undefined ? row.price : Math.round(Math.max(0, Number(b.price) || 0)); db.prepare('UPDATE deal_products SET qty=?,price=? WHERE id=?').run(qty, price, id); }
       if (req.method === 'DELETE') db.prepare('DELETE FROM deal_products WHERE id=?').run(id);
-      const sum = db.prepare('SELECT COALESCE(SUM(price*qty),0) s FROM deal_products WHERE deal_id=?').get(row.deal_id).s; db.prepare('UPDATE deals SET amount=? WHERE id=?').run(sum, row.deal_id); return json(res, 200, { saved: true, amount: sum }); }
+      const sum = dealSumByProducts(row.deal_id); db.prepare('UPDATE deals SET amount=? WHERE id=?').run(sum, row.deal_id); return json(res, 200, { saved: true, amount: sum }); }
     // ===== users / team =====
     if (p === '/api/users') {
       // Список нужен всем для выбора ответственного, но e-mail сотрудников —
@@ -3500,21 +3536,7 @@ ${user?.name || ''}`.trim();
         try {
           for (const id of ids) {
             // связи рвём так же, как при одиночном удалении: иначе остаются «висячие» задачи и заметки
-            if (table === 'contacts') {
-              db.prepare('UPDATE tasks SET contact_id=NULL WHERE contact_id=?').run(id);
-              db.prepare('UPDATE deals SET contact_id=NULL WHERE contact_id=?').run(id);
-              db.prepare("DELETE FROM notes WHERE entity_type='contacts' AND entity_id=?").run(id);
-            }
-            if (table === 'companies') {
-              db.prepare('UPDATE deals SET company_id=NULL WHERE company_id=?').run(id);
-              db.prepare('UPDATE contacts SET company_id=NULL WHERE company_id=?').run(id);
-              db.prepare("DELETE FROM notes WHERE entity_type='companies' AND entity_id=?").run(id);
-            }
-            if (table === 'deals') {
-              db.prepare('UPDATE tasks SET deal_id=NULL WHERE deal_id=?').run(id);
-              db.prepare('DELETE FROM deal_products WHERE deal_id=?').run(id);
-              db.prepare("DELETE FROM notes WHERE entity_type='deals' AND entity_id=?").run(id);
-            }
+            detachChildren(table, id);
             applied += st.run(id).changes;
           }
           db.exec('COMMIT');
@@ -3698,9 +3720,13 @@ ${user?.name || ''}`.trim();
     json(res, 500, { error: 'Внутренняя ошибка сервера. Попробуйте ещё раз; если повторяется — посмотрите логи.' });
   }
 });
-// медленные/зависшие клиенты не держат соединения и память бесконечно
+// медленные/зависшие клиенты не держат соединения и память бесконечно.
+// Заголовки ограничены жёстко, а время на тело запроса большое намеренно:
+// вложение 15 МБ уходит в теле примерно на 20 МБ, и с объекта на мобильной сети
+// оно передаётся минуты. При прежних двух минутах такая загрузка обрывалась
+// на середине, а человек видел ошибку связи.
 server.headersTimeout = 30000;
-server.requestTimeout = 120000;
+server.requestTimeout = 600000;
 server.keepAliveTimeout = 65000;
 server.maxHeadersCount = 100;
 mirrorSettingsToFile();

@@ -564,7 +564,14 @@ docker compose up --build         # http://localhost:8080
 PORT=3000 ADMIN_PASSWORD=пароль ./run-local.sh
 ```
 
-Пример unit-файла systemd для постоянного запуска без Docker:
+Пример unit-файла systemd для постоянного запуска без Docker. Каталог базы
+задаётся отдельно: процесс работает от пользователя `karkas`, а `/opt/KarkasCRM`
+после `git clone` принадлежит root, поэтому писать в `./data` он не сможет.
+
+```bash
+sudo mkdir -p /var/lib/karkascrm
+sudo chown karkas:karkas /var/lib/karkascrm
+```
 
 ```ini
 [Unit]
@@ -574,6 +581,9 @@ After=network.target
 [Service]
 WorkingDirectory=/opt/KarkasCRM
 Environment=NODE_ENV=production
+Environment=DATA_DIR=/var/lib/karkascrm
+Environment=HOST=127.0.0.1
+Environment=PORT=8080
 ExecStart=/usr/bin/node --experimental-sqlite backend/src/server.js
 Restart=always
 User=karkas
@@ -581,6 +591,16 @@ User=karkas
 [Install]
 WantedBy=multi-user.target
 ```
+
+Настройки интеграций и ключи хранятся в `DATA_DIR/settings.env`, права на файл
+сервер выставляет сам, поэтому каталог должен переживать обновления кода.
+Файл `.env` из репозитория при таком запуске не читается: его значения задаются
+строками `Environment=` или вводятся в интерфейсе на вкладке «Интеграции».
+
+С таким unit-файлом CRM слушает только локальный адрес, а снаружи её отдаёт
+Caddy или nginx с HTTPS (разделы 4 и 5). Если доступ нужен без обратного прокси,
+в unit-файл добавляют `Environment=HOST=0.0.0.0`, и тогда шифрование остаётся на
+операторе: без HTTPS пароли сотрудников уходят по сети открытым текстом.
 
 ## Локальная проверка без настроек
 

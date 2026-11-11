@@ -46,7 +46,8 @@ INSERT INTO activities(text,entity_type,entity_id,user_name) VALUES('Автом�
 INSERT INTO activities(text,entity_type,entity_id,user_name) VALUES('Создано (contacts #1)','contacts',1,'Ирина');
 INSERT INTO activities(text,entity_type,entity_id,user_name) VALUES('Файл загружен в чат #1: photo.png','conversations',1,'Ирина');
 INSERT INTO activities(text,entity_type,entity_id,user_name) VALUES('Сделка «Старая сделка» → этап «Переговоры»','deals',1,'Ирина');
-INSERT INTO deals(title,amount,stage,contact_id) VALUES('Старая сделка',777000,'new',1);
+-- сумма с хвостом: так её записывала версия 1.2.4 при дробном количестве позиции
+INSERT INTO deals(title,amount,stage,contact_id) VALUES('Старая сделка',777000.0000000001,'new',1);
 INSERT INTO conversations(contact_id,title,channels) VALUES(1,'Клиент из старой базы','whatsapp');
 INSERT INTO messages(conversation_id,direction,body) VALUES(1,'in','Сообщение из старой базы');
 INSERT INTO messages(conversation_id,direction,body,created_at) VALUES(1,'in','Дубль из старой базы',datetime('now'));
@@ -158,6 +159,8 @@ const cleanStatus = (await fetch(`http://127.0.0.1:${PORT}/api/demo/clean`, { me
 ok('команда очистки примеров данных в продукте отключена', cleanStatus === 404, 'статус ' + cleanStatus);
 const deals = await (await fetch(`http://127.0.0.1:${PORT}/api/deals`, { headers: H })).json();
 ok('старая сделка читается со всеми новыми полями', deals.deals.length === 1 && deals.deals[0].amount === 777000 && deals.deals[0].pipeline_id === 1, JSON.stringify(deals.deals.map(d => [d.title, d.amount, d.pipeline_id])));
+const moneyRow = db.prepare("SELECT amount, typeof(amount) t FROM deals WHERE title='Старая сделка'").get();
+ok('дробная сумма из старой базы приведена к целым рублям', moneyRow.t === 'integer' && moneyRow.amount === 777000, JSON.stringify(moneyRow));
 const conv = await (await fetch(`http://127.0.0.1:${PORT}/api/conversations`, { headers: H })).json();
 ok('старый чат на месте и читается', conv.length === 1 && conv[0].channels === 'whatsapp');
 

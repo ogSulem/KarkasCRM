@@ -341,6 +341,9 @@ td .btn.sm+.btn.sm{margin-left:4px}
 .msgs .empty{margin:auto}
 .profile hr{border:0;border-top:1px dashed var(--line);margin:12px 0}
 .profile p{margin:6px 0}
+/* столбец кнопок в карточке клиента справа от чата: класс вместо встроенного
+   стиля, чтобы правило для узкого экрана могло его переопределить */
+.profile-actions{display:flex;flex-direction:column;gap:6px}
 .stages-editor .st input[type=color]{padding:2px;height:34px}
 .empty small{display:block;margin-top:6px;color:var(--muted)}
 

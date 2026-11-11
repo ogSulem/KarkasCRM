@@ -8,6 +8,11 @@ import { fileURLToPath } from 'node:url';
 
 process.env.DATA_DIR = '/tmp/karkas-competitors-' + Date.now();
 process.env.PORT = '18088';
+// Прайс-лист и каталог в этих проверках настоящие: позиция «Баня каркасная 4×6»
+// возвращается в продажу по названию, значит она должна существовать до загрузки.
+// Режим фиксируем здесь, иначе файл зависел от SEED_MODE во внешнем окружении и
+// при запуске отдельно с SEED_MODE=off одна проверка падала.
+process.env.SEED_MODE = 'base';
 // внешние источники замоканы на localhost — разрешаем внутренние адреса
 process.env.ALLOW_PRIVATE_FETCH = '1';
 const { server, db } = await import('../backend/src/server.js');
