@@ -1252,7 +1252,17 @@ try {
   window.__state.me = { id: 99, name: 'Менеджер', role: 'manager' };
   window.go('settings'); await wait(350);
   const mSet = $('#view').innerHTML;
-  check('менеджер видит только доступные вкладки настроек', /Мой профиль/.test(mSet) && !/Интеграции и каналы/.test(mSet) && !/>Команда</.test(mSet) && !/>Воронки и этапы</.test(mSet));
+  check('менеджер видит только доступные вкладки настроек', />Профиль</.test(mSet) && /Шаблоны сообщений/.test(mSet) && !/Интеграции и каналы/.test(mSet) && !/>Команда</.test(mSet) && !/>Воронки и этапы</.test(mSet));
+  check('настройки менеджера открываются на шаблонах — его рабочем инструменте', /Мои шаблоны/.test(mSet));
+  window.setSettingsTab('profile'); await wait(300);
+  check('профиль менеджера на месте и открывается своей вкладкой', /Мой профиль/.test($('#view').innerHTML) && /Пароль и безопасность/.test($('#view').innerHTML));
+
+  // ── необратимое удаление: человек видит, что именно потеряет ─────────────
+  const iw = window.impactWords({ conversations: 2, messages: 15, deals: 1, tasks: 3 });
+  check('перед удалением карточки названы потери с числами и склонениями',
+    /Переписка удалится: 2 чата, 15 сообщений/.test(iw) && /Без клиента останутся: 1 сделка, 3 задачи/.test(iw));
+  check('потери компании считаются её клиентами', /Без компании останутся: 4 клиента/.test(window.impactWords({ contacts: 4 })));
+  check('пустая карточка второго подтверждения не просит', window.impactWords(null) === '' && window.impactWords({}) === '');
   window.go('competitors'); await wait(400);
   check('менеджер видит прайс-лист и может проверять конкурентов', /Наш прайс-лист/.test($('#view').textContent) && /Добавить конкурента/.test($('#view').textContent));
   await window.openCompetitor(); await wait(250);
@@ -1715,6 +1725,32 @@ try {
     check('партнёру разрешены воронка, переписка и обучение, а качество и рассылки закрыты',
       partnerViews.pipe === true && partnerViews.inbox === true && partnerViews.training === true && partnerViews.quality === false && partnerViews.campaigns === false, JSON.stringify(partnerViews));
     check('администратору доступен раздел качества', window.viewAllowed('quality') === true);
+    // палитра команд: не предлагать роль то, что сервер ей всё равно закроет.
+    // Раньше партнёр выбирал «Новая компания» или «Проверить конкурента» и получал
+    // отказ, а разделы из чужого меню молча перебрасывали его в его воронку.
+    const savedPaletteRole = window.__state.me.role;
+    window.__state.me.role = 'partner';
+    const partnerCmds = window.paletteCommands().flatMap(g => g.items.map(i => i.title));
+    window.__state.me.role = savedPaletteRole;
+    check('партнёру палитра не предлагает чужие разделы и закрытые действия',
+      !partnerCmds.some(t => ['Рабочий стол', 'Компании', 'Конкуренты', 'Новая компания', 'Проверить конкурента', 'Импорт контактов из CSV'].includes(t))
+      && partnerCmds.includes('Сделки') && partnerCmds.includes('Обучение') && partnerCmds.includes('Новый контакт'), partnerCmds.join(' / '));
+    const officeCmds = window.paletteCommands().flatMap(g => g.items.map(i => i.title));
+    check('сотруднику офиса палитра предлагает все разделы и действия',
+      ['Рабочий стол', 'Компании', 'Новая компания', 'Импорт контактов из CSV'].every(t => officeCmds.includes(t)), officeCmds.join(' / '));
+    // поле компании: пустой селект при сохранении отправил бы пустое значение и
+    // молча отвязал карточку от компании, поэтому привязка сохраняется скрытым полем
+    check('поле компании хранит привязку, когда справочник не получен',
+      window.companyField([], 7, '— без компании —').includes('type="hidden"') && window.companyField([], 7, '— без компании —').includes('value="7"'),
+      window.companyField([], 7, '— без компании —'));
+    check('поле компании показывает выбранный справочник',
+      window.companyField([{ id: 3, name: 'ООО Ромашка' }], 3, '— без компании —').includes('<select name="company_id"')
+      && window.companyField([{ id: 3, name: 'ООО Ромашка' }], 3, '— без компании —').includes('selected'));
+    check('без привязки поле компании остаётся обычным списком', window.companyField([], null, '— частное лицо —').includes('<select name="company_id"'));
+    check('форма клиента открывается и без доступа к справочнику компаний', appJsRaw.includes("await api('/api/companies').catch(() => [])"));
+    check('справочник компаний партнёру отдаётся только по его карточкам', serverJsRaw.includes("table === 'companies' && isPartner"));
+    check('документы и состав сделки партнёр меняет только по своим лидам',
+      serverJsRaw.includes('партнёр печатает документы только по своим') && serverJsRaw.includes("partnerOwns(user, 'deals', Number(row.deal_id))"));
     check('в настройках партнёру остаётся только «Профиль»', appJsRaw.includes('isPartner') && appJsRaw.includes('(isViewer || isPartner) ? k === \'profile\''));
     check('рассылкой распоряжается автор или администратор', appJsRaw.includes('Number(c.created_by_id) === Number(state.me?.id)') && serverJsRaw.includes('Отменить рассылку может её автор или администратор'));
     check('поток событий не отдаёт партнёру чужие переписки', serverJsRaw.includes('partnerSeesEvent') && serverJsRaw.includes("res.role = user.role"));

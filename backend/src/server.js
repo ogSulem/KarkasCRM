@@ -208,6 +208,10 @@ CREATE INDEX IF NOT EXISTS idx_notes_entity ON notes(entity_type, entity_id);
 CREATE INDEX IF NOT EXISTS idx_activities_entity ON activities(entity_type, entity_id);
 CREATE INDEX IF NOT EXISTS idx_contacts_email ON contacts(lower(email));
 CREATE INDEX IF NOT EXISTS idx_conv_external ON conversations(external_chat_id);
+-- Файл вложения ищем по адресу, чтобы отдать его только тому, кому принадлежит
+-- переписка: без индекса каждая картинка в чате партнёра стоила бы перебора
+-- всех сообщений.
+CREATE INDEX IF NOT EXISTS idx_msg_content_uri ON messages(content_uri);
 CREATE INDEX IF NOT EXISTS idx_camp_items ON campaign_items(campaign_id, status, id);
 CREATE INDEX IF NOT EXISTS idx_camp_queue ON campaigns(status, scheduled_at);
 CREATE INDEX IF NOT EXISTS idx_training_sort ON training_items(sort, id);
@@ -1693,6 +1697,48 @@ export function partnerOwns(user, table, id) {
   if (table === 'conversations') return !!db.prepare('SELECT 1 x FROM conversations cv JOIN contacts c ON c.id=cv.contact_id WHERE cv.id=? AND (c.responsible_id=? OR EXISTS(SELECT 1 FROM deals WHERE contact_id=c.id AND responsible_id=?))').get(tid, uid, uid);
   return false;
 }
+/* Что потеряется вместе с карточкой. Переписка удаляется каскадом и
+   возвращается только из резервной копии, сделка остаётся, но теряет клиента,
+   а у компании отвязываются её клиенты. Поэтому удаление карточки, за которой
+   что-то стоит, просит второго подтверждения с перечнем потерь — и на сервере:
+   кнопку в интерфейсе может обойти скрипт, а вернуть переписку уже нельзя. */
+// «переписка: 2 чата, 15 сообщений» — журнал читают люди, склонение настоящее
+function impactWords(impact) {
+  const parts = [];
+  if (impact.conversations) parts.push(`переписка: ${impact.conversations} ${ruPlural(impact.conversations, 'чат', 'чата', 'чатов')}`
+    + (impact.messages ? `, ${impact.messages} ${ruPlural(impact.messages, 'сообщение', 'сообщения', 'сообщений')}` : ''));
+  if (impact.deals) parts.push(`сделок без клиента: ${impact.deals}`);
+  if (impact.tasks) parts.push(`задач без клиента: ${impact.tasks}`);
+  if (impact.contacts) parts.push(`клиентов без компании: ${impact.contacts}`);
+  return parts.join('; ');
+}
+
+function deleteImpact(table, ids) {
+  try {
+    const list = [ids].flat().map(Number).filter(Boolean);
+    if (!list.length) return null;
+    const ph = list.map(() => '?').join(',');
+    const n = sql => Number(db.prepare(sql).get(...list).n);
+    let out = null;
+    if (table === 'contacts') {
+      out = {
+        conversations: n(`SELECT COUNT(*) n FROM conversations WHERE contact_id IN (${ph})`),
+        deals: n(`SELECT COUNT(*) n FROM deals WHERE contact_id IN (${ph})`),
+        tasks: n(`SELECT COUNT(*) n FROM tasks WHERE contact_id IN (${ph})`),
+      };
+      out.messages = out.conversations
+        ? n(`SELECT COUNT(*) n FROM messages WHERE conversation_id IN (SELECT id FROM conversations WHERE contact_id IN (${ph}))`)
+        : 0;
+    } else if (table === 'companies') {
+      out = {
+        contacts: n(`SELECT COUNT(*) n FROM contacts WHERE company_id IN (${ph})`),
+        deals: n(`SELECT COUNT(*) n FROM deals WHERE company_id IN (${ph})`),
+      };
+    }
+    return out && Object.values(out).some(v => v > 0) ? out : null;
+  } catch { return null; }
+}
+
 function partnerOwnsPath(user, p) {
   const m = p.match(/^\/api\/(deals|contacts|tasks|notes|conversations)\/(\d+)(\/|$)/);
   if (!m) return true;
@@ -2048,11 +2094,11 @@ export const server = http.createServer(async (req, res) => {
       sources: ['manual', 'import', 'site', 'email', ...WZ_ALL, ...WZ_ALL.map(t => 'wazzup-' + t)],
       customFields: getCustomFields(),
       features: { email: !!getSetting('SMTP_HOST'), wazzup: !!getSetting('WAZZUP_API_KEY') },
-      salesTarget: Number(getSetting('SALES_TARGET', '0')) || 0,
-      // правила распределения нужны интерфейсу: по ним считается подсказка
-      // «кому достанется новый контакт» в форме
+      // правило распределения нужно интерфейсу: по нему считается подсказка
+      // «кому достанется новый контакт» в форме. План продаж сюда не кладётся:
+      // интерфейс берёт его из аналитики, а общий ответ читает и партнёр,
+      // которому внутренние планы компании не предназначены
       autoAssign: getSetting('AUTO_ASSIGN', '0') === '1',
-      autoDeal: getSetting('AUTO_DEAL', '1') === '1',
       activeUsers: db.prepare('SELECT COUNT(*) n FROM users WHERE active=1').get().n,
     });
     if (user && p.startsWith('/api/') && user.role === 'viewer' && req.method !== 'GET' && !['/api/me/password', '/api/me/theme', '/api/conversations/read'].includes(p)) return json(res, 403, { error: 'Роль «Наблюдатель» — только просмотр' });
@@ -2060,8 +2106,8 @@ export const server = http.createServer(async (req, res) => {
     // контроль качества, настройки и чужие карточки закрыты здесь централизованно,
     // а списки ниже дополнительно фильтруются по владельцу.
     if (user && user.role === 'partner' && p.startsWith('/api/')) {
-      const PARTNER_GET = [/^\/api\/me$/, /^\/api\/meta$/, /^\/api\/events$/, /^\/api\/dashboard$/, /^\/api\/training(\/\d+)?$/, /^\/api\/pipelines$/, /^\/api\/users$/, /^\/api\/deals(\/\d+)?$/, /^\/api\/contacts(\/\d+)?$/, /^\/api\/tasks(\/\d+)?$/, /^\/api\/notes(\/\d+)?$/, /^\/api\/conversations$/, /^\/api\/conversations\/\d+\/messages$/, /^\/api\/custom-fields$/, /^\/api\/prices$/, /^\/api\/products$/, /^\/api\/templates$/];
-      const PARTNER_WRITE = [/^\/api\/me\/(password|theme|pref)$/, /^\/api\/deals(\/\d+)?$/, /^\/api\/contacts(\/\d+)?$/, /^\/api\/tasks(\/\d+)?$/, /^\/api\/notes(\/\d+)?$/, /^\/api\/conversations$/, /^\/api\/conversations\/read$/, /^\/api\/conversations\/\d+\/(messages|upload|email)$/];
+      const PARTNER_GET = [/^\/api\/me$/, /^\/api\/meta$/, /^\/api\/events$/, /^\/api\/dashboard$/, /^\/api\/training(\/\d+)?$/, /^\/api\/pipelines$/, /^\/api\/users$/, /^\/api\/deals(\/\d+)?$/, /^\/api\/contacts(\/\d+)?$/, /^\/api\/tasks(\/\d+)?$/, /^\/api\/notes(\/\d+)?$/, /^\/api\/conversations$/, /^\/api\/conversations\/\d+\/messages$/, /^\/api\/custom-fields$/, /^\/api\/prices$/, /^\/api\/products$/, /^\/api\/templates$/, /^\/api\/companies$/, /^\/api\/deals\/\d+\/(print|products)$/];
+      const PARTNER_WRITE = [/^\/api\/me\/(password|theme|pref)$/, /^\/api\/deals(\/\d+)?$/, /^\/api\/contacts(\/\d+)?$/, /^\/api\/tasks(\/\d+)?$/, /^\/api\/notes(\/\d+)?$/, /^\/api\/conversations$/, /^\/api\/conversations\/read$/, /^\/api\/conversations\/\d+\/(messages|upload|email)$/, /^\/api\/deals\/\d+\/(send-doc|products)$/, /^\/api\/deal_products\/\d+$/];
       if (!(req.method === 'GET' || req.method === 'HEAD' ? PARTNER_GET : PARTNER_WRITE).some(re => re.test(p)))
         return json(res, 403, { error: 'Партнёру доступны его сделки, клиенты, задачи и раздел «Обучение»' });
       if (!partnerOwnsPath(user, p)) return json(res, 403, { error: 'Это чужая карточка: партнёр видит только свои лиды' });
@@ -2317,6 +2363,9 @@ export const server = http.createServer(async (req, res) => {
           return json(res, 200, db.prepare('SELECT * FROM notes WHERE entity_type=? AND entity_id=? ORDER BY id DESC').all(et, eid));
         }
         if (table === 'contacts' && isPartner) return json(res, 200, db.prepare('SELECT * FROM contacts WHERE responsible_id=? OR id IN (SELECT contact_id FROM deals WHERE responsible_id=? AND contact_id IS NOT NULL) ORDER BY id DESC').all(user.id, user.id));
+        // компании партнёру нужны как справочник для его же карточек: без них
+        // форма клиента не открывается, а привязка сделки к компании теряется
+        if (table === 'companies' && isPartner) return json(res, 200, db.prepare('SELECT * FROM companies WHERE id IN (SELECT company_id FROM contacts WHERE responsible_id=? AND company_id IS NOT NULL) OR id IN (SELECT company_id FROM deals WHERE responsible_id=? AND company_id IS NOT NULL) ORDER BY id DESC').all(user.id, user.id));
         return json(res, 200, db.prepare(`SELECT * FROM ${table} ORDER BY id DESC`).all());
       }
       if (req.method === 'GET') {
@@ -2422,6 +2471,19 @@ export const server = http.createServer(async (req, res) => {
         const prevTask = table === 'tasks' ? db.prepare('SELECT title,responsible_id,due FROM tasks WHERE id=?').get(id) : null;
         const prevContact = table === 'contacts' ? db.prepare('SELECT name,responsible_id FROM contacts WHERE id=?').get(id) : null;
         if (ks.length) db.prepare(`UPDATE ${table} SET ${ks.map(k => k + '=?')} WHERE id=?`).run(...ks.map(k => b[k]), id);
+        // Передача клиента или задачи другому сотруднику остаётся в журнале.
+        // Уведомление видит только новый исполнитель, а по ленте потом можно
+        // разобрать, кто и когда переложил карточку: в сделках такие правки
+        // писались всегда, в клиентах и задачах след терялся.
+        const prevOwner = prevTask || prevContact;
+        if (prevOwner && b.responsible_id !== undefined
+          && Number(b.responsible_id || 0) !== Number(prevOwner.responsible_id || 0)) {
+          const ownerName = x => x
+            ? (db.prepare('SELECT name FROM users WHERE id=?').get(Number(x))?.name || 'сотрудник ' + Number(x))
+            : 'не назначен';
+          const whatTitle = String((prevTask ? prevTask.title : prevContact.name) || '').trim().slice(0, 120);
+          logActivity(`${prevTask ? 'Задача' : 'Клиент'} «${whatTitle || 'без названия'}»: ответственный ${ownerName(prevOwner.responsible_id)} → ${ownerName(b.responsible_id)}`, table, Number(id), user.name);
+        }
         // задачу переназначили — новый исполнитель получает уведомление сразу
         if (prevTask && b.responsible_id !== undefined && b.responsible_id
           && Number(b.responsible_id) !== Number(user.id) && Number(b.responsible_id) !== Number(prevTask.responsible_id)) {
@@ -2443,6 +2505,11 @@ export const server = http.createServer(async (req, res) => {
         return json(res, 200, nextTaskId ? { ...row, next_task_id: nextTaskId } : row);
       }
       if (req.method === 'DELETE' && id) {
+        // карточка, за которой стоит переписка, сделки или клиенты компании,
+        // удаляется только с явным подтверждением: потери необратимы
+        const impact = deleteImpact(table, [id]);
+        if (impact && u.searchParams.get('confirm') !== '1')
+          return json(res, 409, { error: 'Требуется подтверждение удаления', confirmDelete: true, impact });
         // связанные записи не должны оставаться с «висячими» ссылками
         if (table === 'contacts') {
           db.prepare('UPDATE tasks SET contact_id=NULL WHERE contact_id=?').run(id);
@@ -2454,8 +2521,23 @@ export const server = http.createServer(async (req, res) => {
           db.prepare('UPDATE contacts SET company_id=NULL WHERE company_id=?').run(id);
           db.prepare("DELETE FROM notes WHERE entity_type='companies' AND entity_id=?").run(id);
         }
+        const before = db.prepare(`SELECT * FROM ${table} WHERE id=?`).get(id);
         const gone = db.prepare(`DELETE FROM ${table} WHERE id=?`).run(id).changes;
         if (!gone) return json(res, 404, { error: 'Запись не найдена — обновите страницу' });
+        // Удаление необратимо, поэтому след в журнале обязателен: без него
+        // пропажу карточки клиента или задачи некому объяснить — неизвестно,
+        // кто и когда её убрал. Сделки и шаблоны писались в журнал и раньше,
+        // остальные записи удалялись молча.
+        const deletedText = {
+          contacts: 'Клиент удалён', companies: 'Компания удалена', tasks: 'Задача удалена',
+          products: 'Позиция каталога удалена', automations: 'Правило автоматизации удалено',
+          notes: 'Заметка удалена',
+        }[table] || 'Запись удалена';
+        const goneTitle = String((before && (before.name || before.title)) || '').trim().slice(0, 120);
+        // состав потерь пишем и в журнал: он объясняет, почему карточка исчезла
+        // вместе с перепиской, когда самой карточки уже нет
+        const impactText = impact ? '; ' + impactWords(impact) : '';
+        logActivity((goneTitle ? `${deletedText}: «${goneTitle}»` : deletedText) + impactText, table, Number(id), user.name);
         broadcast('change', { table });
         return json(res, 200, { deleted: true });
       }
@@ -2756,6 +2838,7 @@ export const server = http.createServer(async (req, res) => {
       const id = Number(p.split('/')[3]);
       const deal = db.prepare('SELECT d.*,c.name contact_name,c.phone contact_phone,c.email contact_email,co.name company_name FROM deals d LEFT JOIN contacts c ON c.id=d.contact_id LEFT JOIN companies co ON co.id=d.company_id WHERE d.id=?').get(id);
       if (!deal) return json(res, 404, { error: 'Сделка не найдена' });
+      if (user.role === 'partner' && Number(deal.responsible_id) !== Number(user.id)) return json(res, 403, { error: 'Это чужая сделка: партнёр печатает документы только по своим' });
       const doc = u.searchParams.get('doc') === 'invoice' ? 'invoice' : 'quote';
       const items = db.prepare('SELECT * FROM deal_products WHERE deal_id=? ORDER BY id').all(id);
       return html(res, 200, dealDocument({ deal, items, doc, company: companyRequisites() }));
@@ -2767,6 +2850,7 @@ export const server = http.createServer(async (req, res) => {
       const id = Number(mSendDoc[1]);
       const deal = db.prepare('SELECT d.*,c.name contact_name,c.email contact_email FROM deals d LEFT JOIN contacts c ON c.id=d.contact_id WHERE d.id=?').get(id);
       if (!deal) return json(res, 404, { error: 'Сделка не найдена' });
+      if (user.role === 'partner' && Number(deal.responsible_id) !== Number(user.id)) return json(res, 403, { error: 'Это чужая сделка: партнёр отправляет документы только по своим' });
       const b = await readBody(req);
       const doc = b.doc === 'invoice' ? 'invoice' : 'quote';
       const to = String(b.to || deal.contact_email || '').trim();
@@ -2808,6 +2892,8 @@ ${user?.name || ''}`.trim();
     const mDeal = p.match(/^\/api\/deals\/(\d+)(?:\/(products))?$/);
     if (mDeal) { const id = mDeal[1];
       if (mDeal[2] === 'products') {
+        // состав сделки видит и меняет её ответственный: партнёру чужие позиции недоступны
+        if (user.role === 'partner' && !partnerOwns(user, 'deals', Number(id))) return json(res, 403, { error: 'Это чужая сделка: партнёр работает только со своими' });
         if (req.method === 'GET') return json(res, 200, db.prepare('SELECT * FROM deal_products WHERE deal_id=?').all(id));
         if (req.method === 'POST') {
           if (!db.prepare('SELECT id FROM deals WHERE id=?').get(id)) return json(res, 404, { error: 'Сделка не найдена' });
@@ -2911,6 +2997,8 @@ ${user?.name || ''}`.trim();
     }
     const mDp = p.match(/^\/api\/deal_products\/(\d+)$/);
     if (mDp) { const id = mDp[1]; const row = db.prepare('SELECT * FROM deal_products WHERE id=?').get(id); if (!row) return json(res, 404, { error: 'Позиция не найдена' });
+      // позиция меняет сумму сделки, поэтому проверяем владельца сделки, а не только роль
+      if (user.role === 'partner' && !partnerOwns(user, 'deals', Number(row.deal_id))) return json(res, 403, { error: 'Это чужая сделка: партнёр меняет состав только своих' });
       if (req.method === 'PATCH') { const b = await readBody(req); const qty = b.qty === undefined ? row.qty : Math.max(0.001, Number(b.qty) || row.qty), price = b.price === undefined ? row.price : Math.max(0, Number(b.price) || 0); db.prepare('UPDATE deal_products SET qty=?,price=? WHERE id=?').run(qty, price, id); }
       if (req.method === 'DELETE') db.prepare('DELETE FROM deal_products WHERE id=?').run(id);
       const sum = db.prepare('SELECT COALESCE(SUM(price*qty),0) s FROM deal_products WHERE deal_id=?').get(row.deal_id).s; db.prepare('UPDATE deals SET amount=? WHERE id=?').run(sum, row.deal_id); return json(res, 200, { saved: true, amount: sum }); }
@@ -3403,6 +3491,10 @@ ${user?.name || ''}`.trim();
       }
       let applied = 0;
       if (b.action === 'delete') {
+        // пачка карточек теряет переписку и связи так же, как одна карточка,
+        // поэтому порог подтверждения общий и считается одним запросом
+        const bulkImpact = deleteImpact(table, ids);
+        if (bulkImpact && !b.confirm) return json(res, 409, { error: 'Требуется подтверждение удаления', confirmDelete: true, impact: bulkImpact });
         const st = db.prepare(`DELETE FROM ${table} WHERE id=?`);
         db.exec('BEGIN IMMEDIATE');
         try {
@@ -3429,7 +3521,8 @@ ${user?.name || ''}`.trim();
         } catch (e) { db.exec('ROLLBACK'); throw e }
         // удаление пачки записей — заметное действие: без строки в журнале
         // пропажа нескольких клиентов выглядела бы необъяснимой
-        logActivity(`Массовое удаление (${TABLE_RU[table] || table}): ${applied} ${ruPlural(applied, 'запись', 'записи', 'записей')}`, table, null, user.name);
+        const bulkWords = bulkImpact ? '; ' + impactWords(bulkImpact) : '';
+        logActivity(`Массовое удаление (${TABLE_RU[table] || table}): ${applied} ${ruPlural(applied, 'запись', 'записи', 'записей')}` + bulkWords, table, null, user.name);
       }
       else {
         const patch = {}; for (const k of Object.keys(b.patch || {})) if (fields.includes(k) && b.patch[k] !== undefined) patch[k] = b.patch[k];
@@ -3538,6 +3631,15 @@ ${user?.name || ''}`.trim();
     // загруженные файлы чатов: только для авторизованных (токен в cookie, заголовке или ?token=)
     if (p.startsWith('/uploads/')) {
       if (!user) return json(res, 401, { error: 'Требуется авторизация' });
+      // Партнёр читает только файлы своих лидов. Адрес файла не секрет: он
+      // попадает в переписку, уведомления и выгрузки, а чужой договор или
+      // смету внешнему человеку видеть нельзя. Сотрудники офиса (администратор,
+      // менеджер, наблюдатель) видят все чаты, поэтому и файлы им доступны.
+      if (user.role === 'partner') {
+        const own = db.prepare('SELECT conversation_id FROM messages WHERE content_uri=? LIMIT 1').get(p);
+        if (!own || !partnerOwns(user, 'conversations', own.conversation_id))
+          return json(res, 403, { error: 'Это чужой файл: партнёр видит только документы своих лидов' });
+      }
       const name = basename(safeDecode(p));
       if (!/^[A-Za-z0-9._-]+$/.test(name)) return json(res, 400, { error: 'Некорректное имя файла' });
       const src = join(UPLOAD_DIR, name);
