@@ -1,7 +1,7 @@
 // Проверка миграций базы: KarkasCRM должна открывать базу прошлых версий без потери данных.
 // Запуск:  node --experimental-sqlite tests/migrate.test.mjs
 import { DatabaseSync } from 'node:sqlite';
-import { mkdtempSync, rmSync } from 'node:fs';
+import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -71,6 +71,15 @@ const before = {
   ourPrices: old.prepare("SELECT COUNT(*) n FROM price_rows WHERE scope='ours'").get().n,
 };
 old.close();
+// копия настроек прежнего сервера: при старте файл дополняет базу, но не
+// перекрывает значения, которые в базе уже есть
+writeFileSync(join(DATA, 'settings.env'), [
+  '# Настройки КаркасCRM — автоматическая копия значений, сохранённых в интерфейсе.',
+  'COMPANY_NAME="Компания из файла"',
+  'CURRENCY="€"',
+  'не_ключ=пропуск',
+  'BAD KEY=пропуск',
+].join('\n') + '\n', 'utf8');
 console.log(`\n=== Миграции базы KarkasCRM (${DATA}) ===`);
 ok('подготовлена база прежней схемы', before.contacts === 1 && before.deals === 1 && before.messages === 5 && before.ourPrices === 2, JSON.stringify(before));
 
@@ -123,6 +132,10 @@ ok('новые поля у старых записей заполнены зна
 const m = db.prepare('SELECT * FROM messages WHERE id=1').get();
 ok('переписка из старой базы сохранена', m.body === 'Сообщение из старой базы');
 ok('настройки компании перенесены', db.prepare("SELECT value FROM settings WHERE key='COMPANY_NAME'").get().value === 'Старая компания');
+ok('settings.env дополняет базу недостающими ключами', db.prepare("SELECT value FROM settings WHERE key='CURRENCY'").get()?.value === '€',
+  String(db.prepare("SELECT value FROM settings WHERE key='CURRENCY'").get()?.value));
+ok('settings.env не перекрывает значения из базы', db.prepare("SELECT COUNT(*) n FROM settings WHERE value='Компания из файла'").get().n === 0);
+ok('из settings.env берутся только допустимые ключи', db.prepare("SELECT COUNT(*) n FROM settings WHERE key LIKE '% %' OR key='не_ключ'").get().n === 0);
 
 // ── 4. API поверх мигрированной базы ─────────────────────────────────────────
 const healthPublic = await (await fetch(`http://127.0.0.1:${PORT}/api/health`)).json();

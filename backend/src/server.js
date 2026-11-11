@@ -33,6 +33,9 @@ const ROOT = fileURLToPath(new URL('.', import.meta.url));
 const DATA_DIR = process.env.DATA_DIR || join(ROOT, '../../data');
 const PUBLIC_DIR = process.env.PUBLIC_DIR || join(ROOT, '../../frontend/public');
 const UPLOAD_DIR = join(DATA_DIR, 'uploads');
+// копия настроек: объявлена рядом с путями данных, потому что читается
+// сразу после миграций схемы, до остального кода настроек
+const SETTINGS_FILE = join(DATA_DIR, 'settings.env');
 const ADMIN_EMAIL = (process.env.ADMIN_EMAIL || 'admin@example.com').toLowerCase();
 const ADMIN_PASSWORD = process.env.ADMIN_PASSWORD || 'admin12345';
 
@@ -342,7 +345,6 @@ const setSetting = (k, v) => { db.prepare('INSERT INTO settings(key,value) VALUE
 // нет: при переносе на новый сервер или пересозданной базе адреса интеграций,
 // ключи и параметры возвращаются без ручного ввода. Источник истины — база:
 // значение, сохранённое через интерфейс, тут же перезаписывает строку файла.
-const SETTINGS_FILE = join(DATA_DIR, 'settings.env');
 let settingsMirrorTimer = 0;
 function scheduleSettingsMirror() {
   clearTimeout(settingsMirrorTimer);
