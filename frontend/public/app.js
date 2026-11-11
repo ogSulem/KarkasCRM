@@ -150,6 +150,15 @@ const chan = c => (c || 'whatsapp').split(',').map(x => x.trim()).filter(Boolean
 
 const ROLE_LABELS = { admin: 'Администратор', manager: 'Менеджер', viewer: 'Наблюдатель', partner: 'Партнёр' };
 const roleLabel = r => ROLE_LABELS[r] || r;
+// Класс роли на теле страницы назначается только здесь. Список ролей прежде был
+// продублирован в boot() и в syncMe(), причём во втором варианте не было
+// «партнёра»: после переподключения живого канала или правки сотрудников
+// партнёру возвращались чужие разделы меню, общий поиск и колокольчик.
+const ROLE_CLASSES = Object.keys(ROLE_LABELS).map(r => 'role-' + r);
+function applyRoleClass(role) {
+  document.body.classList.remove(...ROLE_CLASSES);
+  document.body.classList.add('role-' + (ROLE_LABELS[role] ? role : 'manager'));
+}
 
 // Браузер хранит кириллический домен в машиночитаемом виде: вместо
 // «crm.каркастайги.рф» — «crm.xn--80aaamzedb7cml.xn--p1ai». В адресе вебхука и в
@@ -691,7 +700,7 @@ function cfInputs(entity, obj = {}, grid = 2, only = 'all') {
   const fields = cfFor(entity).filter(f => only === 'all' ? true : only === 'required' ? f.required : !f.required);
   if (!fields.length) return '';
   const val = cfValues(obj.custom);
-  return `<div class="form-grid2" style="grid-template-columns:repeat(${grid},1fr)">${fields.map(f => {
+  return `<div class="form-grid2" data-cols="${grid}">${fields.map(f => {
     const v = esc(val[f.key] ?? '');
     const star = f.required ? '<span class="star" aria-hidden="true">*</span>' : '';
     const cls = f.required ? 'req' : 'opt';
@@ -836,8 +845,7 @@ async function boot() {
     loadDrafts(); // черновики читаются заново: ключ зависит от сотрудника
     guardIdenticalHtml($('#view')); // одинаковый экран не перерисовывается
     // роль на теле страницы: для наблюдателя прячем кнопки создания в шапке
-    document.body.classList.remove('role-admin', 'role-manager', 'role-viewer', 'role-partner');
-    document.body.classList.add('role-' + (['admin', 'manager', 'viewer', 'partner'].includes(me.user.role) ? me.user.role : 'manager'));
+    applyRoleClass(me.user.role);
     if (me.user.must_change_password) {
       $('#login').classList.add('hidden'); $('#app').classList.add('hidden');
       $('#passwordChange').classList.remove('hidden');
@@ -1287,7 +1295,7 @@ function pipeDraw(v, d) {
     <span class="tabs" style="margin:0"><button class="${state.dealScope !== 'mine' && state.dealScope !== 'notask' && state.dealScope !== 'overdue' ? 'active' : ''}" onclick="setDealScope('all')">Все сделки</button><button class="${state.dealScope === 'mine' ? 'active' : ''}" onclick="setDealScope('mine')">Мои (${d.deals.filter(x => x.responsible_id === meId()).length})</button><button class="${state.dealScope === 'notask' ? 'active' : ''}" onclick="setDealScope('notask')">Без задач (${noTaskCount})</button><button class="${state.dealScope === 'overdue' ? 'active' : ''}" onclick="setDealScope('overdue')">Просрочено (${overdueCount})</button></span>
     <span class="tag" title="Сделок в текущем фильтре">Показано: ${shown.length}${shown.length !== shown.filter(x => !['won', 'lost'].includes(x.stage)).length ? ` · в работе: ${shown.filter(x => !['won', 'lost'].includes(x.stage)).length}` : ''}</span><span class="tag orange" title="Сумма активных сделок в фильтре">В работе на ${fmt(shown.filter(x => !['won', 'lost'].includes(x.stage)).reduce((a, x) => a + x.amount, 0))}</span>
     ${state.me?.role !== 'partner' ? `<button class="btn sm" style="margin-left:auto" onclick="download('/api/export/deals','deals.csv')" title="Выгрузить сделки в CSV">${icon('download', 13)} Экспорт</button>` : ''}
-    <input id="dealSearch" style="max-width:210px" placeholder="Поиск по сделкам и клиентам" value="${esc(state.dealQuery || '')}" oninput="liveSearch('deals',()=>setDealQuery(this.value))">
+    <input id="dealSearch" class="searchfield searchfield-sm" placeholder="Поиск по сделкам и клиентам" value="${esc(state.dealQuery || '')}" oninput="liveSearch('deals',()=>setDealQuery(this.value))">
     ${(state.me && state.me.role) === 'admin' ? `<button class="btn sm" onclick="openPipelineEditor()">${icon('settings', 13)} Настроить воронку</button>` : ''}</div>
   ${canEdit() && state.me?.role !== 'partner' ? bulkSlot('deals', `${bulkStage()}${bulkOwner('deals')}`) : ''}
   <div class="kanban">${d.stages.map(s => {
@@ -1945,7 +1953,7 @@ async function markConvsRead() {
   state.cache.convs = await api('/api/conversations');
   toast(`Помечено прочитанным: ${ids.length}`);
   render();
-  navCounts(await api('/api/dashboard')).catch(() => {});
+  api('/api/dashboard').then(navCounts).catch(() => {});
 }
 function filterConvs(q, keepLimit) {
   if (!keepLimit) state.convLimit = 100;
@@ -2209,7 +2217,7 @@ async function contacts(v) {
 
   v.innerHTML = `${viewerNote()}
   <div class="card toolbar">
-   <input id="contactSearch" style="flex:1 1 320px;min-width:240px;max-width:480px" placeholder="Поиск по имени, тел, почте" value="${esc(f.q)}" oninput="liveSearch('contacts',()=>setContactQuery(this.value))">
+   <input id="contactSearch" class="searchfield" placeholder="Поиск по имени, тел, почте" value="${esc(f.q)}" oninput="liveSearch('contacts',()=>setContactQuery(this.value))">
    <select style="width:auto" onchange="setContactFilter('owner',this.value)"><option value="">Все ответственные</option>${__team.map(u => `<option value="${u.id}" ${f.owner == u.id ? 'selected' : ''}>${esc(u.name)}</option>`).join('')}</select>
    <select style="width:auto" onchange="setContactFilter('source',this.value)"><option value="">Все источники</option>${(state.meta?.sources || Object.keys(SOURCE_LABELS)).map(s => `<option value="${esc(s)}" ${f.source === s ? 'selected' : ''}>${esc(sourceLabel(s))}</option>`).join('')}</select>
    ${tagsAll.length ? `<select style="width:auto" onchange="setContactFilter('tag',this.value)"><option value="">Все теги</option>${tagsAll.map(t => `<option value="${esc(t)}" ${f.tag === t ? 'selected' : ''}>${esc(t)}</option>`).join('')}</select>` : ''}
@@ -2492,7 +2500,7 @@ async function companies(v) {
   const q = (state.companyQuery || '').trim().toLowerCase();
   const shown = q ? rows.filter(c => `${c.name} ${c.inn || ''} ${c.phone || ''} ${c.email || ''}`.toLowerCase().includes(q)) : rows;
   v.innerHTML = `${viewerNote()}<div class="card"><div class="row" style="border:0;flex-wrap:wrap;gap:8px"><h3>Компании (${shown.length}${shown.length !== rows.length ? ` из ${rows.length}` : ''})</h3>
-   <input id="companySearch" style="flex:1 1 320px;min-width:240px;max-width:480px" placeholder="Поиск: название, ИНН, телефон, почта" value="${esc(state.companyQuery || '')}" oninput="liveSearch('companies',()=>setCompanyQuery(this.value))">
+   <input id="companySearch" class="searchfield" placeholder="Поиск: название, ИНН, телефон, почта" value="${esc(state.companyQuery || '')}" oninput="liveSearch('companies',()=>setCompanyQuery(this.value))">
    ${canEdit() ? `<button class="btn sm primary" style="margin-left:auto" onclick="openCompany()">+ Компания</button>` : ''}</div>
   ${canEdit() ? bulkSlot('companies', `<button class="btn sm danger" onclick="bulkApply('companies','delete')">${icon('trash', 13)} Удалить</button>`) : ''}
   <div class="tbl-scroll"><table><tr><th class="sel"></th>${sortTh('companies','name','Компания')}${sortTh('companies','inn','ИНН')}<th>Телефон</th><th>E-mail</th><th>Сайт</th><th></th></tr>
@@ -2584,7 +2592,7 @@ async function tasks(v) {
    ${state.taskFilter ? `<span class="tag orange" style="display:inline-flex;gap:6px;align-items:center">${state.taskFilter === 'today' ? 'Только на сегодня' : 'Только просроченные'}<button class="btn sm" style="padding:0 4px" title="Сбросить фильтр" onclick="clearTaskFilter()">×</button></span>` : ''}
    ${state.taskQuery ? `<span class="tag grey" style="display:inline-flex;gap:6px;align-items:center">Поиск: ${esc(state.taskQuery)}<button class="btn sm" style="padding:0 4px" title="Очистить поиск" onclick="clearTaskQuery()">×</button></span>` : ''}
    <span class="tabs" style="margin:0"><button class="${state.taskView === 'list' ? 'active' : ''}" onclick="setTaskView('list')">${icon('list', 14)} Список</button><button class="${state.taskView === 'week' ? 'active' : ''}" onclick="setTaskView('week')">${icon('calendar', 14)} Неделя</button></span>
-   <input id="taskSearch" style="max-width:220px" placeholder="Поиск по задачам" value="${esc(state.taskQuery || '')}" oninput="liveSearch('tasks',()=>setTaskQuery(this.value))">
+   <input id="taskSearch" class="searchfield searchfield-sm" placeholder="Поиск по задачам" value="${esc(state.taskQuery || '')}" oninput="liveSearch('tasks',()=>setTaskQuery(this.value))">
    ${canEdit() ? `<button class="btn sm primary" style="margin-left:auto" onclick="openTask()">${icon('plus', 14)} Задача</button>` : ''}</div>
    ${state.taskScope === 'mine' ? `<p><small>Здесь задачи, назначенные на вас (${esc((state.me && state.me.name) || '')}), и неназначенные — их удобно разобрать первыми.</small></p>` : ''}
    ${state.taskView === 'week' ? weekCalendar(rows) : ''}
@@ -2740,7 +2748,7 @@ async function products(v) {
   const onSale = rows.filter(p => p.active);
   const noPrice = onSale.filter(p => !(Number(p.price) > 0)).length;
   v.innerHTML = `${viewerNote()}<div class="card"><div class="row" style="border:0;flex-wrap:wrap;gap:8px"><h3>Каталог и прайс-лист (${shown.length})</h3>
-   <input id="productSearch" style="flex:1 1 320px;min-width:240px;max-width:480px" placeholder="Поиск: название, артикул, примечание" value="${esc(state.productQuery || '')}" oninput="liveSearch('products',()=>setProductQuery(this.value))">
+   <input id="productSearch" class="searchfield" placeholder="Поиск: название, артикул, примечание" value="${esc(state.productQuery || '')}" oninput="liveSearch('products',()=>setProductQuery(this.value))">
    <span class="tabs" style="margin:0"><button class="${onlyActive ? 'active' : ''}" onclick="setProductScope('active')">В продаже</button><button class="${!onlyActive ? 'active' : ''}" onclick="setProductScope('all')">Все${archived ? ` (+${archived} в архиве)` : ''}</button></span>
    <button class="btn sm" title="Скачать прайс-лист таблицей CSV — откроется в Excel" onclick="download('/api/prices/export?scope=ours','price-list.csv')">${icon('download', 13)} Скачать прайс</button>
    ${amAdmin() ? `<button class="btn sm" title="Загрузить прайс из Excel или CSV" onclick="openPriceImport(null,'ours')">${icon('upload', 13)} Загрузить из файла</button>` : ''}
@@ -3119,7 +3127,7 @@ async function competitorsView(v) {
   v.innerHTML = `${viewerNote()}
   <div class="card toolbar">
     <h3 style="margin:0">Конкуренты на контроле (${shown.length}${shown.length !== list.length ? ` из ${list.length}` : ''})</h3>
-    <input id="compFilter" style="flex:1 1 320px;min-width:240px;max-width:480px" placeholder="Поиск: название, ИНН, город" value="${esc(state.compQuery || '')}" oninput="liveSearch('compList',()=>setCompQuery(this.value))">
+    <input id="compFilter" class="searchfield" placeholder="Поиск: название, ИНН, город" value="${esc(state.compQuery || '')}" oninput="liveSearch('compList',()=>setCompQuery(this.value))">
     ${state.compQuery ? `<button class="btn sm ghost" onclick="clearCompQuery()">Сбросить</button>` : ''}
     ${canEdit() ? `<button class="btn primary" style="margin-left:auto" onclick="openCompetitor()">${icon('plus', 14)} Добавить конкурента</button>` : `<span style="margin-left:auto"></span>`}
     <button class="btn" title="Наш прайс-лист — это раздел «Каталог»: те же позиции и цены" onclick="openOurPrices()">${icon('excel', 14)} Наш прайс-лист${ours.rows.length ? ` (${ours.rows.length})` : ''}</button>
@@ -3335,7 +3343,7 @@ function findingsBlock(c) {
       <br><small>${esc(f.author || '')} · ${esc(dt(f.created_at))}${f.source_url ? ` · <a href="${esc(f.source_url)}" target="_blank" rel="noopener">источник</a>` : ''}</small></span>
       ${canEdit() ? `<button class="btn sm ghost" onclick="deleteFinding(${f.id},${c.id})">Удалить</button>` : ''}</div>`).join('') || '<small>Записей пока нет</small>'}</div>
    ${canEdit() ? `<form onsubmit="return saveFinding(event,${c.id})" style="margin-top:10px">
-     <div style="display:grid;grid-template-columns:auto 1fr auto auto;gap:8px;align-items:end">
+     <div class="find-grid">
       <label>Что нашли<select name="kind">${FINDING_KINDS.map(k => `<option value="${k}">${k}</option>`).join('')}</select></label>
       <label>Описание<input name="title" placeholder="3 исполнительных производства, долг по договору поставки" required maxlength="200"></label>
       <label>Сумма или число<input name="amount" type="number" min="0" step="1" placeholder="450000"></label>
@@ -3720,7 +3728,7 @@ async function settings(v) {
      <div class="card"><h3>Мессенджеры через Wazzup</h3>
       <p>Статус: <b class="${s.wazzup.configured ? 'green' : ''}">${s.wazzup.configured ? 'подключено' : 'не подключено'}</b></p>
       <label>Ключ доступа Wazzup<input id="wzKey" placeholder="${esc(s.wazzup.api_key || 'вставьте ключ из личного кабинета Wazzup')}"></label>
-      <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px"><label>Куда отправлять ответы по умолчанию<select id="wzChannel"><option value="">— выберите канал —</option>${chans.filter(c => wzAlive(c) || c.external_id === s.wazzup.channel_id).map(c => `<option value="${esc(c.external_id)}" ${c.external_id === s.wazzup.channel_id ? 'selected' : ''}>${esc(wzTitle(c))}${wzAlive(c) ? '' : ' — не работает'}</option>`).join('')}</select></label>
+      <div class="form-grid2"><label>Куда отправлять ответы по умолчанию<select id="wzChannel"><option value="">— выберите канал —</option>${chans.filter(c => wzAlive(c) || c.external_id === s.wazzup.channel_id).map(c => `<option value="${esc(c.external_id)}" ${c.external_id === s.wazzup.channel_id ? 'selected' : ''}>${esc(wzTitle(c))}${wzAlive(c) ? '' : ' — не работает'}</option>`).join('')}</select></label>
       <label>Код защиты адреса (необязательно)<input id="wzSecret" value="${esc(s.wazzup.webhook_secret || '')}" placeholder="придумайте длинный код"></label></div>
       <p class="form-hint">Код подставляется в адрес вебхука и защищает от поддельных сообщений.</p>
       <label>Адрес сервера Wazzup<input id="wzUrl" value="${esc(s.wazzup.api_url)}"></label>
@@ -3758,7 +3766,7 @@ async function settings(v) {
   -H 'Content-Type: application/json' \
   -d '{"channel":"site","name":"Иван","phone":"+7 999 123-45-67","body":"Нужен дом 8×10"}'</pre>
       <label>Код защиты (чтобы чужие не присылали заявки)
-        <div style="display:flex;gap:8px"><input id="whSecret" value="${esc(s.webhook?.secret || '')}" placeholder="пусто — принимать любые заявки"><button type="button" class="btn sm" style="white-space:nowrap" onclick="genWebhookSecret()">Сгенерировать</button></div>
+        <div class="field-row"><input id="whSecret" value="${esc(s.webhook?.secret || '')}" placeholder="пусто — принимать любые заявки"><button type="button" class="btn sm" style="white-space:nowrap" onclick="genWebhookSecret()">Сгенерировать</button></div>
       </label>
       <p><small>Если код задан, заявка без него отклоняется. Готовая форма для сайта уже содержит код — её можно вставлять как есть. Другим сервисам добавьте код в адрес: <code>?secret=…</code> (подробность для программиста: можно и заголовком <code>x-webhook-secret</code>).</small></p>
       <div style="display:flex;gap:8px;flex-wrap:wrap"><button class="btn primary sm" onclick="saveWebhookSecret()">Сохранить секрет</button><button class="btn sm" onclick="copySiteFormCode()">${icon('copy', 13)} Скопировать код формы для сайта</button></div></div>
@@ -3775,15 +3783,15 @@ async function settings(v) {
       <p><small><b>Что такое «пароль приложения».</b> Яндекс Почта, Mail.ru и Gmail не разрешают сторонним программам входить по обычному паролю. В настройках безопасности ящика создаётся отдельный одноразовый пароль для CRM: он выглядит как <code>abcd efgh ijkl mnop</code> и вводится в поле «Пароль приложения» ниже. Обычный пароль от почты останется только у вас.</small></p>
       <p>Статус: <b class="${s.email.configured ? 'green' : ''}">${s.email.configured ? 'почта настроена' : 'не настроена'}</b></p>
       <form onsubmit="return saveEmail(event)">
-       <div style="display:grid;grid-template-columns:2fr 1fr;gap:12px"><label>Почтовый сервер<input name="SMTP_HOST" value="${esc(s.email.host || '')}" placeholder="smtp.mail.ru"></label><label>Порт<input name="SMTP_PORT" value="${esc(s.email.port || '587')}" placeholder="465 или 587"></label></div>
+       <div class="form-grid-21"><label>Почтовый сервер<input name="SMTP_HOST" value="${esc(s.email.host || '')}" placeholder="smtp.mail.ru"></label><label>Порт<input name="SMTP_PORT" value="${esc(s.email.port || '587')}" placeholder="465 или 587"></label></div>
        <p class="form-hint">Обычно <code>smtp.название.ru</code>, точно — в справке вашей почты. Порт и шифрование определяются сами.</p>
-       <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px"><label>Логин (адрес ящика)<input name="SMTP_USER" value="${esc(s.email.user || '')}" placeholder="crm@company.ru"></label><label>Пароль приложения<input name="SMTP_PASS" type="password" placeholder="${s.email.pass ? '•••••• (сохранён)' : 'пароль приложения'}"></label></div>
-       <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px"><label>Защита соединения<select name="SMTP_SECURE"><option value="" ${!s.email.secure ? 'selected' : ''}>Авто: STARTTLS</option><option value="1" ${s.email.secure === '1' ? 'selected' : ''}>SSL/TLS сразу (обычно 465)</option><option value="0" ${s.email.secure === '0' ? 'selected' : ''}>Без шифрования (внутренний сервер)</option></select></label><label>Адрес отправителя<input name="MAIL_FROM" value="${esc(s.email.from || '')}" placeholder="crm@company.ru"></label></div>
+       <div class="form-grid2"><label>Логин (адрес ящика)<input name="SMTP_USER" value="${esc(s.email.user || '')}" placeholder="crm@company.ru"></label><label>Пароль приложения<input name="SMTP_PASS" type="password" placeholder="${s.email.pass ? '•••••• (сохранён)' : 'пароль приложения'}"></label></div>
+       <div class="form-grid2"><label>Защита соединения<select name="SMTP_SECURE"><option value="" ${!s.email.secure ? 'selected' : ''}>Авто: STARTTLS</option><option value="1" ${s.email.secure === '1' ? 'selected' : ''}>SSL/TLS сразу (обычно 465)</option><option value="0" ${s.email.secure === '0' ? 'selected' : ''}>Без шифрования (внутренний сервер)</option></select></label><label>Адрес отправителя<input name="MAIL_FROM" value="${esc(s.email.from || '')}" placeholder="crm@company.ru"></label></div>
        <label>Адрес для проверочного письма<input name="SMTP_TEST_TO" value="${esc(s.email.test_to || '')}" placeholder="admin@company.ru"></label>
-       <div style="display:flex;gap:8px"><button class="btn primary">Сохранить почту</button><button class="btn" type="button" onclick="testEmail(this.form)">Отправить проверочное письмо</button></div></form>
+       <div class="btn-row"><button class="btn primary">Сохранить почту</button><button class="btn" type="button" onclick="testEmail(this.form)">Отправить проверочное письмо</button></div></form>
       <hr><p><b>Приём входящих писем</b></p>
       <p><small><b>Входящие письма.</b> Письма приходят не сами по себе: в почтовом ящике нужно включить пересылку (фильтр «пересылать все письма на адрес…») на адрес ниже. CRM разберёт отправителя, тему и текст и добавит письмо в чат клиента. Код защиты спасает адрес от чужого спама; если он пуст, письма принимаются без проверки.</small></p>
-      <div style="display:flex;gap:8px"><input id="emailSecret" value="${esc(s.email.webhook_secret || '')}" placeholder="секрет для входящих писем"><button type="button" class="btn sm" style="white-space:nowrap" onclick="genEmailSecret()">Сгенерировать</button><button type="button" class="btn sm primary" style="white-space:nowrap" onclick="saveEmailSecret()">Сохранить</button></div>
+      <div class="field-row"><input id="emailSecret" value="${esc(s.email.webhook_secret || '')}" placeholder="секрет для входящих писем"><button type="button" class="btn sm" style="white-space:nowrap" onclick="genEmailSecret()">Сгенерировать</button><button type="button" class="btn sm primary" style="white-space:nowrap" onclick="saveEmailSecret()">Сохранить</button></div>
       ${hookLine(origin + '/webhooks/email' + (s.email.webhook_secret ? '?secret=' + encodeURIComponent(s.email.webhook_secret) : ''))}
      </div>
      </div></div>`;
@@ -3926,7 +3934,7 @@ async function settings(v) {
       <p>${esc(t.body)}</p></div>${canEdit() ? `<div class="tpl-actions"><button class="btn sm" title="Изменить шаблон" onclick="openTemplate(${t.id})">${icon('edit', 13)}</button><button class="btn sm danger" title="Удалить шаблон" onclick="delTemplate(${t.id})">${icon('trash', 13)}</button></div>` : ''}</div>`;
     body = `<div class="settings-cols"><div>
      <div class="card"><div class="row" style="border:0;flex-wrap:wrap;gap:8px"><div><h3>Мои шаблоны (${rows.length})</h3><small>Заготовки частых ответов. В чате выбираются из списка «Шаблоны ответов…» над полем ввода.</small></div>
-      <input id="tplSearch" style="max-width:200px;margin-left:auto" placeholder="Поиск по шаблонам" value="${esc(state.tplQuery || '')}" oninput="liveSearch('tpl',()=>setTplQuery(this.value))">
+      <input id="tplSearch" class="searchfield searchfield-sm searchfield-end" placeholder="Поиск по шаблонам" value="${esc(state.tplQuery || '')}" oninput="liveSearch('tpl',()=>setTplQuery(this.value))">
       ${canEdit() ? `<button class="btn sm primary" onclick="openTemplate()">${icon('plus', 13)} Новый шаблон</button>` : ''}</div>
      ${shown.map(tplRow).join('') || `<div class="empty">${tq ? 'Ничего не найдено — измените поиск' : 'Шаблонов пока нет. Создайте первый — например, приветствие или условия доставки.'}</div>`}</div>
     </div><div>
@@ -3948,7 +3956,7 @@ async function settings(v) {
     };
     body = `<div class="settings-cols"><div class="card">
      <div class="row" style="border:0;flex-wrap:wrap;gap:8px"><div><h3>Команда (${rows.length})</h3><small>Доступ в CRM выдаёт администратор: e-mail — это логин, пароль сотрудник меняет при первом входе.</small></div>
-      <input id="teamSearch" style="max-width:220px;margin-left:auto" placeholder="Поиск: имя, e-mail, роль" value="${esc(state.teamQuery || '')}" oninput="liveSearch('team',()=>setTeamQuery(this.value))">
+      <input id="teamSearch" class="searchfield searchfield-sm searchfield-end" placeholder="Поиск: имя, e-mail, роль" value="${esc(state.teamQuery || '')}" oninput="liveSearch('team',()=>setTeamQuery(this.value))">
       <button class="btn sm primary" onclick="openUser()">+ Пользователь</button></div>
      <div class="tbl-scroll"><table><tr><th>Сотрудник</th><th>E-mail (логин)</th><th>Роль</th><th>Сделки в работе</th><th>Задачи</th><th>Последний вход</th><th>Доступ</th><th></th></tr>
       ${shown.map(x => { const st = stat(x.id); return `<tr>
@@ -3969,21 +3977,21 @@ async function settings(v) {
   } else if (state.settingsTab === 'data') {
     const demoRows = Object.values(s.demo || {}).reduce((a, b) => a + b, 0);
     body = `${demoRows ? `<div class="card tint-info"><h3>${icon('sparkles', 16)} Демонстрационные данные</h3><p><small>Сейчас в базе примеры: клиентов ${s.demo?.contacts || 0}, сделок ${s.demo?.deals || 0}, задач ${s.demo?.tasks || 0}, чатов ${s.demo?.conversations || 0}, конкурентов ${s.demo?.competitors || 0}, товаров каталога ${s.demo?.products || 0}, шаблонов ${s.demo?.templates || 0}, правил ${s.demo?.automations || 0}. Их можно редактировать как обычные данные или удалить одной кнопкой — тогда CRM будет полностью чистой.</small></p><button class="btn danger sm" onclick="cleanDemo()">${icon('trash', 13)} Удалить демонстрационные данные</button></div>` : ''}
-    <div class="settings-cols"><div><div class="card"><h3>Название компании</h3><form onsubmit="return saveCompanySettings(event)"><div style="display:grid;grid-template-columns:2fr 1fr;gap:12px"><label>Название<input name="COMPANY_NAME" value="${esc(s.company.name)}"></label><label>Валюта<input name="CURRENCY" value="${esc(s.company.currency)}"></label></div>
+    <div class="settings-cols"><div><div class="card"><h3>Название компании</h3><form onsubmit="return saveCompanySettings(event)"><div class="form-grid-21"><label>Название<input name="COMPANY_NAME" value="${esc(s.company.name)}"></label><label>Валюта<input name="CURRENCY" value="${esc(s.company.currency)}"></label></div>
      <p class="form-hint">Название и валюта попадают в печатные документы и во все суммы. Автосоздание и распределение сделок — во вкладке «Автоматизации».</p>
      <button class="btn primary">Сохранить</button></form></div>
      <div class="card"><h3>Реквизиты для КП и счёта</h3><p><small>Попадают в печатные документы сделки (кнопки «КП» и «Счёт»). Префикс номера — начало нумерации, например «КП», «СЧ».</small></p>
       <form onsubmit="return saveCompanySettings(event)">
-       <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:12px"><label>ИНН<input name="COMPANY_INN" value="${esc((s.requisites || {}).inn || '')}"></label>
+       <div class="form-grid3"><label>ИНН<input name="COMPANY_INN" value="${esc((s.requisites || {}).inn || '')}"></label>
        <label>КПП<input name="COMPANY_KPP" value="${esc((s.requisites || {}).kpp || '')}"></label>
        <label>ОГРН<input name="COMPANY_OGRN" value="${esc((s.requisites || {}).ogrn || '')}"></label></div>
        <label>Юридический адрес<input name="COMPANY_ADDRESS" value="${esc((s.requisites || {}).address || '')}"></label>
-       <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:12px"><label>Телефон<input name="COMPANY_PHONE" value="${esc((s.requisites || {}).phone || '')}"></label>
+       <div class="form-grid3"><label>Телефон<input name="COMPANY_PHONE" value="${esc((s.requisites || {}).phone || '')}"></label>
        <label>E-mail<input name="COMPANY_EMAIL" value="${esc((s.requisites || {}).email || '')}"></label>
        <label>Сайт<input name="COMPANY_SITE" value="${esc((s.requisites || {}).site || '')}"></label></div>
-       <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px"><label>Банк<input name="COMPANY_BANK" value="${esc((s.requisites || {}).bank || '')}" placeholder="ООО «Банк», БИК 044525225"></label>
+       <div class="form-grid2"><label>Банк<input name="COMPANY_BANK" value="${esc((s.requisites || {}).bank || '')}" placeholder="ООО «Банк», БИК 044525225"></label>
        <label>Расчётный счёт<input name="COMPANY_ACCOUNT" value="${esc((s.requisites || {}).account || '')}" placeholder="40702810…"></label></div>
-       <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px"><label>Корр. счёт<input name="COMPANY_CORR" value="${esc((s.requisites || {}).corr || '')}"></label>
+       <div class="form-grid2"><label>Корр. счёт<input name="COMPANY_CORR" value="${esc((s.requisites || {}).corr || '')}"></label>
        <label>Начало номера документов<input name="DOC_PREFIX" value="${esc((s.requisites || {}).doc_prefix || '')}" placeholder="КП"></label></div>
        <button class="btn primary">Сохранить реквизиты</button></form></div>
        <div class="card"><h3>Дополнительные параметры</h3>
@@ -4004,7 +4012,7 @@ async function settings(v) {
        <button class="btn sm" onclick="download('/api/export/json','karkas-backup.json')" title="Текстовый файл со всеми данными — для переноса в другую программу">${icon('download', 13)} Скачать все данные</button></div>
        <div id="backupList" style="margin-top:10px">Загрузка…</div>
        <form onsubmit="return saveMaintenance(event)">
-       <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px"><label>Хранить копии, дней<input name="BACKUP_KEEP_DAYS" type="number" min="0" max="3650" value="${esc(String(s.maintenance?.backup_keep_days ?? 7))}"></label>
+       <div class="form-grid2"><label>Хранить копии, дней<input name="BACKUP_KEEP_DAYS" type="number" min="0" max="3650" value="${esc(String(s.maintenance?.backup_keep_days ?? 7))}"></label>
        <label>Час создания копии (0–23)<input name="BACKUP_HOUR" type="number" min="0" max="23" value="${esc(String(s.maintenance?.backup_hour ?? 3))}"></label></div>
        <label>Адрес для уведомлений о просроченных задачах (необязательно)<input name="NOTIFY_WEBHOOK" value="${esc(s.maintenance?.notify_webhook || '')}" placeholder="https://hooks.slack.com/services/…"></label>
        <button class="btn primary">Сохранить</button>
@@ -4147,7 +4155,7 @@ async function editField(i) {
   openModal(`<h3>${i >= 0 ? 'Своё поле' : 'Новое поле карточки'}</h3><p><small>${i >= 0 ? 'Изменения сразу появятся в формах и карточках; уже введённые значения сохранятся.' : 'Поле появится в форме создания и в карточке выбранного раздела.'}</small></p><form onsubmit="return saveField(event,${i})">
    <input type="hidden" name="key" value="${esc(f.key)}">
    <label class="req">Название поля<span class="star">*</span><input name="label" required value="${esc(f.label)}" placeholder="Площадь участка"></label>
-   <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px"><label>Тип<select name="type">${[['text', 'Текст'], ['number', 'Число'], ['date', 'Дата'], ['email', 'E-mail'], ['phone', 'Телефон'], ['select', 'Список вариантов']].map(([k, n]) => `<option value="${k}" ${k === f.type ? 'selected' : ''}>${n}</option>`).join('')}</select></label>
+   <div class="form-grid2"><label>Тип<select name="type">${[['text', 'Текст'], ['number', 'Число'], ['date', 'Дата'], ['email', 'E-mail'], ['phone', 'Телефон'], ['select', 'Список вариантов']].map(([k, n]) => `<option value="${k}" ${k === f.type ? 'selected' : ''}>${n}</option>`).join('')}</select></label>
    <label>Где показывать<select name="entity">${[['both', 'Везде'], ['contacts', 'Только контакты'], ['deals', 'Только сделки']].map(([k, n]) => `<option value="${k}" ${k === f.entity ? 'selected' : ''}>${n}</option>`).join('')}</select></label></div>
    <label>Варианты списка (только для типа «Список», через запятую)<input name="options" value="${esc((f.options || []).join(', '))}" placeholder="каркас, брус, газобетон"></label>
    <label class="check-line"><input type="checkbox" name="required" style="width:auto" ${f.required ? 'checked' : ''}><span>Обязательное поле <small>— стоит первым, без него карточка не сохранится</small></span></label>
@@ -4995,8 +5003,7 @@ async function syncMe() {
     $('#uName').textContent = u.name;
     $('#uEmail').textContent = u.email || '';
     $('#uAva').textContent = (u.name || 'A')[0].toUpperCase();
-    document.body.classList.remove('role-admin', 'role-manager', 'role-viewer');
-    document.body.classList.add('role-' + (['admin', 'manager', 'viewer'].includes(u.role) ? u.role : 'manager'));
+    applyRoleClass(u.role);
     const sideInt = $('#sideIntegrations');
     if (sideInt) sideInt.classList.toggle('hidden', u.role !== 'admin');
     if (u.must_change_password) {

@@ -1792,7 +1792,7 @@ test('партнёр: отдельный вход, только свои лид�
   const lp = await readyLogin('/api/auth/login', { method: 'POST', body: JSON.stringify({ email: 'partner@example.com', password: 'partnerpassword1' }) });
   const savedH = h;
   h = { Authorization: 'Bearer ' + lp.body.token };
-  for (const path of ['/api/analytics', '/api/dashboard', '/api/settings', '/api/quality', '/api/campaigns', '/api/companies', '/api/competitors']) {
+  for (const path of ['/api/analytics', '/api/settings', '/api/quality', '/api/campaigns', '/api/companies', '/api/competitors']) {
     const r = await call(path);
     assert.ok(r.status === 403, path + ' закрыт для партнёра, получен ' + r.status);
   }
@@ -1807,6 +1807,19 @@ test('партнёр: отдельный вход, только свои лид�
   assert.equal(c.status, 201);
   const contacts = await call('/api/contacts');
   assert.ok(contacts.body.length === 1 && contacts.body[0].id === c.body.id, 'в клиентах только свой');
+  // рабочий стол партнёра: счётчики для меню считаются по его данным, а сводка
+  // по компании (выручка, потери, лента, чужие сделки) ему не отдаётся
+  const dash = await call('/api/dashboard');
+  assert.equal(dash.status, 200, 'счётчики в меню партнёру доступны');
+  assert.equal(dash.body.dealsTotal, 1, 'считаются только его сделки');
+  assert.equal(dash.body.activeDealsSum, 100000, 'сумма только его сделок');
+  assert.equal(dash.body.contacts, 1, 'считаются только его клиенты');
+  assert.equal(dash.body.revenue, 0, 'выручка компании партнёру не отдаётся');
+  assert.equal(dash.body.lostSum, 0, 'потери компании партнёру не отдаются');
+  assert.equal(dash.body.companies, 0, 'число компаний партнёру не отдаётся');
+  assert.deepEqual(dash.body.activities, [], 'лента действий компании пустая');
+  assert.deepEqual(dash.body.recentDeals, [], 'чужих сделок в подборке нет');
+  assert.deepEqual(dash.body.stages, [], 'распределение по этапам компании не отдаётся');
   assert.equal((await call('/api/contacts/' + c.body.id, { method: 'PATCH', body: JSON.stringify({ responsible_id: 1 }) })).status, 400, 'передать клиента другому нельзя');
   const users = await call('/api/users');
   assert.equal(users.body.length, 1, 'список сотрудников — только он сам');
@@ -1826,6 +1839,7 @@ test('партнёр: отдельный вход, только свои лид�
   assert.equal((await call('/api/templates')).status, 200, 'шаблоны ответов доступны');
   const convList = await call('/api/conversations');
   assert.ok(Array.isArray(convList.body) && convList.body.every(x => x.contact_id === c.body.id), 'в списке только свои переписки');
+  assert.equal((await call('/api/dashboard')).body.unreadMine, 0, 'своё отправленное сообщение не даёт непрочитанных');
   h = savedH;
   // общий поток событий не отдаёт партнёру чужие переписки и закрытые разделы
   const partnerSock = { role: 'partner', userId: u.body.id };
