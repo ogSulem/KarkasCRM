@@ -642,6 +642,7 @@ function meId() { return (state.me && state.me.id) || null; }
 // менеджер ведёт клиентов и сделки, администратор меняет настройки и справочники.
 const amAdmin = () => (state.me && state.me.role) === 'admin';
 const canEdit = () => (state.me && state.me.role) !== 'viewer';
+const isPartner = () => (state.me && state.me.role) === 'partner';
 const viewerNote = () => canEdit() ? '' : `<div class="notice info">${icon('eye', 15)} <b>Режим просмотра.</b> Все данные и выгрузки доступны, а изменения вносят сотрудники с ролью «Менеджер» или «Администратор».</div>`;
 function userOptions(selId) {
   // Сотрудник с закрытым доступом не предлагается для новых назначений:
@@ -650,6 +651,27 @@ function userOptions(selId) {
   // за кем они закреплены.
   const list = __team.filter(u => u.active !== 0 || Number(u.id) === Number(selId));
   return `<option value="">— не назначен —</option>` + list.map(u => `<option value="${u.id}" ${u.id === selId ? 'selected' : ''}>${esc(u.name)} (${esc(roleLabel(u.role))})${u.active === 0 ? ' — доступ закрыт' : ''}</option>`).join('');
+}
+
+// Партнёр всегда остаётся ответственным за свой лид: сервер не даёт передать его
+// другому сотруднику. Список выбора обещал бы то, чего сделать нельзя (правка
+// заканчивалась отказом, а при создании ответственный молча заменялся на самого
+// партнёра), поэтому вместо него показываем имя как есть. Поле недоступно для
+// ввода и в запрос не попадает.
+function ownerField(selId) {
+  if (!isPartner()) return fld('Ответственный', `<select name="responsible_id">${userOptions(selId)}</select>`);
+  const u = (__team || []).find(x => Number(x.id) === Number(selId)) || state.me || {};
+  return `<label class="opt">Ответственный<input value="${esc(u.name || '— вы —')}" disabled></label>`;
+}
+
+// Поле компании в форме клиента и карточке сделки. Справочник компаний доступен
+// не каждой роли, а пустой список в селекте при сохранении отправил бы пустое
+// значение и молча отвязал карточку от компании. Поэтому, когда справочник не
+// получен, а привязка есть, текущее значение уходит скрытым полем и не теряется.
+function companyField(list, currentId, emptyLabel) {
+  const rows = Array.isArray(list) ? list : [];
+  if (!rows.length && currentId) return `<input type="hidden" name="company_id" value="${Number(currentId)}">`;
+  return fld('Компания', `<select name="company_id"><option value="">${esc(emptyLabel)}</option>${rows.map(x => `<option value="${x.id}" ${x.id === currentId ? 'selected' : ''}>${esc(x.name)}</option>`).join('')}</select>`);
 }
 
 // Подсказка в форме: по текущим правилам распределения считает, кому
@@ -672,7 +694,7 @@ function myTasksBlock() {
         <b>${esc(t.title)}</b><br>
         <small class="${meta.overdue ? 'task-due-overdue' : (meta.label.startsWith('сегодня') ? 'task-due-today' : '')}">${esc(meta.label)}${t.contact_name ? ' · ' + esc(t.contact_name) : ''}</small>
       </div>
-      <button class="btn sm mark" onclick="toggleTask(${t.id},1)">${icon('check', 13)} Выполнить</button>
+      ${canEdit() ? `<button class="btn sm mark" onclick="toggleTask(${t.id},1)">${icon('check', 13)} Выполнить</button>` : ''}
     </div>`;
   }).join('');
 }
@@ -1401,7 +1423,7 @@ async function openDeal(contactId, stageCode) {
    ${grid2(`${fld('Сумма (' + CUR() + ')', `<input name="amount" type="number" value="0" placeholder="0">`)}
      ${fld('Клиент', `<select name="contact_id"><option value="">— выбрать —</option>${state.contacts.map(c => `<option value="${c.id}" ${c.id === contactId ? 'selected' : ''}>${esc(c.name)}</option>`).join('')}</select>`)}`)}
    ${grid2(`${fld('Этап', `<select name="stage">${def.map(st => `<option value="${esc(st.code)}" ${st.code === curStage ? 'selected' : ''}>${esc(st.name)}</option>`).join('')}</select>`)}
-     ${fld('Ответственный', `<select name="responsible_id">${userOptions(meId())}</select>`)}`)}
+     ${ownerField(meId())}`)}
    ${grid2(`${fld('Дедлайн', '<input name="deadline" type="date">')}
      ${fld('Приоритет', `<select name="priority"><option value="normal">Обычный</option><option value="high">Высокий</option><option value="low">Низкий</option></select>`)}`)}
    ${cfInputs('deals', {}, 2, 'optional')}
@@ -1499,9 +1521,9 @@ function dealTab(deal, d) {
      ${grid2(`${fld('Сумма (' + CUR() + ')', `<input name="amount" type="number" value="${deal.amount}">`)}
        ${fld('Этап', `<select name="stage">${selStages(deal.stage, state.cardStages)}</select>`)}`)}
      ${grid2(`${fld('Клиент', `<select name="contact_id"><option value="">— без контакта —</option>${(state.contacts || []).map(c => `<option value="${c.id}" ${c.id === deal.contact_id ? 'selected' : ''}>${esc(c.name)}</option>`).join('')}</select>`)}
-       ${fld('Компания', `<select name="company_id"><option value="">— без компании —</option>${(state.cardCompanies || []).map(c => `<option value="${c.id}" ${c.id === deal.company_id ? 'selected' : ''}>${esc(c.name)}</option>`).join('')}</select>`)}`)}
+       ${companyField(state.cardCompanies || [], deal.company_id, '— без компании —')}`)}
      ${grid2(`${fld('Дедлайн', `<input name="deadline" type="date" value="${esc((deal.deadline || '').slice(0, 10))}">`)}
-       ${fld('Ответственный', `<select name="responsible_id">${userOptions(deal.responsible_id)}</select>`)}`)}
+       ${ownerField(deal.responsible_id)}`)}
      ${grid2(`${fld('Приоритет', `<select name="priority"><option value="normal" ${deal.priority === 'normal' ? 'selected' : ''}>Обычный</option><option value="high" ${deal.priority === 'high' ? 'selected' : ''}>Высокий</option><option value="low" ${deal.priority === 'low' ? 'selected' : ''}>Низкий</option></select>`)}
        ${fld('Причина отказа (если сделка проиграна)', `<input name="loss_reason" value="${esc(deal.loss_reason || '')}" placeholder="Дорого, выбрали другого подрядчика…">`)}`)}
      ${cfInputs('deals', deal, 2, 'optional')}
@@ -2148,10 +2170,26 @@ async function bulkApply(table, action, patch = {}) {
   return bulkApplyNow(table, action, ids, patch);
 }
 async function bulkApplyNow(table, action, ids, patch) {
-  await api('/api/bulk', { method: 'POST', body: JSON.stringify({ table, action, ids, patch }) });
-  clearSel(table);
-  toast(`Применено к ${ids.length} записям`);
-  render();
+  const sent = extra => api('/api/bulk', { method: 'POST', body: JSON.stringify({ table, action, ids, patch, ...extra }) });
+  const done = () => {
+    clearSel(table);
+    toast(`Применено к ${ids.length} записям`);
+    render();
+  };
+  try {
+    await sent({});
+  } catch (e) {
+    // то же правило, что и для одной карточки: пачка клиентов уносит переписку,
+    // поэтому сервер перечисляет потери и просит подтвердить ещё раз
+    const words = e && e.data && e.data.confirmDelete ? impactWords(e.data.impact) : '';
+    if (!words) throw e;
+    askConfirm(`${words} Вернуть данные можно только из резервной копии. Удалить всё?`, async () => {
+      await sent({ confirm: true });
+      done();
+    }, { okText: 'Удалить всё' });
+    return;
+  }
+  done();
 }
 function bulkOwner(table) {
   return `<select style="width:auto" onchange="if(this.value){bulkApply('${table}','update',{responsible_id:+this.value});this.value=''}"><option value="">Сменить ответственного…</option>${__team.filter(u => u.active !== 0).map(u => `<option value="${u.id}">${esc(u.name)}</option>`).join('')}</select>`;
@@ -2433,7 +2471,7 @@ async function openContactCard(id) {
 
 async function openContact(id) {
   await team();
-  const comps = await api('/api/companies');
+  const comps = await api('/api/companies').catch(() => []);
   const c = id ? await api('/api/contacts/' + id) : { tags: '', custom: '{}' };
   openModal(`<h3>${id ? 'Контакт' : 'Новый контакт'}</h3><form onsubmit="return saveContact(event,${id || 'null'})">
    ${formLegend()}
@@ -2441,9 +2479,9 @@ async function openContact(id) {
    ${cfInputs('contacts', c, 2, 'required')}
    ${grid2(`${fld('Телефон', `<input name="phone" value="${esc(c.phone || '')}" placeholder="+7 999 123-45-67">`)}
      ${fld('E-mail', `<input name="email" type="email" value="${esc(c.email || '')}" placeholder="ivan@mail.ru">`)}`)}
-   ${grid2(`${fld('Компания', `<select name="company_id"><option value="">— частное лицо —</option>${comps.map(x => `<option value="${x.id}" ${x.id === c.company_id ? 'selected' : ''}>${esc(x.name)}</option>`).join('')}</select>`)}
+   ${grid2(`${companyField(comps, c.company_id, '— частное лицо —')}
      ${fld('Должность', `<input name="position" value="${esc(c.position || '')}" placeholder="Собственник / застройщик">`)}`)}
-   ${grid2(`${fld('Ответственный', `<select name="responsible_id">${userOptions(c.responsible_id || meId())}</select>`)}
+   ${grid2(`${ownerField(c.responsible_id || meId())}
      ${fld('Источник', `<select name="source">${sourceOptions(c.source)}</select>`)}`)}
    <p class="form-hint">${esc(responsibleHint())}</p>
    ${fld('Теги', `<input name="tags" value="${esc(c.tags || '')}" placeholder="VIP, каркас, участок">`)}
@@ -2701,7 +2739,7 @@ async function openTask(id, p = {}) {
      <button type="button" class="btn sm chip ghost" onclick="setTaskDue(this,'clear')">без срока</button>
    </div>
    <div class="task-links"><div class="task-link-col"><span class="task-link-cap">Клиент</span>${linkSlot('contact_id', preContact, 'contact')}</div><div class="task-link-col"><span class="task-link-cap">Сделка</span>${linkSlot('deal_id', preDeal, 'pipe')}</div></div>
-   ${grid2(`${fld('Ответственный', `<select name="responsible_id">${userOptions(t.responsible_id || meId())}</select>`)}
+   ${grid2(`${ownerField(t.responsible_id || meId())}
      ${fld('Приоритет', `<select name="priority"><option value="normal" ${t.priority === 'normal' ? 'selected' : ''}>Обычный</option><option value="high" ${t.priority === 'high' ? 'selected' : ''}>Высокий</option><option value="low" ${t.priority === 'low' ? 'selected' : ''}>Низкий</option></select>`)}`)}
    ${fld('Повтор задачи', `<select name="repeat">${[['none', 'Не повторять'], ['daily', 'Каждый день'], ['weekly', 'Каждую неделю'], ['monthly', 'Каждый месяц']].map(([k, n]) => `<option value="${k}" ${k === (t.repeat || 'none') ? 'selected' : ''}>${n}</option>`).join('')}</select>`)}
    ${fld('Результат (после выполнения)', `<textarea name="result" rows="2" placeholder="Договорились на 15:00 — пришлём смету сегодня">${esc(t.result || '')}</textarea>`)}
@@ -3708,7 +3746,9 @@ async function settings(v) {
   // партнёру тоже остаётся только «Профиль»: справочники офиса — не его инструмент
   const isPartner = (state.me && state.me.role) === 'partner';
   const tabs = Object.fromEntries(Object.entries(allTabs).filter(([k]) => isAdmin ? true : ((isViewer || isPartner) ? k === 'profile' : !adminOnly.includes(k))));
-  if (!tabs[state.settingsTab]) state.settingsTab = isAdmin ? 'integrations' : 'profile';
+  // вкладка по умолчанию — первая доступная этой роли: менеджеру открываются
+  // шаблоны сообщений (его рабочий инструмент), а не свой профиль
+  if (!tabs[state.settingsTab]) state.settingsTab = Object.keys(tabs)[0] || 'profile';
   let body = '';
 
   if (state.settingsTab === 'integrations') {
@@ -4591,12 +4631,43 @@ async function importContacts() { openModal(`<h3>Импорт контактов
 function csvFromFile(input) { const f = input.files[0]; if (!f) return; const r = new FileReader(); r.onload = () => { $('#modalBody textarea').value = r.result; }; r.readAsText(f); }
 async function doImport(e) { e.preventDefault(); const d = await api('/api/import/contacts', { method: 'POST', body: JSON.stringify({ csv: new FormData(e.target).get('csv') }) }); closeModal(); toast(d.message || ('Импортировано контактов: ' + d.imported)); render(); return false; }
 const DEL_LABELS = { contacts: 'контакт', companies: 'компанию', deals: 'сделку', tasks: 'задачу', products: 'позицию каталога', automations: 'правило', pipelines: 'воронку' };
+/* Сервер отвечает перечнем потерь, если карточка не пустая: переписка
+   удаляется вместе с клиентом, а сделки остаются без него. Показываем этот
+   перечень и спрашиваем второй раз — восстановление только из резервной копии. */
+function impactWords(imp) {
+  if (!imp) return '';
+  const parts = [];
+  if (imp.conversations) {
+    const bits = [`${imp.conversations} ${plural(imp.conversations, 'чат', 'чата', 'чатов')}`];
+    if (imp.messages) bits.push(`${imp.messages} ${plural(imp.messages, 'сообщение', 'сообщения', 'сообщений')}`);
+    parts.push('Переписка удалится: ' + bits.join(', '));
+  }
+  const orphan = [];
+  if (imp.deals) orphan.push(`${imp.deals} ${plural(imp.deals, 'сделка', 'сделки', 'сделок')}`);
+  if (imp.tasks) orphan.push(`${imp.tasks} ${plural(imp.tasks, 'задача', 'задачи', 'задач')}`);
+  if (imp.contacts) orphan.push(`${imp.contacts} ${plural(imp.contacts, 'клиент', 'клиента', 'клиентов')}`);
+  if (orphan.length) parts.push(`Без ${imp.contacts ? 'компании' : 'клиента'} останутся: ` + orphan.join(', '));
+  return parts.length ? parts.join('. ') + '.' : '';
+}
 function del(table, id, name = '') {
   const what = DEL_LABELS[table] || 'запись';
-  askConfirm(`Удалить ${what}${name ? ' «' + name + '»' : ''}? Действие необратимо.`, async () => {
-    await api(`/api/${table}/${id}`, { method: 'DELETE' });
+  const done = () => {
     if (table === 'products') state.ourPrices = null; // прайс-лист = каталог
     closeModal(); toast('Удалено'); render();
+  };
+  askConfirm(`Удалить ${what}${name ? ' «' + name + '»' : ''}? Действие необратимо.`, async () => {
+    try {
+      await api(`/api/${table}/${id}`, { method: 'DELETE' });
+    } catch (e) {
+      const words = e && e.data && e.data.confirmDelete ? impactWords(e.data.impact) : '';
+      if (!words) throw e;
+      askConfirm(`${words} Вернуть данные можно только из резервной копии. Удалить всё?`, async () => {
+        await api(`/api/${table}/${id}?confirm=1`, { method: 'DELETE' });
+        done();
+      }, { okText: 'Удалить всё' });
+      return;
+    }
+    done();
   }, { okText: 'Удалить' });
 }
 
@@ -4683,29 +4754,31 @@ if (si) {
 /* ── палитра команд (Ctrl+K) ────────────────────────────────────────── */
 const PALETTE_ACTIONS = [
   { group: 'Разделы', items: [
-    { ico: 'dashboard', title: 'Рабочий стол', hint: 'обзор продаж', run: () => go('dashboard') },
-    { ico: 'pipe', title: 'Сделки', hint: 'канбан-воронка', run: () => go('pipe') },
-    { ico: 'tasks', title: 'Задачи', hint: 'дела и календарь', run: () => go('tasks') },
-    { ico: 'inbox', title: 'Чаты', hint: 'единый инбокс мессенджеров', run: () => go('inbox') },
-    { ico: 'contacts', title: 'Контакты', hint: 'база клиентов', run: () => go('contacts') },
-    { ico: 'companies', title: 'Компании', hint: 'юридические лица', run: () => go('companies') },
-    { ico: 'products', title: 'Каталог', hint: 'он же прайс-лист: дома, проекты и опции', run: () => go('products') },
-    { ico: 'analytics', title: 'Аналитика', hint: 'воронка и план продаж', run: () => go('analytics') },
-    { ico: 'quality', title: 'Качество', hint: 'оценка работы менеджеров для РОПа', roles: ['admin'], run: () => go('quality') },
-    { ico: 'campaigns', title: 'Рассылки', hint: 'сообщения клиентам по сегментам', roles: ['admin', 'manager'], run: () => go('campaigns') },
-    { ico: 'competitors', title: 'Конкуренты', hint: 'разведка и проверка', run: () => go('competitors') },
-    { ico: 'training', title: 'Обучение', hint: 'материалы для партнёров и команды', run: () => go('training') },
-    { ico: 'settings', title: 'Настройки', hint: 'интеграции и права', run: () => go('settings') }
+    { ico: 'dashboard', title: 'Рабочий стол', hint: 'обзор продаж', view: 'dashboard', run: () => go('dashboard') },
+    { ico: 'pipe', title: 'Сделки', hint: 'канбан-воронка', view: 'pipe', run: () => go('pipe') },
+    { ico: 'tasks', title: 'Задачи', hint: 'дела и календарь', view: 'tasks', run: () => go('tasks') },
+    { ico: 'inbox', title: 'Чаты', hint: 'единый инбокс мессенджеров', view: 'inbox', run: () => go('inbox') },
+    { ico: 'contacts', title: 'Контакты', hint: 'база клиентов', view: 'contacts', run: () => go('contacts') },
+    { ico: 'companies', title: 'Компании', hint: 'юридические лица', view: 'companies', run: () => go('companies') },
+    { ico: 'products', title: 'Каталог', hint: 'он же прайс-лист: дома, проекты и опции', view: 'products', run: () => go('products') },
+    { ico: 'analytics', title: 'Аналитика', hint: 'воронка и план продаж', view: 'analytics', run: () => go('analytics') },
+    { ico: 'quality', title: 'Качество', hint: 'оценка работы менеджеров для РОПа', view: 'quality', run: () => go('quality') },
+    { ico: 'campaigns', title: 'Рассылки', hint: 'сообщения клиентам по сегментам', view: 'campaigns', run: () => go('campaigns') },
+    { ico: 'competitors', title: 'Конкуренты', hint: 'разведка и проверка', view: 'competitors', run: () => go('competitors') },
+    { ico: 'training', title: 'Обучение', hint: 'материалы для партнёров и команды', view: 'training', run: () => go('training') },
+    { ico: 'settings', title: 'Настройки', hint: 'интеграции и права', view: 'settings', run: () => go('settings') }
   ]},
   // edit: группу видят только роли с правом изменений — зрителю сервер всё
-  // равно ответил бы 403, предлагать запрещённое действие нелогично
+  // равно ответил бы 403, предлагать запрещённое действие нелогично.
+  // roles: действие доступно не всем, кто может менять данные (компанию и
+  // проверку конкурента сервер партнёру не открывает)
   { group: 'Быстрое создание', edit: true, items: [
     { ico: 'plus', title: 'Новая сделка', hint: 'открыть форму', run: () => openDeal() },
     { ico: 'plus', title: 'Новый контакт', hint: 'добавить клиента', run: () => openContact() },
     { ico: 'plus', title: 'Новая задача', hint: 'поставить дело', run: () => openTask() },
-    { ico: 'company', title: 'Новая компания', hint: 'добавить юрлицо', run: () => openCompany() },
-    { ico: 'competitor', title: 'Проверить конкурента', hint: 'поиск и проверка по ИНН', run: () => { go('competitors'); setTimeout(async () => { await openCompetitor(); $('#compFind')?.focus(); }, 300); } },
-    { ico: 'upload', title: 'Импорт контактов из CSV', hint: 'загрузить файл', run: () => importContacts() }
+    { ico: 'company', title: 'Новая компания', hint: 'добавить юрлицо', roles: ['admin', 'manager'], run: () => openCompany() },
+    { ico: 'competitor', title: 'Проверить конкурента', hint: 'поиск и проверка по ИНН', roles: ['admin', 'manager'], run: () => { go('competitors'); setTimeout(async () => { await openCompetitor(); $('#compFind')?.focus(); }, 300); } },
+    { ico: 'upload', title: 'Импорт контактов из CSV', hint: 'загрузить файл', roles: ['admin', 'manager'], run: () => importContacts() }
   ]},
   { group: 'Интерфейс', items: [
     { ico: 'sun', title: 'Светлая тема', hint: 'включить светлую', run: () => applyTheme('light') },
@@ -4723,7 +4796,9 @@ function paletteCommands(query = '') {
   const res = [];
   for (const g of PALETTE_ACTIONS) {
     if (g.edit && !canEdit()) continue;
-    const matched = g.items.filter(it => (!it.roles || it.roles.includes(state.me?.role)) && (!q || (it.title + ' ' + (it.hint || '')).toLowerCase().includes(q)));
+    // view: раздел показываем только роли, которой он открыт, — иначе команда
+    //    из палитры молча перебрасывала партнёра в его воронку вместо раздела
+    const matched = g.items.filter(it => (!it.roles || it.roles.includes(state.me?.role)) && (!it.view || viewAllowed(it.view)) && (!q || (it.title + ' ' + (it.hint || '')).toLowerCase().includes(q)));
     if (matched.length) res.push({ group: g.group, items: matched });
   }
   return res;

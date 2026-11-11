@@ -769,7 +769,17 @@ test('массовые действия: одна операция на пачк
   const linked = (await call('/api/contacts', { method: 'POST', body: JSON.stringify({ name: 'Связанный для пачки' }) })).body;
   const linkedDeal = (await call('/api/deals', { method: 'POST', body: JSON.stringify({ title: 'Сделка связанного', stage: 'new', contact_id: linked.id }) })).body;
   const linkedTask = (await call('/api/tasks', { method: 'POST', body: JSON.stringify({ title: 'Задача связанного', contact_id: linked.id }) })).body;
-  assert.equal((await call('/api/bulk', { method: 'POST', body: JSON.stringify({ table: 'contacts', ids: [linked.id], action: 'delete' }) })).status, 200);
+  // карточка со связями молча не удаляется: сервер перечисляет, что потеряется
+  const asked = await call('/api/bulk', { method: 'POST', body: JSON.stringify({ table: 'contacts', ids: [linked.id], action: 'delete' }) });
+  assert.equal(asked.status, 409, 'удаление карточки со связями требует подтверждения');
+  assert.equal(asked.body.confirmDelete, true, 'интерфейс узнаёт, что нужен второй вопрос');
+  assert.equal(asked.body.impact.deals, 1, 'сделка учтена в потерях');
+  assert.equal(asked.body.impact.tasks, 1, 'задача учтена в потерях');
+  assert.equal((await call('/api/bulk', { method: 'POST', body: JSON.stringify({ table: 'contacts', ids: [linked.id], action: 'delete', confirm: true }) })).status, 200,
+    'после подтверждения пачка удалена');
+  const linkedDash = (await call('/api/dashboard')).body;
+  assert.match(linkedDash.activities[0].text, /сделок без клиента: 1/,
+    'потери названы в журнале: ' + linkedDash.activities[0].text);
   assert.equal((await call('/api/tasks/' + linkedTask.id)).body.contact_id, null, 'задача осталась, но без ссылки на удалённый контакт');
   assert.equal((await call('/api/deals/' + linkedDeal.id)).body.deal.contact_id, null, 'сделка осталась, но без ссылки на удалённый контакт');
   const del = await call('/api/bulk', { method: 'POST', body: JSON.stringify({ table: 'contacts', ids, action: 'delete' }) });
@@ -777,6 +787,9 @@ test('массовые действия: одна операция на пачк
   assert.equal((await call('/api/contacts')).body.filter(c => ids.includes(c.id)).length, 0, 'записи удалены');
   const delDash = (await call('/api/dashboard')).body;
   assert.match(delDash.activities[0].text, /Массовое удаление \(клиентов\): 3 записи/, 'массовое удаление осталось в журнале: ' + delDash.activities[0].text);
+  // пустые карточки подтверждения не требуют: лишний вопрос мешает работе
+  assert.equal((await call('/api/bulk', { method: 'POST', body: JSON.stringify({ table: 'tasks', ids: [linkedTask.id], action: 'delete' }) })).status, 200,
+    'задача без связей удаляется сразу');
 });
 
 test('сделка, заведённая сразу закрытой, получает дату закрытия', async () => {
@@ -1348,6 +1361,64 @@ test('лента рабочего стола не тонет в чатах, ис
   assert.ok(!dash3.activities.some(a => /[Фф]айл загружен|загружен в переписку/.test(a.text)), 'загрузка файла в чат не попала в ленту компании');
 });
 
+test('удаление и передача карточки видны в журнале, план компании не уходит в общем ответе', async () => {
+  // /api/meta читает каждая роль, включая партнёра: внутренних планов компании
+  // в этом ответе быть не должно, а правило распределения интерфейсу нужно
+  const meta = (await call('/api/meta')).body;
+  assert.ok(!('salesTarget' in meta), 'план продаж не отдаётся в общем ответе');
+  assert.ok(!('autoDeal' in meta), 'признак автоматической сделки не отдаётся в общем ответе');
+  assert.equal(typeof meta.autoAssign, 'boolean', 'правило распределения обращений осталось');
+
+  const me = (await call('/api/me')).body.user;
+  const c = await call('/api/contacts', { method: 'POST', body: JSON.stringify({ name: 'Журнальный Клиент' }) });
+  assert.equal(c.status, 201, 'клиент для проверки создан');
+  const t = await call('/api/tasks', { method: 'POST', body: JSON.stringify({ title: 'Журнальная Задача' }) });
+  assert.equal(t.status, 201, 'задача для проверки создана');
+
+  // передача карточки другому сотруднику: уведомление уходит новому исполнителю,
+  // а след остаётся в ленте — иначе не разобрать, кто и когда переложил клиента
+  const re = await call('/api/contacts/' + c.body.id, { method: 'PATCH', body: JSON.stringify({ responsible_id: me.id }) });
+  assert.equal(re.status, 200, 'ответственный назначен');
+  const dashRe = (await call('/api/dashboard')).body;
+  assert.match(dashRe.activities[0].text, /Клиент «Журнальный Клиент»: ответственный не назначен → /,
+    'передача клиента записана в журнал: ' + dashRe.activities[0].text);
+
+  const reTask = await call('/api/tasks/' + t.body.id, { method: 'PATCH', body: JSON.stringify({ responsible_id: me.id }) });
+  assert.equal(reTask.status, 200, 'задача назначена');
+  const dashTask = (await call('/api/dashboard')).body;
+  assert.match(dashTask.activities[0].text, /Задача «Журнальная Задача»: ответственный не назначен → /,
+    'передача задачи записана в журнал: ' + dashTask.activities[0].text);
+
+  // снятие ответственного — тоже изменение, которое должно остаться в ленте
+  await call('/api/contacts/' + c.body.id, { method: 'PATCH', body: JSON.stringify({ responsible_id: '' }) });
+  const dashOff = (await call('/api/dashboard')).body;
+  assert.match(dashOff.activities[0].text, /ответственный .* → не назначен/,
+    'снятие ответственного записано: ' + dashOff.activities[0].text);
+
+  // удаление необратимо: без записи в журнале пропажу карточки не объяснить
+  const dealOf = await call('/api/deals', { method: 'POST', body: JSON.stringify({ title: 'Сделка журнального клиента', contact_id: c.body.id }) });
+  assert.equal(dealOf.status, 201, 'сделка привязана к клиенту');
+  const guarded = await call('/api/contacts/' + c.body.id, { method: 'DELETE' });
+  assert.equal(guarded.status, 409, 'клиент со сделкой без подтверждения не удаляется');
+  assert.equal(guarded.body.impact.deals, 1, 'сервер назвал, сколько сделок останется без клиента');
+  assert.equal((await call('/api/contacts/' + c.body.id)).status, 200, 'карточка на месте, пока нет подтверждения');
+  assert.equal((await call('/api/contacts/' + c.body.id + '?confirm=1', { method: 'DELETE' })).status, 200, 'после подтверждения клиент удалён');
+  const dashDel = (await call('/api/dashboard')).body;
+  assert.match(dashDel.activities[0].text, /Клиент удалён: «Журнальный Клиент»/,
+    'удаление клиента записано в журнал: ' + dashDel.activities[0].text);
+
+  assert.equal((await call('/api/tasks/' + t.body.id, { method: 'DELETE' })).status, 200, 'задача удалена');
+  const dashDel2 = (await call('/api/dashboard')).body;
+  assert.match(dashDel2.activities[0].text, /Задача удалена: «Журнальная Задача»/,
+    'удаление задачи записано в журнал: ' + dashDel2.activities[0].text);
+
+  const co = await call('/api/companies', { method: 'POST', body: JSON.stringify({ name: 'Журнальная Компания' }) });
+  assert.equal((await call('/api/companies/' + co.body.id, { method: 'DELETE' })).status, 200, 'компания удалена');
+  const dashDel3 = (await call('/api/dashboard')).body;
+  assert.match(dashDel3.activities[0].text, /Компания удалена: «Журнальная Компания»/,
+    'удаление компании записано в журнал: ' + dashDel3.activities[0].text);
+});
+
 test('файл в сообщении хранит имя, тип и размер, превью списка читается', async () => {
   const conv = (await call('/api/conversations')).body[0];
   assert.ok(conv, 'есть чат для проверки');
@@ -1789,13 +1860,37 @@ test('партнёр: отдельный вход, только свои лид�
   // чужая сделка создаётся до входа партнёра — на неё он не должен видеть ничего
   const fd = await call('/api/deals', { method: 'POST', body: JSON.stringify({ title: 'Чужой лид', amount: 10 }) });
   assert.equal(fd.status, 201);
+  // чужая переписка с вложением: этот файл партнёру не должен достаться
+  const PNG_B64 = Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==', 'base64').toString('base64');
+  const fContact = await call('/api/contacts', { method: 'POST', body: JSON.stringify({ name: 'Чужой клиент с файлом', phone: '+79000000009' }) });
+  assert.equal(fContact.status, 201);
+  const fConv = await call('/api/conversations', { method: 'POST', body: JSON.stringify({ contact_id: fContact.body.id, chat_type: 'whatsapp' }) });
+  assert.equal(fConv.status, 201, 'переписка чужого клиента создана');
+  const alienFile = await call(`/api/conversations/${fConv.body.id}/upload`, { method: 'POST', body: JSON.stringify({ filename: 'dogovor.png', contentType: 'image/png', dataBase64: PNG_B64 }) });
+  assert.equal(alienFile.status, 201, 'файл в чужой переписке загружен');
+  await call(`/api/conversations/${fConv.body.id}/messages`, { method: 'POST', body: JSON.stringify({ body: '', contentUri: alienFile.body.url, contentName: alienFile.body.name, contentType: alienFile.body.contentType }) });
+  // справочник компаний партнёру нужен для его же карточек, но только в объёме
+  // его лидов: вторая компания к его клиентам и сделкам не привязана
+  const fcOwn = await call('/api/companies', { method: 'POST', body: JSON.stringify({ name: 'Компания его клиента' }) });
+  assert.equal(fcOwn.status, 201);
+  const fcOther = await call('/api/companies', { method: 'POST', body: JSON.stringify({ name: 'Чужая компания' }) });
+  assert.equal(fcOther.status, 201);
+  const fcContact = await call('/api/contacts', { method: 'POST', body: JSON.stringify({ name: 'Клиент партнёра от офиса', phone: '+79000000011', responsible_id: u.body.id, company_id: fcOwn.body.id }) });
+  assert.equal(fcContact.status, 201, 'офис передал партнёру клиента');
   const lp = await readyLogin('/api/auth/login', { method: 'POST', body: JSON.stringify({ email: 'partner@example.com', password: 'partnerpassword1' }) });
   const savedH = h;
   h = { Authorization: 'Bearer ' + lp.body.token };
-  for (const path of ['/api/analytics', '/api/settings', '/api/quality', '/api/campaigns', '/api/companies', '/api/competitors']) {
+  for (const path of ['/api/analytics', '/api/settings', '/api/quality', '/api/campaigns', '/api/competitors', '/api/search']) {
     const r = await call(path);
     assert.ok(r.status === 403, path + ' закрыт для партнёра, получен ' + r.status);
   }
+  // компании: форма клиента и карточка сделки без справочника не работали, поэтому
+  // чтение открыто, но только по его собственным карточкам, а правка закрыта
+  const comps = await call('/api/companies');
+  assert.equal(comps.status, 200, 'справочник компаний для его карточек доступен');
+  assert.deepEqual(comps.body.map(x => x.id), [fcOwn.body.id], 'видна только компания его клиента');
+  assert.equal((await call('/api/companies', { method: 'POST', body: JSON.stringify({ name: 'Своя компания' }) })).status, 403, 'создавать компании партнёр не может');
+  assert.equal((await call('/api/companies/' + fcOther.body.id, { method: 'PATCH', body: JSON.stringify({ name: 'Переименовать' }) })).status, 403, 'править компании партнёр не может');
   assert.equal((await call('/api/deals')).body.deals.length, 0, 'чужих сделок не видно');
   const d = await call('/api/deals', { method: 'POST', body: JSON.stringify({ title: 'Лид партнёра', amount: 100000 }) });
   assert.equal(d.status, 201, 'партнёр создаёт себе лид');
@@ -1806,14 +1901,15 @@ test('партнёр: отдельный вход, только свои лид�
   const c = await call('/api/contacts', { method: 'POST', body: JSON.stringify({ name: 'Клиент партнёра', phone: '+79000000001' }) });
   assert.equal(c.status, 201);
   const contacts = await call('/api/contacts');
-  assert.ok(contacts.body.length === 1 && contacts.body[0].id === c.body.id, 'в клиентах только свой');
+  assert.equal(contacts.body.length, 2, 'в клиентах только свои');
+  assert.ok(contacts.body.every(x => [c.body.id, fcContact.body.id].includes(x.id)), 'чужих клиентов в списке нет');
   // рабочий стол партнёра: счётчики для меню считаются по его данным, а сводка
   // по компании (выручка, потери, лента, чужие сделки) ему не отдаётся
   const dash = await call('/api/dashboard');
   assert.equal(dash.status, 200, 'счётчики в меню партнёру доступны');
   assert.equal(dash.body.dealsTotal, 1, 'считаются только его сделки');
   assert.equal(dash.body.activeDealsSum, 100000, 'сумма только его сделок');
-  assert.equal(dash.body.contacts, 1, 'считаются только его клиенты');
+  assert.equal(dash.body.contacts, 2, 'считаются только его клиенты');
   assert.equal(dash.body.revenue, 0, 'выручка компании партнёру не отдаётся');
   assert.equal(dash.body.lostSum, 0, 'потери компании партнёру не отдаются');
   assert.equal(dash.body.companies, 0, 'число компаний партнёру не отдаётся');
@@ -1828,6 +1924,20 @@ test('партнёр: отдельный вход, только свои лид�
   assert.equal((await call('/api/training', { method: 'POST', body: JSON.stringify({ title: 'Взлом', kind: 'text', body: 'x' }) })).status, 403, 'материалы меняет только админ');
   assert.equal((await call('/api/notes', { method: 'POST', body: JSON.stringify({ entity_type: 'deals', entity_id: d.body.id, body: 'Звонок состоялся' }) })).status, 201, 'заметка к своей сделке');
   assert.equal((await call('/api/notes', { method: 'POST', body: JSON.stringify({ entity_type: 'deals', entity_id: fd.body.id, body: 'чужое' }) })).status, 403, 'заметка к чужой сделке закрыта');
+  // состав сделки: партнёр собирает свой лид из позиций, чужую сделку не трогает
+  assert.equal((await call('/api/deals/' + d.body.id + '/products')).status, 200, 'состав своей сделки виден');
+  assert.equal((await call('/api/deals/' + fd.body.id + '/products')).status, 403, 'состав чужой сделки закрыт');
+  const pos = await call('/api/deals/' + d.body.id + '/products', { method: 'POST', body: JSON.stringify({ name: 'Дом 6 на 8', price: 700000, qty: 1 }) });
+  assert.equal(pos.status, 201, 'позицию в свою сделку добавил');
+  assert.equal((await call('/api/deals/' + fd.body.id + '/products', { method: 'POST', body: JSON.stringify({ name: 'чужое', price: 1, qty: 1 }) })).status, 403, 'в чужую сделку позиция не добавляется');
+  assert.equal((await call('/api/deal_products/' + pos.body.id, { method: 'PATCH', body: JSON.stringify({ qty: 2 }) })).status, 200, 'свою позицию правит');
+  assert.equal((await call('/api/deals/' + d.body.id)).body.deal.amount, 1400000, 'сумма сделки пересчитана по позициям');
+  // документы по своей сделке: печать и отправка доступны, чужая сделка закрыта
+  assert.equal((await call('/api/deals/' + d.body.id + '/print?doc=quote')).status, 200, 'КП своей сделки печатается');
+  assert.equal((await call('/api/deals/' + d.body.id + '/print?doc=invoice')).status, 200, 'счёт своей сделки печатается');
+  assert.equal((await call('/api/deals/' + fd.body.id + '/print?doc=quote')).status, 403, 'чужое КП закрыто');
+  assert.equal((await call('/api/deals/' + fd.body.id + '/send-doc', { method: 'POST', body: JSON.stringify({ doc: 'quote' }) })).status, 403, 'отправка по чужой сделке закрыта');
+  assert.equal((await call('/api/deal_products/' + pos.body.id, { method: 'DELETE' })).status, 200, 'свою позицию удаляет');
   assert.equal((await call('/api/me/pref', { method: 'PATCH', body: JSON.stringify({ view: 'training' }) })).status, 200, 'любимый раздел сохраняется');
   // переписка со своим клиентом: партнёр отвечает сам, чужой чат закрыт
   const conv = await call('/api/conversations', { method: 'POST', body: JSON.stringify({ contact_id: c.body.id, chat_type: 'whatsapp' }) });
@@ -1837,6 +1947,15 @@ test('партнёр: отдельный вход, только свои лид�
   const sent = await call('/api/conversations/' + conv.body.id + '/messages', { method: 'POST', body: JSON.stringify({ body: 'Здравствуйте', channel: 'whatsapp' }) });
   assert.ok(sent.status !== 403, 'отправка в своём чате не закрыта, статус ' + sent.status);
   assert.equal((await call('/api/templates')).status, 200, 'шаблоны ответов доступны');
+  // вложения чужих переписок партнёру закрыты: адрес файла не секрет, он уходит
+  // в уведомления и выгрузки, а чужой договор внешнему человеку видеть нельзя
+  const ownFile = await call(`/api/conversations/${conv.body.id}/upload`, { method: 'POST', body: JSON.stringify({ filename: 'smeta.png', contentType: 'image/png', dataBase64: PNG_B64 }) });
+  assert.equal(ownFile.status, 201, 'партнёр прикладывает файл к своему чату');
+  await call(`/api/conversations/${conv.body.id}/messages`, { method: 'POST', body: JSON.stringify({ body: '', contentUri: ownFile.body.url, contentName: ownFile.body.name, contentType: ownFile.body.contentType }) });
+  assert.equal((await fetch(base + ownFile.body.url, { headers: h })).status, 200, 'свой файл партнёр открывает');
+  assert.equal((await fetch(base + alienFile.body.url, { headers: h })).status, 403, 'чужой файл партнёру не отдаётся');
+  assert.equal((await fetch(base + alienFile.body.url, { headers: savedH })).status, 200, 'сотрудник офиса видит все вложения');
+  assert.equal((await fetch(base + alienFile.body.url)).status, 401, 'без входа файл не отдаётся никому');
   const convList = await call('/api/conversations');
   assert.ok(Array.isArray(convList.body) && convList.body.every(x => x.contact_id === c.body.id), 'в списке только свои переписки');
   assert.equal((await call('/api/dashboard')).body.unreadMine, 0, 'своё отправленное сообщение не даёт непрочитанных');
