@@ -1044,6 +1044,17 @@ async function safeRemoteUrl(raw) {
   if (!ips.length || !ips.every(i => isPublicIp(i.address))) return null;
   return url;
 }
+/* Файл вложения появляется в папке uploads уже готовым: пишем во временное имя
+   и переименовываем. Без этого сбой в момент записи оставляет обрезанный файл,
+   а сообщение в базе уже ссылается на него — в чате открывается битая картинка.
+   Недописанные остатки убирает ночная чистка сиротских файлов. */
+function storeUpload(stored, buf) {
+  const dest = join(UPLOAD_DIR, stored);
+  const tmp = dest + '.part';
+  writeFileSync(tmp, buf);
+  renameSync(tmp, dest);
+  return '/uploads/' + stored;
+}
 async function fetchAttachment(uri) {
   let url = await safeRemoteUrl(uri);
   if (!url) return null;
@@ -1067,8 +1078,7 @@ async function fetchAttachment(uri) {
   const ext = ATTACH_EXT[ct] || (String(uri).match(/\.(png|jpe?g|gif|webp|svg|pdf|txt|csv|zip|docx?|xlsx?|mp4|mp3|ogg)(?:\?|$)/i)?.[1] || 'bin').toLowerCase();
   const stored = `${localDate().replace(/-/g, '')}-${randomBytes(6).toString('hex')}-wazzup.${ext}`;
   mkdir(UPLOAD_DIR, { recursive: true });
-  writeFileSync(join(UPLOAD_DIR, stored), buf);
-  return '/uploads/' + stored;
+  return storeUpload(stored, buf);
 }
 function queueAttachmentDownload(convId, uri, externalId) {
   if (!externalId || !/^https?:\/\//i.test(String(uri || ''))) return;
@@ -2050,7 +2060,7 @@ export const server = http.createServer(async (req, res) => {
     // контроль качества, настройки и чужие карточки закрыты здесь централизованно,
     // а списки ниже дополнительно фильтруются по владельцу.
     if (user && user.role === 'partner' && p.startsWith('/api/')) {
-      const PARTNER_GET = [/^\/api\/me$/, /^\/api\/meta$/, /^\/api\/events$/, /^\/api\/training(\/\d+)?$/, /^\/api\/pipelines$/, /^\/api\/users$/, /^\/api\/deals(\/\d+)?$/, /^\/api\/contacts(\/\d+)?$/, /^\/api\/tasks(\/\d+)?$/, /^\/api\/notes(\/\d+)?$/, /^\/api\/conversations$/, /^\/api\/conversations\/\d+\/messages$/, /^\/api\/custom-fields$/, /^\/api\/prices$/, /^\/api\/products$/, /^\/api\/templates$/];
+      const PARTNER_GET = [/^\/api\/me$/, /^\/api\/meta$/, /^\/api\/events$/, /^\/api\/dashboard$/, /^\/api\/training(\/\d+)?$/, /^\/api\/pipelines$/, /^\/api\/users$/, /^\/api\/deals(\/\d+)?$/, /^\/api\/contacts(\/\d+)?$/, /^\/api\/tasks(\/\d+)?$/, /^\/api\/notes(\/\d+)?$/, /^\/api\/conversations$/, /^\/api\/conversations\/\d+\/messages$/, /^\/api\/custom-fields$/, /^\/api\/prices$/, /^\/api\/products$/, /^\/api\/templates$/];
       const PARTNER_WRITE = [/^\/api\/me\/(password|theme|pref)$/, /^\/api\/deals(\/\d+)?$/, /^\/api\/contacts(\/\d+)?$/, /^\/api\/tasks(\/\d+)?$/, /^\/api\/notes(\/\d+)?$/, /^\/api\/conversations$/, /^\/api\/conversations\/read$/, /^\/api\/conversations\/\d+\/(messages|upload|email)$/];
       if (!(req.method === 'GET' || req.method === 'HEAD' ? PARTNER_GET : PARTNER_WRITE).some(re => re.test(p)))
         return json(res, 403, { error: 'Партнёру доступны его сделки, клиенты, задачи и раздел «Обучение»' });
@@ -2064,6 +2074,28 @@ export const server = http.createServer(async (req, res) => {
 
     // ===== dashboard / analytics =====
     if (p === '/api/dashboard') {
+      // Партнёру сводка по компании не отдаётся: выручка, число клиентов и лента
+      // действий — внутренние цифры. Ему нужны только счётчики в меню (его сделки
+      // и его непрочитанные чаты), поэтому считается то же самое, но по его данным
+      // и тем же правилом, что и список его диалогов.
+      if (user?.role === 'partner') {
+        const pid = Number(user.id);
+        const nowP = localNow();
+        const unreadP = db.prepare("SELECT COUNT(*) n FROM conversations cv JOIN contacts c ON c.id=cv.contact_id WHERE (c.responsible_id=? OR c.id IN (SELECT contact_id FROM deals WHERE responsible_id=? AND contact_id IS NOT NULL)) AND EXISTS (SELECT 1 FROM messages m WHERE m.conversation_id=cv.id AND m.direction='in' AND m.id > COALESCE((SELECT rm.last_msg_id FROM read_marks rm WHERE rm.conversation_id=cv.id AND rm.user_id=?),0))").get(pid, pid, pid)?.n || 0;
+        const tasksOpenP = db.prepare('SELECT COUNT(*) n FROM tasks WHERE done=0 AND responsible_id=?').get(pid)?.n || 0;
+        return json(res, 200, {
+          stages: [], activities: [], recentDeals: [],
+          dealsTotal: db.prepare("SELECT COUNT(*) n FROM deals WHERE responsible_id=? AND stage NOT IN ('won','lost')").get(pid)?.n || 0,
+          activeDealsSum: db.prepare("SELECT COALESCE(SUM(amount),0) s FROM deals WHERE responsible_id=? AND stage NOT IN ('won','lost')").get(pid)?.s || 0,
+          contacts: db.prepare('SELECT COUNT(*) n FROM contacts WHERE responsible_id=?').get(pid)?.n || 0,
+          companies: 0, revenue: 0, lostSum: 0, monthRevenue: 0, conversion: 0,
+          unread: unreadP, unreadMine: unreadP,
+          tasksOpen: tasksOpenP, tasksToday: 0, tasksOverdue: 0,
+          myTasksOpen: tasksOpenP,
+          myTasksOverdue: db.prepare("SELECT COUNT(*) n FROM tasks WHERE done=0 AND responsible_id=? AND due IS NOT NULL AND due != '' AND (CASE WHEN length(due)=10 THEN due || ' 23:59:59' ELSE due END) < ?").get(pid, nowP)?.n || 0,
+          myTasksToday: 0,
+        });
+      }
       const pipelineId = Number(u.searchParams.get('pipeline') || 1);
       const stages = getStages(pipelineId);
       const today = localDate();
@@ -3144,7 +3176,7 @@ ${user?.name || ''}`.trim();
       const safeName = safeFileName(b.filename || ('файл.' + ext));
       const stored = `${localDate().replace(/-/g, '')}-${randomBytes(6).toString('hex')}-${asciiFileName(b.filename || ('file.' + ext))}`;
       mkdir(UPLOAD_DIR, { recursive: true });
-      writeFileSync(join(UPLOAD_DIR, stored), raw);
+      storeUpload(stored, raw);
       // В журнал загрузка не пишется: файл тут же становится сообщением чата
       // с именем, форматом и размером — след живёт в самой переписке, а
       // недоотправленные остатки убирает ночная чистка сиротских файлов

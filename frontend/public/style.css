@@ -45,11 +45,13 @@ nav button.active{background:linear-gradient(90deg,rgba(22,163,74,.85),rgba(249,
 .ico{display:inline-block;vertical-align:-0.15em;flex-shrink:0}
 .nav-ico{display:inline-flex;align-items:center;margin-right:2px}
 .um-ico{display:inline-flex;align-items:center}
-/* password eye */
+/* password eye: правило одно на всё приложение. Прежде второе определение
+   ниже по файлу сбрасывало кнопку через all:unset, из-за чего иконка глаза
+   вставала по базовой линии и выглядела сдвинутой вверх */
 .pw-wrap{position:relative;display:flex;align-items:center;width:100%}
-.pw-wrap input{width:100%;padding-right:38px}
-.pw-eye{position:absolute;right:6px;top:50%;transform:translateY(-50%);background:none;border:none;cursor:pointer;padding:6px;color:var(--muted);display:inline-flex;align-items:center;justify-content:center;border-radius:6px;transition:color .15s}
-.pw-eye:hover{color:var(--ink)}
+.pw-wrap input{width:100%;padding-right:42px}
+.pw-eye{position:absolute;right:6px;top:50%;transform:translateY(-50%);background:none;border:0;cursor:pointer;padding:6px;color:var(--muted);display:inline-flex;align-items:center;justify-content:center;border-radius:6px;transition:color .15s,opacity .15s;flex:none;opacity:.75}
+.pw-eye:hover{color:var(--ink);opacity:1}
 /* task button */
 .btn.sm.mark{background:transparent;border:1px solid var(--green);color:var(--green);font-weight:600;cursor:pointer;border-radius:6px;padding:4px 10px;display:inline-flex;align-items:center;gap:4px;transition:all .15s;font-size:12.5px}
 .btn.sm.mark:hover{background:var(--green-l);color:var(--green-d)}
@@ -162,6 +164,9 @@ tr.selected td,tr.selected:hover td{background:var(--green-l)}
 .deal-task-pill.future{background:#f1f5f9;color:#475569}
 .deal-task-pill.future:hover{background:#e2e8f0}
 .drop-close-bar{position:fixed;bottom:20px;left:280px;right:20px;display:grid;grid-template-columns:1fr 1fr;gap:16px;z-index:40;animation:slideUpBar .2s ease}
+@media(max-width:900px){
+  .drop-close-bar{left:12px;right:12px;grid-template-columns:1fr;gap:10px;bottom:calc(16px + env(safe-area-inset-bottom,0px))}
+}
 @keyframes slideUpBar{from{transform:translateY(30px);opacity:0}to{transform:translateY(0);opacity:1}}
 .drop-zone{padding:16px 20px;border-radius:14px;display:flex;align-items:center;justify-content:center;gap:10px;font-weight:700;font-size:14px;box-shadow:0 12px 30px -10px rgba(0,0,0,.3);transition:all .15s;border:2px dashed transparent}
 .drop-zone.won{background:#dcfce7;color:#14532d;border-color:#16a34a}
@@ -209,11 +214,19 @@ tr.selected td,tr.selected:hover td{background:var(--green-l)}
 .chat{display:flex;flex-direction:column}
 .palette-list .p-item .p-ico{display:inline-flex;align-items:center;color:var(--muted);flex-shrink:0}
 .chat-head{padding:10px 14px;border-bottom:1px solid var(--line);display:flex;justify-content:space-between;align-items:center;gap:8px}
+.chat-head>div{min-width:0}
+/* на телефоне имя клиента и действия чата не помещаются в одну строку:
+   действия уходят на вторую, длинное имя переносится, ничего не вылезает */
+@media(max-width:640px){
+  .chat-head{flex-wrap:wrap;gap:6px;padding:8px 10px}
+  .chat-head>div:nth-child(2){flex:1 1 auto;overflow-wrap:anywhere}
+  .chat-head>div:last-child{flex:1 1 100%;display:flex;gap:6px}
+  .chat-head>div:last-child .btn{flex:1 1 auto;justify-content:center}
+}
 .chat-back{display:none;flex:none}
 .msgs{flex:1;overflow:auto;padding:14px;background:#f8faf9;display:flex;flex-direction:column;gap:8px}
 .msg{max-width:78%;padding:9px 12px;border-radius:13px;background:#fff;border:1px solid var(--line);box-shadow:0 1px 2px rgba(15,23,42,.04);font-size:14px;align-self:flex-start}
 .msg.out{align-self:flex-end;background:linear-gradient(135deg,var(--green),#15803d);color:#fff;border-color:transparent}
-.msg.out small{color:#bbf7d0}
 .msg small{display:block;margin-top:4px;font-size:11.5px;color:var(--muted)}
 .composer{display:flex;flex-direction:column;gap:7px;padding:10px 12px;border-top:1px solid var(--line);background:var(--card)}
 /* поле ввода сообщения растёт со текстом: длинные ответы видно целиком,
@@ -243,7 +256,7 @@ html[data-theme=dark] .send-btn{background:#16a34a;border-color:#16a34a;color:#f
 .profile{padding:14px}
 /* misc */
 .modal{position:fixed;inset:0;background:rgba(15,23,42,.45);display:grid;place-items:center;z-index:50;padding:16px;backdrop-filter:blur(2px)}
-.modal-card{background:#fff;border-radius:16px;padding:22px;--mpad:22px;width:min(720px,100%);max-height:90vh;overflow:auto;position:relative;box-shadow:0 30px 70px -20px rgba(0,0,0,.5)}
+.modal-card{background:#fff;border-radius:16px;padding:22px;--mpad:22px;width:min(720px,100%);max-height:90vh;max-height:90dvh;overflow:auto;position:relative;box-shadow:0 30px 70px -20px rgba(0,0,0,.5)}
 .modal-card .x{position:sticky;top:6px;float:right;z-index:7;margin:-12px -6px 0 0;font-size:22px;border:0;background:none;cursor:pointer;color:var(--muted)}
 /* карточка конкурента шире обычных окон: сводный отчёт раскладывается
    колонками, таблицы судов и цен не сжимаются в столбик */
@@ -262,7 +275,7 @@ html[data-theme=dark] .send-btn{background:#16a34a;border-color:#16a34a;color:#f
 @media(max-width:1000px){.settings-cols{grid-template-columns:1fr}}
 .settings-cols .card{align-self:start}
 table.mini td{padding:5px 8px}
-code{background:#f1f5f9;border-radius:6px;padding:2px 6px;font-size:12.5px;word-break:break-all}
+code{background:#eef2f7;border-radius:6px;padding:2px 6px;font-size:12.5px;word-break:break-all}
 .stages-editor{display:flex;flex-direction:column;gap:6px}
 .stages-editor .st{display:grid;grid-template-columns:26px 1fr 1fr 90px 34px;gap:6px;align-items:center}
 /* Всплывающие уведомления: стопка справа снизу, чтобы не перекрывать работу
@@ -330,7 +343,6 @@ td .btn.sm+.btn.sm{margin-left:4px}
 .profile p{margin:6px 0}
 .stages-editor .st input[type=color]{padding:2px;height:34px}
 .empty small{display:block;margin-top:6px;color:var(--muted)}
-code{background:#eef2f7}
 
 /* ── адаптив: планшет и телефон (менеджеры в поле) ── */
 @media(max-width:1180px){
@@ -396,6 +408,7 @@ code{background:#eef2f7}
   .jump-new{min-height:40px;padding:9px 16px}
   .composer-select{min-width:0;max-width:46%}
   .chat-attach.img img{max-width:170px;max-height:170px}
+  .attach-cap{max-width:170px}
   .modal{padding:8px}
   /* редактор воронок: пять колонок на телефоне не помещаются, раскладываем в две строки */
   .stages-editor .st{grid-template-columns:22px 1fr 40px;row-gap:8px}
@@ -479,7 +492,6 @@ html[data-theme=dark] .drop-zone.lost{background:#3b1418;color:#fca5a5;border-co
 @keyframes aurora{0%{transform:translate3d(-6%,-4%,0) scale(1)}50%{transform:translate3d(6%,4%,0) scale(1.08)}100%{transform:translate3d(-6%,-4%,0) scale(1)}}
 #view>*{animation:fadeUp .22s ease both}
 .modal-card{animation:popIn .18s ease both}
-.deal{transition:transform .15s ease,box-shadow .2s ease}
 .deal:hover{transform:translateY(-2px)}
 .deal:active{cursor:grabbing;transform:scale(.99)}
 .kpi{transition:transform .18s ease,box-shadow .2s ease}
@@ -506,6 +518,10 @@ body.dragging{cursor:grabbing}
 .sk-kpi{height:78px;border-radius:var(--radius)}
 .sk-col{min-width:265px;max-width:265px;height:220px;border-radius:var(--radius)}
 .sk-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(190px,1fr));gap:12px;margin-bottom:14px}
+@media(max-width:900px){
+  .sk-col{min-width:230px;max-width:230px}
+  .sk-grid{grid-template-columns:repeat(auto-fit,minmax(150px,1fr))}
+}
 
 /* ── пустые состояния ────────────────────────────────────────────────────── */
 .empty-state{text-align:center;padding:34px 18px;color:var(--muted)}
@@ -518,13 +534,15 @@ body.dragging{cursor:grabbing}
 .login::before,.login::after{content:'';position:absolute;width:60vw;height:60vw;border-radius:50%;filter:blur(60px);opacity:.55;pointer-events:none}
 .login::before{background:radial-gradient(circle at 30% 30%,rgba(34,197,94,.55),transparent 60%);top:-18vw;left:-10vw;animation:aurora 22s ease-in-out infinite}
 .login::after{background:radial-gradient(circle at 60% 40%,rgba(249,115,22,.5),transparent 60%);bottom:-22vw;right:-12vw;animation:aurora 26s ease-in-out infinite reverse}
+/* на телефоне два размытых слоя 60vw с бесконечной анимацией заставляют
+   браузер постоянно перерисовывать экран: батарея садится, ввод лагает.
+   Фон остаётся объёмным за счёт градиентов, но слои крупнее, легче и стоят на месте */
+@media(max-width:640px){
+  .login::before,.login::after{width:95vw;height:95vw;filter:blur(30px);opacity:.4;animation:none}
+}
 .login-card{position:relative;z-index:1;animation:fadeUp .35s ease both;background:color-mix(in srgb,var(--card) 94%,transparent);backdrop-filter:blur(10px)}
 .login-card h1{font-size:24px;letter-spacing:-.02em}
 .login-card .brand-leaf.big{animation:popIn .5s ease both}
-.pw-wrap{position:relative}
-.pw-wrap input{padding-right:44px}
-.pw-wrap button{position:absolute;right:6px;top:50%;transform:translateY(-50%);all:unset;cursor:pointer;padding:6px 8px;font-size:15px;opacity:.7}
-.pw-wrap button:hover{opacity:1}
 .login .err.shake{animation:shake .45s ease}
 
 /* ── палитра команд (Ctrl+K) ────────────────────────────────────────── */
@@ -580,11 +598,46 @@ label.opt{font-weight:500;color:#475569}
 label .star,.star{color:#dc2626;font-weight:700;margin-left:3px}
 .form-grid2{display:grid;grid-template-columns:1fr 1fr;gap:12px}
 .form-grid2>label{margin-bottom:10px;min-width:0}
+/* число колонок задаётся атрибутом, а не встроенным стилем: на телефоне
+   раскладка всё равно складывается в одну колонку */
+.form-grid2[data-cols="3"]{grid-template-columns:repeat(3,1fr)}
+.form-grid2[data-cols="4"]{grid-template-columns:repeat(4,1fr)}
+.form-grid-21{display:grid;grid-template-columns:2fr 1fr;gap:12px}
+.form-grid3{display:grid;grid-template-columns:repeat(3,1fr);gap:12px}
+.form-grid-21>label,.form-grid3>label{margin-bottom:10px;min-width:0}
+/* запись ручной находки в карточке конкурента: четыре колонки на столе */
+.find-grid{display:grid;grid-template-columns:auto 1fr auto auto;gap:8px;align-items:end}
+.find-grid>label{margin-bottom:0;min-width:0}
+/* поля поиска в разделах: на столе стоят в строку с фильтрами, на телефоне
+   занимают всю ширину, чтобы в них было легко попасть пальцем */
+.searchfield{flex:1 1 320px;min-width:240px;max-width:480px}
+.searchfield-sm{max-width:220px}
+.searchfield-end{margin-left:auto}
+/* строка «поле и кнопки рядом»: браузер не сжимает input ниже его природного
+   минимума, поэтому без переноса такая строка вылезала за край узкого экрана */
+.field-row{display:flex;gap:8px;flex-wrap:wrap;align-items:center}
+.field-row>input{flex:1 1 170px;min-width:0;width:auto}
+.field-row>.btn{flex:0 0 auto}
+.btn-row{display:flex;gap:8px;flex-wrap:wrap}
+@media(max-width:560px){.field-row>.btn,.btn-row>.btn{flex:1 1 auto;justify-content:center}}
 .form-hint{font-size:13px;color:var(--muted);margin:-2px 0 12px;line-height:1.5}
 .form-hint .star{margin:0 2px 0 0}
 .check-line{display:flex;align-items:flex-start;gap:8px;font-weight:500!important;margin-bottom:12px;cursor:pointer}
 .check-line input{margin-top:2px}
-@media(max-width:560px){.form-grid2{grid-template-columns:1fr}}
+/* неделя задач: семь колонок с горизонтальной прокруткой на телефоне неудобны,
+   дни встают друг под друга и неделя читается сверху вниз без скролла вбок */
+@media(max-width:700px){
+  .calendar{grid-template-columns:1fr;overflow-x:visible}
+  .cal-day{min-height:0;padding:9px 10px}
+  .cal-day h4{font-size:14px;margin-bottom:4px}
+  .form-grid3{grid-template-columns:1fr 1fr}
+  .form-grid2[data-cols="3"],.form-grid2[data-cols="4"]{grid-template-columns:1fr 1fr}
+  .find-grid{grid-template-columns:1fr 1fr}
+}
+@media(max-width:560px){
+  .form-grid2,.form-grid2[data-cols],.form-grid-21,.form-grid3{grid-template-columns:1fr}
+  .find-grid{grid-template-columns:1fr}
+}
 html[data-theme=dark] label.req{color:var(--ink)}
 html[data-theme=dark] label.opt{color:var(--muted)}
 /* карточка сделки: шапка с быстрыми решениями */
@@ -595,6 +648,14 @@ html[data-theme=dark] label.opt{color:var(--muted)}
 @media(max-width:560px){
   .modal-card .tabs{flex-wrap:nowrap;overflow-x:auto;padding-bottom:4px}
   .card-actions .btn{flex:1 1 auto;justify-content:center}
+  /* пузырь сообщения занимает почти всю ширину: длинный текст читается без
+     узкой колонки, а вложения не сжимаются */
+  .msg{max-width:88%}
+  /* адрес вебхука переносится, а не растягивает карточку за экран */
+  .hook-line code{min-width:0;width:100%;overflow-wrap:anywhere}
+  /* поля поиска в разделах занимают всю строку: попасть в них пальцем проще */
+  .searchfield,.searchfield-sm{max-width:none;min-width:0;flex:1 1 100%}
+  .searchfield-end{margin-left:0}
 }
 
 /* ── компактное выпадающее меню действий ────────────────────────────────── */
@@ -645,6 +706,8 @@ html[data-theme=dark] .link-btn{color:#86efac}
 @media (prefers-reduced-motion: reduce){.restart-card .bar i{animation:none;width:100%}}
 /* узкие телефоны: бренд и навигация не должны теснить друг друга */
 @media(max-width:380px){
+  /* очень узкие экраны: две кнопки в шапке чата встают друг под друга */
+  .chat-head>div:last-child{flex-wrap:wrap}
   .brand-text{font-size:18px}
   .brand-leaf{width:26px;height:24px}
   .brand-leaf.big{width:60px;height:56px}
