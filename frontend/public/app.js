@@ -7,6 +7,9 @@ const $$ = s => Array.from(document.querySelectorAll(s));
 const ICON_PATHS = {
   dashboard: '<rect x="3" y="3" width="7" height="9" rx="1"/><rect x="14" y="3" width="7" height="5" rx="1"/><rect x="14" y="12" width="7" height="9" rx="1"/><rect x="3" y="16" width="7" height="5" rx="1"/>',
   pipe: '<path d="M22 3H2l8 9.46V19l4 2v-8.54L22 3z"/>',
+  campaigns: '<path d="M22 2 11 13"/><path d="M22 2 15 22l-4-9-9-4Z"/>',
+  quality: '<path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10Z"/><path d="m9 12 2 2 4-4"/>',
+  training: '<path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20"/><path d="M6.5 2H20v20H6.5A2.5 2.5 0 0 1 4 19.5v-15A2.5 2.5 0 0 1 6.5 2Z"/>',
   inbox: '<path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/>',
   chat: '<path d="M21 11.5a8.38 8.38 0 0 1-.9 3.8 8.5 8.5 0 0 1-7.6 4.7 8.38 8.38 0 0 1-3.8-.9L3 21l1.9-5.7a8.38 8.38 0 0 1-.9-3.8 8.5 8.5 0 0 1 4.7-7.6 8.38 8.38 0 0 1 3.8-.9h.5a8.48 8.48 0 0 1 8 8v.5z"/>',
   contacts: '<path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M23 21v-2a4 4 0 0 0-3-3.87"/><path d="M16 3.13a4 4 0 0 1 0 7.75"/>',
@@ -145,7 +148,7 @@ const wzTitle = c => (c.label ? String(c.label)
 // бейджи каналов клиента: «WhatsApp · Telegram» — одна строка для списков
 const chan = c => (c || 'whatsapp').split(',').map(x => x.trim()).filter(Boolean).map(x => `<span class="chan ${x}">${esc(channelLabel(x))}</span>`).join(' ');
 
-const ROLE_LABELS = { admin: 'Администратор', manager: 'Менеджер', viewer: 'Наблюдатель' };
+const ROLE_LABELS = { admin: 'Администратор', manager: 'Менеджер', viewer: 'Наблюдатель', partner: 'Партнёр' };
 const roleLabel = r => ROLE_LABELS[r] || r;
 
 // Браузер хранит кириллический домен в машиночитаемом виде: вместо
@@ -824,12 +827,16 @@ async function boot() {
     state.me = me.user;
     // открываем раздел, на котором сотрудник закончил в прошлый раз: ежедневная
     // работа начинается сразу со своих чатов или сделок, а не с пустого стола
-    if (me.user.pref_view && me.user.pref_view !== 'dashboard' && state.view === 'dashboard') go(me.user.pref_view);
+    if (me.user.role === 'partner') {
+      // партнёр начинает со своих сделок: рабочий стол с цифрами всей компании
+      // для него закрыт, из личных разделов доступны воронка и обучение
+      if (!['pipe', 'training'].includes(state.view)) go(['pipe', 'training'].includes(me.user.pref_view) ? me.user.pref_view : 'pipe');
+    } else if (me.user.pref_view && me.user.pref_view !== 'dashboard' && state.view === 'dashboard') go(me.user.pref_view);
     loadDrafts(); // черновики читаются заново: ключ зависит от сотрудника
     guardIdenticalHtml($('#view')); // одинаковый экран не перерисовывается
     // роль на теле страницы: для наблюдателя прячем кнопки создания в шапке
-    document.body.classList.remove('role-admin', 'role-manager', 'role-viewer');
-    document.body.classList.add('role-' + (['admin', 'manager', 'viewer'].includes(me.user.role) ? me.user.role : 'manager'));
+    document.body.classList.remove('role-admin', 'role-manager', 'role-viewer', 'role-partner');
+    document.body.classList.add('role-' + (['admin', 'manager', 'viewer', 'partner'].includes(me.user.role) ? me.user.role : 'manager'));
     if (me.user.must_change_password) {
       $('#login').classList.add('hidden'); $('#app').classList.add('hidden');
       $('#passwordChange').classList.remove('hidden');
@@ -860,7 +867,7 @@ function hydrateNavIcons() {
   const map = {
     dashboard: 'dashboard', pipe: 'pipe', inbox: 'inbox', contacts: 'contacts',
     companies: 'companies', tasks: 'tasks', products: 'products', competitors: 'competitors',
-    analytics: 'analytics', settings: 'settings'
+    analytics: 'analytics', campaigns: 'campaigns', quality: 'quality', training: 'training', settings: 'settings'
   };
   // Переключение разделов задано встроенным onclick в разметке — здесь только иконки.
   $$('#nav button').forEach(b => {
@@ -888,6 +895,9 @@ const TITLES = {
   products: ['Каталог', 'Ваш прайс-лист: дома, бани и услуги — то, что продаёте, и по каким ценам'],
   analytics: ['Аналитика', 'Сколько продали, конверсия, план и результаты менеджеров'],
   competitors: ['Конкуренты', 'Проверка по открытым источникам и сравнение цен'],
+  campaigns: ['Рассылки', 'Сообщения клиентам в WhatsApp или на почту — сразу или по расписанию'],
+  quality: ['Контроль качества', 'Ответы клиентам и движение сделок — автоматическая оценка для РОПа'],
+  training: ['Обучение', 'Материалы для партнёров и сотрудников: статьи, видео и ссылки'],
   settings: ['Настройки', 'Компания, интеграции, поля, команда и резервные копии']
 };
 
@@ -901,7 +911,10 @@ const SKELETONS = {
   competitors: () => `<div class="sk-grid">${'<div class="skeleton sk-kpi"></div>'.repeat(3)}</div><div class="card">${'<div class="sk-line"></div>'.repeat(4)}</div>`,
   settings: () => `<div class="card"><div class="sk-line w40"></div>${'<div class="sk-line"></div>'.repeat(6)}</div>`,
   companies: () => `<div class="card"><div class="sk-line w40"></div>${'<div class="sk-line"></div>'.repeat(5)}</div>`,
-  products: () => `<div class="card"><div class="sk-line w40"></div>${'<div class="sk-line"></div>'.repeat(5)}</div>`
+  products: () => `<div class="card"><div class="sk-line w40"></div>${'<div class="sk-line"></div>'.repeat(5)}</div>`,
+  campaigns: () => `<div class="card"><div class="sk-line w40"></div>${'<div class="sk-line"></div>'.repeat(4)}</div>`,
+  quality: () => `<div class="sk-grid">${'<div class="skeleton sk-kpi"></div>'.repeat(3)}</div><div class="card"><div class="sk-line w40"></div>${'<div class="sk-line"></div>'.repeat(4)}</div>`,
+  training: () => `<div class="grid">${'<div class="skeleton sk-kpi"></div>'.repeat(3)}</div>`
 };
 
 async function go(view, subTab) {
@@ -1026,6 +1039,9 @@ async function renderNow() {
     if (state.view === 'products') return await products(v);
     if (state.view === 'competitors') return await competitorsView(v);
     if (state.view === 'analytics') return await analytics(v);
+    if (state.view === 'campaigns') return await campaignsView(v);
+    if (state.view === 'quality') return await qualityView(v);
+    if (state.view === 'training') return await trainingView(v);
     if (state.view === 'settings') return await settings(v);
   } catch (e) {
     v.innerHTML = `<div class="card err"><h3>Не удалось загрузить раздел</h3><p>${esc(e.message)}</p><button class="btn primary" onclick="render()">Повторить попытку</button></div>`;
@@ -1256,10 +1272,10 @@ function pipeDraw(v, d) {
     <b>Воронка:</b><select style="width:auto" onchange="setPipeline(this.value)">${d.pipelines.map(p => `<option value="${p.id}" ${p.id === state.pipeline ? 'selected' : ''}>${esc(p.name)}</option>`).join('')}</select>
     <span class="tabs" style="margin:0"><button class="${state.dealScope !== 'mine' && state.dealScope !== 'notask' && state.dealScope !== 'overdue' ? 'active' : ''}" onclick="setDealScope('all')">Все сделки</button><button class="${state.dealScope === 'mine' ? 'active' : ''}" onclick="setDealScope('mine')">Мои (${d.deals.filter(x => x.responsible_id === meId()).length})</button><button class="${state.dealScope === 'notask' ? 'active' : ''}" onclick="setDealScope('notask')">Без задач (${noTaskCount})</button><button class="${state.dealScope === 'overdue' ? 'active' : ''}" onclick="setDealScope('overdue')">Просрочено (${overdueCount})</button></span>
     <span class="tag" title="Сделок в текущем фильтре">Показано: ${shown.length}${shown.length !== shown.filter(x => !['won', 'lost'].includes(x.stage)).length ? ` · в работе: ${shown.filter(x => !['won', 'lost'].includes(x.stage)).length}` : ''}</span><span class="tag orange" title="Сумма активных сделок в фильтре">В работе на ${fmt(shown.filter(x => !['won', 'lost'].includes(x.stage)).reduce((a, x) => a + x.amount, 0))}</span>
-    <button class="btn sm" style="margin-left:auto" onclick="download('/api/export/deals','deals.csv')" title="Выгрузить сделки в CSV">${icon('download', 13)} Экспорт</button>
+    ${state.me?.role !== 'partner' ? `<button class="btn sm" style="margin-left:auto" onclick="download('/api/export/deals','deals.csv')" title="Выгрузить сделки в CSV">${icon('download', 13)} Экспорт</button>` : ''}
     <input id="dealSearch" style="max-width:210px" placeholder="Поиск по сделкам и клиентам" value="${esc(state.dealQuery || '')}" oninput="liveSearch('deals',()=>setDealQuery(this.value))">
     ${(state.me && state.me.role) === 'admin' ? `<button class="btn sm" onclick="openPipelineEditor()">${icon('settings', 13)} Настроить воронку</button>` : ''}</div>
-  ${canEdit() ? bulkSlot('deals', `${bulkStage()}${bulkOwner('deals')}`) : ''}
+  ${canEdit() && state.me?.role !== 'partner' ? bulkSlot('deals', `${bulkStage()}${bulkOwner('deals')}`) : ''}
   <div class="kanban">${d.stages.map(s => {
     const colDeals = shown.filter(x => x.stage === s.code);
     const colSum = colDeals.reduce((a, x) => a + x.amount, 0);
@@ -2763,19 +2779,303 @@ async function analytics(v) {
       const maxM = Math.max(...(a.byMonth || []).map(x => x.s), 1);
       return `<p style="display:flex;justify-content:space-between;margin:8px 0 2px"><span>${esc(monthText(m.ym))}</span><b>${fmt(m.s)}</b></p><div class="bar"><i style="width:${Math.round((m.s || 0) / maxM * 100)}%"></i></div><p class="form-hint" style="margin:-8px 0 10px">сделок: ${m.n}</p>`;
     }).join('') : '<p><small>Успешных сделок пока нет — как только первая закроется, здесь появится её месяц.</small></p>'}</div>
-   <div class="card"><h3>Сделки по источникам</h3><table><tr><th>Источник</th><th>Сделок</th><th>Сумма</th></tr>${a.bySource.map(x => `<tr><td>${esc(sourceLabel(x.name))}</td><td>${x.count}</td><td><b>${fmt(x.sum)}</b></td></tr>`).join('') || '<tr><td colspan="3"><small>Пока нет сделок</small></td></tr>'}</table></div>
+   <div class="card"><h3>Сделки по источникам</h3><div class="tbl-scroll"><table><tr><th>Источник</th><th>Сделок</th><th>Сумма</th></tr>${a.bySource.map(x => `<tr><td>${esc(sourceLabel(x.name))}</td><td>${x.count}</td><td><b>${fmt(x.sum)}</b></td></tr>`).join('') || '<tr><td colspan="3"><small>Пока нет сделок</small></td></tr>'}</table></div></div>
    <div class="card"><h3>План продаж — ${esc(monthShort(plan.month || isoMonth()))}</h3>
     <p><small>План — цель на <b>${esc(monthText(plan.month || isoMonth()))}</b>, факт — сумма успешных сделок, закрытых за этот же месяц. Они стоят рядом, чтобы сразу видеть, сколько осталось продать до конца месяца: план минус факт. План не мешает работе — это ориентир для команды.</small></p>
     ${(state.me && state.me.role) === 'admin' ? `<form onsubmit="return setSalesPlan(event)"><div style="display:flex;gap:10px;align-items:flex-end"><label style="margin:0;flex:1">Целевая выручка на месяц (${CUR()})<input name="target" type="number" value="${plan.target || ''}" placeholder="3000000"></label><button class="btn primary">Сохранить цель</button></div></form>` : `<p><small>Цель на месяц задаёт администратор. Текущая цель: <b>${plan.target ? fmt(plan.target) : 'не задана'}</b>.</small></p>`}</div>
   </div><div>
-   <div class="card"><h3>Результаты по менеджерам</h3><table><tr><th>Менеджер</th><th>Сделок</th><th>Сумма</th></tr>${a.byManager.map(x => `<tr><td>${esc(x.name)}</td><td>${x.count}</td><td><b>${fmt(x.sum)}</b></td></tr>`).join('') || '<tr><td colspan="3"><small>Нет данных</small></td></tr>'}</table></div>
-   <div class="card"><h3>Причины проигрыша сделок</h3><table><tr><th>Причина</th><th>Число</th><th>Сумма потерь</th></tr>${a.byLoss.map(x => `<tr><td>${esc(x.name || 'Не указана')}</td><td>${x.count}</td><td><b>${fmt(x.sum)}</b></td></tr>`).join('') || '<tr><td colspan="3"><small>Сделок в отказе нет</small></td></tr>'}</table></div>
+   <div class="card"><h3>Результаты по менеджерам</h3>
+    <p class="form-hint" style="margin-top:-2px">Конверсия — доля успешных сделок среди закрытых: успех к сумме успеха и отказов.</p>
+    <div class="tbl-scroll"><table><tr><th>Менеджер</th><th>Сделок</th><th>Успех</th><th>Отказ</th><th>Конверсия</th><th>Сумма</th></tr>${a.byManager.map(x => `<tr><td>${esc(x.name)}</td><td>${x.count}</td><td class="green">${x.won ?? 0}</td><td>${x.lost ?? 0}</td><td>${x.conversion === null || x.conversion === undefined ? '—' : `<b class="${x.conversion >= 30 ? 'green' : ''}">${x.conversion}%</b>`}</td><td><b>${fmt(x.sum)}</b></td></tr>`).join('') || '<tr><td colspan="6"><small>Нет данных</small></td></tr>'}</table></div></div>
+   <div class="card"><h3>Причины проигрыша сделок</h3><div class="tbl-scroll"><table><tr><th>Причина</th><th>Число</th><th>Сумма потерь</th></tr>${a.byLoss.map(x => `<tr><td>${esc(x.name || 'Не указана')}</td><td>${x.count}</td><td><b>${fmt(x.sum)}</b></td></tr>`).join('') || '<tr><td colspan="3"><small>Сделок в отказе нет</small></td></tr>'}</table></div></div>
   </div></div>`;
 }
 async function setSalesPlan(e) {
   e.preventDefault(); const target = new FormData(e.target).get('target');
   await api('/api/settings', { method: 'PUT', body: JSON.stringify({ SALES_TARGET: target }) });
   toast('План продаж сохранён'); render(); return false;
+}
+
+/* ---------- рассылки ---------- */
+// Статус рассылки словами и цветом: очередь и отправка — «в работе» (оранжевый),
+// готово — зелёный, отмена — серый.
+const CAMPAIGN_STATUS = {
+  scheduled: ['Запланирована', 'orange'], queued: ['В очереди', 'orange'], running: ['Отправляется', 'orange'],
+  done: ['Завершена', ''], canceled: ['Отменена', 'grey']
+};
+const campaignStatusTag = c => { const [t, cls] = CAMPAIGN_STATUS[c.status] || [c.status, 'grey']; return `<span class="tag ${cls}">${esc(t)}</span>`; };
+function fmtSchedule(iso) {
+  if (!iso) return '';
+  const m = String(iso).match(/^(\d{4})-(\d{2})-(\d{2})[T ](\d{2}):(\d{2})/);
+  return m ? `${m[3]}.${m[2]}.${m[1]} ${m[4]}:${m[5]}` : String(iso);
+}
+async function campaignsView(v) {
+  const list = await api('/api/campaigns');
+  const can = ['admin', 'manager'].includes(state.me?.role);
+  const features = state.meta?.features || {};
+  v.innerHTML = `${viewerNote()}<div class="card toolbar">
+    <b>Одно сообщение — сразу многим клиентам</b>
+    <span class="tag grey" title="Сколько рассылок создано">Рассылок: ${list.length}</span>
+    ${can ? `<button class="btn primary sm" style="margin-left:auto" onclick="openCampaign()">${icon('plus', 14)} Новая рассылка</button>` : ''}
+  </div>
+  ${list.length ? `<div class="card"><div class="tbl-scroll"><table>
+    <tr><th>Название</th><th>Канал</th><th>Статус</th><th>Получателей</th><th>Отправлено</th><th>С ошибками</th><th>Когда</th><th>Кто создал</th></tr>
+    ${list.map(c => `<tr>
+      <td><a href="#" onclick="openCampaignCard(${c.id});return false">${esc(c.name)}</a></td>
+      <td>${c.channel === 'email' ? 'Почта' : 'WhatsApp'}</td>
+      <td>${campaignStatusTag(c)}</td>
+      <td>${c.total}</td>
+      <td class="green">${c.sent || 0}</td>
+      <td>${c.failed ? `<b class="red">${c.failed}</b>` : '0'}</td>
+      <td>${c.scheduled_at ? esc(fmtSchedule(c.scheduled_at)) : 'сразу'}</td>
+      <td>${esc(c.created_by || '—')}</td>
+    </tr>`).join('')}
+  </table></div></div>`
+  : `<div class="card"><p>Рассылок пока нет. Рассылка — это одно сообщение сразу многим клиентам: вы выбираете, кому (по источнику, тегу, ответственному или сделке), через какой канал (WhatsApp или почта) и когда (сразу или по расписанию). Каждое сообщение сохраняется в переписке клиента.</p>
+    ${!features.wazzup && !features.email ? '<p class="form-hint">Сначала подключите канал: WhatsApp — Настройки → Интеграции → Wazzup, почту — Настройки → Интеграции → Почта (SMTP).</p>' : ''}</div>`}`;
+}
+function campaignForm(f) {
+  const fd = new FormData(f);
+  const a = {};
+  for (const k of ['source', 'tag', 'owner_id', 'pipeline_id', 'stage']) {
+    const val = String(fd.get(k) || '').trim();
+    if (val) a[k] = ['owner_id', 'pipeline_id'].includes(k) ? Number(val) : val;
+  }
+  return {
+    name: String(fd.get('name') || ''), channel: String(fd.get('channel') || 'whatsapp'),
+    subject: String(fd.get('subject') || ''), message: String(fd.get('message') || ''),
+    audience: a, when: String(fd.get('when') || 'now'), scheduled_at: String(fd.get('scheduled_at') || '')
+  };
+}
+async function openCampaign() {
+  const features = state.meta?.features || {};
+  const waOk = !!features.wazzup, mailOk = !!features.email;
+  if (!waOk && !mailOk) return toast('Подключите канал отправки: WhatsApp (Wazzup) или почту (SMTP) — Настройки → Интеграции', 'err');
+  const users = await api('/api/users').catch(() => []);
+  const pipes = await api('/api/pipelines').catch(() => []);
+  window.__campPipes = pipes;
+  const sources = state.meta?.sources || [];
+  const channel = waOk ? 'whatsapp' : 'email';
+  openModal(`<div class="modal-head"><h3>Новая рассылка</h3></div>
+  <form onsubmit="return campaignSubmit(event)">
+    <label>Название <b>*</b><input name="name" required maxlength="120" placeholder="Например: Приглашение на день открытых домов"></label>
+    <div class="form-grid2">
+      <label>Канал <b>*</b><select name="channel" onchange="campaignChannel(this.value)">
+        <option value="whatsapp" ${waOk ? '' : 'disabled'} ${channel === 'whatsapp' ? 'selected' : ''}>WhatsApp${waOk ? '' : ' — не подключён'}</option>
+        <option value="email" ${mailOk ? '' : 'disabled'} ${channel === 'email' ? 'selected' : ''}>Почта${mailOk ? '' : ' — не настроена'}</option>
+      </select></label>
+      <label id="campSubjectWrap" style="${channel === 'email' ? '' : 'display:none'}">Тема письма<input name="subject" maxlength="200" placeholder="Например: Предложение по вашему участку"></label>
+    </div>
+    <label>Текст сообщения <b>*</b><textarea name="message" rows="5" required maxlength="4000" placeholder="Здравствуйте, {имя}!"></textarea>
+      <small class="form-hint">{имя} заменится именем клиента. В WhatsApp получат только те, у кого заполнен телефон и кто уже переписывался с вами или дал номер; в почтовой рассылке — у кого указан e-mail.</small></label>
+    <p style="margin:14px 0 6px"><b>Кому отправить</b> <small class="form-hint">фильтры сужают сегмент, пустые — значит «все клиенты»</small></p>
+    <div class="form-grid2">
+      <label>Источник<select name="source"><option value="">Любой</option>${sources.map(x => `<option value="${esc(x)}">${esc(sourceLabel(x))}</option>`).join('')}</select></label>
+      <label>Тег<input name="tag" maxlength="60" placeholder="Например: франшиза"></label>
+      <label>Ответственный<select name="owner_id"><option value="">Любой</option>${users.map(x => `<option value="${x.id}">${esc(x.name)}</option>`).join('')}</select></label>
+      <label>Воронка<select name="pipeline_id" onchange="campaignStages(this.value)"><option value="">Любая</option>${pipes.map(pl => `<option value="${pl.id}">${esc(pl.name)}</option>`).join('')}</select></label>
+      <label>Этап сделки<select name="stage" id="campStage"><option value="">Любой</option></select></label>
+    </div>
+    <div class="form-grid2">
+      <label>Когда отправить<select name="when" onchange="document.getElementById('campWhenWrap').style.display=this.value==='later'?'':'none'">
+        <option value="now">Сразу после создания</option>
+        <option value="later">По расписанию</option>
+      </select></label>
+      <span id="campWhenWrap" style="display:none"><label>Дата и время<input type="datetime-local" name="scheduled_at"></label></span>
+    </div>
+    <p><button type="button" class="btn sm" onclick="campaignPreview(event)">Посчитать получателей</button> <span id="campCount" class="form-hint"></span></p>
+    <div class="row" style="border:0;justify-content:flex-end">
+      <button type="button" class="btn" onclick="closeModal()">Отмена</button>
+      <button class="btn primary" type="submit">Создать рассылку</button>
+    </div>
+  </form>`);
+}
+function campaignChannel(k) {
+  const wrap = document.getElementById('campSubjectWrap');
+  if (wrap) wrap.style.display = k === 'email' ? '' : 'none';
+  const cnt = document.getElementById('campCount');
+  if (cnt) cnt.textContent = '';
+}
+function campaignStages(pid) {
+  const sel = document.getElementById('campStage');
+  if (!sel) return;
+  const pl = (window.__campPipes || []).find(x => String(x.id) === String(pid));
+  sel.innerHTML = '<option value="">Любой</option>' + ((pl?.stages || []).map(st => `<option value="${esc(st.code)}">${esc(st.name)}</option>`).join(''));
+}
+async function campaignPreview(e) {
+  const b = campaignForm(e.target.closest('form'));
+  const r = await api('/api/campaigns/preview', { method: 'POST', body: JSON.stringify({ channel: b.channel, audience: b.audience }) });
+  const el = document.getElementById('campCount');
+  if (el) el.textContent = r.count ? `Подходит получателей: ${r.count}` : 'Под фильтр никто не подходит — проверьте сегмент или канал';
+}
+async function campaignSubmit(e) {
+  e.preventDefault();
+  const b = campaignForm(e.target);
+  const body = { name: b.name, channel: b.channel, subject: b.subject, message: b.message, audience: b.audience };
+  if (b.when === 'later') {
+    if (!b.scheduled_at) { toast('Выберите дату и время отправки', 'err'); return false; }
+    body.scheduled_at = b.scheduled_at;
+  }
+  await api('/api/campaigns', { method: 'POST', body: JSON.stringify(body) });
+  toast(body.scheduled_at ? 'Рассылка запланирована' : 'Рассылка создана и встанет в очередь');
+  closeModal(); render(); return false;
+}
+const CAMPAIGN_ITEM = { queued: 'В очереди', sent: 'Отправлено', failed: 'Ошибка', canceled: 'Отменено' };
+async function openCampaignCard(id) {
+  const c = await api('/api/campaigns/' + id);
+  const can = ['admin', 'manager'].includes(state.me?.role);
+  const items = c.items || [];
+  const shown = items.slice(0, 200);
+  const pct = c.total ? Math.round((c.sent || 0) / c.total * 100) : 0;
+  openModal(`<div class="modal-head"><h3>Рассылка «${esc(c.name)}»</h3>${can ? `<span class="row" style="border:0;margin:0">
+      ${c.status === 'scheduled' ? `<button class="btn sm primary" onclick="campaignAct(${c.id},'start')">Отправить сейчас</button>` : ''}
+      ${['scheduled', 'queued', 'running'].includes(c.status) ? `<button class="btn sm" onclick="campaignAct(${c.id},'cancel')">Отменить</button>` : ''}
+      ${state.me?.role === 'admin' ? `<button class="btn sm danger" onclick="campaignDelete(${c.id})">Удалить</button>` : ''}</span>` : ''}</div>
+    <p>${campaignStatusTag(c)} канал: ${c.channel === 'email' ? 'почта' : 'WhatsApp'}${c.scheduled_at ? ', по расписанию ' + esc(fmtSchedule(c.scheduled_at)) : ''}${c.created_by ? ', создал(а) ' + esc(c.created_by) : ''}</p>
+    <div class="bar" title="Отправлено ${c.sent || 0} из ${c.total}"><i style="width:${pct}%"></i></div>
+    <p class="form-hint" style="margin-top:-6px">Получателей: ${c.total} · отправлено: ${c.sent || 0} · с ошибками: ${c.failed || 0}${items.length > shown.length ? ` · показаны первые ${shown.length}` : ''}</p>
+    <p><b>Текст:</b><br>${esc(c.message).replace(/\n/g, '<br>')}</p>
+    <div class="tbl-scroll"><table>
+      <tr><th>Клиент</th><th>Адрес</th><th>Статус</th><th>Когда</th></tr>
+      ${shown.map(it => `<tr><td>${esc(it.contact_name || '—')}</td><td>${esc(it.address || '')}</td>
+        <td>${it.status === 'failed' && it.error ? `<span class="tag orange" title="${esc(it.error)}">Ошибка</span>` : `<span class="tag ${it.status === 'sent' ? '' : 'grey'}">${esc(CAMPAIGN_ITEM[it.status] || it.status)}</span>`}</td>
+        <td>${it.sent_at ? esc(fmtSchedule(it.sent_at)) : ''}</td></tr>`).join('') || '<tr><td colspan="4"><small>Получателей нет</small></td></tr>'}
+    </table></div>`);
+}
+async function campaignAct(id, action) {
+  await api(`/api/campaigns/${id}/${action}`, { method: 'POST', body: '{}' });
+  toast(action === 'start' ? 'Рассылка запущена' : 'Рассылка отменена');
+  openCampaignCard(id); render();
+}
+function campaignDelete(id) {
+  askConfirm('Удалить рассылку вместе с историей отправки? Отправленные сообщения останутся в переписке клиентов.', async () => {
+    await api('/api/campaigns/' + id, { method: 'DELETE' });
+    toast('Рассылка удалена'); closeModal(); render();
+  }, { okText: 'Удалить' });
+}
+
+/* ---------- контроль качества ---------- */
+async function qualityView(v) {
+  const days = state.qDays || 30;
+  const d = await api('/api/quality?days=' + days);
+  const t = d.totals || {};
+  const verdictColor = score => score >= 85 ? 'var(--green)' : score >= 70 ? '#65a30d' : score >= 50 ? 'var(--orange)' : 'var(--danger)';
+  v.innerHTML = `<div class="card toolbar">
+    <b>Период:</b>
+    <span class="tabs" style="margin:0">${[7, 30, 90].map(n => `<button class="${days === n ? 'active' : ''}" onclick="setQualityDays(${n})">${n === 7 ? 'Неделя' : n === 30 ? '30 дней' : '90 дней'}</button>`).join('')}</span>
+    <span class="tag grey" title="Никто не заполняет отчёты руками — всё считается из переписки и сделок">Считается автоматически</span>
+  </div>
+  <div class="grid">
+    <div class="kpi"><i>${icon('inbox', 20)}</i><span>Сообщений без ответа</span><b class="${t.unanswered ? 'red' : 'green'}">${t.unanswered ?? 0}</b><small>клиенты ждут ответа</small></div>
+    <div class="kpi"><i>${icon('clock', 20)}</i><span>Медиана первого ответа</span><b>${t.medianResponseMin === null || t.medianResponseMin === undefined ? '—' : t.medianResponseMin + ' мин'}</b><small>по всем сотрудникам</small></div>
+    <div class="kpi"><i>${icon('pipe', 20)}</i><span>Сделки без движения</span><b>${t.stalled ?? 0}</b><small>больше 14 дней на этапе</small></div>
+    <div class="kpi"><i>${icon('tasks', 20)}</i><span>Просроченные задачи</span><b class="${t.overdueTasks ? 'red' : ''}">${t.overdueTasks ?? 0}</b><small>открытые, срок прошёл</small></div>
+  </div>
+  <div class="card"><h3>Оценка по сотрудникам</h3>
+    <div class="tbl-scroll"><table>
+      <tr><th>Сотрудник</th><th>Оценка</th><th>Вывод</th><th>Сделок</th><th>Успех</th><th>Отказ</th><th>Конверсия</th><th>Без ответа</th><th>Ответ, мин</th><th>Без движения</th><th>Просрочено</th></tr>
+      ${(d.managers || []).map(m => `<tr>
+        <td>${esc(m.name)}</td>
+        <td><b style="color:${verdictColor(m.score)}">${m.score}</b></td>
+        <td>${esc(m.verdict)}</td>
+        <td>${m.deals}</td>
+        <td class="green">${m.won}</td>
+        <td>${m.lost}</td>
+        <td>${m.conversion === null ? '—' : m.conversion + '%'}</td>
+        <td>${m.unanswered ? `<b class="red">${m.unanswered}</b>` : '0'}</td>
+        <td>${m.medianResponseMin === null ? '—' : m.medianResponseMin}</td>
+        <td>${m.stalled || '0'}</td>
+        <td>${m.overdueTasks || '0'}</td>
+      </tr>`).join('') || '<tr><td colspan="11"><small>Активных менеджеров нет</small></td></tr>'}
+    </table></div></div>
+  <div class="card"><h3>Как считается оценка</h3>
+    <p class="form-hint" style="margin-top:-2px">Старт — 100 баллов. Баллы снимаются за то, что мешает продаже:</p>
+    <ul>${(d.factors || []).map(f => `<li>${esc(f)}</li>`).join('')}</ul>
+    <p class="form-hint">Оценка показывает, где клиент ждёт, а сделка стоит. Разбор конкретного случая — в карточке сделки и в переписке клиента.</p>
+  </div>`;
+}
+function setQualityDays(n) { state.qDays = n; render(); }
+
+/* ---------- обучение ---------- */
+const TRAINING_KIND = { text: ['Статья', 'file'], video: ['Видео', 'eye'], link: ['Ссылка', 'paperclip'] };
+async function trainingView(v) {
+  const list = await api('/api/training');
+  state.cache.training = list;
+  const isAdmin = state.me?.role === 'admin';
+  v.innerHTML = `<div class="card toolbar">
+    <b>Материалы для партнёров и команды</b>
+    <span class="tag grey" title="Сколько материалов в портале">Материалов: ${list.length}</span>
+    ${isAdmin ? `<button class="btn primary sm" style="margin-left:auto" onclick="openTrainingEditor()">${icon('plus', 14)} Добавить материал</button>` : ''}
+  </div>
+  ${list.length ? `<div class="grid train-grid">${list.map(t => {
+    const kind = TRAINING_KIND[t.kind] || TRAINING_KIND.text;
+    const url = siteHref(t.url);
+    return `<div class="card train-card">
+      <p class="form-hint" style="margin:0 0 6px">${icon(kind[1], 15)} ${esc(kind[0])}</p>
+      <h3 style="margin:0 0 6px">${esc(t.title)}</h3>
+      ${t.kind === 'text'
+        ? `<p class="train-excerpt">${esc(String(t.body || '').slice(0, 140))}${String(t.body || '').length > 140 ? '…' : ''}</p>`
+        : `<p class="train-excerpt form-hint">${esc(url)}</p>`}
+      <div class="row" style="border:0;margin-top:10px">
+        ${t.kind === 'text'
+          ? `<button class="btn sm" onclick="openTraining(${t.id})">Читать</button>`
+          : url
+            ? `<a class="btn sm" href="${esc(url)}" target="_blank" rel="noopener">${t.kind === 'video' ? 'Смотреть' : 'Открыть'}</a>`
+            : '<span class="tag grey">Адрес не указан</span>'}
+        ${isAdmin ? `<button class="btn sm" onclick="openTrainingEditor(${t.id})">Изменить</button>
+          <button class="btn sm danger" onclick="trainingDelete(${t.id})">Удалить</button>` : ''}
+      </div>
+    </div>`;
+  }).join('')}</div>`
+  : `<div class="card"><p>Материалов пока нет.${isAdmin ? ' Добавьте первый: статью, видео или ссылку — партнёры и сотрудники увидят их в этом разделе.' : ' Когда администратор добавит материалы, они появятся здесь.'}</p></div>`}`;
+}
+async function openTraining(id) {
+  const t = (await api('/api/training')).find(x => x.id === id);
+  if (!t) return toast('Материал не найден — обновите страницу', 'err');
+  openModal(`<div class="modal-head"><h3>${esc(t.title)}</h3></div>
+    <div class="train-body">${esc(t.body).replace(/\n/g, '<br>')}</div>`);
+}
+async function openTrainingEditor(id) {
+  if (state.me?.role !== 'admin') return;
+  const t = id ? await api('/api/training/' + id) : null;
+  if (id && !t) return toast('Материал не найден — обновите страницу', 'err');
+  const isText = !t || t.kind === 'text';
+  openModal(`<div class="modal-head"><h3>${t ? 'Материал' : 'Новый материал'}</h3></div>
+  <form onsubmit="return trainingSubmit(event,${id || 0})">
+    <label>Название <b>*</b><input name="title" required maxlength="140" value="${esc(t?.title || '')}" placeholder="Например: Как проходит сделка"></label>
+    <label>Тип<select name="kind" onchange="trainingKind(this.value)">
+      <option value="text" ${isText ? 'selected' : ''}>Статья — текст читается в CRM</option>
+      <option value="video" ${t?.kind === 'video' ? 'selected' : ''}>Видео — ссылка на ролик</option>
+      <option value="link" ${t?.kind === 'link' ? 'selected' : ''}>Ссылка — открывается в новой вкладке</option>
+    </select></label>
+    <label id="trainBodyWrap" style="${isText ? '' : 'display:none'}">Текст<textarea name="body" rows="10" maxlength="50000" placeholder="Текст статьи: абзацы переносятся как есть">${esc(t?.body || '')}</textarea></label>
+    <label id="trainUrlWrap" style="${isText ? 'display:none' : ''}">Адрес (https://…)<input name="url" maxlength="500" value="${esc(t?.url || '')}" placeholder="https://"></label>
+    <label>Порядок в списке<input name="sort" type="number" value="${t?.sort ?? 0}"><small class="form-hint">Меньшее число — выше в списке</small></label>
+    <div class="row" style="border:0;justify-content:flex-end">
+      <button type="button" class="btn" onclick="closeModal()">Отмена</button>
+      <button class="btn primary" type="submit">Сохранить</button>
+    </div>
+  </form>`);
+}
+function trainingKind(k) {
+  const text = k === 'text';
+  const bw = document.getElementById('trainBodyWrap'), uw = document.getElementById('trainUrlWrap');
+  if (bw) bw.style.display = text ? '' : 'none';
+  if (uw) uw.style.display = text ? 'none' : '';
+}
+async function trainingSubmit(e, id) {
+  e.preventDefault();
+  const f = new FormData(e.target);
+  const b = { title: String(f.get('title') || ''), kind: String(f.get('kind') || 'text'), body: String(f.get('body') || ''), url: String(f.get('url') || '').trim(), sort: Number(f.get('sort')) || 0 };
+  if (id) await api('/api/training/' + id, { method: 'PATCH', body: JSON.stringify(b) });
+  else await api('/api/training', { method: 'POST', body: JSON.stringify(b) });
+  toast('Материал сохранён'); closeModal(); render(); return false;
+}
+function trainingDelete(id) {
+  askConfirm('Удалить материал из обучения?', async () => {
+    await api('/api/training/' + id, { method: 'DELETE' });
+    toast('Материал удалён'); render();
+  }, { okText: 'Удалить' });
 }
 
 /* ---------- competitors view ---------- */
@@ -3635,6 +3935,7 @@ async function settings(v) {
       <p><small><b>Администратор</b> — всё: настройки, команда, интеграции, воронки, свои поля, каталог (он же прайс-лист), резервные копии.</small></p>
       <p><small><b>Менеджер</b> — клиенты, компании, сделки, задачи, заметки, все чаты, каталог (смотрит и берёт позиции в сделки), шаблоны сообщений и проверка конкурентов. E-mail коллег ему не показывается.</small></p>
       <p><small><b>Наблюдатель</b> — только просмотр и выгрузки: руководитель или бухгалтер видит цифры, но ничего не меняет.</small></p>
+      <p><small><b>Партнёр</b> — отдельный вход для партнёра или франчайзи: он видит только воронку по своим лидам и раздел «Обучение». Чужие клиенты, сделки, аналитика и настройки ему недоступны; назначьте партнёра ответственным в сделке или карточке клиента — и они появятся у него в списке.</small></p>
       <hr><p><small><b>Первый вход.</b> После создания сотрудника CRM показывает данные для входа одним окном — скопируйте и передайте их лично. При первом входе человек задаёт свой пароль (от 12 символов), а выданный вами перестаёт работать.</small></p>
       <p><small><b>Уволился сотрудник?</b> Снимите галочку «Сотрудник может входить в CRM» — все его сеансы завершатся сразу. Карточки и переписка останутся в базе; сделки и задачи можно передать другому человеку массовым действием.</small></p></div></div></div>`;
   } else if (state.settingsTab === 'data') {
@@ -3667,6 +3968,9 @@ async function settings(v) {
        </form>
        </div>
     </div><div>
+     <div class="card"><h3>Файл настроек</h3>
+      <p><small>Всё, что сохранено в настройках, автоматически дублируется в файл <b>data/settings.env</b>. При переносе на другой сервер или восстановлении пустой базы CRM возьмёт недостающие значения из этого файла: адреса интеграций, ключи и параметры не придётся вводить заново. Файл обновляется сам; база данных остаётся главным хранилищем.</small></p>
+     </div>
      <div class="card"><h3>Резервные копии базы</h3>
        <div style="display:flex;gap:8px;flex-wrap:wrap"><button class="btn primary sm" onclick="makeBackup()">${icon('plus', 13)} Создать копию сейчас</button>
        <button class="btn sm" onclick="download('/api/export/json','karkas-backup.json')" title="Текстовый файл со всеми данными — для переноса в другую программу">${icon('download', 13)} Скачать все данные</button></div>
@@ -4104,7 +4408,7 @@ async function openUser(id) {
      ${fld('E-mail', `<input name="email" type="email" required value="${esc(x.email || '')}">`, true)}`)}
    ${fld(id ? 'Новый пароль (оставьте пустым, чтобы не менять)' : 'Пароль (мин. 12 символов)', `<div class="pw-wrap"><input name="password" type="password" minlength="12" autocomplete="new-password" ${id ? '' : 'required'} placeholder="минимум 12 знаков"><button type="button" class="pw-eye" title="Показать/скрыть пароль" onclick="togglePass(this)">${icon('eye', 16)}</button></div>`, !id)}
    <button type="button" class="btn w" onclick="generateUserPassword(this.form)">Сгенерировать пароль</button>
-   ${fld('Роль', `<select name="role">${Object.entries({ admin: 'Администратор — всё, включая настройки', manager: 'Менеджер — клиенты, сделки, задачи, чаты', viewer: 'Наблюдатель — только просмотр' }).map(([k, n]) => `<option value="${k}" ${k === (x.role || 'manager') ? 'selected' : ''}>${n}</option>`).join('')}</select>`)}
+   ${fld('Роль', `<select name="role">${Object.entries({ admin: 'Администратор — всё, включая настройки', manager: 'Менеджер — клиенты, сделки, задачи, чаты', viewer: 'Наблюдатель — только просмотр', partner: 'Партнёр — только свои лиды и обучение' }).map(([k, n]) => `<option value="${k}" ${k === (x.role || 'manager') ? 'selected' : ''}>${n}</option>`).join('')}</select>`)}
    <label style="display:flex;gap:8px;align-items:center"><input type="checkbox" name="active" style="width:auto" ${x.active === 0 ? '' : 'checked'}> Сотрудник может входить в CRM</label>
    <p><small>Сохраните пароль и передайте сотруднику по защищённому каналу. Он сможет изменить его в профиле.</small></p>
    <button class="btn primary w">Сохранить</button></form>`);
@@ -4351,7 +4655,10 @@ const PALETTE_ACTIONS = [
     { ico: 'companies', title: 'Компании', hint: 'юридические лица', run: () => go('companies') },
     { ico: 'products', title: 'Каталог', hint: 'он же прайс-лист: дома, проекты и опции', run: () => go('products') },
     { ico: 'analytics', title: 'Аналитика', hint: 'воронка и план продаж', run: () => go('analytics') },
+    { ico: 'quality', title: 'Качество', hint: 'оценка работы менеджеров для РОПа', roles: ['admin'], run: () => go('quality') },
+    { ico: 'campaigns', title: 'Рассылки', hint: 'сообщения клиентам по сегментам', roles: ['admin', 'manager'], run: () => go('campaigns') },
     { ico: 'competitors', title: 'Конкуренты', hint: 'разведка и проверка', run: () => go('competitors') },
+    { ico: 'training', title: 'Обучение', hint: 'материалы для партнёров и команды', run: () => go('training') },
     { ico: 'settings', title: 'Настройки', hint: 'интеграции и права', run: () => go('settings') }
   ]},
   // edit: группу видят только роли с правом изменений — зрителю сервер всё
@@ -4380,7 +4687,7 @@ function paletteCommands(query = '') {
   const res = [];
   for (const g of PALETTE_ACTIONS) {
     if (g.edit && !canEdit()) continue;
-    const matched = g.items.filter(it => !q || (it.title + ' ' + (it.hint || '')).toLowerCase().includes(q));
+    const matched = g.items.filter(it => (!it.roles || it.roles.includes(state.me?.role)) && (!q || (it.title + ' ' + (it.hint || '')).toLowerCase().includes(q)));
     if (matched.length) res.push({ group: g.group, items: matched });
   }
   return res;
@@ -4511,11 +4818,15 @@ const VIEW_TABLES = {
   products: ['products'],
   analytics: ['deals', 'contacts', 'pipelines', 'users'],
   competitors: ['competitors', 'products'],
+  campaigns: ['campaigns', 'contacts'],
+  quality: ['deals', 'tasks', 'users'],
+  training: ['training_items'],
   settings: [], // формы настроек события не дёргают: заполнение не сбивается;
   // список «Команда» обновляется адресной веткой ниже
 };
 const KNOWN_TABLES = new Set(['tasks', 'deals', 'contacts', 'companies', 'products', 'templates',
-  'automations', 'notes', 'pipelines', 'competitors', 'channels', 'conversations', 'settings', 'users']);
+  'automations', 'notes', 'pipelines', 'competitors', 'channels', 'conversations', 'settings', 'users',
+  'campaigns', 'training_items']);
 // Чаты обновляются только на событиях, которые их касаются: диалог взял
 // коллега, изменилась карточка клиента, канал или шаблон ответа. Ценник,
 // задачи и доска сделок переписку не перечитывают.

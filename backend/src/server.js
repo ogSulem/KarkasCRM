@@ -104,6 +104,9 @@ CREATE TABLE IF NOT EXISTS read_marks(user_id INTEGER NOT NULL,conversation_id I
   last_msg_id INTEGER NOT NULL DEFAULT 0,updated_at TEXT DEFAULT (datetime('now')),PRIMARY KEY(user_id,conversation_id));
 CREATE TABLE IF NOT EXISTS activities(id INTEGER PRIMARY KEY,text TEXT,entity_type TEXT,entity_id INTEGER,user_name TEXT,feed INTEGER DEFAULT 1,created_at TEXT DEFAULT (datetime('now')));
 CREATE TABLE IF NOT EXISTS automation_queue(id INTEGER PRIMARY KEY,automation_id INTEGER,trigger_type TEXT,deal_id INTEGER,contact_id INTEGER,run_at TEXT,quiet INTEGER DEFAULT 0,created_at TEXT DEFAULT (datetime('now')));
+CREATE TABLE IF NOT EXISTS campaigns(id INTEGER PRIMARY KEY,name TEXT NOT NULL,channel TEXT NOT NULL DEFAULT 'whatsapp',subject TEXT DEFAULT '',message TEXT NOT NULL,audience TEXT DEFAULT '{}',status TEXT NOT NULL DEFAULT 'scheduled',scheduled_at TEXT,created_by TEXT DEFAULT '',created_by_id INTEGER,total INTEGER DEFAULT 0,sent INTEGER DEFAULT 0,failed INTEGER DEFAULT 0,created_at TEXT DEFAULT (datetime('now')));
+CREATE TABLE IF NOT EXISTS campaign_items(id INTEGER PRIMARY KEY,campaign_id INTEGER REFERENCES campaigns(id) ON DELETE CASCADE,contact_id INTEGER,address TEXT DEFAULT '',status TEXT NOT NULL DEFAULT 'queued',error TEXT DEFAULT '',sent_at TEXT);
+CREATE TABLE IF NOT EXISTS training_items(id INTEGER PRIMARY KEY,title TEXT NOT NULL,kind TEXT DEFAULT 'text',body TEXT DEFAULT '',url TEXT DEFAULT '',sort INTEGER DEFAULT 0,created_at TEXT DEFAULT (datetime('now')));
 `);
 // мягкие миграции: дополняем ранее созданные таблицы недостающими колонками
 const SCHEMA = [
@@ -175,6 +178,7 @@ for (const [t, c, d] of SCHEMA_COLUMNS) {
   const cols = db.prepare(`PRAGMA table_info(${t})`).all().map(r => r.name); if (!cols.includes(c)) db.exec(`ALTER TABLE ${t} ADD COLUMN ${c} ${d}`);
 }
 if (missingColumns.length && !freshDb) console.log(`Схема базы обновлена: заполнено полей — ${missingColumns.length}`);
+seedSettingsFromFile();
 // индексы создаём ПОСЛЕ миграций: иначе база прошлой версии упадёт на отсутствующей колонке
 db.exec(`
 CREATE INDEX IF NOT EXISTS idx_msg_conv ON messages(conversation_id,id);
@@ -204,7 +208,7 @@ CREATE INDEX IF NOT EXISTS idx_conv_external ON conversations(external_chat_id);
 `);
 try { db.exec('CREATE UNIQUE INDEX IF NOT EXISTS idx_msg_ext ON messages(external_id) WHERE external_id IS NOT NULL'); }
 catch (e) { console.error('Не удалось создать уникальный индекс по external_id (в базе есть дубли внешних id):', e.message); }
-const SCHEMA_VERSION = 7;
+const SCHEMA_VERSION = 8;
 
 // Дата в местном часовом поясе (в базе время хранится в UTC, а сроки задач —
 // в местном настенном времени; сравнивать их с UTC-«сегодня» нельзя).
@@ -332,7 +336,51 @@ function clientIp(req) {
   const list = String(req.headers['x-forwarded-for'] || '').split(',').map(x => x.trim()).filter(Boolean);
   return list.length ? list[list.length - 1] : remote;
 }
-const setSetting = (k, v) => db.prepare('INSERT INTO settings(key,value) VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value').run(k, String(v ?? ''));
+const setSetting = (k, v) => { db.prepare('INSERT INTO settings(key,value) VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value').run(k, String(v ?? '')); scheduleSettingsMirror(); };
+// Файл-копия настроек: всё, что сохранено в «Настройках», дополнительно пишется
+// в data/settings.env. При старте файл дополняет базу ключами, которых в ней
+// нет: при переносе на новый сервер или пересозданной базе адреса интеграций,
+// ключи и параметры возвращаются без ручного ввода. Источник истины — база:
+// значение, сохранённое через интерфейс, тут же перезаписывает строку файла.
+const SETTINGS_FILE = join(DATA_DIR, 'settings.env');
+let settingsMirrorTimer = 0;
+function scheduleSettingsMirror() {
+  clearTimeout(settingsMirrorTimer);
+  settingsMirrorTimer = setTimeout(mirrorSettingsToFile, 400);
+  settingsMirrorTimer.unref?.(); // тесты и завершение процесса не ждут копию
+}
+export function mirrorSettingsToFile() {
+  try {
+    const rows = db.prepare('SELECT key,value FROM settings ORDER BY key').all();
+    const lines = ['# Настройки КаркасCRM — автоматическая копия значений, сохранённых в интерфейсе.',
+      '# База остаётся источником истины; при старте файл дополняет базу недостающими ключами.',
+      ...rows.map(r => `${r.key}=${JSON.stringify(String(r.value ?? ''))}`)];
+    const tmp = SETTINGS_FILE + '.part';
+    writeFileSync(tmp, lines.join('\n') + '\n', 'utf8');
+    renameSync(tmp, SETTINGS_FILE);
+  } catch (e) { console.error('Не удалось сохранить копию настроек в settings.env:', e.message); }
+}
+export function seedSettingsFromFile() {
+  try {
+    if (!existsSync(SETTINGS_FILE)) return 0;
+    const ins = db.prepare('INSERT OR IGNORE INTO settings(key,value) VALUES(?,?)');
+    let n = 0;
+    for (const line of readFileSync(SETTINGS_FILE, 'utf8').split('\n')) {
+      const t = line.trim();
+      if (!t || t.startsWith('#')) continue;
+      const i = t.indexOf('=');
+      if (i < 1) continue;
+      const key = t.slice(0, i).trim();
+      if (!/^[A-Za-z0-9_]+$/.test(key)) continue;
+      let val = t.slice(i + 1).trim();
+      if (val.startsWith('"')) { try { val = JSON.parse(val); } catch { val = val.replace(/^"|"$/g, ''); } }
+      const r = ins.run(key, String(val));
+      if (r.changes) n++;
+    }
+    if (n) console.log(`Настройки дополнены из settings.env: ${n} ключ${n === 1 ? '' : 'ей'}`);
+    return n;
+  } catch (e) { console.error('Не удалось прочитать settings.env:', e.message); return 0; }
+}
 // feed=0 — строка остаётся в истории карточек, но не показывается в ленте
 // «Последние события компании» на рабочем столе: там нужны действия людей,
 // а не поток событий из чатов
@@ -537,6 +585,94 @@ const wzHookHuman = v => v ? ruDate(v) + ' ' + String(v).slice(11, 16) : '';
 
 // Одно действие правила. Отдельной функцией — потому что его выполняют и сразу,
 // и по очереди, если задана выдержка.
+// ----- рассылки -----
+// Сегмент получателей: фильтр по источнику, тегу, владельцу и сделке.
+// Адрес берётся готовый — нормализованный телефон или e-mail; пустые отсекаются.
+function campaignRecipients(aud, channel) {
+  const a = aud && typeof aud === 'object' ? aud : {};
+  const where = [], params = [];
+  if (a.source) { where.push('c.source=?'); params.push(String(a.source).slice(0, 60)); }
+  if (a.tag) { where.push("(',' || REPLACE(c.tags,' ','') || ',') LIKE ?"); params.push(`%,${String(a.tag).replace(/[,%]/g, '').slice(0, 60)},%`); }
+  if (a.owner_id) { where.push('c.responsible_id=?'); params.push(Number(a.owner_id)); }
+  if (a.pipeline_id || a.stage) {
+    where.push('EXISTS(SELECT 1 FROM deals dd WHERE dd.contact_id=c.id' + (a.pipeline_id ? ' AND COALESCE(dd.pipeline_id,1)=?' : '') + (a.stage ? " AND dd.stage<>'' AND dd.stage=?" : '') + ')');
+    if (a.pipeline_id) params.push(Number(a.pipeline_id));
+    if (a.stage) params.push(String(a.stage).slice(0, 60));
+  }
+  const addr = channel === 'email' ? "NULLIF(TRIM(c.email),'')" : 'c.phone_norm';
+  const sql = `SELECT c.id, c.name, ${addr} AS address FROM contacts c ${where.length ? 'WHERE ' + where.join(' AND ') : ''} ORDER BY c.id`;
+  return db.prepare(sql).all(...params).filter(r => r.address);
+}
+// Одно сообщение рассылки: канал, подстановка {имя}, запись в переписку клиента.
+async function campaignSendOne(camp, it) {
+  const contact = db.prepare('SELECT * FROM contacts WHERE id=?').get(it.contact_id);
+  const firstName = String(contact?.name || '').trim().split(/\s+/)[0] || '';
+  const text = String(camp.message).replace(/\{имя\}|\{name\}/giu, firstName).trim();
+  let status = 'failed', error = '';
+  try {
+    if (!contact) throw new Error('Клиент удалён');
+    if (!text) throw new Error('Пустой текст');
+    if (camp.channel === 'email') {
+      if (!contact.email) throw new Error('У клиента нет e-mail');
+      await sendMail({ ...smtpSettings(), to: contact.email, toName: contact.name || undefined, subject: camp.subject || camp.name, text });
+      const conv = db.prepare('SELECT id FROM conversations WHERE contact_id=?').get(contact.id);
+      if (conv) {
+        db.prepare("INSERT INTO messages(conversation_id,channel,direction,body,subject,status,author) VALUES(?,?,?,?,?,'sent','Рассылка')").run(conv.id, 'email', 'out', text, camp.subject || camp.name);
+        db.prepare("UPDATE conversations SET last_at=datetime('now') WHERE id=?").run(conv.id);
+        broadcast('message', { conversation_id: conv.id, direction: 'out' });
+      }
+    } else {
+      let conv = db.prepare('SELECT cv.*,c.phone FROM conversations cv LEFT JOIN contacts c ON c.id=cv.contact_id WHERE cv.contact_id=?').get(contact.id);
+      if (!conv) {
+        const chatId = digits(contact.phone || '');
+        if (!chatId) throw new Error('У клиента нет телефона');
+        const r = db.prepare("INSERT INTO conversations(contact_id,title,channels,channel_id,external_chat_id,chat_type,assigned_id,last_at) VALUES(?,?,?,?,?,?,?,datetime('now'))")
+          .run(contact.id, contact.name || 'Клиент', 'whatsapp', '', chatId, 'whatsapp', contact.responsible_id || null);
+        conv = db.prepare('SELECT cv.*,c.phone FROM conversations cv LEFT JOIN contacts c ON c.id=cv.contact_id WHERE cv.id=?').get(r.lastInsertRowid);
+      }
+      const send = await deliver(conv, conv.chat_type || 'whatsapp', text, { id: camp.created_by_id, name: camp.created_by });
+      if (!send.delivered) throw new Error(send.hint || 'Канал не подключён');
+      db.prepare("INSERT INTO messages(conversation_id,channel,direction,body,status,author) VALUES(?,?,?,?,?,?)")
+        .run(conv.id, conv.chat_type || 'whatsapp', 'out', text, 'sent', 'Рассылка');
+      db.prepare("UPDATE conversations SET last_at=datetime('now') WHERE id=?").run(conv.id);
+      broadcast('message', { conversation_id: conv.id, direction: 'out' });
+    }
+    status = 'sent';
+  } catch (e) { error = String(e.message || e).slice(0, 300); }
+  db.prepare("UPDATE campaign_items SET status=?, error=?, sent_at=datetime('now') WHERE id=?").run(status, error, it.id);
+  db.prepare("UPDATE campaigns SET sent=(SELECT COUNT(*) FROM campaign_items WHERE campaign_id=? AND status='sent'), failed=(SELECT COUNT(*) FROM campaign_items WHERE campaign_id=? AND status='failed') WHERE id=?").run(camp.id, camp.id, camp.id);
+}
+// Очередь рассылок: за такт — небольшая порция, между сообщениями пауза,
+// чтобы мессенджер не принял поток за спам. После перезапуска сервера
+// недоотправленная рассылка продолжается: статус живёт в базе.
+let campaignBusy = false;
+async function campaignTick() {
+  if (campaignBusy) return;
+  campaignBusy = true;
+  try {
+    for (const c of db.prepare("SELECT id,scheduled_at FROM campaigns WHERE status='scheduled' AND scheduled_at IS NOT NULL").all()) {
+      const t = new Date(String(c.scheduled_at));
+      if (!isNaN(t.getTime()) && t.getTime() <= Date.now()) { db.prepare("UPDATE campaigns SET status='queued' WHERE id=?").run(c.id); broadcast('change', { table: 'campaigns' }); }
+    }
+    const camp = db.prepare("SELECT * FROM campaigns WHERE status IN ('queued','running') ORDER BY id LIMIT 1").get();
+    if (!camp) return;
+    if (camp.status === 'queued') { db.prepare("UPDATE campaigns SET status='running' WHERE id=?").run(camp.id); broadcast('change', { table: 'campaigns' }); }
+    const items = db.prepare("SELECT * FROM campaign_items WHERE campaign_id=? AND status='queued' ORDER BY id LIMIT 4").all(camp.id);
+    for (const it of items) {
+      if (db.prepare("SELECT status FROM campaigns WHERE id=?").get(camp.id)?.status === 'canceled') return;
+      await campaignSendOne(camp, it);
+      await new Promise(r => setTimeout(r, camp.channel === 'email' ? 500 : 1200));
+    }
+    const left = db.prepare("SELECT COUNT(*) n FROM campaign_items WHERE campaign_id=? AND status='queued'").get(camp.id).n;
+    if (!left && db.prepare('SELECT status FROM campaigns WHERE id=?').get(camp.id)?.status === 'running') {
+      const cnt = db.prepare("SELECT COALESCE(SUM(status='sent'),0) s, COALESCE(SUM(status='failed'),0) f FROM campaign_items WHERE campaign_id=?").get(camp.id);
+      db.prepare("UPDATE campaigns SET status='done', sent=?, failed=? WHERE id=?").run(cnt.s, cnt.f, camp.id);
+      logActivity(`Рассылка «${camp.name}» завершена: отправлено ${cnt.s}, с ошибками ${cnt.f}`, 'campaigns', camp.id, camp.created_by);
+      broadcast('change', { table: 'campaigns' });
+    }
+  } catch (e) { console.error('Очередь рассылок:', e.message); }
+  finally { campaignBusy = false; }
+}
 async function applyAction(a, ctx) {
   // Правило, сработавшее из чата, не пишется в ленту компании: иначе в активный
   // день на рабочем столе стоят только строки автоматизации. Полная история
@@ -1506,6 +1642,24 @@ const ADMIN_ONLY = [
 const ADMIN_ONLY_HINT = [
   [/^\/api\/prices\/ours(\/.*)?$/, 'Прайс-лист меняет только администратор. Позицию, которой нет в каталоге, можно добавить прямо в сделку.'],
 ];
+// Партнёрский контур: карточка «своя», если партнёр в ней ответственный
+// (сделки, клиенты, задачи) или она привязана к его сделке либо клиенту
+// (заметки, чаты). Проверка используется и в общем шлюзе, и внутри маршрутов.
+export function partnerOwns(user, table, id) {
+  const uid = Number(user.id), tid = Number(id);
+  if (!tid) return false;
+  if (table === 'deals') return !!db.prepare('SELECT 1 x FROM deals WHERE id=? AND responsible_id=?').get(tid, uid);
+  if (table === 'contacts') return !!db.prepare('SELECT 1 x FROM contacts WHERE id=? AND (responsible_id=? OR EXISTS(SELECT 1 FROM deals WHERE contact_id=contacts.id AND responsible_id=?))').get(tid, uid, uid);
+  if (table === 'tasks') return !!db.prepare('SELECT 1 x FROM tasks WHERE id=? AND (responsible_id=? OR EXISTS(SELECT 1 FROM deals WHERE id=tasks.deal_id AND responsible_id=?) OR EXISTS(SELECT 1 FROM contacts WHERE id=tasks.contact_id AND responsible_id=?))').get(tid, uid, uid, uid);
+  if (table === 'notes') { const n = db.prepare('SELECT entity_type,entity_id FROM notes WHERE id=?').get(tid); return !!n && partnerOwns(user, n.entity_type, n.entity_id); }
+  if (table === 'conversations') return !!db.prepare('SELECT 1 x FROM conversations cv JOIN contacts c ON c.id=cv.contact_id WHERE cv.id=? AND (c.responsible_id=? OR EXISTS(SELECT 1 FROM deals WHERE contact_id=c.id AND responsible_id=?))').get(tid, uid, uid);
+  return false;
+}
+function partnerOwnsPath(user, p) {
+  const m = p.match(/^\/api\/(deals|contacts|tasks|notes|conversations)\/(\d+)(\/|$)/);
+  if (!m) return true;
+  return partnerOwns(user, m[1], m[2]);
+}
 function requireAdmin(user, res) { if (user.role !== 'admin') { json(res, 403, { error: 'Только для администратора' }); return false; } return true; }
 // Закрыли повторяющуюся задачу — сразу создаём следующую по расписанию.
 // Отсчёт от сегодня, а не от просроченной даты: закрытая с опозданием задача
@@ -1530,7 +1684,7 @@ function validateUser(b, creating = false) {
   if ((creating || b.name !== undefined) && (typeof b.name !== 'string' || !b.name.trim())) return 'Укажите имя';
   if ((creating || b.email !== undefined) && (typeof b.email !== 'string' || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(b.email.trim()))) return 'Укажите корректный e-mail';
   if ((creating || b.password) && (typeof b.password !== 'string' || b.password.length < 12 || b.password.length > 256)) return 'Пароль должен содержать от 12 до 256 символов';
-  if (b.role !== undefined && !['admin', 'manager', 'viewer'].includes(b.role)) return 'Неизвестная роль';
+  if (b.role !== undefined && !['admin', 'manager', 'viewer', 'partner'].includes(b.role)) return 'Неизвестная роль';
   if (b.active !== undefined && ![0, 1].includes(b.active)) return 'Некорректный статус';
   // длина имени и адреса ограничена: проверка формата пройдена, теперь
   // мегабайты текста не должны попадать в таблицу сотрудников
@@ -1845,7 +1999,7 @@ export const server = http.createServer(async (req, res) => {
     if (p === '/api/me/pref' && req.method === 'PATCH') {
       const b = await readBody(req);
       const v = String(b.view || '');
-      if (!['dashboard', 'pipe', 'inbox', 'contacts', 'companies', 'tasks', 'products', 'competitors', 'analytics', 'settings'].includes(v)) return json(res, 400, { error: 'Неизвестный раздел' });
+      if (!['dashboard', 'pipe', 'inbox', 'contacts', 'companies', 'tasks', 'products', 'competitors', 'analytics', 'settings', 'campaigns', 'quality', 'training'].includes(v)) return json(res, 400, { error: 'Неизвестный раздел' });
       db.prepare('UPDATE users SET pref_view=? WHERE id=?').run(v, user.id);
       return json(res, 200, { ok: true });
     }
@@ -1864,6 +2018,16 @@ export const server = http.createServer(async (req, res) => {
       activeUsers: db.prepare('SELECT COUNT(*) n FROM users WHERE active=1').get().n,
     });
     if (user && p.startsWith('/api/') && user.role === 'viewer' && req.method !== 'GET' && !['/api/me/password', '/api/me/theme', '/api/conversations/read'].includes(p)) return json(res, 403, { error: 'Роль «Наблюдатель» — только просмотр' });
+    // Партнёр: своя учётка, свои лиды и обучающий портал. Аналитика, рассылки,
+    // контроль качества, настройки и чужие карточки закрыты здесь централизованно,
+    // а списки ниже дополнительно фильтруются по владельцу.
+    if (user && user.role === 'partner' && p.startsWith('/api/')) {
+      const PARTNER_GET = [/^\/api\/me$/, /^\/api\/meta$/, /^\/api\/events$/, /^\/api\/training$/, /^\/api\/pipelines$/, /^\/api\/users$/, /^\/api\/deals(\/\d+)?$/, /^\/api\/contacts(\/\d+)?$/, /^\/api\/tasks(\/\d+)?$/, /^\/api\/notes(\/\d+)?$/, /^\/api\/conversations$/, /^\/api\/conversations\/\d+\/messages$/, /^\/api\/custom-fields$/, /^\/api\/prices$/, /^\/api\/products$/];
+      const PARTNER_WRITE = [/^\/api\/me\/(password|theme|pref)$/, /^\/api\/deals(\/\d+)?$/, /^\/api\/contacts(\/\d+)?$/, /^\/api\/tasks(\/\d+)?$/, /^\/api\/notes(\/\d+)?$/, /^\/api\/conversations\/read$/];
+      if (!(req.method === 'GET' || req.method === 'HEAD' ? PARTNER_GET : PARTNER_WRITE).some(re => re.test(p)))
+        return json(res, 403, { error: 'Партнёру доступны его сделки, клиенты, задачи и раздел «Обучение»' });
+      if (!partnerOwnsPath(user, p)) return json(res, 403, { error: 'Это чужая карточка: партнёр видит только свои лиды' });
+    }
     // настройки, команда, воронки, шаблоны, автоматизации, ключи и обслуживание — только администратор
     if (user && user.role !== 'admin' && req.method !== 'GET' && ADMIN_ONLY.some(re => re.test(p))) {
       const hint = ADMIN_ONLY_HINT.find(([re]) => re.test(p));
@@ -1939,7 +2103,7 @@ export const server = http.createServer(async (req, res) => {
         avgCheck: wonCount ? Math.round(wonSum / wonCount) : 0,
         forecast,
         bySource: by('SELECT c.source name, COUNT(*) n, COALESCE(SUM(d.amount),0) s FROM deals d LEFT JOIN contacts c ON c.id=d.contact_id GROUP BY c.source'),
-        byManager: by('SELECT COALESCE(u.name, NULLIF(d.responsible,\'\'), \'—\') name, COUNT(*) n, COALESCE(SUM(d.amount),0) s FROM deals d LEFT JOIN users u ON u.id=d.responsible_id GROUP BY 1'),
+        byManager: db.prepare("SELECT COALESCE(u.name, NULLIF(d.responsible,''), '—') name, COUNT(*) n, COALESCE(SUM(d.amount),0) s, COALESCE(SUM(d.stage='won'),0) w, COALESCE(SUM(d.stage='lost'),0) l FROM deals d LEFT JOIN users u ON u.id=d.responsible_id GROUP BY 1").all().map(r => ({ name: r.name || '—', count: r.n, sum: r.s, won: r.w, lost: r.l, conversion: r.w + r.l ? Math.round(r.w / (r.w + r.l) * 100) : null })),
         byLoss: by("SELECT COALESCE(loss_reason,'—') name, COUNT(*) n, COALESCE(SUM(amount),0) s FROM deals WHERE stage='lost' GROUP BY loss_reason"),
         // распределение по этапам всех воронок: сделка попадает в свой этап по
         // паре «воронка + код», иначе одноимённые этапы разных воронок сливаются
@@ -2084,7 +2248,17 @@ export const server = http.createServer(async (req, res) => {
       if (req.method !== 'GET' && table === 'automations' && !requireAdmin(user, res)) return;
       if (req.method !== 'GET' && table === 'products' && user.role !== 'admin')
         return json(res, 403, { error: 'Каталог и прайс-лист меняет администратор. Позицию, которой нет в каталоге, можно добавить прямо в сделку.' });
-      if (req.method === 'GET' && !id) { if (table === 'tasks') return json(res, 200, db.prepare('SELECT t.*,c.name contact_name,d.title deal_title,u.name responsible_name FROM tasks t LEFT JOIN contacts c ON c.id=t.contact_id LEFT JOIN deals d ON d.id=t.deal_id LEFT JOIN users u ON u.id=t.responsible_id ORDER BY done,due,id DESC').all()); if (table === 'notes') return json(res, 200, db.prepare('SELECT * FROM notes WHERE entity_type=? AND entity_id=? ORDER BY id DESC').all(u.searchParams.get('type'), u.searchParams.get('entity'))); return json(res, 200, db.prepare(`SELECT * FROM ${table} ORDER BY id DESC`).all()); }
+      if (req.method === 'GET' && !id) {
+        const isPartner = user.role === 'partner';
+        if (table === 'tasks') return json(res, 200, db.prepare(`SELECT t.*,c.name contact_name,d.title deal_title,u.name responsible_name FROM tasks t LEFT JOIN contacts c ON c.id=t.contact_id LEFT JOIN deals d ON d.id=t.deal_id LEFT JOIN users u ON u.id=t.responsible_id${isPartner ? ` WHERE t.responsible_id=${Number(user.id)} OR EXISTS(SELECT 1 FROM deals pd WHERE pd.id=t.deal_id AND pd.responsible_id=${Number(user.id)}) OR EXISTS(SELECT 1 FROM contacts pc WHERE pc.id=t.contact_id AND pc.responsible_id=${Number(user.id)})` : ''} ORDER BY done,due,id DESC`).all());
+        if (table === 'notes') {
+          const et = String(u.searchParams.get('type') || ''), eid = Number(u.searchParams.get('entity'));
+          if (isPartner && !partnerOwns(user, et, eid)) return json(res, 403, { error: 'Это чужая карточка: партнёр видит только свои лиды' });
+          return json(res, 200, db.prepare('SELECT * FROM notes WHERE entity_type=? AND entity_id=? ORDER BY id DESC').all(et, eid));
+        }
+        if (table === 'contacts' && isPartner) return json(res, 200, db.prepare('SELECT * FROM contacts WHERE responsible_id=? OR id IN (SELECT contact_id FROM deals WHERE responsible_id=? AND contact_id IS NOT NULL) ORDER BY id DESC').all(user.id, user.id));
+        return json(res, 200, db.prepare(`SELECT * FROM ${table} ORDER BY id DESC`).all());
+      }
       if (req.method === 'GET') {
         const row = db.prepare(`SELECT * FROM ${table} WHERE id=?`).get(id);
         return row ? json(res, 200, row) : json(res, 404, { error: 'Запись не найдена — возможно, её уже удалили. Обновите страницу.' });
@@ -2101,6 +2275,12 @@ export const server = http.createServer(async (req, res) => {
       };
       if (req.method === 'POST') {
         const b = await readBody(req); if (table === 'notes') b.author = user.name;
+        if (user.role === 'partner') {
+          if (table === 'contacts' || table === 'tasks') b.responsible_id = user.id;
+          if (table === 'tasks' && b.deal_id && !partnerOwns(user, 'deals', b.deal_id)) return json(res, 403, { error: 'Это чужая сделка' });
+          if (table === 'tasks' && b.contact_id && !partnerOwns(user, 'contacts', b.contact_id)) return json(res, 403, { error: 'Это чужой клиент' });
+          if (table === 'notes' && !partnerOwns(user, String(b.entity_type || ''), Number(b.entity_id))) return json(res, 403, { error: 'Заметку можно добавить только к своей карточке' });
+        }
         if (table === 'products') { const err = normalizeProduct(b); if (err) return json(res, 400, { error: err }); }
         if (table === 'tasks' && b.due && !normalizeDue(String(b.due))) return json(res, 400, { error: 'Не поняли срок. Укажите дату как 25.10.2026 14:00 или «завтра 10:00».' });
         // обязательные поля проверяем до SQL: иначе пользователь увидит 500 вместо подсказки
@@ -2153,6 +2333,11 @@ export const server = http.createServer(async (req, res) => {
       }
       if (req.method === 'PATCH' && id) {
         const b = await readBody(req);
+        if (user.role === 'partner') {
+          if (b.responsible_id !== undefined && Number(b.responsible_id) !== Number(user.id)) return json(res, 400, { error: 'Партнёр отвечает только за свои карточки' });
+          if (b.deal_id && !partnerOwns(user, 'deals', b.deal_id)) return json(res, 403, { error: 'Это чужая сделка' });
+          if (b.contact_id && !partnerOwns(user, 'contacts', b.contact_id)) return json(res, 403, { error: 'Это чужой клиент' });
+        }
         if (table === 'products') { const err = normalizeProduct(b); if (err) return json(res, 400, { error: err }); }
         if (table === 'automations') {
           const cur = db.prepare('SELECT * FROM automations WHERE id=?').get(id);
@@ -2216,6 +2401,179 @@ export const server = http.createServer(async (req, res) => {
       }
     }
     // ===== pipelines & stages (configurable) =====
+    // ===== Рассылки: менеджер выбирает сегмент, канал и время, сервер отправляет очередью =====
+    if (p === '/api/campaigns' || /^\/api\/campaigns\//.test(p)) {
+      if (!['admin', 'manager'].includes(user.role)) return json(res, 403, { error: 'Рассылки доступны менеджеру и администратору' });
+      if (p === '/api/campaigns/preview' && req.method === 'POST') {
+        const b = await readBody(req);
+        const channel = String(b.channel) === 'email' ? 'email' : 'whatsapp';
+        return json(res, 200, { count: campaignRecipients(b.audience, channel).length });
+      }
+      if (p === '/api/campaigns') {
+        if (req.method === 'GET') return json(res, 200, db.prepare('SELECT * FROM campaigns ORDER BY id DESC LIMIT 100').all());
+        if (req.method === 'POST') {
+          const rl = rateLimit('campaign:' + user.id, 10, 60000);
+          if (!rl.ok) { res.setHeader('Retry-After', String(rl.retryAfter || 60)); return json(res, 429, { error: 'Слишком много рассылок за минуту' }); }
+          const b = await readBody(req);
+          const name = String(b.name || '').trim().slice(0, 120);
+          if (!name) return json(res, 400, { error: 'Укажите название рассылки' });
+          const channel = String(b.channel) === 'email' ? 'email' : 'whatsapp';
+          if (channel === 'whatsapp' && !getSetting('WAZZUP_API_KEY')) return json(res, 400, { error: 'WhatsApp не подключён: Настройки → Интеграции → Wazzup. Либо выберите канал «Почта»' });
+          if (channel === 'email' && !getSetting('SMTP_HOST')) return json(res, 400, { error: 'Почта не настроена: Настройки → Интеграции → Почта (SMTP). Либо выберите канал «WhatsApp»' });
+          const message = String(b.message || '').trim().slice(0, 4000);
+          if (!message) return json(res, 400, { error: 'Напишите текст сообщения' });
+          const subject = channel === 'email' ? (String(b.subject || '').trim().slice(0, 200) || name) : '';
+          let scheduledAt = null;
+          if (b.scheduled_at) {
+            const t = new Date(String(b.scheduled_at));
+            if (isNaN(t.getTime())) return json(res, 400, { error: 'Не поняли время отправки' });
+            if (t.getTime() < Date.now() - 60000) return json(res, 400, { error: 'Время отправки уже прошло — выберите будущее или отправьте сразу' });
+            scheduledAt = String(b.scheduled_at).slice(0, 16);
+          }
+          const rows = campaignRecipients(b.audience, channel);
+          if (!rows.length) return json(res, 400, { error: 'Под фильтр не подходит ни один клиент с заполненным ' + (channel === 'email' ? 'e-mail' : 'телефоном') + '. Проверьте сегмент или выберите другой канал' });
+          if (rows.length > 5000) return json(res, 400, { error: 'Слишком большой сегмент: предел одной рассылки — 5000 получателей' });
+          const r = db.prepare('INSERT INTO campaigns(name,channel,subject,message,audience,status,scheduled_at,created_by,created_by_id,total) VALUES(?,?,?,?,?,?,?,?,?,?)')
+            .run(name, channel, subject, message, JSON.stringify(b.audience || {}), scheduledAt ? 'scheduled' : 'queued', scheduledAt, user.name, user.id, rows.length);
+          const ins = db.prepare('INSERT INTO campaign_items(campaign_id,contact_id,address) VALUES(?,?,?)');
+          for (const row of rows) ins.run(Number(r.lastInsertRowid), row.id, String(row.address));
+          logActivity(`Рассылка «${name}»: ${rows.length} получателей, канал ${channel === 'email' ? 'почта' : 'WhatsApp'}${scheduledAt ? ', запланирована на ' + scheduledAt.replace('T', ' ') : ''}`, 'campaigns', Number(r.lastInsertRowid), user.name);
+          broadcast('change', { table: 'campaigns' });
+          return json(res, 201, db.prepare('SELECT * FROM campaigns WHERE id=?').get(r.lastInsertRowid));
+        }
+      }
+      const mCamp = p.match(/^\/api\/campaigns\/(\d+)(?:\/(start|cancel))?$/);
+      if (mCamp) {
+        const cid = Number(mCamp[1]);
+        const camp = db.prepare('SELECT * FROM campaigns WHERE id=?').get(cid);
+        if (!camp) return json(res, 404, { error: 'Рассылка не найдена — обновите страницу' });
+        if (req.method === 'GET') return json(res, 200, { ...camp, items: db.prepare('SELECT ci.*, c.name contact_name FROM campaign_items ci LEFT JOIN contacts c ON c.id=ci.contact_id WHERE ci.campaign_id=? ORDER BY ci.id LIMIT 1000').all(cid) });
+        if (req.method === 'POST' && mCamp[2] === 'start') {
+          if (camp.status !== 'scheduled') return json(res, 400, { error: 'Отправить сразу можно только запланированную рассылку' });
+          db.prepare("UPDATE campaigns SET status='queued', scheduled_at=NULL WHERE id=?").run(cid);
+          logActivity(`Рассылка «${camp.name}» запущена вручную`, 'campaigns', cid, user.name);
+          broadcast('change', { table: 'campaigns' });
+          return json(res, 200, { ok: true });
+        }
+        if (req.method === 'POST' && mCamp[2] === 'cancel') {
+          if (!['scheduled', 'queued', 'running'].includes(camp.status)) return json(res, 400, { error: 'Эта рассылка уже завершена' });
+          db.prepare("UPDATE campaigns SET status='canceled' WHERE id=?").run(cid);
+          db.prepare("UPDATE campaign_items SET status='canceled' WHERE campaign_id=? AND status='queued'").run(cid);
+          logActivity(`Рассылка «${camp.name}» отменена`, 'campaigns', cid, user.name);
+          broadcast('change', { table: 'campaigns' });
+          return json(res, 200, { ok: true });
+        }
+        if (req.method === 'DELETE') {
+          if (!requireAdmin(user, res)) return;
+          db.prepare('DELETE FROM campaigns WHERE id=?').run(cid);
+          logActivity(`Рассылка «${camp.name}» удалена`, 'campaigns', cid, user.name);
+          broadcast('change', { table: 'campaigns' });
+          return json(res, 200, { ok: true });
+        }
+      }
+      return json(res, 404, { error: 'Не найдено' });
+    }
+    // ===== Контроль качества (ОКК): автоматический разбор работы менеджеров для РОПа =====
+    if (p === '/api/quality') {
+      if (!requireAdmin(user, res)) return;
+      const days = Math.min(365, Math.max(1, Math.trunc(Number(u.searchParams.get('days')) || 30)));
+      // время в базе — UTC (datetime('now')): границу периода считаем в том же формате
+      const since = new Date(Date.now() - days * 864e5).toISOString().slice(0, 19).replace('T', ' ');
+      const managers = db.prepare("SELECT id,name FROM users WHERE active=1 AND role IN ('admin','manager') ORDER BY id").all();
+      const convQ = db.prepare('SELECT cv.id FROM conversations cv JOIN contacts c ON c.id=cv.contact_id WHERE c.responsible_id=? OR EXISTS(SELECT 1 FROM deals d WHERE d.contact_id=cv.contact_id AND d.responsible_id=?)');
+      const msgQ = db.prepare('SELECT direction,created_at FROM messages WHERE conversation_id=? AND created_at>=? ORDER BY id');
+      const rows = managers.map(m => {
+        const deals = db.prepare('SELECT stage FROM deals WHERE responsible_id=?').all(m.id);
+        const won = deals.filter(d => d.stage === 'won').length, lost = deals.filter(d => d.stage === 'lost').length;
+        let unanswered = 0; const resp = [];
+        for (const cv of convQ.all(m.id, m.id)) {
+          let pendingIn = null;
+          for (const msg of msgQ.all(cv.id, since)) {
+            if (msg.direction === 'in') { if (!pendingIn) { pendingIn = msg.created_at; unanswered++; } }
+            else if (pendingIn) { resp.push((Date.parse(msg.created_at.replace(' ', 'T') + 'Z') - Date.parse(pendingIn.replace(' ', 'T') + 'Z')) / 60000); pendingIn = null; unanswered--; }
+          }
+        }
+        unanswered = Math.max(0, unanswered);
+        resp.sort((a, b) => a - b);
+        const medianResponseMin = resp.length ? Math.round(resp[Math.floor(resp.length / 2)]) : null;
+        const stalled = db.prepare("SELECT COUNT(*) n FROM deals WHERE responsible_id=? AND stage NOT IN ('won','lost') AND COALESCE(updated_at,created_at) < datetime('now','-14 days')").get(m.id).n;
+        const overdueTasks = db.prepare("SELECT COUNT(*) n FROM tasks WHERE done=0 AND due IS NOT NULL AND due != '' AND (CASE WHEN length(due)=10 THEN due || ' 23:59:59' ELSE due END) < datetime('now','localtime') AND (responsible_id=? OR EXISTS(SELECT 1 FROM deals d WHERE d.id=tasks.deal_id AND d.responsible_id=?))").get(m.id, m.id).n;
+        const slowPenalty = medianResponseMin === null ? 0 : medianResponseMin > 60 ? 15 : medianResponseMin > 30 ? 10 : medianResponseMin > 15 ? 5 : 0;
+        const score = Math.max(0, 100 - Math.min(30, unanswered * 5) - slowPenalty - Math.min(15, stalled * 3) - Math.min(15, overdueTasks * 2));
+        const verdict = score >= 85 ? 'Отлично' : score >= 70 ? 'Хорошо' : score >= 50 ? 'Требует внимания' : 'Критично';
+        return { id: m.id, name: m.name, deals: deals.length, won, lost, conversion: won + lost ? Math.round(won / (won + lost) * 100) : null, unanswered, medianResponseMin, stalled, overdueTasks, score, verdict };
+      });
+      const medians = rows.map(r => r.medianResponseMin).filter(x => x !== null).sort((a, b) => a - b);
+      return json(res, 200, {
+        days,
+        totals: {
+          managers: rows.length,
+          unanswered: rows.reduce((a, r) => a + r.unanswered, 0),
+          stalled: rows.reduce((a, r) => a + r.stalled, 0),
+          overdueTasks: rows.reduce((a, r) => a + r.overdueTasks, 0),
+          medianResponseMin: medians.length ? medians[Math.floor(medians.length / 2)] : null,
+        },
+        managers: rows,
+        factors: [
+          'Сообщения без ответа: входящее от клиента, за которым не ответил менеджер (−5 за каждое, не больше −30)',
+          'Медиана первого ответа дольше 15 / 30 / 60 минут (−5 / −10 / −15)',
+          'Сделки без движения больше 14 дней (−3 за каждую, не больше −15)',
+          'Просроченные открытые задачи (−2 за каждую, не больше −15)',
+        ],
+      });
+    }
+    // ===== Обучающий портал: материалы для партнёров и сотрудников =====
+    if (p === '/api/training' || /^\/api\/training\/\d+$/.test(p)) {
+      if (req.method === 'GET' && p === '/api/training') return json(res, 200, db.prepare('SELECT * FROM training_items ORDER BY sort,id').all());
+      if (req.method === 'GET') {
+        const row = db.prepare('SELECT * FROM training_items WHERE id=?').get(Number(p.split('/').pop()));
+        return row ? json(res, 200, row) : json(res, 404, { error: 'Материал не найден' });
+      }
+      if (!requireAdmin(user, res)) return;
+      const kindOk = k => ['text', 'video', 'link'].includes(k);
+      if (req.method === 'POST') {
+        const b = await readBody(req);
+        const title = String(b.title || '').trim().slice(0, 140);
+        if (!title) return json(res, 400, { error: 'Укажите название материала' });
+        const kind = kindOk(String(b.kind)) ? String(b.kind) : 'text';
+        const body = String(b.body || '').slice(0, 50000);
+        const url = String(b.url || '').trim().slice(0, 500);
+        if (kind !== 'text' && !/^https?:\/\//i.test(url)) return json(res, 400, { error: 'Для видео и ссылки нужен адрес, который начинается с http:// или https://' });
+        if (kind === 'text' && !body.trim()) return json(res, 400, { error: 'Текст материала пустой' });
+        const r = db.prepare('INSERT INTO training_items(title,kind,body,url,sort) VALUES(?,?,?,?,?)').run(title, kind, body, url, Number(b.sort) || 0);
+        logActivity(`Материал «${title}» добавлен в обучение`, 'training_items', Number(r.lastInsertRowid), user.name);
+        broadcast('change', { table: 'training_items' });
+        return json(res, 201, db.prepare('SELECT * FROM training_items WHERE id=?').get(r.lastInsertRowid));
+      }
+      const mTr = p.match(/^\/api\/training\/(\d+)$/);
+      if (mTr) {
+        const id = Number(mTr[1]);
+        const row = db.prepare('SELECT * FROM training_items WHERE id=?').get(id);
+        if (!row) return json(res, 404, { error: 'Материал не найден — обновите страницу' });
+        if (req.method === 'PATCH') {
+          const b = await readBody(req);
+          if (b.title !== undefined) b.title = String(b.title).trim().slice(0, 140);
+          if (b.title !== undefined && !b.title) return json(res, 400, { error: 'Название не может быть пустым' });
+          const kind = b.kind !== undefined ? String(b.kind) : row.kind;
+          if (b.kind !== undefined && !kindOk(kind)) return json(res, 400, { error: 'Тип материала: текст, видео или ссылка' });
+          if (b.body !== undefined) b.body = String(b.body).slice(0, 50000);
+          if (b.url !== undefined) b.url = String(b.url).trim().slice(0, 500);
+          const url = b.url !== undefined ? b.url : row.url;
+          if (kind !== 'text' && !/^https?:\/\//i.test(url)) return json(res, 400, { error: 'Для видео и ссылки нужен адрес, который начинается с http:// или https://' });
+          const ks = Object.keys(b).filter(k => ['title', 'kind', 'body', 'url', 'sort'].includes(k));
+          if (ks.length) db.prepare(`UPDATE training_items SET ${ks.map(k => k + '=?').join(',')} WHERE id=?`).run(...ks.map(k => k === 'sort' ? (Number(b[k]) || 0) : b[k]), id);
+          broadcast('change', { table: 'training_items' });
+          return json(res, 200, db.prepare('SELECT * FROM training_items WHERE id=?').get(id));
+        }
+        if (req.method === 'DELETE') {
+          db.prepare('DELETE FROM training_items WHERE id=?').run(id);
+          logActivity(`Материал «${row.title}» удалён из обучения`, 'training_items', id, user.name);
+          broadcast('change', { table: 'training_items' });
+          return json(res, 200, { ok: true });
+        }
+      }
+      return json(res, 404, { error: 'Не найдено' });
+    }
     if (p === '/api/pipelines') {
       if (req.method === 'GET') return json(res, 200, db.prepare('SELECT * FROM pipelines ORDER BY id').all().map(pl => ({ ...pl, stages: getStages(pl.id) })));
       if (req.method === 'POST') { if (!requireAdmin(user, res)) return; const b = await readBody(req); const r = db.prepare('INSERT INTO pipelines(name) VALUES(?)').run(b.name || 'Новая воронка'); const st = db.prepare('INSERT INTO stages(pipeline_id,code,name,color,sort,kind) VALUES(?,?,?,?,?,?)'); [['new', 'Неразобранное', '#f97316', 0, 'open'], ['won', 'Успешно реализовано', '#15803d', 1, 'won'], ['lost', 'Закрыто и не реализовано', '#78716c', 2, 'lost']].forEach(x => st.run(r.lastInsertRowid, ...x)); return json(res, 201, { id: r.lastInsertRowid }); }
@@ -2281,7 +2639,11 @@ export const server = http.createServer(async (req, res) => {
         // карточки клиента и компании просят сделки без параметра — там нужен
         // список по всем воронкам
         const where = u.searchParams.has('pipeline') ? ' WHERE COALESCE(d.pipeline_id,1)=?' : '';
-        return json(res, 200, { pipelines: db.prepare('SELECT * FROM pipelines').all(), stages: getStages(pid), deals: db.prepare('SELECT d.*,c.name contact_name,c.phone contact_phone,co.name company_name,(SELECT COUNT(*) FROM tasks t WHERE t.deal_id=d.id AND t.done=0) as tasks_open,(SELECT MIN(t.due) FROM tasks t WHERE t.deal_id=d.id AND t.done=0) as next_task_due FROM deals d LEFT JOIN contacts c ON c.id=d.contact_id LEFT JOIN companies co ON co.id=d.company_id' + where + ' ORDER BY d.id DESC').all(...(where ? [pid] : [])) });
+        // партнёр видит на доске только свои сделки — вторым условием, чтобы
+        // не менять набор параметров подготовленного запроса
+        const partnerAnd = user.role === 'partner' ? ` AND d.responsible_id=${Number(user.id)}` : '';
+        const partnerWhere = user.role === 'partner' && !where ? ` WHERE d.responsible_id=${Number(user.id)}` : '';
+        return json(res, 200, { pipelines: db.prepare('SELECT * FROM pipelines').all(), stages: getStages(pid), deals: db.prepare('SELECT d.*,c.name contact_name,c.phone contact_phone,co.name company_name,(SELECT COUNT(*) FROM tasks t WHERE t.deal_id=d.id AND t.done=0) as tasks_open,(SELECT MIN(t.due) FROM tasks t WHERE t.deal_id=d.id AND t.done=0) as next_task_due FROM deals d LEFT JOIN contacts c ON c.id=d.contact_id LEFT JOIN companies co ON co.id=d.company_id' + where + partnerAnd + partnerWhere + ' ORDER BY d.id DESC').all(...(where ? [pid] : [])) });
       }
       if (req.method === 'POST') { const b = await readBody(req); if (!String(b.title || '').trim()) return json(res, 400, { error: 'Укажите название сделки' });
         b.title = String(b.title).trim().slice(0, 200);
@@ -2302,6 +2664,7 @@ export const server = http.createServer(async (req, res) => {
         if (b.responsible_id !== undefined && b.responsible_id !== null && b.responsible_id !== '' && !db.prepare('SELECT 1 x FROM users WHERE id=?').get(b.responsible_id)) return json(res, 400, { error: 'Ответственный не найден — обновите страницу и выберите сотрудника' });
         // имя ответственного дублируется в старом поле responsible: аналитика и поиск
         // читают его, поэтому не позволяем ему разойтись с responsible_id
+        if (user.role === 'partner') b.responsible_id = user.id; // партнёр создаёт лид только себе
         if (b.responsible_id !== undefined) {
           b.responsible_id = b.responsible_id ? Number(b.responsible_id) : null;
           b.responsible = b.responsible_id ? (db.prepare('SELECT name FROM users WHERE id=?').get(b.responsible_id)?.name || null) : null;
@@ -2416,6 +2779,7 @@ ${user?.name || ''}`.trim();
         if (b.contact_id !== undefined) { b.contact_id = b.contact_id ? Number(b.contact_id) : null; if (b.contact_id !== null && (!Number.isInteger(b.contact_id) || b.contact_id <= 0)) return json(res, 400, { error: 'Некорректный клиент — выберите контакт из списка' }); if (b.contact_id && !db.prepare('SELECT 1 x FROM contacts WHERE id=?').get(b.contact_id)) return json(res, 400, { error: 'Клиент не найден — выберите контакт из списка' }); }
         if (b.company_id !== undefined) { b.company_id = b.company_id ? Number(b.company_id) : null; if (b.company_id !== null && (!Number.isInteger(b.company_id) || b.company_id <= 0)) return json(res, 400, { error: 'Некорректная компания — выберите из списка' }); if (b.company_id && !db.prepare('SELECT 1 x FROM companies WHERE id=?').get(b.company_id)) return json(res, 400, { error: 'Компания не найдена — обновите страницу и выберите из списка' }); }
         if (b.responsible_id !== undefined && b.responsible_id !== null && b.responsible_id !== '' && !db.prepare('SELECT 1 x FROM users WHERE id=?').get(b.responsible_id)) return json(res, 400, { error: 'Ответственный не найден — обновите страницу и выберите сотрудника' });
+        if (user.role === 'partner' && b.responsible_id !== undefined && Number(b.responsible_id) !== Number(user.id)) return json(res, 400, { error: 'Партнёр не может передать лид другому сотруднику' });
         if (b.responsible_id !== undefined) {
           b.responsible_id = b.responsible_id ? Number(b.responsible_id) : null;
           b.responsible = b.responsible_id ? (db.prepare('SELECT name FROM users WHERE id=?').get(b.responsible_id)?.name || null) : null;
@@ -2484,7 +2848,9 @@ ${user?.name || ''}`.trim();
       // только администратору: остальным достаточно имени и роли.
       if (req.method === 'GET') return json(res, 200, user.role === 'admin'
         ? db.prepare('SELECT id,name,email,role,active,last_login,must_change_password FROM users ORDER BY id').all()
-        : db.prepare('SELECT id,name,role,active FROM users ORDER BY id').all());
+        : user.role === 'partner'
+          ? [{ id: user.id, name: user.name, role: 'partner', active: 1 }]
+          : db.prepare('SELECT id,name,role,active FROM users ORDER BY id').all());
       if (req.method === 'POST') {
         if (!requireAdmin(user, res)) return;
         const b = await readBody(req);
@@ -2596,7 +2962,10 @@ ${user?.name || ''}`.trim();
     }
 
     // ===== inbox =====
-    if (p === '/api/conversations' && req.method === 'GET') return json(res, 200, db.prepare(`SELECT cv.*,c.phone,c.email,c.company,c.source,c.position,
+    if (p === '/api/conversations' && req.method === 'GET') {
+      // партнёру видна переписка его клиентов — и только она
+      const pw = user.role === 'partner' ? `WHERE c.responsible_id=${Number(user.id)} OR c.id IN (SELECT contact_id FROM deals WHERE responsible_id=${Number(user.id)} AND contact_id IS NOT NULL) ` : '';
+      return json(res, 200, db.prepare(`SELECT cv.*,c.phone,c.email,c.company,c.source,c.position,
       c.responsible_id AS contact_responsible_id, ru.name AS contact_responsible_name,
       (SELECT CASE
          WHEN COALESCE(body,'') <> '' AND body <> '[вложение]' THEN substr(body,1,200)
@@ -2608,7 +2977,8 @@ ${user?.name || ''}`.trim();
       (SELECT author FROM messages WHERE conversation_id=cv.id ORDER BY id DESC LIMIT 1) last_author,
       (SELECT d.amount FROM deals d WHERE d.contact_id=cv.contact_id AND d.stage NOT IN ('won','lost') ORDER BY d.id DESC LIMIT 1) deal_amount,
       (SELECT COUNT(*) FROM messages m WHERE m.conversation_id=cv.id AND m.direction='in' AND m.id > COALESCE((SELECT rm.last_msg_id FROM read_marks rm WHERE rm.conversation_id=cv.id AND rm.user_id=?),0)) unread
-      FROM conversations cv LEFT JOIN contacts c ON c.id=cv.contact_id LEFT JOIN users ru ON ru.id=c.responsible_id ORDER BY cv.last_at DESC, cv.id DESC`).all(user.id).map(r => ({ ...r, unread: r.unread || 0 })));
+      FROM conversations cv LEFT JOIN contacts c ON c.id=cv.contact_id LEFT JOIN users ru ON ru.id=c.responsible_id ${pw}ORDER BY cv.last_at DESC, cv.id DESC`).all(user.id).map(r => ({ ...r, unread: r.unread || 0 })));
+    }
     // Начать переписку первым. Беседа появлялась только из входящего сообщения,
     // поэтому менеджер не мог написать клиенту, который ещё не обращался.
     if (p === '/api/conversations' && req.method === 'POST') {
@@ -3157,6 +3527,11 @@ server.headersTimeout = 30000;
 server.requestTimeout = 120000;
 server.keepAliveTimeout = 65000;
 server.maxHeadersCount = 100;
+mirrorSettingsToFile();
+// unref: очередь работает, пока сервер жив, но не держит процесс в тестах
+const campaignTimer = setInterval(campaignTick, 4000);
+campaignTimer.unref();
+campaignTick().catch(() => {});
 server.listen(PORT, HOST, () => console.log(`КаркасCRM запущена: http://${HOST}:${PORT} | администратор: ${ADMIN_EMAIL}`));
 // понятная ошибка вместо «тихого» зависания, если порт занят или нет прав
 server.on('error', e => {
@@ -3175,6 +3550,7 @@ const graceful = (sig) => {
   for (const res of clients) { try { res.end(); } catch {} }
   clients.clear();
   scheduler && clearInterval(scheduler);
+  campaignTimer && clearInterval(campaignTimer);
   // PRAGMA optimize обновляет статистику для планировщика запросов: следующая
   // версия стартует с актуальными данными о том, как быстрее читать базу
   server.close(() => { try { db.exec('PRAGMA optimize'); db.exec('PRAGMA wal_checkpoint(TRUNCATE)'); db.close(); } catch {} process.exit(0); });
