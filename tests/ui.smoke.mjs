@@ -1703,9 +1703,29 @@ try {
   {
     const cssFlat = cssText.replace(/\s+/g, '');
     check('в меню есть разделы рассылок, качества и обучения', ['campaigns', 'quality', 'training'].every(x => $(`#nav button[data-view="${x}"]`)));
-    check('партнёру остаются только «Сделки» и «Обучение»', cssFlat.includes('body.role-partnernavbutton:not([data-view="pipe"]):not([data-view="training"]){display:none}'));
+    check('партнёру остаются «Сделки», «Чаты» и «Обучение»', cssFlat.includes('body.role-partnernavbutton:not([data-view="pipe"]):not([data-view="inbox"]):not([data-view="training"]){display:none}'));
     check('качество — раздел РОПа, рассылки скрыты от наблюдателя', cssFlat.includes('body.role-viewer[data-view="campaigns"],body.role-viewer[data-view="quality"],body.role-manager[data-view="quality"]{display:none}'));
-    check('партнёр начинает со своих сделок, а не с рабочего стола', appJsRaw.includes("me.user.role === 'partner'") && appJsRaw.includes("go(['pipe', 'training'].includes(me.user.pref_view) ? me.user.pref_view : 'pipe')"));
+    check('партнёр начинает со своих сделок, а не с рабочего стола', appJsRaw.includes("me.user.role === 'partner'") && appJsRaw.includes("PARTNER_VIEWS.includes(me.user.pref_view) ? me.user.pref_view : 'pipe'"));
+    check('раздел чужой роли не открывается даже прямым переходом', appJsRaw.includes('function viewAllowed(view)') && appJsRaw.includes('if (!viewAllowed(view))'));
+    // проверяем саму логику доступа: у партнёра свои разделы, у РОПа — качество
+    const savedRole = window.__state.me.role;
+    window.__state.me.role = 'partner';
+    const partnerViews = { quality: window.viewAllowed('quality'), campaigns: window.viewAllowed('campaigns'), pipe: window.viewAllowed('pipe'), inbox: window.viewAllowed('inbox'), training: window.viewAllowed('training') };
+    window.__state.me.role = savedRole;
+    check('партнёру разрешены воронка, переписка и обучение, а качество и рассылки закрыты',
+      partnerViews.pipe === true && partnerViews.inbox === true && partnerViews.training === true && partnerViews.quality === false && partnerViews.campaigns === false, JSON.stringify(partnerViews));
+    check('администратору доступен раздел качества', window.viewAllowed('quality') === true);
+    check('в настройках партнёру остаётся только «Профиль»', appJsRaw.includes('isPartner') && appJsRaw.includes('(isViewer || isPartner) ? k === \'profile\''));
+    check('рассылкой распоряжается автор или администратор', appJsRaw.includes('Number(c.created_by_id) === Number(state.me?.id)') && serverJsRaw.includes('Отменить рассылку может её автор или администратор'));
+    check('поток событий не отдаёт партнёру чужие переписки', serverJsRaw.includes('partnerSeesEvent') && serverJsRaw.includes("res.role = user.role"));
+    check('автоответы правил и рассылок не считаются ответом менеджера', serverJsRaw.includes("COALESCE(m.author,'')<>'Рассылка'"));
+    // момент отправки рассылки хранится в UTC и показывается в поясе сотрудника
+    const p2 = n => String(n).padStart(2, '0');
+    const local = new Date('2030-01-02T03:04:05.000Z');
+    check('время отправки показывается в местном поясе', window.fmtSchedule('2030-01-02T03:04:05.000Z') === `${p2(local.getDate())}.${p2(local.getMonth() + 1)}.${local.getFullYear()} ${p2(local.getHours())}:${p2(local.getMinutes())}`, window.fmtSchedule('2030-01-02T03:04:05.000Z'));
+    check('отметка о доставке читается тем же правилом', window.fmtSchedule('2030-01-02 03:04:05') === `${p2(local.getDate())}.${p2(local.getMonth() + 1)}.${local.getFullYear()} ${p2(local.getHours())}:${p2(local.getMinutes())}`);
+    check('карточки обучения на телефоне в одну колонку, длинный адрес переносится', cssFlat.includes('@media(max-width:560px){.train-grid{grid-template-columns:1fr}}') && cssText.includes('overflow-wrap:anywhere'));
+    check('файл настроек с секретами закрыт правами 0600', serverJsRaw.includes('mode: 0o600') && serverJsRaw.includes('chmodSync(tmp, 0o600)'));
     check('на телефоне любая таблица прокручивается внутри экрана', cssFlat.includes('#viewtable,#modalBodytable{display:block;max-width:100%;overflow-x:auto'));
     check('настройки дублируются в файл data/settings.env и возвращаются из него', serverJsRaw.includes('settings.env') && serverJsRaw.includes('seedSettingsFromFile') && serverJsRaw.includes('mirrorSettingsToFile'));
     let envOk = false;

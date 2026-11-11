@@ -1,6 +1,6 @@
 import { test, before, after } from 'node:test';
 import assert from 'node:assert';
-import { readFileSync } from 'node:fs';
+import { readFileSync, statSync } from 'node:fs';
 
 // Версия берётся из файла VERSION, а не вписывается в тест: иначе каждое её
 // повышение требовало бы правки проверок, которые должны быть от него свободны.
@@ -8,7 +8,7 @@ const VERSION = readFileSync(new URL('../VERSION', import.meta.url), 'utf8').tri
 process.env.DATA_DIR = '/tmp/karkas-test-' + Date.now();
 process.env.PORT = '18099';
 process.env.SEED_MODE = 'off'; // детерминированная чистая база для тестов
-const { server, db } = await import('../backend/src/server.js');
+const { server, db, partnerSeesEvent } = await import('../backend/src/server.js');
 const base = 'http://127.0.0.1:18099';
 let h;
 const call = (p, opt = {}) => fetch(base + p, { ...opt, headers: { 'Content-Type': 'application/json', ...(h || {}), ...(opt.headers || {}) } }).then(async r => ({ status: r.status, body: (r.headers.get('content-type') || '').includes('json') ? await r.json() : await r.text() }));
@@ -1642,6 +1642,8 @@ test('настройки дублируются в файл settings.env', async
   const env = readFileSync(process.env.DATA_DIR + '/settings.env', 'utf8');
   assert.match(env, /SMTP_HOST="mail\.example\.test"/, 'значение из интерфейса попало в файл');
   assert.match(env, /^# /m, 'файл начинается с пояснения, что это копия');
+  // в копии ключи интеграций и пароли почты: читать её может только владелец сервиса
+  assert.equal(statSync(process.env.DATA_DIR + '/settings.env').mode & 0o777, 0o600, 'права файла с секретами 0600');
   await call('/api/settings', { method: 'PUT', body: JSON.stringify({ SMTP_HOST: '' }) });
 });
 
@@ -1681,6 +1683,17 @@ test('контроль качества: РОП видит оценку, мен�
   assert.ok(q.body.managers.every(m => typeof m.score === 'number' && m.score >= 0 && m.score <= 100), 'оценка от 0 до 100');
   assert.ok(q.body.managers.every(m => typeof m.verdict === 'string' && m.verdict), 'вывод словами');
   assert.ok(q.body.totals && Array.isArray(q.body.factors) && q.body.factors.length >= 3, 'объяснение правил входит в ответ');
+  // вопрос клиента, на который ответил не человек, а правило или рассылка,
+  // остаётся в отчёте: качество измеряется ответами сотрудника
+  const qContact = await call('/api/contacts', { method: 'POST', body: JSON.stringify({ name: 'Клиент ОКК', phone: '+79007770011', responsible_id: 1 }) });
+  const qConv = await call('/api/conversations', { method: 'POST', body: JSON.stringify({ contact_id: qContact.body.id, chat_type: 'whatsapp' }) });
+  const ago = m => new Date(Date.now() - m * 60000).toISOString().slice(0, 19).replace('T', ' ');
+  db.prepare("INSERT INTO messages(conversation_id,channel,direction,body,created_at) VALUES(?,'whatsapp','in','Вопрос клиента',?)").run(qConv.body.id, ago(20));
+  db.prepare("INSERT INTO messages(conversation_id,channel,direction,body,created_at,author) VALUES(?,'whatsapp','out','Автоответ',?,'Рассылка')").run(qConv.body.id, ago(19));
+  const qAuto = await call('/api/quality?days=7');
+  const adminRow = qAuto.body.managers.find(m => Number(m.id) === 1);
+  assert.ok(adminRow && adminRow.unanswered >= 1, 'автоответ не закрыл вопрос клиента');
+  assert.equal(adminRow.medianResponseMin, null, 'медиана не считается по автоматическим сообщениям');
   const mgr = await call('/api/users', { method: 'POST', body: JSON.stringify({ name: 'Менеджер ОКК', email: 'qc@example.com', password: 'qcpassword123', role: 'manager' }) });
   assert.equal(mgr.status, 201);
   const lm = await readyLogin('/api/auth/login', { method: 'POST', body: JSON.stringify({ email: 'qc@example.com', password: 'qcpassword123' }) });
@@ -1739,6 +1752,12 @@ test('рассылка: сегмент, расписание и отмена; к
   const c = await call('/api/campaigns', { method: 'POST', body: JSON.stringify({ name: 'Зимнее предложение', channel: 'email', subject: 'Зима', message: 'Здравствуйте, {имя}!', scheduled_at: '2030-01-01T10:00' }) });
   assert.equal(c.status, 201);
   assert.equal(c.body.status, 'scheduled', 'рассылка ждёт расписания');
+  // момент отправки хранится в UTC: расписание не съезжает, если сервер и
+  // сотрудник работают в разных поясах
+  const utcWhen = new Date(Date.now() + 3600e3).toISOString();
+  const utcCamp = await call('/api/campaigns', { method: 'POST', body: JSON.stringify({ name: 'По поясу', channel: 'email', message: 'текст', scheduled_at: utcWhen }) });
+  assert.equal(utcCamp.status, 201);
+  assert.equal(utcCamp.body.scheduled_at, utcWhen, 'время отправки сохранено в UTC без сдвига');
   assert.ok(c.body.total >= 2, 'получатели посчитаны');
   const one = await call('/api/campaigns/' + c.body.id);
   assert.equal(one.body.items.length, one.body.total, 'список получателей зафиксирован при создании');
@@ -1753,8 +1772,11 @@ test('рассылка: сегмент, расписание и отмена; к
   h = { Authorization: 'Bearer ' + lmm.body.token };
   assert.equal((await call('/api/campaigns')).status, 200, 'менеджер видит список рассылок');
   assert.equal((await call('/api/campaigns/' + c.body.id, { method: 'DELETE' })).status, 403, 'удаление только у админа');
+  assert.equal((await call('/api/campaigns/' + utcCamp.body.id + '/cancel', { method: 'POST', body: '{}' })).status, 403, 'чужую рассылку менеджер не отменяет');
+  assert.equal((await call('/api/campaigns/' + utcCamp.body.id + '/start', { method: 'POST', body: '{}' })).status, 403, 'чужую рассылку менеджер не запускает');
   h = savedH;
   assert.equal((await call('/api/campaigns/' + c.body.id, { method: 'DELETE' })).status, 200);
+  assert.equal((await call('/api/campaigns/' + utcCamp.body.id, { method: 'DELETE' })).status, 200);
   await call('/api/settings', { method: 'PUT', body: JSON.stringify({ SMTP_HOST: '' }) });
   await new Promise(r => setTimeout(r, 500)); // копия настроек в файле гасится вместе с ключами
 });
@@ -1794,5 +1816,24 @@ test('партнёр: отдельный вход, только свои лид�
   assert.equal((await call('/api/notes', { method: 'POST', body: JSON.stringify({ entity_type: 'deals', entity_id: d.body.id, body: 'Звонок состоялся' }) })).status, 201, 'заметка к своей сделке');
   assert.equal((await call('/api/notes', { method: 'POST', body: JSON.stringify({ entity_type: 'deals', entity_id: fd.body.id, body: 'чужое' }) })).status, 403, 'заметка к чужой сделке закрыта');
   assert.equal((await call('/api/me/pref', { method: 'PATCH', body: JSON.stringify({ view: 'training' }) })).status, 200, 'любимый раздел сохраняется');
+  // переписка со своим клиентом: партнёр отвечает сам, чужой чат закрыт
+  const conv = await call('/api/conversations', { method: 'POST', body: JSON.stringify({ contact_id: c.body.id, chat_type: 'whatsapp' }) });
+  assert.equal(conv.status, 201, 'партнёр начинает переписку со своим клиентом');
+  const foreignConv = await call('/api/conversations', { method: 'POST', body: JSON.stringify({ contact_id: fd.body.id, chat_type: 'whatsapp' }) });
+  assert.ok(foreignConv.status === 403 || foreignConv.status === 404, 'чужому клиенту партнёр написать не может, статус ' + foreignConv.status);
+  const sent = await call('/api/conversations/' + conv.body.id + '/messages', { method: 'POST', body: JSON.stringify({ body: 'Здравствуйте', channel: 'whatsapp' }) });
+  assert.ok(sent.status !== 403, 'отправка в своём чате не закрыта, статус ' + sent.status);
+  assert.equal((await call('/api/templates')).status, 200, 'шаблоны ответов доступны');
+  const convList = await call('/api/conversations');
+  assert.ok(Array.isArray(convList.body) && convList.body.every(x => x.contact_id === c.body.id), 'в списке только свои переписки');
+  h = savedH;
+  // общий поток событий не отдаёт партнёру чужие переписки и закрытые разделы
+  const partnerSock = { role: 'partner', userId: u.body.id };
+  const managerSock = { role: 'manager', userId: 1 };
+  assert.equal(partnerSeesEvent(partnerSock, 'message', { conversation_id: conv.body.id, title: 'Клиент партнёра', preview: 'текст', direction: 'in' }), true, 'своё сообщение приходит');
+  assert.equal(partnerSeesEvent(partnerSock, 'message', { conversation_id: 999999, title: 'Чужой клиент', preview: 'чужой текст', direction: 'in' }), false, 'чужое сообщение партнёру не уходит');
+  assert.equal(partnerSeesEvent(partnerSock, 'change', { table: 'deals' }), true, 'обновление своего раздела приходит');
+  assert.equal(partnerSeesEvent(partnerSock, 'change', { table: 'campaigns' }), false, 'чужой раздел не дёргает клиент партнёра');
+  assert.equal(partnerSeesEvent(managerSock, 'message', { conversation_id: 999999, title: 'Клиент', preview: 'текст', direction: 'in' }), true, 'сотрудникам офиса поток не урезается');
   h = savedH;
 });
