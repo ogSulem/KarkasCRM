@@ -99,6 +99,12 @@ label input,label select,label textarea{margin-top:4px;font-weight:400}
 .kpi i{font-style:normal;font-size:18px}.kpi span{display:block;color:var(--muted);font-size:13px;margin:4px 0 2px}
 .kpi b{display:block;font-size:24px;line-height:1.2;margin:2px 0 2px;font-variant-numeric:tabular-nums}
 .kpi b.accent{color:var(--orange)}.kpi b.green{color:var(--green)}
+.green{color:var(--green)}.red{color:var(--danger)}
+/* обучающий портал: карточки равной ширины, анонс текста в три строки */
+.train-grid{grid-template-columns:repeat(auto-fill,minmax(260px,1fr))}
+.train-card{display:flex;flex-direction:column}
+.train-excerpt{margin:0;color:var(--muted);font-size:13.5px;display:-webkit-box;-webkit-line-clamp:3;-webkit-box-orient:vertical;overflow:hidden}
+.train-body{line-height:1.55}
 .kpi small{display:block;color:var(--muted);font-size:12.5px;line-height:1.4}
 .kpi small b{display:inline;font-size:inherit;margin:0}
 .cols{display:grid;grid-template-columns:1.6fr 1fr;gap:14px;align-items:start}
@@ -366,6 +372,9 @@ code{background:#eef2f7}
   th,td{padding:6px 6px}
   .stages-editor .st{grid-template-columns:22px 1fr 1fr 70px 30px}
 }
+/* любая таблица на телефоне прокручивается пальцем внутри экрана: длинные
+   строки (аналитика, качество, журнал, сравнение цен) не ломают разметку */
+@media(max-width:900px){#view table,#modalBody table{display:block;max-width:100%;overflow-x:auto;-webkit-overflow-scrolling:touch}}
 @media(max-width:560px){
   .login-card{padding:22px}
   .row{flex-wrap:wrap}
@@ -674,6 +683,12 @@ html[data-theme=dark] pre.code-block{background:#0f171b;color:var(--ink)}
 /* роль «Наблюдатель»: кнопки создания в шапке не показываем, плашку — показываем */
 .head-readonly{display:none}
 body.role-viewer .head-create{display:none}
+/* рассылки — рабочий инструмент менеджера, контроль качества — раздел РОПа */
+body.role-viewer [data-view="campaigns"],body.role-viewer [data-view="quality"],body.role-manager [data-view="quality"]{display:none}
+/* партнёр: только свои лиды и обучение. Поиск, колокольчик и остальные разделы
+   закрыты на сервере, поэтому кнопки прячем, чтобы не предлагать запрещённое */
+body.role-partner nav button:not([data-view="pipe"]):not([data-view="training"]){display:none}
+body.role-partner .searchbox,body.role-partner #bellBtn{display:none}
 body.role-viewer .head-readonly{display:inline-block}
 .viewer-lock{margin:10px 0 0}
 /* тёмная тема: докрашиваем то, что осталось со светлыми цветами по умолчанию */

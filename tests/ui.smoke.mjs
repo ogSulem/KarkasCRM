@@ -1696,6 +1696,51 @@ try {
   // ── навигация работает на inline-обработчиках, не завися от boot() ───────
   check('все пункты меню несут inline-обработчик go()', $$('#nav button').length >= 9 && $$('#nav button').every(b => /^go\('/.test(b.getAttribute('onclick') || '')));
 
+  // ── рассылки, качество, обучение и доступ партнёра ──────────────────
+  {
+    const cssFlat = cssText.replace(/\s+/g, '');
+    check('в меню есть разделы рассылок, качества и обучения', ['campaigns', 'quality', 'training'].every(x => $(`#nav button[data-view="${x}"]`)));
+    check('партнёру остаются только «Сделки» и «Обучение»', cssFlat.includes('body.role-partnernavbutton:not([data-view="pipe"]):not([data-view="training"]){display:none}'));
+    check('качество — раздел РОПа, рассылки скрыты от наблюдателя', cssFlat.includes('body.role-viewer[data-view="campaigns"],body.role-viewer[data-view="quality"],body.role-manager[data-view="quality"]{display:none}'));
+    check('партнёр начинает со своих сделок, а не с рабочего стола', appJsRaw.includes("me.user.role === 'partner'") && appJsRaw.includes("go(['pipe', 'training'].includes(me.user.pref_view) ? me.user.pref_view : 'pipe')"));
+    check('на телефоне любая таблица прокручивается внутри экрана', cssFlat.includes('#viewtable,#modalBodytable{display:block;max-width:100%;overflow-x:auto'));
+    check('настройки дублируются в файл data/settings.env и возвращаются из него', serverJsRaw.includes('settings.env') && serverJsRaw.includes('seedSettingsFromFile') && serverJsRaw.includes('mirrorSettingsToFile'));
+    let envOk = false;
+    try { accessSync(DATA + '/settings.env', constants.R_OK); envOk = readFileSync(DATA + '/settings.env', 'utf8').includes('COMPANY_NAME='); } catch {}
+    check('сервер смоука уже создал settings.env со значениями', envOk);
+  }
+  {
+    await window.go('quality'); await wait(500);
+    check('раздел «Качество» показывает оценку сотрудников и правила счёта', $('#view').textContent.includes('Оценка по сотрудникам') && $('#view').textContent.includes('Как считается оценка'));
+    window.setQualityDays(7); await wait(500);
+    check('период качества переключается и пересчитывается', window.__state.qDays === 7 && $('#view').textContent.includes('Неделя'));
+  }
+  {
+    await window.go('training'); await wait(400);
+    check('обучение начинается с понятной пустой витрины', $('#view').textContent.includes('Материалов пока нет'));
+    const tr = await (await fetch(BASE + '/api/training', { method: 'POST', headers: authH(), body: JSON.stringify({ title: 'Как проходит сделка', kind: 'text', body: 'Первая строка.\nВторая строка.' }) })).json();
+    await window.go('training'); await wait(400);
+    check('добавленный материал виден в портале', $('#view').textContent.includes('Как проходит сделка'));
+    await window.openTraining(tr.id); await wait(300);
+    check('статья открывается в окне, переносы строк сохранены', $('#modalBody').innerHTML.includes('Первая строка.<br>Вторая строка.'));
+    window.closeModal(); await wait(150);
+  }
+  {
+    // ключ Wazzup в настройках уже есть (сценарий чатов выше) — канал доступен,
+    // а отправка запланирована на 2030 год: очередь за время теста не отправляет
+    await window.go('campaigns'); await wait(400);
+    check('раздел «Рассылки» объясняет, что это и кому нужно', $('#view').textContent.includes('Рассылок пока нет'));
+    await fetch(BASE + '/api/contacts', { method: 'POST', headers: authH(), body: JSON.stringify({ name: 'Получатель рассылки', phone: '+79001112233' }) });
+    const camp = await (await fetch(BASE + '/api/campaigns', { method: 'POST', headers: authH(), body: JSON.stringify({ name: 'Смоук-рассылка', channel: 'whatsapp', message: 'Здравствуйте, {имя}!', scheduled_at: '2030-01-01T10:00' }) })).json();
+    await window.go('campaigns'); await wait(400);
+    check('запланированная рассылка видна в списке со статусом', $('#view').textContent.includes('Смоук-рассылка') && $('#view').textContent.includes('Запланирована'));
+    await window.openCampaignCard(camp.id); await wait(400);
+    check('карточка рассылки показывает прогресс и получателей', $('#modalBody').textContent.includes('Получателей:') && $('#modalBody').textContent.includes('79001112233'));
+    await window.campaignAct(camp.id, 'cancel'); await wait(400);
+    check('рассылку можно отменить из карточки', $('#modalBody').textContent.includes('Отменена'));
+    window.closeModal(); await wait(150);
+  }
+
   // Полный сценарий: администратор выдаёт данные, сотрудник меняет пароль.
   await window.openUser();
   const createdForm = $('#modalBody form');
