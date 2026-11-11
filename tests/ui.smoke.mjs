@@ -784,8 +784,8 @@ try {
     // сайты до таймаута, и карточка не успевает открыться к проверке.
     await window.api('/api/competitor-sources', { method: 'PUT', body: JSON.stringify({
       RUSPROFILE_URL: 'http://127.0.0.1:9', FEDRESURS_API_URL: 'http://127.0.0.1:9', KAD_API_URL: 'http://127.0.0.1:9',
-      FNS_API_URL: 'http://127.0.0.1:9', GOOGLE_API_URL: 'http://127.0.0.1:9', TWOGIS_API_URL: 'http://127.0.0.1:9',
-      YANDEX_API_URL: 'http://127.0.0.1:9', COMPETITOR_TIMEOUT_MS: '1500',
+      FNS_API_URL: 'http://127.0.0.1:9', FNS_SEARCH_URL: 'http://127.0.0.1:9', GOOGLE_API_URL: 'http://127.0.0.1:9',
+      TWOGIS_API_URL: 'http://127.0.0.1:9', YANDEX_API_URL: 'http://127.0.0.1:9', COMPETITOR_TIMEOUT_MS: '1500',
     }) }).catch(() => {});
     // поиск с проверкой живёт в окне «Добавить конкурента»: на странице
     // остался один фильтр списка — два поля поиска подряд читались непонятно
@@ -800,7 +800,10 @@ try {
     check('в конкурентах есть кнопка «Найти и проверить»', Boolean(btn));
     pageErrors.length = 0;
     btn.click();
-    await wait(3000);
+    // ожидание с запасом: поиск опрашивает источники и по недоступным адресам
+    // отвечает отказом сразу, но на медленном прогонщике карточка может
+    // открыться позже — ждём stabilный экран, а не фиксированные секунды
+    await settle(1500, 45000);
     check('клик по «Найти и проверить» не падает', pageErrors.length === 0, pageErrors.join(' | ').slice(0, 140));
     check('после поиска открылась карточка найденного конкурента', /Проверка Поиска/.test($('#modalBody').textContent), $('#modalBody').textContent.replace(/\s+/g, ' ').slice(0, 90));
     window.closeModal(); await wait(150);
