@@ -77,7 +77,9 @@ cmd_pack() {
   docker volume inspect "$VOLUME" >/dev/null 2>&1 || die "Том $VOLUME не найден. Если установка сделана в другом каталоге или без Docker, см. DEPLOY.md, раздел 12."
 
   local tmp stamp out restart=0
-  tmp=$(mktemp -d)
+  # рабочий каталог держим рядом с архивом, на том же диске: /tmp на VPS бывает
+  # маленьким tmpfs, а том с базой и вложениями — на гигабайты. TMPDIR переопределяет.
+  tmp=$(mktemp -d "${TMPDIR:-$PWD}/.karkas-move.XXXXXX")
   CLEAN_DIR="$tmp"
 
   if crm_running; then
@@ -127,9 +129,12 @@ cmd_pack() {
   echo "Контрольная сумма: $(sha256sum "$out" | cut -d' ' -f1)"
   echo
   echo "Дальше на новом сервере:"
-  echo "  1) передайте архив, например: scp $out root@НОВЫЙ_IP:/opt/"
+  echo "  1) передайте архив: scp $out root@НОВЫЙ_IP:/opt/"
+  echo "     большой архив надёжнее отправлять через rsync -P — он дозаливает при обрыве;"
+  echo "     после передачи сверьте сумму: sha256sum на обоих серверах должны совпасть"
   echo "  2) поставьте код: git clone https://github.com/ogSulem/KarkasCRM /opt/KarkasCRM"
-  echo "     (или распакуйте KarkasCRM.zip) и запустите ./install.sh"
+  echo "     (или распакуйте KarkasCRM.zip); install.sh для переноса не нужен —"
+  echo "     restore сам создаст том, поставит .env из архива и поднимет CRM"
   echo "  3) cd /opt/KarkasCRM && ./scripts/move.sh restore /opt/$out"
   echo "  4) переключите DNS на новый сервер и включите HTTPS: ./install.sh --tls ваш-домен"
   echo "  Полный порядок и проверки — DEPLOY.md, раздел 12."
@@ -149,7 +154,9 @@ cmd_restore() {
   [ -f docker-compose.yml ] || die "Рядом нет docker-compose.yml: запускайте скрипт из каталога KarkasCRM на новом сервере."
 
   local tmp want got
-  tmp=$(mktemp -d)
+  # рабочий каталог держим рядом с архивом, на том же диске: /tmp на VPS бывает
+  # маленьким tmpfs, а том с базой и вложениями — на гигабайты. TMPDIR переопределяет.
+  tmp=$(mktemp -d "${TMPDIR:-$PWD}/.karkas-move.XXXXXX")
   CLEAN_DIR="$tmp"
 
   tar xzf "$archive" -C "$tmp" || die "Архив не распаковался: возможно, он передан не полностью."
@@ -214,7 +221,7 @@ cmd_restore() {
     chmod 700 /data/.jwt-secret 2>/dev/null || true
   '
 
-  local profile port health
+  local profile port health health_ok
   profile=$(tls_profile)
   if [ -n "$profile" ]; then
     echo "Запускаю в режиме «домен и HTTPS» (профиль tls)"
@@ -227,17 +234,30 @@ cmd_restore() {
   docker builder prune -f --keep-storage 1GB >/dev/null 2>&1 || true
 
   port=$(port_from_env)
+  health_ok=0
   if health=$(wait_health "$port"); then
     echo "CRM отвечает: $health"
+    health_ok=1
   else
     echo "CRM пока не отвечает — смотрите логи: docker compose logs -f crm"
   fi
   compose ps
 
+  # Сразу сверяем базу на новом сервере: сколько записей доехало, цела ли база,
+  # нет ли висячих строк, на месте ли вложения чатов и резервные копии. Это
+  # доказательство, что перенос ничего не потерял, а не только что контейнер
+  # поднялся. db-check читает базу без остановки CRM и сам говорит итог.
+  if [ "$health_ok" = 1 ]; then
+    echo
+    echo "Сверяю базу на новом сервере: состав, целостность, вложения и копии"
+    compose exec -T crm node --experimental-sqlite --disable-warning=ExperimentalWarning scripts/db-check.mjs 2>&1 | sed 's/^/  /' || true
+  fi
+
   echo
   echo "Проверьте после переноса:"
   echo "  1) войдите своим логином: сеансы сохраняются, если перенесён .env (тот же JWT_SECRET);"
-  echo "  2) сверьте числа записей: docker compose exec -T crm node scripts/db-check.mjs;"
+  echo "  2) числа записей и целостность базы сверены выше; повторить вручную можно командой"
+  echo "     docker compose exec -T crm node --experimental-sqlite scripts/db-check.mjs;"
   echo "  3) откройте чат с файлом и скачайте вложение: папка uploads перенесена вместе с томом;"
   echo "  4) переключите DNS на новый сервер, затем включите HTTPS (./install.sh --tls ваш-домен);"
   echo "  5) адрес вебхука Wazzup и почты не меняется, если домен прежний: проверьте счётчик"

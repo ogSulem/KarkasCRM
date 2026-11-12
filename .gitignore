@@ -21,3 +21,10 @@ test-results/
 /frontend/public/downloads/
 *.zip
 *.patch
+
+# Перенос на другой сервер: архив с данными, страховочные копии, saved .env и
+# рабочие каталоги. В архиве база и секреты, поэтому в репозиторий им нельзя.
+karkascrm-move-*.tar.gz
+pre-move-*.tar.gz
+.env.pre-move-*
+.karkas-move.*/
