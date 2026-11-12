@@ -199,6 +199,8 @@ test('развёртывание переносит данные, права и 
   assert.ok(dst.calls().some(x => x === 'chown -R 1000:1000 ' + dst.vol), 'файлы отданы пользователю контейнера (uid 1000)');
   assert.ok(dst.calls().some(x => x === 'compose up -d --build'), 'CRM собрана и запущена');
   assert.match(r.out, /"ok":true/, 'после запуска проверен отклик /api/health');
+  assert.ok(dst.calls().some(x => x.includes('db-check.mjs')), 'после успешного запуска база сверена автоматически');
+  assert.match(r.out, /Сверяю базу на новом сервере/, 'оператор видит автоматическую сверку базы');
   assert.match(r.out, /переключите DNS/i, 'оператору напомнили про домен');
 });
 
@@ -293,4 +295,5 @@ test('если CRM не отвечает после переноса, опера
   assert.equal(r.code, 0, 'перенос данных выполнен, даже если сервис ещё поднимается');
   assert.match(r.out, /пока не отвечает/, 'сообщение о проверке живости');
   assert.match(r.out, /docker compose logs -f crm/, 'показано, где смотреть логи');
+  assert.ok(!dst.calls().some(x => x.includes('db-check.mjs')), 'сверку базы не запускают, пока сервис не ответил');
 });
