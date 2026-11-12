@@ -1743,7 +1743,11 @@ try {
   {
     const cssFlat = cssText.replace(/\s+/g, '');
     check('в меню есть разделы рассылок, качества и обучения', ['campaigns', 'quality', 'training'].every(x => $(`#nav button[data-view="${x}"]`)));
-    check('партнёру остаются «Сделки», «Чаты» и «Обучение»', cssFlat.includes('body.role-partnernavbutton:not([data-view="pipe"]):not([data-view="inbox"]):not([data-view="training"]){display:none}'));
+    check('партнёру остаются «Сделки», «Чаты», «Задачи» и «Обучение»', cssFlat.includes('body.role-partnernavbutton:not([data-view="pipe"]):not([data-view="inbox"]):not([data-view="tasks"]):not([data-view="training"]){display:none}'));
+    // офис назначает партнёру задачи, и новый лид сам создаёт ему задачу позвонить:
+    // без раздела он нашёл бы их только внутри карточки сделки
+    check('раздел задач партнёру открыт', appJsRaw.includes("const PARTNER_VIEWS = ['pipe', 'inbox', 'tasks', 'training', 'settings']"));
+    check('массовые действия скрыты у того, кому сервер их запретил', (appJsRaw.match(/canEdit\(\) && !isPartner\(\) \? bulkSlot\(/g) || []).length === 2);
     check('качество — раздел РОПа, рассылки скрыты от наблюдателя', cssFlat.includes('body.role-viewer[data-view="campaigns"],body.role-viewer[data-view="quality"],body.role-manager[data-view="quality"]{display:none}'));
     check('партнёр начинает со своих сделок, а не с рабочего стола', appJsRaw.includes("me.user.role === 'partner'") && appJsRaw.includes("PARTNER_VIEWS.includes(me.user.pref_view) ? me.user.pref_view : 'pipe'"));
     check('раздел чужой роли не открывается даже прямым переходом', appJsRaw.includes('function viewAllowed(view)') && appJsRaw.includes('if (!viewAllowed(view))'));

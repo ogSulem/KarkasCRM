@@ -1,6 +1,6 @@
 {
   "name": "karkascrm",
-  "version": "1.2.5",
+  "version": "1.2.6",
   "private": true,
   "description": "КаркасCRM — сделки и воронки, клиенты, задачи, единый инбокс мессенджеров, почта и разведка конкурентов. Без внешних зависимостей, один контейнер.",
   "license": "UNLICENSED",
@@ -22,7 +22,7 @@
     "test:all": "./run-tests.sh",
     "start:local": "./run-local.sh",
     "check": "node --check backend/src/server.js && node --check backend/src/competitors.js && node --check backend/src/smtp.js && node --check frontend/public/app.js",
-    "check:sh": "bash -n install.sh && bash -n run-local.sh && bash -n run-tests.sh && bash -n scripts/update.sh && bash -n scripts/pack.sh && bash -n deploy/start-caddy.sh",
+    "check:sh": "bash -n install.sh && bash -n run-local.sh && bash -n run-tests.sh && bash -n scripts/update.sh && bash -n scripts/move.sh && bash -n scripts/pack.sh && bash -n deploy/start-caddy.sh",
     "test:notify": "node --experimental-sqlite --test tests/notifications.test.mjs",
     "db:check": "node --experimental-sqlite scripts/db-check.mjs",
     "db:clean": "node --experimental-sqlite scripts/db-check.mjs --clean"

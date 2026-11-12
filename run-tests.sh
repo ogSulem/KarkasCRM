@@ -18,7 +18,7 @@ node --check tests/wazzup-contract.test.mjs
 node --check tests/mail.test.mjs
 # Скрипты установки и сопровождения. Ни один тест кода их не запускает, поэтому
 # опечатка в install.sh доходит до сервера пользователя: скрипт просто не стартует.
-for sh in install.sh run-local.sh run-tests.sh scripts/update.sh scripts/pack.sh deploy/start-caddy.sh; do
+for sh in install.sh run-local.sh run-tests.sh scripts/update.sh scripts/move.sh scripts/pack.sh deploy/start-caddy.sh; do
   bash -n "$sh" || { echo "  ОШИБКА: синтаксис $sh"; exit 1; }
 done
 # Скрипты сопровождения: db-check не запускает ни один тест, а выгрузка копии
@@ -44,6 +44,9 @@ node --test tests/install-args.test.mjs
 # Режим обновления — на подставных docker/git/curl: ошибка здесь стоит портов
 # 80/443 чужого сайта, поэтому профиль tls должен включаться только по отметке режима
 node --test tests/update-mode.test.mjs
+# Перенос на другой сервер — на подставных docker и curl: ошибка здесь стоит всех
+# данных заказчика, поэтому проверяется весь круг (упаковка, сумма, развёртывание)
+node --test tests/move.test.mjs
 node --experimental-sqlite tests/migrate.test.mjs
 node --experimental-sqlite tests/seed.test.mjs
 node --test tests/backup-s3.test.mjs
