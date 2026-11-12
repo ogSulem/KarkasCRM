@@ -34,6 +34,7 @@ jobs:
           node --check tests/timezone.test.js
           node --check tests/install-args.test.mjs
           node --check tests/update-mode.test.mjs
+          node --check tests/move.test.mjs
           node --check tests/wazzup-contract.test.mjs
           node --check tests/mail.test.mjs
           node --check tests/ui.smoke.mjs
@@ -44,7 +45,7 @@ jobs:
           node --check tests/backup-s3.test.mjs
           node --check tests/seed.test.mjs
           node --check tests/docker-smoke.mjs
-          for sh in install.sh run-local.sh run-tests.sh scripts/update.sh scripts/pack.sh deploy/start-caddy.sh; do bash -n "$sh"; done
+          for sh in install.sh run-local.sh run-tests.sh scripts/update.sh scripts/move.sh scripts/pack.sh deploy/start-caddy.sh; do bash -n "$sh"; done
 
       - name: Интеграционные тесты (API и конкуренты)
         run: node --experimental-sqlite --test tests/api.test.js tests/competitors.test.js
@@ -85,6 +86,11 @@ jobs:
       # где порты заняты чужим сайтом, значит уронить этот сайт.
       - name: Режим обновления выбирается по отметке, а не по домену
         run: node --test tests/update-mode.test.mjs
+
+      # Перенос на другой сервер — на подставных docker и curl. Ошибка здесь стоит
+      # всех данных заказчика, поэтому проверяется весь круг целиком.
+      - name: Перенос на другой сервер — упаковка и развёртывание
+        run: node --test tests/move.test.mjs
 
       - name: Тест миграций базы данных
         run: |

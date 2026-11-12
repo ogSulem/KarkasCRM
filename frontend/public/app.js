@@ -956,9 +956,12 @@ const SKELETONS = {
 };
 
 // Разделы по ролям: качество — РОПу, рассылки — менеджеру и администратору,
-// партнёру — его воронка, переписка и обучение. Проверка стоит перед отрисовкой,
-// поэтому переход по старой ссылке или из палитры не заканчивается экраном ошибки.
-const PARTNER_VIEWS = ['pipe', 'inbox', 'training', 'settings'];
+// партнёру — его воронка, переписка, его задачи и обучение. Задачи партнёру
+// назначает офис, и новый лид сам создаёт ему задачу «позвонить клиенту», поэтому
+// раздел ему нужен; список на сервере ограничен его записями. Проверка стоит
+// перед отрисовкой, поэтому переход по старой ссылке или из палитры не
+// заканчивается экраном ошибки.
+const PARTNER_VIEWS = ['pipe', 'inbox', 'tasks', 'training', 'settings'];
 const VIEW_ROLES = { quality: ['admin'], campaigns: ['admin', 'manager'] };
 function viewAllowed(view) {
   const role = state.me && state.me.role;
@@ -1326,7 +1329,7 @@ function pipeDraw(v, d) {
     ${state.me?.role !== 'partner' ? `<button class="btn sm" style="margin-left:auto" onclick="download('/api/export/deals','deals.csv')" title="Выгрузить сделки в CSV">${icon('download', 13)} Экспорт</button>` : ''}
     <input id="dealSearch" class="searchfield searchfield-sm" placeholder="Поиск по сделкам и клиентам" value="${esc(state.dealQuery || '')}" oninput="liveSearch('deals',()=>setDealQuery(this.value))">
     ${(state.me && state.me.role) === 'admin' ? `<button class="btn sm" onclick="openPipelineEditor()">${icon('settings', 13)} Настроить воронку</button>` : ''}</div>
-  ${canEdit() && state.me?.role !== 'partner' ? bulkSlot('deals', `${bulkStage()}${bulkOwner('deals')}`) : ''}
+  ${canEdit() && !isPartner() ? bulkSlot('deals', `${bulkStage()}${bulkOwner('deals')}`) : ''}
   <div class="kanban">${d.stages.map(s => {
     const colDeals = shown.filter(x => x.stage === s.code);
     const colSum = colDeals.reduce((a, x) => a + x.amount, 0);
@@ -2653,7 +2656,7 @@ async function tasks(v) {
    ${canEdit() ? `<button class="btn sm primary" style="margin-left:auto" onclick="openTask()">${icon('plus', 14)} Задача</button>` : ''}</div>
    ${state.taskScope === 'mine' ? `<p><small>Здесь задачи, назначенные на вас (${esc((state.me && state.me.name) || '')}), и неназначенные — их удобно разобрать первыми.</small></p>` : ''}
    ${state.taskView === 'week' ? weekCalendar(rows) : ''}
-   ${state.taskView !== 'week' && canEdit() ? bulkSlot('tasks', `<button class="btn sm" onclick="bulkApply('tasks','update',{done:1})">${icon('check', 14)} Выполнить выбранные</button> <button class="btn sm" onclick="bulkRescheduleTasks()">Перенести</button> <button class="btn sm danger" onclick="bulkApply('tasks','delete')">${icon('trash', 14)} Удалить</button>`) : ''}
+   ${state.taskView !== 'week' && canEdit() && !isPartner() ? bulkSlot('tasks', `<button class="btn sm" onclick="bulkApply('tasks','update',{done:1})">${icon('check', 14)} Выполнить выбранные</button> <button class="btn sm" onclick="bulkRescheduleTasks()">Перенести</button> <button class="btn sm danger" onclick="bulkApply('tasks','delete')">${icon('trash', 14)} Удалить</button>`) : ''}
    ${state.taskView === 'week' ? '' : groups.map(([t, list]) => list.length ? `<h3 style="margin-top:12px">${t} <small>${list.length}</small></h3>${list.slice(0, state.taskLimit || 50).map(x => {
      const meta = taskDueMeta(x.due, x.done);
      return `<div class="row taskrow ${selSet('tasks').has(x.id) ? 'selected' : ''}">
