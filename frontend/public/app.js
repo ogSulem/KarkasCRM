@@ -670,16 +670,6 @@ function ownerField(selId) {
   return `<label class="opt">Ответственный<input value="${esc(u.name || '— вы —')}" disabled></label>`;
 }
 
-// Поле компании в форме клиента и карточке сделки. Справочник компаний доступен
-// не каждой роли, а пустой список в селекте при сохранении отправил бы пустое
-// значение и молча отвязал карточку от компании. Поэтому, когда справочник не
-// получен, а привязка есть, текущее значение уходит скрытым полем и не теряется.
-function companyField(list, currentId, emptyLabel) {
-  const rows = Array.isArray(list) ? list : [];
-  if (!rows.length && currentId) return `<input type="hidden" name="company_id" value="${Number(currentId)}">`;
-  return fld('Компания', `<select name="company_id"><option value="">${esc(emptyLabel)}</option>${rows.map(x => `<option value="${x.id}" ${x.id === currentId ? 'selected' : ''}>${esc(x.name)}</option>`).join('')}</select>`);
-}
-
 // Подсказка в форме: по текущим правилам распределения считает, кому
 // достанется новый контакт.
 function responsibleHint() {
@@ -1412,7 +1402,9 @@ async function submitSendDoc(e, id) {
 async function openDeal(contactId, stageCode) {
   await team();
   await ensureStages();
-  if (!state.contacts.length) state.contacts = await api('/api/contacts');
+  // клиент подбирается поиском: если сделку создают из карточки клиента,
+  // он уже известен и показан подписью
+  const preContact = contactId ? await api('/api/contacts/' + contactId).catch(() => null) : null;
   const def = ((state.pipelines || []).find(p => p.id === state.pipeline) || state.pipelines?.[0] || {}).stages || [];
   const curStage = stageCode || (def[0] ? def[0].code : '');
   openModal(`<h3>Новая сделка</h3><form onsubmit="return saveDeal(event)">
@@ -1420,7 +1412,7 @@ async function openDeal(contactId, stageCode) {
    ${fld('Название сделки', `<input name="title" required placeholder="Каркасный дом 8×10">`, true)}
    ${cfInputs('deals', {}, 2, 'required')}
    ${grid2(`${fld('Сумма (' + CUR() + ')', `<input name="amount" type="number" value="0" placeholder="0">`)}
-     ${fld('Клиент', `<select name="contact_id"><option value="">— выбрать —</option>${state.contacts.map(c => `<option value="${c.id}" ${c.id === contactId ? 'selected' : ''}>${esc(c.name)}</option>`).join('')}</select>`)}`)}
+     ${fld('Клиент', pickSlot('contact_id', preContact))}`)}
    ${grid2(`${fld('Этап', `<select name="stage">${def.map(st => `<option value="${esc(st.code)}" ${st.code === curStage ? 'selected' : ''}>${esc(st.name)}</option>`).join('')}</select>`)}
      ${ownerField(meId())}`)}
    ${grid2(`${fld('Дедлайн', '<input name="deadline" type="date">')}
@@ -1471,13 +1463,11 @@ async function openDealCard(id) {
   const d = await api('/api/deals/' + id);
   await team();
   const deal = d.deal;
-  if (!(state.contacts || []).length) state.contacts = await api('/api/contacts').catch(() => []);
   // этапы берём из воронки самой сделки: иначе в карточке можно выбрать чужой этап
   const pipes = state.pipelines && state.pipelines.length ? state.pipelines : await api('/api/pipelines');
   state.pipelines = pipes;
   const pipe = pipes.find(p => p.id === deal.pipeline_id) || pipes[0] || {};
   state.cardStages = pipe.stages || [];
-  state.cardCompanies = state.cardCompanies || await api('/api/companies').catch(() => []);
   const done = ['won', 'lost'].includes(deal.stage);
   const openTasks = (d.tasks || []).filter(t => !t.done).length;
   const nextTask = (d.tasks || []).filter(t => !t.done && t.due).sort((a, b) => String(a.due).localeCompare(String(b.due)))[0];
@@ -1519,8 +1509,8 @@ function dealTab(deal, d) {
      ${cfInputs('deals', deal, 2, 'required')}
      ${grid2(`${fld('Сумма (' + CUR() + ')', `<input name="amount" type="number" value="${deal.amount}">`)}
        ${fld('Этап', `<select name="stage">${selStages(deal.stage, state.cardStages)}</select>`)}`)}
-     ${grid2(`${fld('Клиент', `<select name="contact_id"><option value="">— без контакта —</option>${(state.contacts || []).map(c => `<option value="${c.id}" ${c.id === deal.contact_id ? 'selected' : ''}>${esc(c.name)}</option>`).join('')}</select>`)}
-       ${companyField(state.cardCompanies || [], deal.company_id, '— без компании —')}`)}
+     ${grid2(`${fld('Клиент', pickSlot('contact_id', deal.contact_id ? { id: deal.contact_id, name: deal.contact_name } : null))}
+       ${fld('Компания', pickSlot('company_id', deal.company_id ? { id: deal.company_id, name: deal.company_name } : null))}`)}
      ${grid2(`${fld('Дедлайн', `<input name="deadline" type="date" value="${esc((deal.deadline || '').slice(0, 10))}">`)}
        ${ownerField(deal.responsible_id)}`)}
      ${grid2(`${fld('Приоритет', `<select name="priority"><option value="normal" ${deal.priority === 'normal' ? 'selected' : ''}>Обычный</option><option value="high" ${deal.priority === 'high' ? 'selected' : ''}>Высокий</option><option value="low" ${deal.priority === 'low' ? 'selected' : ''}>Низкий</option></select>`)}
@@ -1885,7 +1875,7 @@ async function inbox(v) {
        <button type="button" class="tmpl-settings" onclick="go('settings','templates')">${icon('settings', 12)} настроить шаблоны</button>
      </div>
      <p class="form-hint" id="sendAccountHint" style="margin:-2px 0 0"></p></form>` : `<div class="composer"><p class="form-hint" style="margin:0">${icon('eye', 14)} Режим просмотра: переписка доступна для чтения, отвечает менеджер или администратор.</p></div>`}` : '<div class="empty">Выберите диалог</div>'}</div>
-   <div class="profile">${cur ? `<h3>Клиент</h3><p><b>${esc(displayTitle(cur.title))}</b>${cur.position ? `<br><small>${esc(cur.position)}</small>` : ''}</p><p>${icon('phone', 13)} ${esc(cur.phone ? prettyPhone(cur.phone) : '—')}<br>${icon('email', 13)} ${esc(cur.email || '—')}${cur.company ? `<br>${icon('company', 13)} ${esc(cur.company)}` : ''}${cur.source ? `<br>${icon('info', 13)} Источник: ${esc(sourceLabel(cur.source))}` : ''}${cur.contact_responsible_name ? `<br>${icon('user', 13)} Ответственный: ${esc(cur.contact_responsible_name)}` : ''}</p><p>Каналы: ${chan(cur.channels)}${(cur.channels || '').includes('email') ? ' <span class="tag grey">почта подключена</span>' : ''}</p><p><button class="btn sm" onclick="attachContact(${cur.contact_id})">Открыть карточку клиента</button></p><hr><div class="profile-actions">${cur.phone ? `<a class="btn sm" href="tel:${esc(String(cur.phone).replace(/[^+\d]/g, ''))}">${icon('phone', 13)} Позвонить</a>` : ''}${canEdit() ? `<button class="btn sm" onclick="openTask(null,{contact_id:${cur.contact_id}})">+ Задача</button><button class="btn sm" onclick="quickDeal(${cur.contact_id})">+ Сделка</button><button class="btn sm" onclick="quickNote(${cur.contact_id})">+ Заметка</button>` : ''}</div>` : '<div class="empty">Выберите чат</div>'}</div></div>`;
+   <div class="profile">${cur ? `<h3>Клиент</h3><p><b>${esc(displayTitle(cur.title))}</b>${cur.position ? `<br><small>${esc(cur.position)}</small>` : ''}</p><p>${icon('phone', 13)} ${esc(cur.phone ? prettyPhone(cur.phone) : '—')}<br>${icon('email', 13)} ${esc(cur.email || '—')}${cur.company ? `<br>${icon('company', 13)} ${esc(cur.company)}` : ''}${cur.source ? `<br>${icon('tag', 13)} Источник: ${esc(sourceLabel(cur.source))}` : ''}${cur.contact_responsible_name ? `<br>${icon('contact', 13)} Ответственный: ${esc(cur.contact_responsible_name)}` : ''}</p><p>Каналы: ${chan(cur.channels)}${(cur.channels || '').includes('email') ? ' <span class="tag grey">почта подключена</span>' : ''}</p><p><button class="btn sm" onclick="attachContact(${cur.contact_id})">Открыть карточку клиента</button></p><hr><div class="profile-actions">${cur.phone ? `<a class="btn sm" href="tel:${esc(String(cur.phone).replace(/[^+\d]/g, ''))}">${icon('phone', 13)} Позвонить</a>` : ''}${canEdit() ? `<button class="btn sm" onclick="openTask(null,{contact_id:${cur.contact_id}})">+ Задача</button><button class="btn sm" onclick="quickDeal(${cur.contact_id})">+ Сделка</button><button class="btn sm" onclick="quickNote(${cur.contact_id})">+ Заметка</button>` : ''}</div>` : '<div class="empty">Выберите чат</div>'}</div></div>`;
   if (cur && canEdit()) { refreshSendAccount(cur.id); const t = $('#msgText'); if (t) { t.value = state.drafts[cur.id] || ''; autoGrow(t); } }
   const mDiv = $('#chatMsgs');
   if (mDiv) mDiv.scrollTop = mDiv.scrollHeight;
@@ -2449,10 +2439,17 @@ async function submitStartConv(e, contactId) {
 async function openContactCard(id) {
   await ensureStages();
   const c = await api('/api/contacts/' + id);
-  const deals = (await api('/api/deals')).deals.filter(d => d.contact_id === id);
-  const conv = (await api('/api/conversations')).find(x => x.contact_id === id);
-  const notes = await api(`/api/notes?type=contacts&entity=${id}`);
-  const contactTasks = (await api('/api/tasks').catch(() => [])).filter(t => t.contact_id === id && !t.done).slice(0, 6);
+  // карточка просит у сервера только данные этого клиента: раньше она тянула
+  // все сделки, все чаты и все задачи компании и отбирала нужное на месте —
+  // на большой базе окно открывалось заметно дольше
+  const [deals, convList, notes, taskList] = await Promise.all([
+    api(`/api/deals?contact_id=${id}`).then(x => x.deals || []).catch(() => []),
+    api(`/api/conversations?contact_id=${id}`).catch(() => []),
+    api(`/api/notes?type=contacts&entity=${id}`).catch(() => []),
+    api(`/api/tasks?contact_id=${id}`).catch(() => []),
+  ]);
+  const conv = convList.find(x => x.contact_id === id) || null;
+  const contactTasks = taskList.filter(t => !t.done).slice(0, 6);
   await team();
   const rawPhone = (c.phone || '').replace(/[^\d]/g, '');
 
@@ -2498,15 +2495,17 @@ async function openContactCard(id) {
 
 async function openContact(id) {
   await team();
-  const comps = await api('/api/companies').catch(() => []);
   const c = id ? await api('/api/contacts/' + id) : { tags: '', custom: '{}' };
+  // компания подбирается поиском: справочник целиком в форму не грузится,
+  // а привязанная компания показана подписью
+  const comp = c.company_id ? await api('/api/companies/' + c.company_id).catch(() => null) : null;
   openModal(`<h3>${id ? 'Контакт' : 'Новый контакт'}</h3><form onsubmit="return saveContact(event,${id || 'null'})">
    ${formLegend()}
    ${fld('Имя клиента', `<input name="name" required value="${esc(c.name || '')}" placeholder="Иван Петров">`, true)}
    ${cfInputs('contacts', c, 2, 'required')}
    ${grid2(`${fld('Телефон', `<input name="phone" value="${esc(c.phone || '')}" placeholder="+7 999 123-45-67">`)}
      ${fld('E-mail', `<input name="email" type="email" value="${esc(c.email || '')}" placeholder="ivan@mail.ru">`)}`)}
-   ${grid2(`${companyField(comps, c.company_id, '— частное лицо —')}
+   ${grid2(`${fld('Компания', pickSlot('company_id', comp))}
      ${fld('Должность', `<input name="position" value="${esc(c.position || '')}" placeholder="Собственник / застройщик">`)}`)}
    ${grid2(`${ownerField(c.responsible_id || meId())}
      ${fld('Источник', `<select name="source">${sourceOptions(c.source)}</select>`)}`)}
@@ -2535,7 +2534,7 @@ async function saveContact(e, id, allowDuplicate = false) {
     }
     throw err;
   }
-  if (!id) { state.contacts = []; state.cardCompanies = null; }
+  if (!id) state.contacts = [];
   closeModal(); toast(id ? 'Контакт сохранён' : 'Контакт создан'); render(); return false;
 }
 
@@ -2576,14 +2575,14 @@ async function companies(v) {
 // Данные те же, что в списках, — открываются в один клик из таблицы.
 async function openCompanyCard(id) {
   const c = await api('/api/companies/' + id);
-  const [people, dealsData] = await Promise.all([
-    api('/api/contacts').catch(() => []),
-    // сделки отдаются объектом {pipelines, stages, deals}; без параметра pipeline
-    // список по всем воронкам — карточке компании нужны именно все
-    api('/api/deals').catch(() => ({ deals: [] })),
+  // сотрудники и сделки компании приходят одним запросом на каждый список:
+  // сервер отдаёт только то, что относится к этой компании (сделки — и те,
+  // что заведены на её сотрудника), поэтому в карточке видно всю работу
+  const [staff, dealsData] = await Promise.all([
+    api(`/api/contacts?company_id=${id}`).catch(() => []),
+    api(`/api/deals?company_id=${id}`).catch(() => ({ deals: [] })),
   ]);
-  const staff = people.filter(x => Number(x.company_id) === Number(id));
-  const deals = (dealsData.deals || []).filter(x => Number(x.company_id) === Number(id));
+  const deals = dealsData.deals || [];
   const sum = deals.reduce((a, d) => a + (Number(d.amount) || 0), 0);
   openModal(`<div class="modal-head">
     <div><h3>${esc(c.name)}</h3><small>${esc(c.inn || 'ИНН не указан')}${siteHref(c.site) ? ` · <a href="${esc(siteHref(c.site))}" target="_blank" rel="noopener">${esc(c.site)}</a>` : ''}</small></div>
@@ -2603,10 +2602,11 @@ async function openCompany(id) {
   let related = '';
   if (id) {
     // в карточке компании сразу видно, кто с ней связан и какие сделки ведутся
-    const [contacts, dealsData] = await Promise.all([api('/api/contacts'), api('/api/deals')]);
-    const cs = contacts.filter(x => x.company_id === id);
-    const ids = new Set(cs.map(x => x.id));
-    const ds = dealsData.deals.filter(x => x.company_id === id || (x.contact_id && ids.has(x.contact_id)));
+    const [cs, dealsData] = await Promise.all([
+      api(`/api/contacts?company_id=${id}`).catch(() => []),
+      api(`/api/deals?company_id=${id}`).catch(() => ({ deals: [] })),
+    ]);
+    const ds = dealsData.deals || [];
     related = `<hr><div class="cols"><div><h4>Контакты компании (${cs.length})</h4>
       <div class="list">${cs.map(x => `<div class="row"><span><a href="#" onclick="closeModal();openContactCard(${x.id});return false"><b>${esc(x.name)}</b></a><br><small>${esc(x.position || '')} ${esc(x.phone || '')}</small></span></div>`).join('') || '<small>Контактов пока нет — привяжите их в карточке клиента</small>'}</div></div>
       <div><h4>Сделки (${ds.length})</h4><div class="list">${ds.map(d => `<div class="row"><span><a href="#" onclick="closeModal();openDealCard(${d.id});return false"><b>${esc(d.title)}</b></a><br><small>${esc(stageLabel(d.stage))} · ${fmt(d.amount)}</small></span></div>`).join('') || '<small>Сделок пока нет</small>'}</div></div></div>`;
@@ -2625,7 +2625,6 @@ async function openCompany(id) {
 async function saveCompany(e, id) {
   e.preventDefault();
   await api(id ? '/api/companies/' + id : '/api/companies', { method: id ? 'PATCH' : 'POST', body: JSON.stringify(Object.fromEntries(new FormData(e.target))) });
-  state.cardCompanies = null;
   closeModal(); toast('Компания сохранена'); render(); return false;
 }
 
@@ -2733,9 +2732,11 @@ async function reschedule(id, days, quiet = false) {
 
 async function openTask(id, p = {}) {
   const t = id ? await api('/api/tasks/' + id) : p;
-  if (!state.contacts.length) state.contacts = await api('/api/contacts');
   await team();
-  const deals = state.deals.length ? state.deals : (await api('/api/deals')).deals;
+  // Привязка к клиенту и сделке подбирается поиском. Список всех клиентов и
+  // всех сделок в форме задачи превращал окно в десятки тысяч строк разметки:
+  // на базе в несколько тысяч записей задача открывалась секунды и тормозила
+  // страницу. Здесь в разметке остаются только уже выбранные значения.
   // срок по умолчанию: сегодня 18:00, а если уже вечер — завтра 12:00
   const nowT = new Date();
   const defDay = new Date(nowT); let defTime = '18:00';
@@ -2743,15 +2744,14 @@ async function openTask(id, p = {}) {
   const dueVal = t.due ? normalizeDue(t.due).replace(' ', 'T').slice(0, 16) : `${isoDate(defDay)}T${defTime}`;
 
   // Если задачу ставят из карточки, клиент и сделка уже известны: показываем их
-  // подписью, а не длинным списком. Понадобится другое — «изменить».
-  const contactPick = `<select name="contact_id"><option value="">— нет —</option>${state.contacts.map(c => `<option value="${c.id}" ${c.id === t.contact_id ? 'selected' : ''}>${esc(c.name)}</option>`).join('')}</select>`;
-  const dealPick = `<select name="deal_id"><option value="">— нет —</option>${deals.map(d => `<option value="${d.id}" ${d.id === t.deal_id ? 'selected' : ''}>${esc(d.title)}</option>`).join('')}</select>`;
-  window.__taskLinkSel = { contact_id: contactPick, deal_id: dealPick };
-  const preContact = t.contact_id ? state.contacts.find(c => c.id === +t.contact_id) : null;
-  const preDeal = t.deal_id ? deals.find(d => d.id === +t.deal_id) : null;
-  const linkSlot = (kind, obj, ico) => obj
-    ? `<div class="task-link-slot" data-kind="${kind}"><span class="task-link">${icon(ico, 13)} <b>${esc(obj.name || obj.title)}</b> <button type="button" class="link-btn" onclick="taskUnlink(this,'${kind}')">изменить</button></span><input type="hidden" name="${kind}" value="${obj.id}"></div>`
-    : `<div class="task-link-slot" data-kind="${kind}">${kind === 'contact_id' ? contactPick : dealPick}</div>`;
+  // подписью, а поиск открывается по кнопке «изменить».
+  // карточка сделки отдаёт объект со всей карточкой — из него берём саму сделку
+  const [preContact, dealCard] = await Promise.all([
+    t.contact_id ? api('/api/contacts/' + t.contact_id).catch(() => null) : Promise.resolve(null),
+    t.deal_id ? api('/api/deals/' + t.deal_id).catch(() => null) : Promise.resolve(null),
+  ]);
+  const preDeal = (dealCard && dealCard.deal) || null;
+  const linkSlot = kind => pickSlot(kind, kind === 'contact_id' ? preContact : preDeal);
 
   openModal(`<h3>${id ? 'Задача' : 'Новая задача'}</h3><form onsubmit="return saveTask(event,${id || 'null'})">
    ${formLegend()}
@@ -2765,7 +2765,7 @@ async function openTask(id, p = {}) {
      <button type="button" class="btn sm chip" onclick="setTaskDue(this,'week')">через неделю</button>
      <button type="button" class="btn sm chip ghost" onclick="setTaskDue(this,'clear')">без срока</button>
    </div>
-   <div class="task-links"><div class="task-link-col"><span class="task-link-cap">Клиент</span>${linkSlot('contact_id', preContact, 'contact')}</div><div class="task-link-col"><span class="task-link-cap">Сделка</span>${linkSlot('deal_id', preDeal, 'pipe')}</div></div>
+   <div class="task-links"><div class="task-link-col"><span class="task-link-cap">Клиент</span>${linkSlot('contact_id')}</div><div class="task-link-col"><span class="task-link-cap">Сделка</span>${linkSlot('deal_id')}</div></div>
    ${grid2(`${ownerField(t.responsible_id || meId())}
      ${fld('Приоритет', `<select name="priority"><option value="normal" ${t.priority === 'normal' ? 'selected' : ''}>Обычный</option><option value="high" ${t.priority === 'high' ? 'selected' : ''}>Высокий</option><option value="low" ${t.priority === 'low' ? 'selected' : ''}>Низкий</option></select>`)}`)}
    ${fld('Повтор задачи', `<select name="repeat">${[['none', 'Не повторять'], ['daily', 'Каждый день'], ['weekly', 'Каждую неделю'], ['monthly', 'Каждый месяц']].map(([k, n]) => `<option value="${k}" ${k === (t.repeat || 'none') ? 'selected' : ''}>${n}</option>`).join('')}</select>`)}
@@ -2773,11 +2773,70 @@ async function openTask(id, p = {}) {
    <button class="btn primary w">${id ? 'Сохранить' : 'Поставить задачу'}</button></form>`);
 }
 
-// Вернуть список выбора, если привязанный клиент или сделка не подходят
-function taskUnlink(btn, kind) {
-  const slot = btn.closest('.task-link-slot');
-  const html = window.__taskLinkSel && window.__taskLinkSel[kind];
-  if (slot && html) slot.innerHTML = html;
+/* ---------- подбор связанной записи ----------
+   Клиент, сделка и компания в формах подбираются поиском: два символа — и
+   сервер ищет по всей базе. Список всей базы в выпадающем поле на тысячах
+   записей делал окно тяжёлым и открывал его секунды, а нужное значение всё
+   равно приходилось искать прокруткой. */
+const PICK = {
+  contact_id: { ph: 'Найти клиента', ico: 'contact', key: 'contacts', name: x => x.name, sub: x => x.phone || x.email || '' },
+  deal_id: { ph: 'Найти сделку', ico: 'pipe', key: 'deals', name: x => x.title, sub: x => x.amount ? fmt(x.amount) : '' },
+  company_id: { ph: 'Найти компанию', ico: 'companies', key: 'companies', name: x => x.name, sub: x => x.inn || '' },
+};
+// пустое поле: строка поиска, список найденного и скрытое значение для формы
+function pickField(kind) {
+  const cfg = PICK[kind];
+  return `<div class="pick" data-kind="${kind}"><input type="text" placeholder="${cfg.ph}" autocomplete="off" aria-label="${cfg.ph}" onfocus="pickSearch(this)" oninput="pickSearch(this)" onkeydown="pickKey(event,this)"><div class="search-results pick-list hidden"></div><input type="hidden" name="${kind}" value=""></div>`;
+}
+// выбранное значение: подпись с кнопкой «изменить», значение — скрытым полем
+function pickValue(kind, name, sub, id) {
+  const cfg = PICK[kind];
+  return `<span class="pick-value">${icon(cfg.ico, 13)} <b>${esc(name || '—')}</b>${sub ? ` <small>${esc(sub)}</small>` : ''} <button type="button" class="link-btn" onclick="pickReset(this)">изменить</button></span><input type="hidden" name="${kind}" value="${Number(id) || ''}">`;
+}
+function pickSlot(kind, obj) {
+  const cfg = PICK[kind];
+  return `<div class="pick-slot" data-kind="${kind}">${obj && obj.id ? pickValue(kind, cfg.name(obj), cfg.sub(obj), obj.id) : pickField(kind)}</div>`;
+}
+function pickReset(btn) {
+  const slot = btn.closest('.pick-slot');
+  if (slot) slot.innerHTML = pickField(slot.dataset.kind);
+}
+let pickT = 0, pickSeq = 0;
+function pickSearch(inp) {
+  const box = inp.closest('.pick');
+  if (!box) return;
+  const kind = box.dataset.kind, cfg = PICK[kind], list = box.querySelector('.pick-list');
+  const q = inp.value.trim();
+  clearTimeout(pickT);
+  if (q.length < 2) { list.classList.add('hidden'); list.innerHTML = ''; return; }
+  const seq = ++pickSeq;
+  pickT = setTimeout(async () => {
+    let data;
+    // only=… просит сервер искать один вид записей: подбору не нужны чужие списки
+    try { data = await api(`/api/search?q=${encodeURIComponent(q)}&only=${cfg.key}`); } catch (e) { return; }
+    if (seq !== pickSeq) return; // строку дописали — этот ответ уже устарел
+    const items = data[cfg.key] || [];
+    list.innerHTML = items.length
+      ? items.map(it => `<div onclick="pickChoose(this,${Number(it.id)})"><b>${esc(cfg.name(it))}</b>${cfg.sub(it) ? ` · <small>${esc(cfg.sub(it))}</small>` : ''}</div>`).join('')
+      : '<small class="pick-none">Ничего не найдено — проверьте написание</small>';
+    list.classList.remove('hidden');
+  }, 180);
+}
+function pickKey(e, inp) {
+  const list = inp.closest('.pick').querySelector('.pick-list');
+  if (e.key === 'Escape') { list.classList.add('hidden'); return; }
+  if (e.key === 'Enter') {
+    const first = list.querySelector('div[onclick]');
+    if (first) { e.preventDefault(); first.click(); }
+  }
+}
+function pickChoose(row, id) {
+  const box = row.closest('.pick');
+  if (!box) return;
+  const kind = box.dataset.kind;
+  const b = row.querySelector('b'), small = row.querySelector('small');
+  const slot = box.closest('.pick-slot');
+  if (slot) slot.innerHTML = pickValue(kind, b ? b.textContent : '', small ? small.textContent : '', id);
 }
 // Быстрые сроки: один клик вместо прокрутки календаря. Точное время — в поле «Срок».
 function setTaskDue(btn, mode) {
@@ -3871,13 +3930,14 @@ async function settings(v) {
      ${isAdmin ? `<div class="card"><h3>Адреса сервисов проверки</h3><p><small>Нужны только техническому специалисту — обычно здесь ничего менять не надо. Если сервис сменил адрес, его можно поправить.</small></p><form onsubmit="return saveCompetitorUrls(event)">${[['FNS_API_URL', 'ФНС API'], ['FEDRESURS_API_URL', 'Федресурс'], ['KAD_API_URL', 'Арбитр'], ['RUSPROFILE_URL', 'Rusprofile'], ['GOOGLE_API_URL', 'Google Places'], ['TWOGIS_API_URL', '2ГИС'], ['YANDEX_API_URL', 'Яндекс Геопоиск']].map(([k, n]) => `<label>${n}<input name="${k}" value="${esc((cs.urls || {})[k] || '')}"></label>`).join('')}<button class="btn">Сохранить адреса</button></form></div>` : ''}
     </div></div>`;
   } else if (state.settingsTab === 'pipelines') {
-    const pl = await api('/api/pipelines');
-    const allDeals = (await api('/api/deals')).deals;
+    // счётчики сделок для каждой воронки считает сервер: вкладке не нужно
+    // забирать все сделки базы, чтобы получить два числа на воронку
+    const pl = await api('/api/pipelines?stats=1');
     body = `<div class="settings-cols"><div class="card">
      <div class="row" style="border:0"><div><h3>Воронки и этапы</h3><small>Этапы — путь сделки от обращения до оплаты. Кнопки управления справа в карточке воронки.</small></div><button class="btn sm primary" onclick="addPipeline()">+ Воронка</button></div>
      ${pl.map(p => {
-       const used = allDeals.filter(d => (d.pipeline_id || 1) === p.id).length;
-       const open = allDeals.filter(d => (d.pipeline_id || 1) === p.id && !['won', 'lost'].includes(d.stage)).length;
+       const used = Number(p.deals_total || 0);
+       const open = Number(p.deals_open || 0);
        return `<div class="card pipe-card">
         <div class="pipe-main"><b>${esc(p.name)}</b>
          <small>${p.stages.length} этапов · сделок: ${used}${open ? `, в работе: ${open}` : ''}</small>
@@ -3964,23 +4024,18 @@ async function settings(v) {
       <p><small>Куда отправить ответ, выбирается прямо в чате над полем ввода — шаблон не привязан к каналу и подходит для любого.</small></p></div>
     </div></div>`;
   } else if (state.settingsTab === 'team') {
-    const rows = await api('/api/users');
-    const allDeals = (await api('/api/deals')).deals;
-    const allTasks = await api('/api/tasks');
+    // нагрузку сотрудника (сделки в работе, сумма, успешные, открытые задачи)
+    // сервер считает двумя группировками — вкладка не тянет сделки и задачи
+    const rows = await api('/api/users?stats=1');
     const uq = (state.teamQuery || '').trim().toLowerCase();
     const shown = uq ? rows.filter(x => `${x.name} ${x.email || ''} ${roleLabel(x.role)}`.toLowerCase().includes(uq)) : rows;
-    const stat = id => {
-      const my = allDeals.filter(d => d.responsible_id === id);
-      const open = my.filter(d => !['won', 'lost'].includes(d.stage));
-      const tasks = allTasks.filter(t => t.responsible_id === id && !t.done);
-      return { open: open.length, sum: open.reduce((a, d) => a + d.amount, 0), won: my.filter(d => d.stage === 'won').length, tasks: tasks.length };
-    };
+    const stat = x => ({ open: Number(x.deals_open || 0), sum: Number(x.deals_sum || 0), won: Number(x.deals_won || 0), tasks: Number(x.tasks_open || 0) });
     body = `<div class="settings-cols"><div class="card">
      <div class="row" style="border:0;flex-wrap:wrap;gap:8px"><div><h3>Команда (${rows.length})</h3><small>Доступ в CRM выдаёт администратор: e-mail — это логин, пароль сотрудник меняет при первом входе.</small></div>
       <input id="teamSearch" class="searchfield searchfield-sm searchfield-end" placeholder="Поиск: имя, e-mail, роль" value="${esc(state.teamQuery || '')}" oninput="liveSearch('team',()=>setTeamQuery(this.value))">
       <button class="btn sm primary" onclick="openUser()">+ Пользователь</button></div>
      <div class="tbl-scroll"><table><tr><th>Сотрудник</th><th>E-mail (логин)</th><th>Роль</th><th>Сделки в работе</th><th>Задачи</th><th>Последний вход</th><th>Доступ</th><th></th></tr>
-      ${shown.map(x => { const st = stat(x.id); return `<tr>
+      ${shown.map(x => { const st = stat(x); return `<tr>
         <td><b>${esc(x.name)}</b>${x.must_change_password ? '<br><small>работает по временному паролю</small>' : ''}</td>
         <td>${esc(x.email || '—')}</td><td>${esc(roleLabel(x.role))}</td>
         <td>${st.open} на ${fmt(st.sum)}<br><small>успешных: ${st.won}</small></td><td>${st.tasks}</td>

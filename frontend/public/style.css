@@ -677,17 +677,24 @@ html[data-theme=dark] .msg-fail{color:#fca5a5}
 .all-clear{display:flex;align-items:center;gap:8px;font-size:13.5px;color:var(--green-d);background:var(--green-l);border-radius:10px;padding:8px 12px}
 html[data-theme=dark] .all-clear{background:#123326;color:#86efac}
 
-/* привязка задачи: подпись вместо длинного списка */
+/* привязка в формах: подпись выбранного значения и поле подбора поиском */
 .task-links{display:grid;grid-template-columns:1fr 1fr;gap:12px}
 .task-link-col{display:flex;flex-direction:column;gap:4px}
 .task-link-cap{font-size:13px;font-weight:600;color:var(--muted)}
-.task-link-slot select{width:100%}
-.task-link{display:flex;align-items:center;gap:6px;font-size:13.5px;color:var(--muted);padding:9px 0 0}
-.task-link b{color:var(--ink);font-weight:600;max-width:100%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+/* подбор клиента и сделки: поле с поиском по базе, найденное — списком под ним.
+   Вид тот же, что у глобального поиска, поэтому тёмная тема и наведение
+   достаются от правил .search-results */
+.pick{position:relative}
+.pick-list{max-height:220px}
+.pick-none{display:block;padding:8px 12px;color:var(--muted);cursor:default}
+.pick-slot{min-width:0}
+.pick-value{display:flex;align-items:center;gap:6px;font-size:13.5px;color:var(--muted);padding:9px 0 0;min-width:0}
+.pick-value b{color:var(--ink);font-weight:600;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.pick-value small{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .link-btn{all:unset;cursor:pointer;color:var(--green-d);font-size:12.5px;border-bottom:1px dashed currentColor}
 .link-btn:hover{color:var(--green)}
 html[data-theme=dark] .link-btn{color:#86efac}
-@media(max-width:560px){.task-links{grid-template-columns:1fr}}
+@media(max-width:560px){.task-links{grid-template-columns:1fr}.pick-list{max-height:170px}}
 
 /* экран ожидания после восстановления базы из копии */
 .restart-screen{position:fixed;inset:0;background:rgba(3,26,13,.55);backdrop-filter:blur(3px);display:grid;place-items:center;z-index:120;padding:20px}
