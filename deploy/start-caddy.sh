@@ -8,8 +8,8 @@ case "$CRM_DOMAIN" in *[!a-zA-Z0-9.-]*|.*|*.) echo 'TLS: CRM_DOMAIN — толь
 case "$CRM_DOMAIN" in *.*) ;; *) echo 'TLS: укажите полное DNS-имя' >&2; exit 1;; esac
 [ "${#JWT_SECRET}" -ge 32 ] || { echo 'TLS: задайте случайный JWT_SECRET (32+ символа)' >&2; exit 1; }
 case "$JWT_SECRET" in *change*|*СМЕНИТЕ*|*смените*) echo 'TLS: замените пример JWT_SECRET' >&2; exit 1;; esac
-if [ "${#ADMIN_PASSWORD}" -lt 12 ] || [ "$ADMIN_PASSWORD" = 'admin12345' ]; then
-  echo 'TLS: в .env нужен ADMIN_PASSWORD от 12 символов (не admin12345).' >&2
+if [ "${#ADMIN_PASSWORD}" -lt 12 ] || [ "$ADMIN_PASSWORD" = 'admin12345' ] || [ "$ADMIN_PASSWORD" = 'admin1234567' ]; then
+  echo 'TLS: в .env нужен ADMIN_PASSWORD от 12 символов, заданный вами (значения по умолчанию не годятся).' >&2
   echo '     Сгенерировать: openssl rand -hex 12' >&2
   exit 1
 fi

@@ -12,6 +12,8 @@
 import { test, before, after } from 'node:test';
 import assert from 'node:assert';
 import { createServer } from 'node:http';
+import { createRequire } from 'node:module';
+const require = createRequire(import.meta.url);
 
 process.env.DATA_DIR = '/tmp/karkas-wazzup-' + Date.now();
 process.env.PORT = '18098';
@@ -74,6 +76,12 @@ const call = async (path, { method = 'GET', body, token } = {}) => {
   let data; try { data = JSON.parse(text) } catch { data = text }
   return { status: r.status, data };
 };
+// Вход администратора: временный пароль первого входа заменяется личным — так же,
+// как это делает сотрудник в интерфейсе.
+const { admin: adminToken } = require('./admin-login.cjs').flow({
+  login: (email, password) => call('/api/auth/login', { method: 'POST', body: { email, password } }),
+  change: (token, oldp, newp) => call('/api/me/password', { method: 'POST', token, body: { old_password: oldp, new_password: newp } }),
+});
 const hook = payload => fetch(`${base}/webhooks/wazzup?secret=${SECRET}`, {
   method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload),
 });
@@ -81,7 +89,7 @@ const hook = payload => fetch(`${base}/webhooks/wazzup?secret=${SECRET}`, {
 before(async () => {
   await new Promise(r => wz.listen(WZ_PORT, r));
   await new Promise(r => server.listening ? r() : server.once('listening', r));
-  admin = (await call('/api/auth/login', { method: 'POST', body: { email: 'admin@example.com', password: 'admin12345' } })).data.token;
+  admin = await adminToken();
   assert.ok(admin, 'вход администратора');
   const saved = await call('/api/settings', { method: 'PUT', token: admin, body: { WAZZUP_API_KEY: KEY, WAZZUP_API_URL: `http://127.0.0.1:${WZ_PORT}`, WAZZUP_WEBHOOK_SECRET: SECRET, PUBLIC_URL: base } });
   assert.equal(saved.status, 200, 'настройки Wazzup сохранены');

@@ -11,6 +11,8 @@ import { tmpdir } from 'node:os';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { signedHeaders } from '../scripts/s3-sign.mjs';
+import { createRequire } from 'node:module';
+const require = createRequire(import.meta.url);
 
 const here = dirname(fileURLToPath(import.meta.url));
 const root = join(here, '..');
@@ -34,6 +36,12 @@ const call = async (path, { method = 'GET', body, token } = {}) => {
   let data; try { data = JSON.parse(text) } catch { data = text }
   return { status: r.status, data };
 };
+// Вход администратора: временный пароль первого входа заменяется личным — так же,
+// как это делает сотрудник в интерфейсе.
+const { admin: adminToken } = require('./admin-login.cjs').flow({
+  login: (email, password) => call('/api/auth/login', { method: 'POST', body: { email, password } }),
+  change: (token, oldp, newp) => call('/api/me/password', { method: 'POST', token, body: { old_password: oldp, new_password: newp } }),
+});
 
 // Хранилище ведёт себя как настоящее: принимает PUT, отдаёт список объектов
 // и удаляет лишнее. Ключи держим в памяти — проверяем не файлы, а протокол.
@@ -72,7 +80,7 @@ function fakeS3({ pageSize = 0 } = {}) {
 
 before(async () => {
   await new Promise(r => server.listening ? r() : server.once('listening', r));
-  admin = (await call('/api/auth/login', { method: 'POST', body: { email: 'admin@example.com', password: 'admin12345' } })).data.token;
+  admin = await adminToken();
   assert.ok(admin, 'вход администратора');
 });
 after(async () => { await new Promise(r => server.close(r)); try { db.close() } catch {} });

@@ -474,7 +474,9 @@ async function api(path, opt = {}) {
     const d = await r.json().catch(() => ({}));
     const err = new Error(d.error || 'Нужно войти в систему.');
     err.unauthorized = true;
-    if (!opt.noSessionEnd && path !== '/api/auth/login') endSession('Сеанс завершён. Войдите, пожалуйста, заново.');
+    // причину называет сервер: «сеанс закрыт, пароль сброшен администратором»
+    // понятнее общего «сеанс завершён» и снимает вопрос, куда делся пароль
+    if (!opt.noSessionEnd && path !== '/api/auth/login') endSession(d.error || 'Сеанс завершён. Войдите, пожалуйста, заново.');
     unlockBusyForms();
     throw err;
   }
@@ -838,6 +840,7 @@ $('#passwordChangeForm').onsubmit = async e => {
   try {
     const result = await api('/api/me/password', { method: 'POST', body: JSON.stringify(b) });
     storeSessionToken(result.token); form.reset(); await boot();
+    toast('Личный пароль задан. Временный пароль больше не действует — входите с новым.');
   } catch (err) { error.textContent = err.message; }
   finally { btn.disabled = false; }
 };
@@ -867,6 +870,12 @@ async function boot() {
     if (me.user.must_change_password) {
       $('#login').classList.add('hidden'); $('#app').classList.add('hidden');
       $('#passwordChange').classList.remove('hidden');
+      // Временный пароль только что введён на экране входа: переносим его в
+      // первое поле, чтобы сотрудник не набирал его второй раз и не получал
+      // «старый пароль неверен» из-за опечатки. Из поля входа значение стираем.
+      const oldPw = $('#passwordChangeForm [name=old_password]'), loginPw = $('#loginPassword');
+      if (oldPw && !oldPw.value && loginPw && loginPw.value) oldPw.value = loginPw.value;
+      if (loginPw) loginPw.value = '';
       return;
     }
     $('#passwordChange').classList.add('hidden');
@@ -4036,12 +4045,14 @@ async function settings(v) {
       <button class="btn sm primary" onclick="openUser()">+ Пользователь</button></div>
      <div class="tbl-scroll"><table><tr><th>Сотрудник</th><th>E-mail (логин)</th><th>Роль</th><th>Сделки в работе</th><th>Задачи</th><th>Последний вход</th><th>Доступ</th><th></th></tr>
       ${shown.map(x => { const st = stat(x); return `<tr>
-        <td><b>${esc(x.name)}</b>${x.must_change_password ? '<br><small>работает по временному паролю</small>' : ''}</td>
+        <td><b>${esc(x.name)}</b><br><small>${x.must_change_password
+      ? `временный пароль${x.pass_changed_at ? ' выдан ' + esc(dt(x.pass_changed_at)) : ''}`
+      : `личный пароль${x.pass_changed_at ? ' задан ' + esc(dt(x.pass_changed_at)) : ' задан'}`}</small></td>
         <td>${esc(x.email || '—')}</td><td>${esc(roleLabel(x.role))}</td>
         <td>${st.open} на ${fmt(st.sum)}<br><small>успешных: ${st.won}</small></td><td>${st.tasks}</td>
         <td><small>${esc(x.last_login ? dt(x.last_login) : 'ещё не входил')}</small></td>
         <td>${x.active ? '<span class="tag">разрешён</span>' : '<span class="tag grey">отключён</span>'}</td>
-        <td style="white-space:nowrap"><button class="btn sm" title="Изменить данные, роль, доступ или выдать новый пароль" onclick="openUser(${x.id})">${icon('edit', 13)} Изменить</button></td></tr>`; }).join('')
+        <td style="white-space:nowrap"><button class="btn sm" title="Изменить данные, роль, доступ или сбросить пароль" onclick="openUser(${x.id})">${icon('edit', 13)} Изменить</button></td></tr>`; }).join('')
         || `<tr><td colspan="8"><div class="empty">${uq ? 'Никого не нашли — измените поиск' : 'Сотрудников пока нет'}</div></td></tr>`}</table></div></div>
      <div><div class="card"><h3>Права ролей</h3>
       <p><small><b>Администратор</b> — всё: настройки, команда, интеграции, воронки, свои поля, каталог (он же прайс-лист), резервные копии.</small></p>
@@ -4363,7 +4374,7 @@ async function saveWebhookSecret() {
 }
 async function saveMaintenance(e) { e.preventDefault(); await api('/api/settings', { method: 'PUT', body: JSON.stringify(Object.fromEntries(new FormData(e.target))) }); toast('Настройки обслуживания сохранены'); state.cache.settings = null; render(); return false; }
 async function saveAdvanced(e) { e.preventDefault(); await api('/api/settings', { method: 'PUT', body: JSON.stringify(Object.fromEntries(new FormData(e.target))) }); toast('Параметры сохранены'); render(); return false; }
-async function savePassword(e) { e.preventDefault(); try { const result = await api('/api/me/password', { method: 'POST', body: JSON.stringify(Object.fromEntries(new FormData(e.target))) }); storeSessionToken(result.token); e.target.reset(); toast('Пароль изменён, другие сеансы завершены'); } catch (err) { toast(err.message, 'err'); } return false; }
+async function savePassword(e) { e.preventDefault(); try { const result = await api('/api/me/password', { method: 'POST', body: JSON.stringify(Object.fromEntries(new FormData(e.target))) }); storeSessionToken(result.token); e.target.reset(); toast('Пароль изменён. Сеансы на других устройствах закрыты.'); } catch (err) { toast(err.message, 'err'); } return false; }
 function addPipeline() { askInput({ title: 'Новая воронка', label: 'Название воронки', value: 'Новая воронка', okText: 'Создать' }, name => { if (!name) return; (async () => { await api('/api/pipelines', { method: 'POST', body: JSON.stringify({ name }) }); toast('Воронка создана'); render(); })(); }); }
 async function openPipelineEditor() { return editPipeline(state.pipeline || 1); }
 async function editPipeline(id) {
@@ -4522,22 +4533,73 @@ function delTemplate(id) {
 }
 async function openUser(id) {
   const rows = await api('/api/users'); const x = id ? (rows.find(u => u.id === id) || {}) : {};
+  // В карточке сотрудника поля пароля нет: сброс делается отдельной кнопкой с
+  // подтверждением. Раньше сгенерированный «посмотреть» пароль уезжал в базу
+  // вместе с правкой роли или доступа, сеансы сотрудника закрывались, а он
+  // решал, что пароль поменялся сам.
+  const pwBlock = id
+    ? `<div class="pw-state"><b>${icon('lock', 15)} Пароль</b>
+       <p><small>${x.must_change_password
+    ? `Работает по временному паролю${x.pass_changed_at ? ', выдан ' + esc(dt(x.pass_changed_at)) : ''}. Личный пароль сотрудник задаст при входе.`
+    : `Личный пароль${x.pass_changed_at ? ' задан ' + esc(dt(x.pass_changed_at)) : ' задан'}. Сам пароль в CRM не хранится и не показывается.`}</small></p>
+       <button type="button" class="btn sm" onclick="resetUserPassword(${id})">${icon('key', 14)} Сбросить пароль</button></div>`
+    : `${fld('Пароль (мин. 12 символов)', `<div class="pw-wrap"><input name="password" type="password" minlength="12" autocomplete="new-password" required placeholder="минимум 12 знаков"><button type="button" class="pw-eye" title="Показать/скрыть пароль" onclick="togglePass(this)">${icon('eye', 16)}</button></div>`, true)}
+   <button type="button" class="btn w" onclick="generateUserPassword(this.form)">Сгенерировать пароль</button>`;
   openModal(`<h3>${id ? 'Пользователь' : 'Новый пользователь'}</h3><form onsubmit="return saveUser(event,${id || 'null'})">
    ${formLegend()}
    ${grid2(`${fld('Имя', `<input name="name" required value="${esc(x.name || '')}">`, true)}
      ${fld('E-mail', `<input name="email" type="email" required value="${esc(x.email || '')}">`, true)}`)}
-   ${fld(id ? 'Новый пароль (оставьте пустым, чтобы не менять)' : 'Пароль (мин. 12 символов)', `<div class="pw-wrap"><input name="password" type="password" minlength="12" autocomplete="new-password" ${id ? '' : 'required'} placeholder="минимум 12 знаков"><button type="button" class="pw-eye" title="Показать/скрыть пароль" onclick="togglePass(this)">${icon('eye', 16)}</button></div>`, !id)}
-   <button type="button" class="btn w" onclick="generateUserPassword(this.form)">Сгенерировать пароль</button>
+   ${pwBlock}
    ${fld('Роль', `<select name="role">${Object.entries({ admin: 'Администратор — всё, включая настройки', manager: 'Менеджер — клиенты, сделки, задачи, чаты', viewer: 'Наблюдатель — только просмотр', partner: 'Партнёр — свои лиды, их переписка и свои задачи' }).map(([k, n]) => `<option value="${k}" ${k === (x.role || 'manager') ? 'selected' : ''}>${n}</option>`).join('')}</select>`)}
    <label style="display:flex;gap:8px;align-items:center"><input type="checkbox" name="active" style="width:auto" ${x.active === 0 ? '' : 'checked'}> Сотрудник может входить в CRM</label>
-   <p><small>Сохраните пароль и передайте сотруднику по защищённому каналу. Он сможет изменить его в профиле.</small></p>
+   <p><small>${id
+    ? 'Сброс пароля закрывает все сеансы сотрудника: он войдёт по временному паролю и задаст личный. Действие остаётся в журнале на рабочем столе.'
+    : 'Сохраните пароль и передайте сотруднику по защищённому каналу. При первом входе он задаст личный пароль, а временный перестанет действовать.'}</small></p>
    <button class="btn primary w">Сохранить</button></form>`);
 }
+// Временный пароль: 16 знаков без похожих друг на друга букв и цифр и без
+// специальных символов. Его передают в мессенджере, читают вслух и набирают на
+// телефоне, поэтому опечатка не должна выглядеть как «пароль не работает».
+function randomPassword() {
+  // Без 0, O, o, I, l, 1 и без специальных знаков: пароль передают в
+  // мессенджере, читают вслух и набирают на телефоне. 55 знаков, 16 позиций —
+  // больше 90 бит энтропии, перебор через ограниченный вход бессмысленен.
+  const alphabet = 'ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnpqrstuvwxyz23456789';
+  const limit = 256 - (256 % alphabet.length); // отсечка хвоста: без перекоса к первым знакам
+  const out = [];
+  while (out.length < 16) {
+    for (const n of crypto.getRandomValues(new Uint8Array(32))) {
+      if (n < limit) out.push(alphabet[n % alphabet.length]);
+      if (out.length === 16) break;
+    }
+  }
+  return out.join('');
+}
+// Данные для входа показываются один раз: в базе хранится только хеш пароля.
+function credentialsText(u) {
+  return `КаркасCRM — данные для входа\nАдрес: ${humanOrigin((state.cache.settings && state.cache.settings.public_url) || location.origin)}\nИмя: ${u.name}\nE-mail: ${u.email}\nВременный пароль: ${u.password}\n\nПри первом входе задайте личный пароль (не менее 12 символов). Не передавайте эти данные другим людям.`;
+}
+function showCredentials(head, credentials) {
+  openModal(`<h3>${head}</h3><p>Передайте данные сотруднику по защищённому каналу. После закрытия окна пароль повторно не показывается.</p><label>Данные для входа<textarea id="createdCredentials" rows="9" readonly>${esc(credentials)}</textarea></label><button type="button" class="btn primary w" onclick="copyCreatedCredentials()">Скопировать данные</button><p id="copyCredentialsStatus" role="status"></p>`);
+}
+// Сброс пароля сотрудника: отдельное действие с подтверждением, потому что оно
+// закрывает все его сеансы и делает прежний пароль нерабочим.
+async function resetUserPassword(id) {
+  const rows = await api('/api/users').catch(() => []);
+  const x = rows.find(u => Number(u.id) === Number(id)) || {};
+  askConfirm(`Сбросить пароль сотрудника${x.name ? ' «' + x.name + '»' : ''}? Все его сеансы закроются сразу, прежний пароль перестанет действовать. Новый временный пароль показывается один раз, а действие остаётся в журнале.`, async () => {
+    const password = randomPassword();
+    try {
+      await api('/api/users/' + id, { method: 'PATCH', body: JSON.stringify({ password }) });
+      __team.length = 0; // отметка о временном пароле обновится без перезагрузки
+      showCredentials('Пароль сброшен', credentialsText({ name: x.name || '', email: x.email || '', password }));
+      render();
+    } catch (e) { toast(e.message, 'err'); }
+  }, { okText: 'Сбросить пароль', danger: true });
+}
 function generateUserPassword(form) {
-  const bytes = crypto.getRandomValues(new Uint8Array(20));
-  const alphabet = 'ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz23456789!@#$%&*?';
   const input = form.elements.password;
-  input.value = Array.from(bytes, n => alphabet[n & 63] || '_').join('');
+  input.value = randomPassword();
   input.type = 'text';
   input.focus(); input.select();
 }
@@ -4555,8 +4617,8 @@ async function saveUser(e, id) {
     __team.length = 0;
     closeModal();
     if (b.password) {
-      const credentials = `КаркасCRM — данные для входа\nАдрес: ${humanOrigin((state.cache.settings && state.cache.settings.public_url) || location.origin)}\nИмя: ${b.name}\nE-mail: ${b.email}\nВременный пароль: ${b.password}\n\nПри первом входе задайте личный пароль (не менее 12 символов). Не передавайте эти данные другим людям.`;
-      openModal(`<h3>${id ? 'Пароль обновлён' : 'Пользователь создан'}</h3><p>Передайте данные сотруднику по защищённому каналу. После закрытия окна пароль повторно не показывается.</p>${!b.active ? '<p class="err">Вход отключён. Разрешите вход в карточке сотрудника.</p>' : ''}<label>Данные для входа<textarea id="createdCredentials" rows="9" readonly>${esc(credentials)}</textarea></label><button type="button" class="btn primary w" onclick="copyCreatedCredentials()">Скопировать данные</button><p id="copyCredentialsStatus" role="status"></p>`);
+      showCredentials('Пользователь создан', credentialsText(b));
+      if (!b.active) toast('Вход отключён: разрешите его в карточке сотрудника', 'err');
     } else toast('Пользователь сохранён');
     render();
   } catch (err) { toast(err.message, 'err'); }

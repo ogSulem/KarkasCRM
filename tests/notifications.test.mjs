@@ -26,10 +26,15 @@ const call = async (path, { method = 'GET', body, token } = {}) => {
   let data; try { data = JSON.parse(text); } catch { data = text; }
   return { status: r.status, data };
 };
+// Временный пароль первого входа заменяется личным: дальше проверки работают
+// с токеном сотрудника, который уже задал свой пароль.
 const login = async (email, password) => {
   const r = await call('/api/auth/login', { method: 'POST', body: { email, password } });
   assert.equal(r.status, 200, 'вход ' + email);
-  return r.data.token;
+  if (!r.data.user?.must_change_password) return r.data.token;
+  const changed = await call('/api/me/password', { method: 'POST', token: r.data.token, body: { old_password: password, new_password: password + '-Personal-2026' } });
+  assert.equal(changed.status, 200, 'замена временного пароля');
+  return changed.data.token;
 };
 const personalLogin = async (name, email) => {
   email = email.replace('@', '-' + Math.random().toString(36).slice(2, 8) + '@');
@@ -86,7 +91,7 @@ const waitFor = async (stream, name, predicate = () => true, ms = 2500) => {
 
 before(async () => {
   await new Promise(r => server.listening ? r() : server.once('listening', r));
-  admin = await login('admin@example.com', 'admin12345');
+  admin = await login('admin@example.com', process.env.ADMIN_PASSWORD || 'admin1234567');
 });
 
 after(async () => {

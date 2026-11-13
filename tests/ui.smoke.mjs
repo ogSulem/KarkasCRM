@@ -7,6 +7,9 @@ import { spawn } from 'node:child_process';
 import { readFileSync, readdirSync, rmSync, accessSync, constants } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
+import { createRequire } from 'node:module';
+
+const require = createRequire(import.meta.url);
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..');
 // Версия из файла, а не вписанная в тест: повышение версии не должно ломать проверки.
@@ -61,6 +64,7 @@ Object.assign(window, {
   openMenu, closeMenu, contactsMoreMenu, openOurPrices, comparePrices, setBuiltinTab, BUILTIN_FIELDS, amAdmin, canEdit,
   ourPriceRows, filterOurPrices, toggleAutomation, openAutomation, autoWarn, noteRow, editNote, lockFormsForViewer, AUTO_TRIGGERS, AUTO_ACTIONS,
   busyButton, priceImportText, pickSlot, pickField, pickValue, pickReset, pickSearch, PICK,
+  resetUserPassword, randomPassword, credentialsText, showCredentials,
   punyDecodeLabel, humanOrigin, wazzupHookUrl, wzAlive, wzState, wzTitle, closeConv,
   nameFromUri, sendAccountFor, refreshSendAccount, WZ_CHAT_TRANSPORTS, msgTime,
   setConvScope, convScopeList, convMine, convEmptyHtml, openNotifications,
@@ -136,12 +140,17 @@ const wait = (ms = 0) => settle(ms, Math.max(5000, ms * 6));
 const hasEmojis = text => /[\u{10000}-\u{10ffff}\u{2600}-\u{27bf}\u{2300}-\u{23ff}\u{2b50}-\u{2b55}]/u.test(text);
 const authH = () => ({ 'Content-Type': 'application/json', Authorization: 'Bearer ' + window.__token });
 const apiPost = async (p, body) => (await fetch(BASE + p, { method: 'POST', headers: authH(), body: JSON.stringify(body) })).json();
+const { ADMIN_TMP, ADMIN_PASS } = require('./admin-login.cjs').flow({
+  login: (email, password) => fetch(BASE + '/api/auth/login', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ email, password }) }).then(async r => ({ status: r.status, body: await r.json() })),
+  change: (token, oldp, newp) => fetch(BASE + '/api/me/password', { method: 'POST', headers: { 'Content-Type': 'application/json', Authorization: 'Bearer ' + token }, body: JSON.stringify({ old_password: oldp, new_password: newp }) }).then(async r => ({ status: r.status, body: await r.json() })),
+});
 
 try {
   // ── вход и сессия ────────────────────────────────────────────────────────
-  const loginRes = await fetch(BASE + '/api/auth/login', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ email: 'admin@example.com', password: 'admin12345' }) });
+  const loginRes = await fetch(BASE + '/api/auth/login', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ email: 'admin@example.com', password: 'admin1234567' }) });
   const loginJson = await loginRes.json();
   check('вход по умолчанию создаёт администратора и отдаёт токен', loginRes.status === 200 && !!loginJson.token);
+  check('система требует заменить временный пароль первого входа', loginJson.user.must_change_password === 1);
   check('сессия ставится в httpOnly-cookie', /karkas_token=.*HttpOnly/i.test(loginRes.headers.get('set-cookie') || ''));
   const meWithCookie = await fetch(BASE + '/api/me', { headers: { Cookie: loginRes.headers.get('set-cookie').split(';')[0] } });
   check('cookie принимается как параллельный способ авторизации', meWithCookie.status === 200);
@@ -149,11 +158,27 @@ try {
   check('выход гасит cookie', /karkas_token=;/.test(logoutRes.headers.get('set-cookie') || ''));
 
   $('#loginForm [name=email]').value = 'admin@example.com';
-  $('#loginForm [name=password]').value = 'admin12345';
+  $('#loginForm [name=password]').value = ADMIN_TMP;
   $('#loginForm').dispatchEvent(new window.Event('submit', { bubbles: true, cancelable: true }));
   await wait(700);
-  check('вход через форму открывает приложение', $('#login').classList.contains('hidden') && !$('#app').classList.contains('hidden'), $('#loginErr').textContent);
-  window.__token = loginJson.token;
+  check('первый вход администратора показывает смену пароля, а не CRM', !$('#passwordChange').classList.contains('hidden') && $('#app').classList.contains('hidden'), $('#loginErr').textContent);
+  const adminChange = $('#passwordChangeForm');
+  check('временный пароль подставлен в первое поле — второй раз его набирать не нужно', adminChange.elements.old_password.value === ADMIN_TMP);
+  adminChange.elements.new_password.value = 'СовсемДругойПароль2026';
+  adminChange.elements.confirm_password.value = ADMIN_PASS;
+  await adminChange.onsubmit({ preventDefault() {}, target: adminChange });
+  check('несовпадение паролей объяснено до отправки на сервер', $('#passwordChangeErr').textContent.includes('не совпадают'));
+  adminChange.elements.confirm_password.value = 'СовсемДругойПароль2026';
+  await adminChange.onsubmit({ preventDefault() {}, target: adminChange });
+  await wait(900);
+  check('после замены личного пароля открывается CRM', $('#passwordChange').classList.contains('hidden') && !$('#app').classList.contains('hidden'), $('#passwordChangeErr').textContent);
+  // Прежний токен закрыт ростом версии сеанса: дальше проверки работают с
+  // новым входом по личному паролю, как это делает сотрудник на своём месте.
+  check('токен первого входа закрыт после смены пароля', (await fetch(BASE + '/api/me', { headers: { Authorization: 'Bearer ' + loginJson.token } })).status === 401);
+  const adminSession = await fetch(BASE + '/api/auth/login', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ email: 'admin@example.com', password: 'СовсемДругойПароль2026' }) });
+  check('вход по личному паролю работает', adminSession.status === 200);
+  window.__token = (await adminSession.json()).token;
+  check('временный пароль стёрт из поля входа', $('#loginPassword').value === '');
   check('токен сессии не сохраняется в localStorage', window.localStorage.getItem('karkas_token') === null);
 
   // ── тестовые данные через API ────────────────────────────────────────────
@@ -1093,8 +1118,32 @@ try {
   window.generateUserPassword(userForm);
   const firstPassword = userForm.elements.password.value;
   window.generateUserPassword(userForm);
-  check('генератор выдаёт разные длинные пароли', firstPassword.length === 20 && userForm.elements.password.value.length === 20 && firstPassword !== userForm.elements.password.value);
+  const secondPassword = userForm.elements.password.value;
+  check('генератор выдаёт разные пароли нужной длины', firstPassword.length === 16 && secondPassword.length === 16 && firstPassword !== secondPassword);
+  check('во временном пароле нет похожих друг на друга знаков и спецсимволов', !/[0OoIl1!@#$%&*?]/.test(firstPassword + secondPassword), firstPassword + ' ' + secondPassword);
+  check('из алфавита временного пароля исключены похожие знаки', !/[0OoIl1]/.test(/alphabet = '([^']+)'/.exec(appJsRaw)[1]), /alphabet = '([^']+)'/.exec(appJsRaw)[1]);
+  check('временный пароль не короче правила личного пароля', firstPassword.length >= 12);
+  check('форма нового сотрудника требует пароль и предлагает его сгенерировать', Boolean(userForm.elements.password) && userForm.elements.password.required && $('#modalBody').textContent.includes('Сгенерировать пароль'));
   window.closeModal();
+
+  // Карточка существующего сотрудника: поля пароля в форме правки нет, сброс —
+  // отдельная кнопка. Раньше сгенерированный «посмотреть» пароль уезжал в базу
+  // вместе с правкой роли, сеансы закрывались, а сотрудник решал, что пароль
+  // поменялся сам собой.
+  {
+    const people = await (await fetch(BASE + '/api/users', { headers: authH() })).json();
+    const who = people.find(x => x.role === 'admin');
+    await window.openUser(who.id); await wait(400);
+    const editForm = $('#modalBody form');
+    check('в карточке сотрудника нет поля пароля', editForm.elements.password === undefined);
+    check('состояние пароля и момент смены видны администратору', Boolean($('.pw-state')) && /Личный пароль задан|работает по временному паролю|Работает по временному паролю/.test($('.pw-state').textContent), $('.pw-state') ? $('.pw-state').textContent.replace(/\s+/g, ' ').slice(0, 90) : 'нет блока');
+    const resetBtn = [...$('#modalBody').querySelectorAll('button')].find(b => /Сбросить пароль/.test(b.textContent));
+    check('сброс пароля — отдельная кнопка, а не поле в форме правки', Boolean(resetBtn));
+    await window.resetUserPassword(who.id); await wait(300);
+    check('сброс пароля спрашивает подтверждение и предупреждает о закрытии сеансов', $('#modalBody').textContent.includes('Подтверждение действия') && $('#modalBody').textContent.includes('сеансы закроются'));
+    window.closeModal(); await wait(150);
+    check('отмена подтверждения не меняет пароль', (await (await fetch(BASE + '/api/users', { headers: authH() })).json()).find(x => x.id === who.id).must_change_password === 0);
+  }
 
   // ── безопасность и заголовки ─────────────────────────────────────────────
   const root = await fetch(BASE + '/');
@@ -1443,6 +1492,9 @@ try {
   check('тосты не прячутся под системную полосу телефона', cssText.includes('bottom:calc(12px + env(safe-area-inset-bottom,0px))'));
   check('пункты меню видны при навигации с клавиатуры', cssText.includes('.dropdown-pop button:focus-visible,.user-menu-item:focus-visible'));
   check('пароль сотрудника — минимум 12 символов, как при смене', appJsRaw.includes('minlength="12"') && appJsRaw.includes('(мин. 12 символов)') && serverJsRaw.includes('b.password.length < 12'));
+  check('хеш пароля не отдаётся ни в списке сотрудников, ни в выгрузке данных', serverJsRaw.includes('SELECT id,name,email,role,active,last_login,must_change_password,pass_changed_at FROM users') && serverJsRaw.includes('out.users = out.users.map(({ pass, ...rest }) => rest)'));
+  check('каждое действие с доступом сотрудника остаётся в журнале', serverJsRaw.includes('выдан временный пароль') && serverJsRaw.includes('сброшен пароль, прежние сеансы закрыты') && serverJsRaw.includes('Временный пароль заменён личным'));
+  check('причина закрытого сеанса называется человеку', serverJsRaw.includes('SESSION_REVOKED') && serverJsRaw.includes('USER_DISABLED') && serverJsRaw.includes('USER_GONE') && appJsRaw.includes('endSession(d.error ||'));
   check('массовое «Выполнено» продлевает повторяющиеся задачи', serverJsRaw.includes("if (table === 'tasks' && Number(patch.done) === 1) for (const id of ids) extendRepeatingTask(id, user.name)"));
   check('тост о просрочке видят только причастные', appJsRaw.includes('d.tasks.filter(t => !t.responsible_id || Number(t.responsible_id) === Number(meId()))'));
   check('предел длины сообщения проверяется и в интерфейсе', appJsRaw.includes('body.length > 4096'));

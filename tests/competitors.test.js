@@ -5,6 +5,13 @@ import assert from 'node:assert';
 import http from 'node:http';
 import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
+import { createRequire } from 'node:module';
+
+const require = createRequire(import.meta.url);
+const { admin: adminToken } = require('./admin-login.cjs').flow({
+  login: (email, password) => call('/api/auth/login', { method: 'POST', body: JSON.stringify({ email, password }) }),
+  change: (token, oldp, newp) => call('/api/me/password', { method: 'POST', headers: { Authorization: 'Bearer ' + token }, body: JSON.stringify({ old_password: oldp, new_password: newp }) }, token),
+});
 
 process.env.DATA_DIR = '/tmp/karkas-competitors-' + Date.now();
 process.env.PORT = '18088';
@@ -70,8 +77,7 @@ before(async () => {
   await mock('2gis', (req, r) => jsonReply(r, { result: { items: [{ id: 'g1', name: 'Конкурент', address_name: 'Москва, Стройная 1', reviews: { general_rating: 3.4, general_review_count: 18 } }] } }));
   await mock('yandex', (req, r) => jsonReply(r, { features: [{ properties: { name: 'Конкурент', CompanyMetaData: { address: 'Москва, Стройная 1', url: 'http://konkurent.ru', rating: 3.6, reviews: 22, Phones: [{ formatted: '+7 495 000-00-00' }] } } }] }));
   await new Promise(r => server.listening ? r() : server.once('listening', r));
-  const l = await call('/api/auth/login', { method: 'POST', body: JSON.stringify({ email: 'admin@example.com', password: 'admin12345' }) });
-  h = { Authorization: 'Bearer ' + l.body.token };
+  h = { Authorization: 'Bearer ' + await adminToken() };
 });
 after(() => { Object.values(mocks).forEach(m => m.server.close()); server.close() });
 const url = n => `http://127.0.0.1:${mocks[n].port}`;

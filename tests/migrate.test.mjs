@@ -4,6 +4,9 @@ import { DatabaseSync } from 'node:sqlite';
 import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { createRequire } from 'node:module';
+
+const require = createRequire(import.meta.url);
 
 const DATA = mkdtempSync(join(tmpdir(), 'karkas-migrate-'));
 const PORT = 18077;
@@ -147,9 +150,19 @@ ok('сервер отвечает /api/health', healthPublic.ok === true && heal
 ok('публичный health не раскрывает счётчики клиентов и имена копий', healthPublic.counts === undefined && healthPublic.backups === undefined, JSON.stringify(healthPublic));
 ok('без токена данные закрыты', (await fetch(`http://127.0.0.1:${PORT}/api/contacts`)).status === 401);
 
-const login = await (await fetch(`http://127.0.0.1:${PORT}/api/auth/login`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ email: 'admin@example.com', password: 'admin12345' }) })).json();
-ok('администратор создан для базы без пользователей', !!login.token, login.error || '');
-const H = { Authorization: 'Bearer ' + login.token, 'Content-Type': 'application/json' };
+const migrateCall = async (path, opt = {}, token = '') => {
+  const r = await fetch(`http://127.0.0.1:${PORT}` + path, { ...opt, headers: { 'Content-Type': 'application/json', ...(token ? { Authorization: 'Bearer ' + token } : {}) } });
+  let body; try { body = await r.json() } catch { body = null }
+  return { status: r.status, body };
+};
+const { admin: adminToken } = require('./admin-login.cjs').flow({
+  login: (email, password) => migrateCall('/api/auth/login', { method: 'POST', body: JSON.stringify({ email, password }) }),
+  change: (token, oldp, newp) => migrateCall('/api/me/password', { method: 'POST', body: JSON.stringify({ old_password: oldp, new_password: newp }) }, token),
+});
+const login = await migrateCall('/api/auth/login', { method: 'POST', body: JSON.stringify({ email: 'admin@example.com', password: 'admin1234567' }) });
+ok('администратор создан для базы без пользователей', !!login.body.token, login.body.error || '');
+ok('созданный администратор обязан заменить временный пароль', login.body.user.must_change_password === 1);
+const H = { Authorization: 'Bearer ' + await adminToken(), 'Content-Type': 'application/json' };
 const health = await (await fetch(`http://127.0.0.1:${PORT}/api/health`, { headers: H })).json();
 ok('администратор видит подробности health', health.counts.contacts >= 1, JSON.stringify(health.counts));
 ok('перед обновлением схемы сделана страховочная копия базы', health.backups.count >= 1 && String(health.backups.last || '').startsWith('pre-upgrade'), JSON.stringify(health.backups));

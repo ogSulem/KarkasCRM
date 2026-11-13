@@ -37,7 +37,11 @@ const UPLOAD_DIR = join(DATA_DIR, 'uploads');
 // сразу после миграций схемы, до остального кода настроек
 const SETTINGS_FILE = join(DATA_DIR, 'settings.env');
 const ADMIN_EMAIL = (process.env.ADMIN_EMAIL || 'admin@example.com').toLowerCase();
-const ADMIN_PASSWORD = process.env.ADMIN_PASSWORD || 'admin12345';
+// Пароль первого администратора. Значение по умолчанию подходит только для
+// запуска на своём компьютере: оно короче не бывает, а правило личного пароля
+// требует от 12 символов, поэтому с ним можно войти и сразу задать свой.
+const DEFAULT_ADMIN_PASSWORD = 'admin1234567';
+const ADMIN_PASSWORD = process.env.ADMIN_PASSWORD || DEFAULT_ADMIN_PASSWORD;
 
 // Версия продукта: единый источник — файл VERSION в корне (он же попадает в Docker-образ).
 const VERSION = (() => { try { return readFileSync(join(ROOT, '../../VERSION'), 'utf8').trim() || '0.0.0'; } catch { return '0.0.0'; } })();
@@ -69,7 +73,7 @@ function loadSecret() {
   const generated = randomBytes(48).toString('hex');
   try { writeFileSync(secretFile, generated, { mode: 0o600 }); chmodSync(secretFile, 0o600); }
   catch (e) { console.error('JWT_SECRET не задан и не удалось сохранить сгенерированный секрет:', e.message); }
-    console.warn('JWT_SECRET не задан в окружении — использован постоянный секрет, сохранённый в каталоге данных. При запуске нескольких серверов задайте JWT_SECRET в окружении');
+  console.warn('JWT_SECRET не задан в окружении — использован постоянный секрет, сохранённый в каталоге данных. При запуске нескольких серверов задайте JWT_SECRET в окружении');
   return generated;
 }
 const SECRET = loadSecret();
@@ -119,7 +123,7 @@ const SCHEMA = [
 const SCHEMA_COLUMNS = [...SCHEMA,
   ['users', 'must_change_password', 'INTEGER NOT NULL DEFAULT 0'],
   ['users', 'session_version', 'INTEGER NOT NULL DEFAULT 0'], ['users', 'pref_view', "TEXT DEFAULT ''"],
-  ['users', 'last_login', 'TEXT'],
+  ['users', 'last_login', 'TEXT'], ['users', 'pass_changed_at', 'TEXT'],
   ['users', 'theme', "TEXT DEFAULT ''"],
   ['contacts', 'company_id', 'INTEGER'], ['contacts', 'position', 'TEXT'], ['contacts', 'responsible_id', 'INTEGER'],
   ['contacts', 'tags', "TEXT DEFAULT ''"], ['contacts', 'notes', "TEXT DEFAULT ''"], ['contacts', 'source', "TEXT DEFAULT 'manual'"],
@@ -271,7 +275,7 @@ try {
   if (moved.changes) console.log(`Любимый раздел перенесён у сотрудников: ${moved.changes}`);
 } catch (e) { console.error('Не удалось перенести любимый раздел:', e.message) }
 
-const SCHEMA_VERSION = 9;
+const SCHEMA_VERSION = 10;
 
 // Дата в местном часовом поясе (в базе время хранится в UTC, а сроки задач —
 // в местном настенном времени; сравнивать их с UTC-«сегодня» нельзя).
@@ -463,6 +467,7 @@ const ruPlural = (n, one, few, many) => {
 // Русские названия таблиц и полей для журнала: строка вида «Массовое изменение
 // (contacts): 3 записей — responsible_id» читалась как отладочный вывод
 const TABLE_RU = { contacts: 'клиентов', companies: 'компаний', tasks: 'задач', deals: 'сделок', products: 'позиций каталога', templates: 'шаблонов', automations: 'правил автоматизации', notes: 'заметок', users: 'сотрудников', pipelines: 'воронок' };
+const ROLE_RU = { admin: 'администратор', manager: 'менеджер', viewer: 'наблюдатель', partner: 'партнёр' };
 const FIELD_RU = { responsible_id: 'ответственный', responsible: 'ответственный', tags: 'теги', stage: 'этап', priority: 'приоритет', done: 'выполнение', amount: 'сумма', deadline: 'срок', active: 'активность', price: 'цена', source: 'источник', pipeline_id: 'воронка', loss_reason: 'причина проигрыша', company_id: 'компания', position: 'должность', type: 'тип', repeat: 'повтор', result: 'результат', due: 'срок', name: 'название', title: 'название', phone: 'телефон', email: 'почта', notes: 'примечание', custom: 'дополнительные поля' };
 const hashPass = (p, salt = randomBytes(16).toString('hex')) => `${salt}:${scryptSync(p, salt, 64).toString('hex')}`;
 function checkPass(p, s) { try { const [salt, h] = String(s).split(':'); const a = Buffer.from(h, 'hex'), b = scryptSync(p, salt, 64); return a.length === b.length && timingSafeEqual(a, b); } catch { return false; } }
@@ -484,6 +489,28 @@ function verify(t) {
     if (p.exp <= Date.now()) return null;
     const user = db.prepare('SELECT id,name,email,role,must_change_password,session_version,theme,pref_view FROM users WHERE id=? AND active=1').get(p.id);
     return user && (p.sv ?? 0) === user.session_version ? user : null;
+  } catch { return null; }
+}
+/* Почему предъявленный токен не принят. Один и тот же ответ «требуется
+   авторизация» на закрытый сеанс, отключённый доступ и истёкший срок оставляет
+   сотрудника в недоумении: он решает, что пароль «поменялся сам», а
+   администратор не видит, что доступ закрыт именно им. Подпись проверяется
+   прежним ключом, поэтому причину нельзя подделать. */
+function sessionFailure(t) {
+  try {
+    const [b, sig] = String(t || '').split('.');
+    if (!b || !sig) return null;
+    const expected = createHmac('sha256', SECRET).update(b).digest(), got = Buffer.from(sig, 'base64url');
+    if (got.length !== expected.length || !timingSafeEqual(expected, got)) return null;
+    const p = JSON.parse(Buffer.from(b, 'base64url').toString());
+    // Срок проверяется первым: неделя прошла у каждого, а сообщение «пароль
+    // сброшен администратором» на обычном истечении пугает без причины.
+    if (p.exp <= Date.now()) return { code: 'SESSION_EXPIRED', error: 'Сеанс истёк. Войдите заново.' };
+    const row = db.prepare('SELECT id,active,session_version FROM users WHERE id=?').get(p.id);
+    if (!row) return { code: 'USER_GONE', error: 'Учётная запись удалена. Обратитесь к администратору.' };
+    if (!row.active) return { code: 'USER_DISABLED', error: 'Доступ к CRM отключён администратором: сеансы закрыты.' };
+    if ((p.sv ?? 0) !== row.session_version) return { code: 'SESSION_REVOKED', error: 'Сеанс закрыт: пароль сброшен или доступ изменён администратором. Войдите заново.' };
+    return null;
   } catch { return null; }
 }
 // httpOnly-cookie сессии: токен не доступен из JavaScript и не переживает XSS
@@ -520,7 +547,16 @@ if (!db.prepare('SELECT id FROM pipelines LIMIT 1').get()) {
 
 
 if (!db.prepare('SELECT id FROM users LIMIT 1').get()) {
-  db.prepare('INSERT INTO users(name,email,pass,role) VALUES(?,?,?,?)').run('Администратор', ADMIN_EMAIL, hashPass(ADMIN_PASSWORD), 'admin');
+  // Первый администратор начинает с временного пароля, если пароль не задан
+  // сознательно: значение по умолчанию описано в документации, а пароль из
+  // установщика знает тот, кто ставил систему. Пока временный пароль не заменён
+  // личным, шлюз PASSWORD_CHANGE_REQUIRED не пускает ни в один раздел.
+  // Требование не предъявляется к явно заданному паролю: иначе тот, кто вписал
+  // в .env короткий пароль и уже работает с ним, не смог бы задать личный —
+  // правило длины от 12 символов такой пароль не принимает.
+  const tempAdmin = ADMIN_PASSWORD === DEFAULT_ADMIN_PASSWORD ? 1 : 0;
+  db.prepare('INSERT INTO users(name,email,pass,role,must_change_password) VALUES(?,?,?,?,?)').run('Администратор', ADMIN_EMAIL, hashPass(ADMIN_PASSWORD), 'admin', tempAdmin);
+  if (tempAdmin) console.log(`Пароль первого администратора взят по умолчанию (${ADMIN_EMAIL} / ${DEFAULT_ADMIN_PASSWORD}). Он действует только до первого входа: система потребует задать личный пароль. Для сервера в интернете задайте ADMIN_PASSWORD в .env: openssl rand -hex 12`);
   if (!getSetting('COMPANY_NAME')) { setSetting('COMPANY_NAME', 'Каркас — каркасные дома'); setSetting('CURRENCY', '₽'); setSetting('AUTO_DEAL', '1'); setSetting('AUTO_DEAL_STAGE', 'new'); }
   logActivity('Система инициализирована: создана чистая база и учётная запись администратора');
 }
@@ -1709,6 +1745,12 @@ function rateLimit(key, limit, windowMs) {
   rec.count++;
   return { ok: rec.count <= limit, left: Math.max(0, limit - rec.count), retryAfter: Math.ceil((rec.resetAt - now) / 1000) };
 }
+// Сброс счётчиков попыток входа: проверки должны убедиться и в блокировке
+// подбора, и в том, что она не мешает работе офиса, а ждать пять минут окна
+// внутри прогона нельзя. В рабочем режиме счётчики гасит удачный вход.
+export function clearLoginAttempts() {
+  for (const k of [...RL.keys()]) if (k.startsWith('login')) RL.delete(k);
+}
 const readBodyRaw = async (req, maxBytes = 5e6) => {
   let s = ''; for await (const ch of req) { s += ch; if (s.length > maxBytes) throw new Error('Слишком большой запрос'); }
   return s;
@@ -1870,6 +1912,9 @@ function extendRepeatingTask(id, byName) {
 function validateUser(b, creating = false) {
   if ((creating || b.name !== undefined) && (typeof b.name !== 'string' || !b.name.trim())) return 'Укажите имя';
   if ((creating || b.email !== undefined) && (typeof b.email !== 'string' || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(b.email.trim()))) return 'Укажите корректный e-mail';
+  // Без пароля сотрудника создать нельзя: хеш строки «undefined» стал бы
+  // рабочим паролем, который никто не выдавал и никто не знает.
+  if (creating && !b.password) return 'Задайте временный пароль сотрудника (от 12 символов)';
   if ((creating || b.password) && (typeof b.password !== 'string' || b.password.length < 12 || b.password.length > 256)) return 'Пароль должен содержать от 12 до 256 символов';
   if (b.role !== undefined && !['admin', 'manager', 'viewer', 'partner'].includes(b.role)) return 'Неизвестная роль';
   if (b.active !== undefined && ![0, 1].includes(b.active)) return 'Некорректный статус';
@@ -2153,8 +2198,9 @@ export const server = http.createServer(async (req, res) => {
     const bearer = (req.headers.authorization || '').replace(/^Bearer\s+/i, '');
     // токен в адресной строке допускаем только для GET (печать, вложения):
     // иначе ссылка с ?token= могла бы инициировать изменение данных
-    const user = verify(bearer || cookieOf(req).karkas_token || (req.method === 'GET' ? u.searchParams.get('token') : '') || '');
-    if (p.startsWith('/api/') && !user) return json(res, 401, { error: 'Требуется авторизация' });
+    const presented = bearer || cookieOf(req).karkas_token || (req.method === 'GET' ? u.searchParams.get('token') : '') || '';
+    const user = verify(presented);
+    if (p.startsWith('/api/') && !user) return json(res, 401, sessionFailure(presented) || { error: 'Требуется авторизация' });
     if (user?.must_change_password && (p.startsWith('/api/') || p.startsWith('/uploads/')) && !['/api/me', '/api/me/password'].includes(p)) return json(res, 403, { code: 'PASSWORD_CHANGE_REQUIRED', error: 'Сначала смените временный пароль' });
     if (user && user.role !== 'admin' && ['/api/settings', '/api/competitor-sources', '/api/backup', '/api/export/json', '/api/backups'].includes(p)) return json(res, 403, { error: 'Только для администратора' });
     if (p === '/api/events') {
@@ -2398,7 +2444,12 @@ export const server = http.createServer(async (req, res) => {
     if (p === '/api/export/json' || p === '/api/backup') {
       // полная выгрузка содержит пользователей и настройки — только администратор
       if (!requireAdmin(user, res)) return;
-      const tables = ['users', 'companies', 'contacts', 'pipelines', 'stages', 'deals', 'tasks', 'notes', 'products', 'templates', 'automations', 'conversations', 'messages', 'channels', 'competitors', 'competitor_checks', 'competitor_reports', 'reviews', 'price_rows']; const out = {}; tables.forEach(t => out[t] = db.prepare(`SELECT * FROM ${t}`).all()); res.writeHead(200, { 'Content-Type': 'application/json', 'Content-Disposition': 'attachment; filename=karkas-backup.json' }); return res.end(JSON.stringify(out, null, 2)); }
+      const tables = ['users', 'companies', 'contacts', 'pipelines', 'stages', 'deals', 'tasks', 'notes', 'products', 'templates', 'automations', 'conversations', 'messages', 'channels', 'competitors', 'competitor_checks', 'competitor_reports', 'reviews', 'price_rows']; const out = {}; tables.forEach(t => out[t] = db.prepare(`SELECT * FROM ${t}`).all());
+      // Хеш пароля в выгрузку не входит: файл уносят на свой компьютер, а
+      // восстановить доступ по нему всё равно нельзя — пароль задаётся заново
+      // в карточке сотрудника. Целиком база переносится копией файла crm.db.
+      out.users = out.users.map(({ pass, ...rest }) => rest);
+      res.writeHead(200, { 'Content-Type': 'application/json', 'Content-Disposition': 'attachment; filename=karkas-backup.json' }); return res.end(JSON.stringify(out, null, 2)); }
 
     // Очередь отложенных действий. Без неё правило с выдержкой выглядит как
     // «настроил и забыл»: не видно, что именно сработает и можно ли отменить.
@@ -3108,7 +3159,7 @@ ${user?.name || ''}`.trim();
       // только администратору: остальным достаточно имени и роли.
       if (req.method === 'GET') {
         const rows = user.role === 'admin'
-          ? db.prepare('SELECT id,name,email,role,active,last_login,must_change_password FROM users ORDER BY id').all()
+          ? db.prepare('SELECT id,name,email,role,active,last_login,must_change_password,pass_changed_at FROM users ORDER BY id').all()
           : user.role === 'partner'
             ? [{ id: user.id, name: user.name, role: 'partner', active: 1 }]
             : db.prepare('SELECT id,name,role,active FROM users ORDER BY id').all();
@@ -3139,7 +3190,11 @@ ${user?.name || ''}`.trim();
         if (error) return json(res, 400, { error });
         const email = b.email.trim().toLowerCase();
         if (db.prepare('SELECT id FROM users WHERE email=?').get(email)) return json(res, 409, { error: 'Этот e-mail уже используется' });
-        const r = db.prepare('INSERT INTO users(name,email,pass,role,active,must_change_password) VALUES(?,?,?,?,?,1)').run(b.name.trim(), email, hashPass(b.password), b.role || 'manager', b.active ?? 1);
+        const role = b.role || 'manager';
+        const r = db.prepare("INSERT INTO users(name,email,pass,role,active,must_change_password,pass_changed_at) VALUES(?,?,?,?,?,1,datetime('now'))").run(b.name.trim(), email, hashPass(b.password), role, b.active ?? 1);
+        // кто и кому выдал доступ, должно быть видно в журнале: иначе на вопрос
+        // «пароль поменялся сам» ответить нечем
+        logActivity(`Сотрудник добавлен: ${b.name.trim()} (${ROLE_RU[role] || role}), выдан временный пароль`, 'users', Number(r.lastInsertRowid), user.name);
         broadcast('change', { table: 'users' });
         return json(res, 201, { id: r.lastInsertRowid });
       }
@@ -3159,10 +3214,19 @@ ${user?.name || ''}`.trim();
         b.email = b.email.trim().toLowerCase();
         if (db.prepare('SELECT id FROM users WHERE email=? AND id!=?').get(b.email, id)) return json(res, 409, { error: 'Этот e-mail уже используется' });
       }
-      if (b.password) db.prepare('UPDATE users SET pass=?,must_change_password=1,session_version=session_version+1 WHERE id=?').run(hashPass(b.password), id);
+      if (b.password) db.prepare("UPDATE users SET pass=?,must_change_password=1,session_version=session_version+1,pass_changed_at=datetime('now') WHERE id=?").run(hashPass(b.password), id);
       const ks = ['name', 'email', 'role', 'active'].filter(k => b[k] !== undefined);
       if (ks.length) db.prepare(`UPDATE users SET ${ks.map(k => k + '=?')} WHERE id=?`).run(...ks.map(k => b[k]), id);
       if (b.password || b.active === 0 || b.role !== undefined) closeUserStreams(id);
+      // изменения доступа читаются в журнале одной строкой: кто, кому и что сделал
+      const done = [];
+      if (b.password) done.push('сброшен пароль, прежние сеансы закрыты');
+      if (b.role !== undefined && b.role !== current.role) done.push(`роль ${ROLE_RU[current.role] || current.role} → ${ROLE_RU[b.role] || b.role}`);
+      if (b.active !== undefined && Number(b.active) !== Number(current.active)) done.push(Number(b.active) ? 'доступ разрешён' : 'доступ отключён');
+      if (b.name !== undefined && String(b.name).trim() !== current.name) done.push('изменено имя');
+      if (b.email !== undefined && b.email !== current.email) done.push(`e-mail ${current.email} → ${b.email}`);
+      const after = db.prepare('SELECT name FROM users WHERE id=?').get(id);
+      if (done.length) logActivity(`Сотрудник ${after ? after.name : current.name}: ${done.join(', ')}`, 'users', id, user.name);
       broadcast('change', { table: 'users' });
       return json(res, 200, { saved: true });
     }
@@ -3234,9 +3298,11 @@ ${user?.name || ''}`.trim();
       const me = db.prepare('SELECT * FROM users WHERE id=?').get(user.id);
       if (!checkPass(String(b.old_password || b.old || ''), me.pass)) return json(res, 400, { error: 'Старый пароль неверен' });
       if (checkPass(nextPass, me.pass)) return json(res, 400, { error: 'Новый пароль должен отличаться от временного или текущего' });
-      db.prepare('UPDATE users SET pass=?,must_change_password=0,session_version=session_version+1 WHERE id=?').run(hashPass(nextPass), user.id);
+      db.prepare("UPDATE users SET pass=?,must_change_password=0,session_version=session_version+1,pass_changed_at=datetime('now') WHERE id=?").run(hashPass(nextPass), user.id);
       closeUserStreams(user.id);
-      logActivity('Пользователь сменил пароль', 'users', user.id, user.name);
+      // запись в журнале отвечает на вопрос руководителя: сотрудник сам задал
+      // личный пароль при первом входе или менял его позже
+      logActivity(me.must_change_password ? 'Временный пароль заменён личным' : 'Сотрудник сменил свой пароль', 'users', user.id, user.name);
       const token = sign({ id: user.id });
       res.setHeader('Set-Cookie', sessionCookie(req, token));
       return json(res, 200, { saved: true, token });
@@ -3745,7 +3811,7 @@ ${user?.name || ''}`.trim();
 
     // загруженные файлы чатов: только для авторизованных (токен в cookie, заголовке или ?token=)
     if (p.startsWith('/uploads/')) {
-      if (!user) return json(res, 401, { error: 'Требуется авторизация' });
+      if (!user) return json(res, 401, sessionFailure(presented) || { error: 'Требуется авторизация' });
       // Партнёр читает только файлы своих лидов. Адрес файла не секрет: он
       // попадает в переписку, уведомления и выгрузки, а чужой договор или
       // смету внешнему человеку видеть нельзя. Сотрудники офиса (администратор,

@@ -36,7 +36,7 @@ services:
       # 1 — не создавать начальные данные (совсем пустая база)
       KARKAS_NO_SEED: ${KARKAS_NO_SEED:-}
       ADMIN_EMAIL: ${ADMIN_EMAIL:-admin@example.com}
-      ADMIN_PASSWORD: ${ADMIN_PASSWORD:-admin12345}
+      ADMIN_PASSWORD: ${ADMIN_PASSWORD:-admin1234567}
       # Wazzup — один ключ на WhatsApp, Telegram, Instagram и Viber
       WAZZUP_API_KEY: ${WAZZUP_API_KEY:-}
       WAZZUP_WEBHOOK_SECRET: ${WAZZUP_WEBHOOK_SECRET:-}
