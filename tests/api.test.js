@@ -47,12 +47,20 @@ test('файлы вложений отдаются с правильным сп�
   mkdirSync(dir, { recursive: true });
   writeFileSync(dir + '/20260101-abcdef-test.svg', '<svg xmlns="http://www.w3.org/2000/svg"><script>alert(1)</script></svg>');
   writeFileSync(dir + '/20260101-abcdef-test.png', Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg==', 'base64'));
+  writeFileSync(dir + '/20260101-abcdef-test.mp3', Buffer.from('0123456789abcdef'));
   const svg = await fetch(base + '/uploads/20260101-abcdef-test.svg', { headers: h });
   assert.equal(svg.status, 200);
   assert.match(svg.headers.get('content-disposition') || '', /attachment/, 'svg открывается только скачиванием');
   assert.equal(svg.headers.get('content-type'), 'image/svg+xml');
   const png = await fetch(base + '/uploads/20260101-abcdef-test.png', { headers: h });
   assert.match(png.headers.get('content-disposition') || '', /inline/, 'обычная картинка показывается на месте');
+  const audio = await fetch(base + '/uploads/20260101-abcdef-test.mp3', { headers: { ...h, Range: 'bytes=2-5' } });
+  assert.equal(audio.status, 206, 'браузер может запрашивать фрагменты записи звонка');
+  assert.equal(audio.headers.get('content-type'), 'audio/mpeg', 'голосовое получает тип, который понимает проигрыватель');
+  assert.equal(audio.headers.get('content-range'), 'bytes 2-5/16', 'размер фрагмента и всего файла согласованы');
+  assert.equal(await audio.text(), '2345', 'отдан только запрошенный диапазон');
+  const badRange = await fetch(base + '/uploads/20260101-abcdef-test.mp3', { headers: { ...h, Range: 'bytes=99-100' } });
+  assert.equal(badRange.status, 416, 'невозможный диапазон не отдаёт неверный файл');
 });
 
 test('поля записей обрезаются до пределов, а свои поля принимаются объектом', async () => {
@@ -1435,6 +1443,42 @@ test('файл в сообщении хранит имя, тип и размер
   assert.match(String(list.last_body), /^Файл: смета\.pdf/, 'в списке чатов вместо пустоты видно имя файла: ' + list.last_body);
 });
 
+test('повторная загрузка вложения проверяет ID и не скачивает локальный файл заново', async () => {
+  const conv = (await call('/api/conversations')).body[0];
+  assert.ok(conv, 'есть чат для проверки');
+  const local = db.prepare("INSERT INTO messages(conversation_id,channel,direction,body,content_uri,content_name,content_type) VALUES(?,'whatsapp','in','[вложение]','/uploads/20260101-abcdef-test.png','фото.png','image/png')").run(conv.id);
+  const already = await call(`/api/messages/${local.lastInsertRowid}/refetch`, { method: 'POST' });
+  assert.equal(already.status, 400, 'локально сохранённый файл повторно не скачивается');
+  assert.match(already.body.error, /уже сохранён/);
+  const missing = await call('/api/messages/999999/refetch', { method: 'POST' });
+  assert.equal(missing.status, 404, 'несуществующее сообщение не создаёт файл');
+  const remote = db.prepare("INSERT INTO messages(conversation_id,channel,direction,body,content_uri) VALUES(?,'whatsapp','in','[вложение]',?)").run(conv.id, `${base}/api/health`);
+  const blocked = await call(`/api/messages/${remote.lastInsertRowid}/refetch`, { method: 'POST' });
+  assert.equal(blocked.status, 502, 'повторное скачивание не обращается к локальным адресам сервера');
+  db.prepare('UPDATE messages SET content_uri=? WHERE id=?').run('http://198.18.0.1/file.pdf', remote.lastInsertRowid);
+  const reserved = await call(`/api/messages/${remote.lastInsertRowid}/refetch`, { method: 'POST' });
+  assert.equal(reserved.status, 502, 'специальная тестовая сеть также не считается публичным адресом');
+});
+
+test('голосовые и видео можно прикрепить, проиграть и перематывать внутри CRM', async () => {
+  const conv = (await call('/api/conversations')).body[0];
+  assert.ok(conv, 'есть чат для отправки файла');
+  for (const [filename, contentType, bytes] of [
+    ['звонок.html', 'audio/mpeg', 'audio-bytes-1234'],
+    ['обзор.mp4', 'video/mp4', 'video-bytes-5678'],
+  ]) {
+    const up = await call(`/api/conversations/${conv.id}/upload`, { method: 'POST', body: JSON.stringify({ filename, contentType, dataBase64: Buffer.from(bytes).toString('base64') }) });
+    assert.equal(up.status, 201, `${filename} принят сервером`);
+    if (filename.endsWith('.html')) assert.match(up.body.url, /\.mp3$/, 'расширение на диске соответствует проверенному типу аудио, а не имени пользователя');
+    const full = await fetch(base + up.body.url, { headers: h });
+    assert.equal(full.headers.get('content-type'), contentType, 'браузер получает корректный тип медиа');
+    assert.match(full.headers.get('content-disposition') || '', /inline/, 'файл не уходит принудительной загрузкой');
+    const range = await fetch(base + up.body.url, { headers: { ...h, Range: 'bytes=1-4' } });
+    assert.equal(range.status, 206, 'плеер может запросить диапазон байтов для перемотки');
+    assert.equal(range.headers.get('content-range'), `bytes 1-4/${Buffer.from(bytes).length}`);
+  }
+});
+
 test('непрочитанные личные: чтение одного сотрудника не стирает метку другого', async () => {
   // отдельный сотрудник: у созданных ранее в сюите пароли уже менялись принудительно
   await call('/api/users', { method: 'POST', body: JSON.stringify({ name: 'Чтец Меток', email: 'readmark@example.com', password: 'readmark12345', role: 'manager' }) });
@@ -1751,14 +1795,15 @@ test('аналитика отдаёт конверсию по каждому м�
   assert.ok(row.conversion === null || (row.conversion >= 0 && row.conversion <= 100), 'конверсия в процентах');
 });
 
-test('контроль качества: РОП видит оценку, менеджер — нет', async () => {
+test('операционные показатели не выдают ложную оценку менеджера', async () => {
   const q = await call('/api/quality?days=30');
   assert.equal(q.status, 200);
   assert.equal(q.body.days, 30);
   assert.ok(Array.isArray(q.body.managers) && q.body.managers.length >= 1, 'по активным менеджерам есть строки');
-  assert.ok(q.body.managers.every(m => typeof m.score === 'number' && m.score >= 0 && m.score <= 100), 'оценка от 0 до 100');
-  assert.ok(q.body.managers.every(m => typeof m.verdict === 'string' && m.verdict), 'вывод словами');
-  assert.ok(q.body.totals && Array.isArray(q.body.factors) && q.body.factors.length >= 3, 'объяснение правил входит в ответ');
+  assert.ok(q.body.managers.every(m => typeof m.unansweredDialogs === 'number' && typeof m.stalled === 'number' && typeof m.overdueTasks === 'number'), 'отдаются измеримые рабочие показатели');
+  assert.ok(q.body.managers.every(m => !('score' in m) && !('verdict' in m)), 'медиана ответа и просрочка не превращаются в оценку менеджера');
+  assert.ok(q.body.totals && Array.isArray(q.body.definitions) && q.body.definitions.length >= 4, 'значение показателей объясняется');
+  assert.match(q.body.note, /не оценка качества менеджера/);
   // вопрос клиента, на который ответил не человек, а правило или рассылка,
   // остаётся в отчёте: качество измеряется ответами сотрудника
   const qContact = await call('/api/contacts', { method: 'POST', body: JSON.stringify({ name: 'Клиент ОКК', phone: '+79007770011', responsible_id: 1 }) });
@@ -1768,15 +1813,85 @@ test('контроль качества: РОП видит оценку, мен�
   db.prepare("INSERT INTO messages(conversation_id,channel,direction,body,created_at,author) VALUES(?,'whatsapp','out','Автоответ',?,'Рассылка')").run(qConv.body.id, ago(19));
   const qAuto = await call('/api/quality?days=7');
   const adminRow = qAuto.body.managers.find(m => Number(m.id) === 1);
-  assert.ok(adminRow && adminRow.unanswered >= 1, 'автоответ не закрыл вопрос клиента');
+  assert.ok(adminRow && adminRow.unansweredDialogs >= 1, 'автоответ не закрыл вопрос клиента');
   assert.equal(adminRow.medianResponseMin, null, 'медиана не считается по автоматическим сообщениям');
   const mgr = await call('/api/users', { method: 'POST', body: JSON.stringify({ name: 'Менеджер ОКК', email: 'qc@example.com', password: 'qcpassword123', role: 'manager' }) });
   assert.equal(mgr.status, 201);
   const lm = await readyLogin('/api/auth/login', { method: 'POST', body: JSON.stringify({ email: 'qc@example.com', password: 'qcpassword123' }) });
   const savedH = h;
   h = { Authorization: 'Bearer ' + lm.body.token };
-  assert.equal((await call('/api/quality')).status, 403, 'менеджер не видит контроль качества');
+  assert.equal((await call('/api/quality')).status, 403, 'менеджер не видит показатели команды');
+  assert.equal((await call('/api/quality/reviews')).status, 403, 'менеджер не видит внутренние проверки ОКК');
+  assert.equal((await call('/api/quality/deals')).status, 403, 'менеджер не получает выборку сделок для ОКК');
   h = savedH;
+});
+
+test('ОКК: ручная оценка с доказательствами, охватом и отдельным статусом «контакта не было»', async () => {
+  const contact = await call('/api/contacts', { method: 'POST', body: JSON.stringify({ name: 'Клиент для ОКК', phone: '79000000088', responsible_id: 1, source: 'site' }) });
+  assert.equal(contact.status, 201);
+  const deal = await call('/api/deals', { method: 'POST', body: JSON.stringify({ title: 'Проверка ОКК ДОМ 45', contact_id: contact.body.id, responsible_id: 1 }) });
+  assert.equal(deal.status, 201);
+  const conv = await call('/api/conversations', { method: 'POST', body: JSON.stringify({ contact_id: contact.body.id, chat_type: 'whatsapp' }) });
+  assert.equal(conv.status, 201);
+  const msg = db.prepare("INSERT INTO messages(conversation_id,channel,direction,body,author) VALUES(?,'whatsapp','in','Сколько стоит дом и можно ли построить в Уфе?','Клиент')").run(conv.body.id);
+  const searched = await call('/api/quality/deals?q=дом');
+  assert.equal(searched.status, 200, 'руководитель ищет сделки без учёта регистра кириллицы');
+  assert.ok(searched.body.rows.some(x => Number(x.id) === Number(deal.body.id)), 'найдена нужная сделка');
+  const created = await call('/api/quality/reviews', { method: 'POST', body: JSON.stringify({ deal_id: deal.body.id }) });
+  assert.equal(created.status, 201, 'черновик создан');
+  let detail = await call('/api/quality/reviews/' + created.body.id);
+  assert.equal(detail.status, 200);
+  assert.equal(detail.body.criteria.length, 18, 'чек-лист соответствует листу «Чек-лист ОКК»');
+  assert.equal(detail.body.messages.length, 1, 'к проверке приложен ограниченный список сообщений сделки');
+  assert.equal(detail.body.messages[0].id, Number(msg.lastInsertRowid));
+  const items = detail.body.criteria.map((c, i) => ({
+    key: c.key,
+    status: i < 13 ? 'yes' : i < 15 ? 'no' : i < 17 ? 'na' : 'unknown',
+    evidence_source: i === 15 ? 'crm' : 'message',
+    message_id: i === 15 ? null : Number(msg.lastInsertRowid),
+    evidence_text: i < 13 ? 'Подтверждено сообщением клиента и ответом сотрудника.'
+      : i < 15 ? 'В доступной переписке факт не подтверждён, приведена причина.'
+        : i < 17 ? 'В этом случае критерий неприменим, причина указана.' : 'Не хватает записи звонка, нужен ручной просмотр.'
+  }));
+  const otherContact = await call('/api/contacts', { method: 'POST', body: JSON.stringify({ name: 'Чужой контакт для ОКК', phone: '79000000089' }) });
+  const otherConv = await call('/api/conversations', { method: 'POST', body: JSON.stringify({ contact_id: otherContact.body.id, chat_type: 'whatsapp' }) });
+  const foreignMessage = db.prepare("INSERT INTO messages(conversation_id,channel,direction,body) VALUES(?,'whatsapp','in','Чужая переписка')").run(otherConv.body.id);
+  const reviewBody = {
+    status: 'complete', data_status: 'partial', interaction_type: 'chat', period_start: '2026-11-01', period_end: '2026-11-13',
+    data_notes: 'Проверена доступная переписка; записи звонков нет.', summary: 'Сотрудник уточнил параметры объекта.',
+    issues: ['На первый вопрос не дан точный ответ.'], next_steps: ['Подготовить расчёт и согласовать время разговора.'],
+    crm_observation: 'Поля бюджета и срока не заполнены, уточнить их у клиента.', items
+  };
+  const foreignItems = items.map((x,i)=>i===0?{...x,message_id:Number(foreignMessage.lastInsertRowid)}:x);
+  const crossed = await call('/api/quality/reviews/' + created.body.id, { method: 'PUT', body: JSON.stringify({ ...reviewBody, items: foreignItems }) });
+  assert.equal(crossed.status, 400, 'источник из чужой сделки нельзя прикрепить как доказательство');
+  const saved = await call('/api/quality/reviews/' + created.body.id, { method: 'PUT', body: JSON.stringify(reviewBody) });
+  assert.equal(saved.status, 200, 'полная проверка сохранена');
+  assert.deepEqual(saved.body.review.score, { confirmed: 13, applicable: 15, criticalFailures: 1, notApplicable: 2, insufficient: 1, unreviewed: 0, percent: 87, coverage: 83, total: 18 });
+  assert.equal(saved.body.review.status, 'complete');
+  const edited = await call('/api/quality/reviews/' + created.body.id, { method: 'PUT', body: JSON.stringify({ status: 'draft', items }) });
+  assert.equal(edited.status, 409, 'завершённый разбор нельзя незаметно переписать');
+  assert.equal((await call('/api/quality/reviews/' + created.body.id, { method: 'DELETE' })).status, 409, 'завершённое доказательство нельзя удалить');
+  const list = await call('/api/quality/reviews?days=30');
+  assert.equal(list.status, 200);
+  assert.equal(list.body.summary.complete, 1);
+  assert.equal(list.body.criteria.length, 18);
+  assert.equal(list.body.criteria.find(x => x.key === 'greeting').percent, 100);
+  assert.equal(list.body.criteria.find(x => x.key === 'materials').applicable, 0, 'неприменимые критерии не попадают в знаменатель');
+
+  const blank = await call('/api/quality/reviews', { method: 'POST', body: JSON.stringify({ deal_id: deal.body.id }) });
+  const blankItems = (await call('/api/quality/reviews/' + blank.body.id)).body.items.map(x => ({ key: x.criterion_key, status: '', evidence_source: '', message_id: null, evidence_text: '' }));
+  const noContact = await call('/api/quality/reviews/' + blank.body.id, { method: 'PUT', body: JSON.stringify({
+    status: 'no_contact', data_notes: 'Менеджер ещё не связался с клиентом; оценивать нечего.', items: blankItems
+  }) });
+  assert.equal(noContact.status, 200, 'отсутствие разговора сохраняется отдельным статусом');
+  assert.equal(noContact.body.review.score, null, 'отсутствие разговора не превращается в ноль баллов');
+  assert.equal((await call('/api/quality/reviews?days=30')).body.summary.no_contact, 1);
+
+  const draft = await call('/api/quality/reviews', { method: 'POST', body: JSON.stringify({ deal_id: deal.body.id }) });
+  const bad = await call('/api/quality/reviews/' + draft.body.id, { method: 'PUT', body: JSON.stringify({ status: 'complete', data_status: 'complete', period_start: '2026-11-01', period_end: '2026-11-13', items: [] }) });
+  assert.equal(bad.status, 400, 'нельзя завершить разбор без 18 статусов и доказательств');
+  assert.equal((await call('/api/quality/reviews/' + draft.body.id, { method: 'DELETE' })).status, 200, 'черновик можно удалить');
 });
 
 test('обучения больше нет: маршрут закрыт, таблица убрана из базы', async () => {

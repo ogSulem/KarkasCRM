@@ -194,7 +194,7 @@ export function seedDemo(db, adminId, adminName) {
 
 export function demoCounts(db) {
   const c = t => { try { return db.prepare(`SELECT COUNT(*) n FROM ${t} WHERE demo=1`).get().n } catch { return 0 } };
-  return { contacts: c('contacts'), deals: c('deals'), tasks: c('tasks'), conversations: c('conversations'), products: c('products'), templates: c('templates'), automations: c('automations'), competitors: c('competitors') };
+  return { contacts: c('contacts'), deals: c('deals'), tasks: c('tasks'), conversations: c('conversations'), products: c('products'), templates: c('templates'), automations: c('automations'), competitors: c('competitors'), qualityReviews: c('quality_reviews') };
 }
 
 export function cleanDemo(db) {
@@ -205,6 +205,7 @@ export function cleanDemo(db) {
   try {
     run("DELETE FROM activities WHERE (entity_type='contacts' AND entity_id IN (SELECT id FROM contacts WHERE demo=1)) OR (entity_type='deals' AND entity_id IN (SELECT id FROM deals WHERE demo=1))");
     run('DELETE FROM tasks WHERE demo=1');
+    run('DELETE FROM quality_reviews WHERE demo=1');
     run('DELETE FROM notes WHERE demo=1');
     run('DELETE FROM deals WHERE demo=1');          // deal_products уходит каскадом
     run('DELETE FROM conversations WHERE demo=1');  // сообщения уходит каскадом
