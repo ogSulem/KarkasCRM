@@ -7,6 +7,8 @@
 import { test, before, after } from 'node:test';
 import assert from 'node:assert';
 import { createServer } from 'node:net';
+import { createRequire } from 'node:module';
+const require = createRequire(import.meta.url);
 
 process.env.DATA_DIR = '/tmp/karkas-mail-' + Date.now();
 process.env.PORT = '18095';
@@ -66,11 +68,17 @@ const call = async (path, { method = 'GET', body, token } = {}) => {
   let data; try { data = JSON.parse(text) } catch { data = text }
   return { status: r.status, data };
 };
+// Вход администратора: временный пароль первого входа заменяется личным — так же,
+// как это делает сотрудник в интерфейсе.
+const { admin: adminToken } = require('./admin-login.cjs').flow({
+  login: (email, password) => call('/api/auth/login', { method: 'POST', body: { email, password } }),
+  change: (token, oldp, newp) => call('/api/me/password', { method: 'POST', token, body: { old_password: oldp, new_password: newp } }),
+});
 
 before(async () => {
   await new Promise(r => smtp.listen(SMTP_PORT, r));
   await new Promise(r => server.listening ? r() : server.once('listening', r));
-  admin = (await call('/api/auth/login', { method: 'POST', body: { email: 'admin@example.com', password: 'admin12345' } })).data.token;
+  admin = await adminToken();
   assert.ok(admin, 'вход администратора');
   const cfg = await call('/api/integrations/email/test', { method: 'POST', token: admin, body: { host: '127.0.0.1', port: SMTP_PORT, secure: '0', user: 'crm@example.com', pass: 'mail-pass', from: 'crm@example.com', to: 'probe@example.com' } });
   assert.equal(cfg.status, 200, 'почта настроена и проверочное письмо прошло: ' + JSON.stringify(cfg.data));

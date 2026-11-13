@@ -16,6 +16,8 @@ node --check tests/install-args.test.mjs
 node --check tests/update-mode.test.mjs
 node --check tests/wazzup-contract.test.mjs
 node --check tests/mail.test.mjs
+node --check tests/password.test.js
+node --check tests/admin-login.cjs
 # Скрипты установки и сопровождения. Ни один тест кода их не запускает, поэтому
 # опечатка в install.sh доходит до сервера пользователя: скрипт просто не стартует.
 for sh in install.sh run-local.sh run-tests.sh scripts/update.sh scripts/move.sh scripts/pack.sh deploy/start-caddy.sh; do
@@ -27,8 +29,11 @@ node --check scripts/db-check.mjs
 node --check scripts/upload-backup.mjs
 node --check scripts/s3-sign.mjs
 
-echo "[2/4] Интеграционные тесты (API, конкуренты, уведомления, гигиена базы, контракт Wazzup, почта, маршруты, часовой пояс, установщик, обновление, миграции, S3)"
+echo "[2/4] Интеграционные тесты (API, пароли, конкуренты, уведомления, гигиена базы, контракт Wazzup, почта, маршруты, часовой пояс, установщик, обновление, миграции, S3)"
 node --experimental-sqlite --test tests/api.test.js tests/competitors.test.js tests/notifications.test.mjs tests/db-hygiene.test.mjs
+# Жизненный цикл пароля отдельным прогоном и на своём порту: проверки намеренно
+# доводят вход до блокировки перебора, а после них счётчики нужно гасить.
+node --experimental-sqlite --test tests/password.test.js
 # Контракт Wazzup сверяется с документацией вендора на подставном API: расхождение
 # здесь выглядит как «синхронизировано: 0» или как недоставленное сообщение.
 node --experimental-sqlite --test tests/wazzup-contract.test.mjs

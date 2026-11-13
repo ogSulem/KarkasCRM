@@ -16,7 +16,7 @@ const VERSION = readFileSync(join(dirname(fileURLToPath(import.meta.url)), '..',
 
 const BASE = process.env.SMOKE_URL || 'http://127.0.0.1:8080';
 const EMAIL = process.env.ADMIN_EMAIL || 'admin@example.com';
-let PASSWORD = process.env.ADMIN_PASSWORD || 'admin12345';
+let PASSWORD = process.env.ADMIN_PASSWORD || 'admin1234567';
 let failed = 0;
 const ok = (name, cond, extra = '') => {
   console.log(`${cond ? 'ok  ' : 'FAIL'} ${name}${extra ? ' — ' + extra : ''}`);

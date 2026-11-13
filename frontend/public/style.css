@@ -681,6 +681,13 @@ html[data-theme=dark] .all-clear{background:#123326;color:#86efac}
 .task-links{display:grid;grid-template-columns:1fr 1fr;gap:12px}
 .task-link-col{display:flex;flex-direction:column;gap:4px}
 .task-link-cap{font-size:13px;font-weight:600;color:var(--muted)}
+/* карточка сотрудника: состояние пароля и кнопка сброса. Поля пароля в форме
+   правки нет, чтобы сгенерированное значение не уехало в базу вместе с ролью */
+.pw-state{border:1px dashed var(--line);border-radius:12px;padding:11px 13px;margin-bottom:12px}
+.pw-state>b{display:flex;align-items:center;gap:6px;font-size:13.5px}
+.pw-state p{margin:4px 0 8px}
+html[data-theme=dark] .pw-state{border-color:var(--line)}
+
 /* подбор клиента и сделки: поле с поиском по базе, найденное — списком под ним.
    Вид тот же, что у глобального поиска, поэтому тёмная тема и наведение
    достаются от правил .search-results */

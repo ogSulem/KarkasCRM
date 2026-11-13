@@ -30,6 +30,8 @@ jobs:
           node --check backend/src/smtp.js
           node --check frontend/public/app.js
           node --check tests/api.test.js
+          node --check tests/password.test.js
+          node --check tests/admin-login.cjs
           node --check tests/competitors.test.js
           node --check tests/timezone.test.js
           node --check tests/install-args.test.mjs
@@ -49,6 +51,11 @@ jobs:
 
       - name: Интеграционные тесты (API и конкуренты)
         run: node --experimental-sqlite --test tests/api.test.js tests/competitors.test.js
+
+      # Жизненный цикл пароля отдельным шагом и на своём порту: проверки
+      # намеренно доводят вход до блокировки подбора, а счётчики нужно гасить
+      - name: Пароль сотрудника — выдача, замена, сброс и причины отказа
+        run: node --experimental-sqlite --test tests/password.test.js
 
       # адресность уведомлений, права на настройки и гигиена базы: эти файлы
       # раньше прогонялись только локальным run-tests.sh и не проверялись в CI

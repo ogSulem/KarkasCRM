@@ -8,7 +8,7 @@ const VERSION = readFileSync(new URL('../VERSION', import.meta.url), 'utf8').tri
 process.env.DATA_DIR = '/tmp/karkas-test-' + Date.now();
 process.env.PORT = '18099';
 process.env.SEED_MODE = 'off'; // детерминированная чистая база для тестов
-const { server, db, partnerSeesEvent } = await import('../backend/src/server.js');
+const { server, db, partnerSeesEvent, clearLoginAttempts } = await import('../backend/src/server.js');
 const base = 'http://127.0.0.1:18099';
 let h;
 const call = (p, opt = {}) => fetch(base + p, { ...opt, headers: { 'Content-Type': 'application/json', ...(h || {}), ...(opt.headers || {}) } }).then(async r => ({ status: r.status, body: (r.headers.get('content-type') || '').includes('json') ? await r.json() : await r.text() }));
@@ -32,7 +32,7 @@ test('health и вход', async () => {
   // публичный health доступен без входа (Docker healthcheck), но не раскрывает бизнес-данные
   assert.equal(anon.counts, undefined, 'счётчики клиентов не видны без входа');
   assert.equal(anon.backups, undefined, 'имена резервных копий не видны без входа');
-  const l = await readyLogin('/api/auth/login', { method: 'POST', body: JSON.stringify({ email: 'admin@example.com', password: 'admin12345' }) });
+  const l = await readyLogin('/api/auth/login', { method: 'POST', body: JSON.stringify({ email: 'admin@example.com', password: 'admin1234567' }) });
   assert.ok(l.body.token, 'получен JWT');
   h = { Authorization: 'Bearer ' + l.body.token };
   assert.equal((await fetch(base + '/api/contacts')).status, 401, 'без токена — 401');
@@ -1189,6 +1189,9 @@ test('защита входа: ограничение попыток подбо�
   assert.ok(codes.includes(429), 'после серии неудачных попыток вход блокируется (429)');
   const ok = await call('/api/health');
   assert.equal(ok.status, 200, 'сервис продолжает работать');
+  // Счётчик неудач общий на IP, а все сценарии идут с одного адреса: без сброса
+  // следующие проверки входа упирались бы в блокировку и падали не по своей причине.
+  clearLoginAttempts();
 });
 
 test('очередь отложенных действий видна, отменяется администратором и помечает удалённое правило', async () => {
@@ -1705,8 +1708,10 @@ test('дашборд считает неназначенные задачи об
 });
 
 test('настройки дублируются в файл settings.env', async () => {
-  const l = await readyLogin('/api/auth/login', { method: 'POST', body: JSON.stringify({ email: 'admin@example.com', password: 'admin12345' }) });
-  h = { Authorization: 'Bearer ' + l.body.token };
+  // Токен администратора уже получен в первом сценарии и остаётся действующим:
+  // временный пароль первого входа к этому моменту заменён личным, поэтому
+  // повторный вход с исходным паролем невозможен — и не нужен.
+  assert.ok(h && h.Authorization, 'токен администратора действует');
   const put = await call('/api/settings', { method: 'PUT', body: JSON.stringify({ SMTP_HOST: 'mail.example.test' }) });
   assert.equal(put.status, 200);
   await new Promise(r => setTimeout(r, 700)); // копия пишется с задержкой, чтобы не дёргать диск на каждое сохранение

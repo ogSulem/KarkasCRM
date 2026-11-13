@@ -7,6 +7,13 @@
 // пояс задаётся здесь, а не берётся из окружения.
 import { test, before, after } from 'node:test';
 import assert from 'node:assert';
+import { createRequire } from 'node:module';
+
+const require = createRequire(import.meta.url);
+const { admin: adminToken } = require('./admin-login.cjs').flow({
+  login: (email, password) => call('/api/auth/login', { method: 'POST', body: JSON.stringify({ email, password }) }),
+  change: (token, oldp, newp) => call('/api/me/password', { method: 'POST', headers: { Authorization: 'Bearer ' + token }, body: JSON.stringify({ old_password: oldp, new_password: newp }) }, token),
+});
 process.env.TZ = 'Europe/Moscow';
 process.env.DATA_DIR = '/tmp/karkas-tz-' + Date.now();
 process.env.PORT = '18077';
@@ -24,14 +31,8 @@ before(async () => { await new Promise(r => server.listening ? r() : server.once
 after(() => server.close());
 
 test('отметка о входе хранится в UTC', async () => {
-  const login = await call('/api/auth/login', { method: 'POST', body: JSON.stringify({ email: 'admin@example.com', password: 'admin12345' }) });
-  assert.equal(login.status, 200, 'вход выполнен');
-  if (login.body.user?.must_change_password) {
-    const changed = await call('/api/me/password', { method: 'POST', headers: { Authorization: 'Bearer ' + login.body.token }, body: JSON.stringify({ old_password: 'admin12345', new_password: 'admin12345-Personal-2026' }) });
-    assert.equal(changed.status, 200, 'первый вход требует смены пароля — меняем');
-    login.body.token = changed.body.token;
-  }
-  h = { Authorization: 'Bearer ' + login.body.token };
+  assert.equal((await call('/api/auth/login', { method: 'POST', body: JSON.stringify({ email: 'admin@example.com', password: 'admin1234567' }) })).status, 200, 'вход выполнен');
+  h = { Authorization: 'Bearer ' + await adminToken() };
 
   const admin = (await call('/api/users')).body.find(u => u.role === 'admin');
   assert.ok(admin?.last_login, 'отметка о входе записана');

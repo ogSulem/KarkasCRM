@@ -5,6 +5,8 @@ import { test, before, after } from 'node:test';
 import assert from 'node:assert';
 import { writeFileSync, mkdirSync, utimesSync, existsSync } from 'node:fs';
 import { join } from 'node:path';
+import { createRequire } from 'node:module';
+const require = createRequire(import.meta.url);
 
 process.env.DATA_DIR = '/tmp/karkas-hygiene-' + Date.now();
 process.env.PORT = '18096';
@@ -26,12 +28,16 @@ const call = async (path, { method = 'GET', body, raw, token: ownToken } = {}) =
   let data; try { data = JSON.parse(text); } catch { data = text; }
   return { status: r.status, data };
 };
+// Вход администратора: временный пароль первого входа заменяется личным — так же,
+// как это делает сотрудник в интерфейсе.
+const { admin: adminToken } = require('./admin-login.cjs').flow({
+  login: (email, password) => call('/api/auth/login', { method: 'POST', body: { email, password } }),
+  change: (token, oldp, newp) => call('/api/me/password', { method: 'POST', token, body: { old_password: oldp, new_password: newp } }),
+});
 
 before(async () => {
   await new Promise(r => server.listening ? r() : server.once('listening', r));
-  const login = await call('/api/auth/login', { method: 'POST', body: { email: 'admin@example.com', password: 'admin12345' } });
-  assert.equal(login.status, 200);
-  token = login.data.token;
+  token = await adminToken();
 });
 
 after(async () => {
