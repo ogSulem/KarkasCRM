@@ -1774,31 +1774,12 @@ test('контроль качества: РОП видит оценку, мен�
   h = savedH;
 });
 
-test('обучающий портал: материалы добавляет админ, читают все', async () => {
-  const bad = await call('/api/training', { method: 'POST', body: JSON.stringify({ title: 'Ссылка', kind: 'link', url: 'javascript:alert(1)' }) });
-  assert.equal(bad.status, 400, 'не-http адрес отклонён');
-  const emptyText = await call('/api/training', { method: 'POST', body: JSON.stringify({ title: 'Пусто', kind: 'text', body: '' }) });
-  assert.equal(emptyText.status, 400, 'статья без текста отклонена');
-  const t = await call('/api/training', { method: 'POST', body: JSON.stringify({ title: 'Как мы продаём', kind: 'text', body: 'Шаг первый.\nШаг второй.' }) });
-  assert.equal(t.status, 201);
-  const list = await call('/api/training');
-  assert.ok(list.body.some(x => x.id === t.body.id), 'материал в списке');
-  const one = await call('/api/training/' + t.body.id);
-  assert.equal(one.status, 200);
-  assert.equal(one.body.title, 'Как мы продаём');
-  const up = await call('/api/training/' + t.body.id, { method: 'PATCH', body: JSON.stringify({ title: 'Как мы продаём 2' }) });
-  assert.equal(up.status, 200);
-  assert.equal(up.body.title, 'Как мы продаём 2');
-  // менеджер читает портал, но не меняет его
-  const lm = await readyLogin('/api/auth/login', { method: 'POST', body: JSON.stringify({ email: 'qc@example.com', password: 'qcpassword123-Personal-2026' }) });
-  const savedH = h;
-  h = { Authorization: 'Bearer ' + lm.body.token };
-  assert.equal((await call('/api/training')).status, 200, 'менеджер видит материалы');
-  assert.equal((await call('/api/training', { method: 'POST', body: JSON.stringify({ title: 'Своё', kind: 'text', body: 'текст' }) })).status, 403, 'добавляет только админ');
-  h = savedH;
-  const del = await call('/api/training/' + t.body.id, { method: 'DELETE' });
-  assert.equal(del.status, 200);
-  assert.ok(!(await call('/api/training')).body.some(x => x.id === t.body.id), 'материал удалён');
+test('обучения больше нет: маршрут закрыт, таблица убрана из базы', async () => {
+  assert.equal((await call('/api/training')).status, 404, 'маршрута обучения нет');
+  assert.equal((await call('/api/training', { method: 'POST', body: JSON.stringify({ title: 'Как мы продаём', kind: 'text', body: 'текст' }) })).status, 404, 'материалы не создаются');
+  assert.equal((await call('/api/training/1', { method: 'DELETE' })).status, 404, 'удалять нечего');
+  assert.equal((await call('/api/me/pref', { method: 'PATCH', body: JSON.stringify({ view: 'training' }) })).status, 400, 'обучение не сохраняется любимым разделом');
+  assert.equal(db.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='training_items'").get(), undefined, 'таблица материалов удалена');
 });
 
 test('рассылка: сегмент, расписание и отмена; канал без подключения отклоняется', async () => {
@@ -1809,13 +1790,33 @@ test('рассылка: сегмент, расписание и отмена; к
   const noCh = await call('/api/campaigns', { method: 'POST', body: JSON.stringify({ name: 'Без канала', channel: 'whatsapp', message: 'текст' }) });
   assert.equal(noCh.status, 400, 'WhatsApp не подключён — рассылка отклонена');
   assert.match(noCh.body.error, /Wazzup|WhatsApp/, 'ошибка объясняет, что подключить');
-  await call('/api/contacts', { method: 'POST', body: JSON.stringify({ name: 'Получатель Один', email: 'rc1@example.com' }) });
-  await call('/api/contacts', { method: 'POST', body: JSON.stringify({ name: 'Получатель Два', email: 'rc2@example.com' }) });
+  const rc1 = await call('/api/contacts', { method: 'POST', body: JSON.stringify({ name: 'Получатель Один', email: 'rc1@example.com' }) });
+  const rc2 = await call('/api/contacts', { method: 'POST', body: JSON.stringify({ name: 'Получатель Два', email: 'rc2@example.com' }) });
   assert.equal((await call('/api/settings', { method: 'PUT', body: JSON.stringify({ SMTP_HOST: 'smtp.example.test' }) })).status, 200);
   const pv = await call('/api/campaigns/preview', { method: 'POST', body: JSON.stringify({ channel: 'email', audience: {} }) });
   assert.ok(pv.body.count >= 2, 'сегмент посчитан до создания');
   const pvTag = await call('/api/campaigns/preview', { method: 'POST', body: JSON.stringify({ channel: 'email', audience: { tag: 'нет-такого-тега' } }) });
   assert.equal(pvTag.body.count, 0, 'по несуществующему тегу получателей нет');
+  // рассылка отмеченным клиентам: получатели ровно те, кого выбрал сотрудник,
+  // а пустой набор не превращается в отправку всей базе
+  const pvPicked = await call('/api/campaigns/preview', { method: 'POST', body: JSON.stringify({ channel: 'email', audience: { ids: [rc1.body.id, rc2.body.id, rc2.body.id] } }) });
+  assert.equal(pvPicked.body.count, 2, 'отмеченные клиенты посчитаны без повторов');
+  assert.equal((await call('/api/campaigns/preview', { method: 'POST', body: JSON.stringify({ channel: 'email', audience: { ids: [] } }) })).body.count, 0, 'пустой набор — получателей нет');
+  assert.equal((await call('/api/campaigns/preview', { method: 'POST', body: JSON.stringify({ channel: 'email', audience: { ids: [999999] } }) })).body.count, 0, 'чужой или несуществующий id не подходит');
+  const emptyPick = await call('/api/campaigns', { method: 'POST', body: JSON.stringify({ name: 'Пустой набор', channel: 'email', message: 'текст', audience: { ids: [] } }) });
+  assert.equal(emptyPick.status, 400, 'рассылка никому не создаётся');
+  assert.match(emptyPick.body.error, /Отметьте клиентов/, 'пустой набор объясняют словами, а не отправкой всей базе');
+  const noMail = await call('/api/contacts', { method: 'POST', body: JSON.stringify({ name: 'Без почты', phone: '+79005554433' }) });
+  const pickNoAddr = await call('/api/campaigns', { method: 'POST', body: JSON.stringify({ name: 'Без адреса', channel: 'email', message: 'текст', audience: { ids: [noMail.body.id] } }) });
+  assert.equal(pickNoAddr.status, 400, 'клиенту без почты рассылка не создаётся');
+  assert.match(pickNoAddr.body.error, /не заполнен e-mail/, 'ошибка называет причину');
+  const pickOk = await call('/api/campaigns', { method: 'POST', body: JSON.stringify({ name: 'Выбранным клиентам', channel: 'email', message: 'Здравствуйте, {имя}', scheduled_at: '2030-01-01T10:00', audience: { ids: [rc1.body.id, rc2.body.id, rc1.body.id] } }) });
+  assert.equal(pickOk.status, 201, 'рассылка отмеченным клиентам создана');
+  assert.equal(pickOk.body.total, 2, 'повторы в наборе не удваивают получателей');
+  const pickCard = await call('/api/campaigns/' + pickOk.body.id);
+  assert.deepEqual(pickCard.body.items.map(x => x.contact_id).sort(), [rc1.body.id, rc2.body.id].sort(), 'в очереди ровно отмеченные клиенты');
+  assert.equal(pickCard.body.audience.includes('ids'), false, 'список id не дублируется в описании рассылки');
+  assert.equal((await call('/api/campaigns/' + pickOk.body.id, { method: 'DELETE' })).status, 200);
   const past = await call('/api/campaigns', { method: 'POST', body: JSON.stringify({ name: 'В прошлом', channel: 'email', message: 'текст', scheduled_at: '2020-01-01T10:00' }) });
   assert.equal(past.status, 400, 'время в прошлом отклонено');
   const noMsg = await call('/api/campaigns', { method: 'POST', body: JSON.stringify({ name: 'Без текста', channel: 'email' }) });
@@ -1852,7 +1853,7 @@ test('рассылка: сегмент, расписание и отмена; к
   await new Promise(r => setTimeout(r, 500)); // копия настроек в файле гасится вместе с ключами
 });
 
-test('партнёр: отдельный вход, только свои лиды и обучение', async () => {
+test('партнёр: отдельный вход, только свои лиды', async () => {
   const u = await call('/api/users', { method: 'POST', body: JSON.stringify({ name: 'Партнёр Север', email: 'partner@example.com', password: 'partnerpassword1', role: 'partner' }) });
   assert.equal(u.status, 201);
   const badRole = await call('/api/users', { method: 'POST', body: JSON.stringify({ name: 'Хакер', email: 'hacker@example.com', password: 'hackerpassword1', role: 'hacker' }) });
@@ -1920,8 +1921,6 @@ test('партнёр: отдельный вход, только свои лид�
   const users = await call('/api/users');
   assert.equal(users.body.length, 1, 'список сотрудников — только он сам');
   assert.equal(users.body[0].id, u.body.id);
-  assert.equal((await call('/api/training')).status, 200, 'обучение доступно');
-  assert.equal((await call('/api/training', { method: 'POST', body: JSON.stringify({ title: 'Взлом', kind: 'text', body: 'x' }) })).status, 403, 'материалы меняет только админ');
   assert.equal((await call('/api/notes', { method: 'POST', body: JSON.stringify({ entity_type: 'deals', entity_id: d.body.id, body: 'Звонок состоялся' }) })).status, 201, 'заметка к своей сделке');
   assert.equal((await call('/api/notes', { method: 'POST', body: JSON.stringify({ entity_type: 'deals', entity_id: fd.body.id, body: 'чужое' }) })).status, 403, 'заметка к чужой сделке закрыта');
   // состав сделки: партнёр собирает свой лид из позиций, чужую сделку не трогает
@@ -1938,7 +1937,7 @@ test('партнёр: отдельный вход, только свои лид�
   assert.equal((await call('/api/deals/' + fd.body.id + '/print?doc=quote')).status, 403, 'чужое КП закрыто');
   assert.equal((await call('/api/deals/' + fd.body.id + '/send-doc', { method: 'POST', body: JSON.stringify({ doc: 'quote' }) })).status, 403, 'отправка по чужой сделке закрыта');
   assert.equal((await call('/api/deal_products/' + pos.body.id, { method: 'DELETE' })).status, 200, 'свою позицию удаляет');
-  assert.equal((await call('/api/me/pref', { method: 'PATCH', body: JSON.stringify({ view: 'training' }) })).status, 200, 'любимый раздел сохраняется');
+  assert.equal((await call('/api/me/pref', { method: 'PATCH', body: JSON.stringify({ view: 'pipe' }) })).status, 200, 'любимый раздел сохраняется');
   // переписка со своим клиентом: партнёр отвечает сам, чужой чат закрыт
   const conv = await call('/api/conversations', { method: 'POST', body: JSON.stringify({ contact_id: c.body.id, chat_type: 'whatsapp' }) });
   assert.equal(conv.status, 201, 'партнёр начинает переписку со своим клиентом');

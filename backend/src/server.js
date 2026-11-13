@@ -109,7 +109,6 @@ CREATE TABLE IF NOT EXISTS activities(id INTEGER PRIMARY KEY,text TEXT,entity_ty
 CREATE TABLE IF NOT EXISTS automation_queue(id INTEGER PRIMARY KEY,automation_id INTEGER,trigger_type TEXT,deal_id INTEGER,contact_id INTEGER,run_at TEXT,quiet INTEGER DEFAULT 0,created_at TEXT DEFAULT (datetime('now')));
 CREATE TABLE IF NOT EXISTS campaigns(id INTEGER PRIMARY KEY,name TEXT NOT NULL,channel TEXT NOT NULL DEFAULT 'whatsapp',subject TEXT DEFAULT '',message TEXT NOT NULL,audience TEXT DEFAULT '{}',status TEXT NOT NULL DEFAULT 'scheduled',scheduled_at TEXT,created_by TEXT DEFAULT '',created_by_id INTEGER,total INTEGER DEFAULT 0,sent INTEGER DEFAULT 0,failed INTEGER DEFAULT 0,created_at TEXT DEFAULT (datetime('now')));
 CREATE TABLE IF NOT EXISTS campaign_items(id INTEGER PRIMARY KEY,campaign_id INTEGER REFERENCES campaigns(id) ON DELETE CASCADE,contact_id INTEGER,address TEXT DEFAULT '',status TEXT NOT NULL DEFAULT 'queued',error TEXT DEFAULT '',sent_at TEXT);
-CREATE TABLE IF NOT EXISTS training_items(id INTEGER PRIMARY KEY,title TEXT NOT NULL,kind TEXT DEFAULT 'text',body TEXT DEFAULT '',url TEXT DEFAULT '',sort INTEGER DEFAULT 0,created_at TEXT DEFAULT (datetime('now')));
 `);
 // мягкие миграции: дополняем ранее созданные таблицы недостающими колонками
 const SCHEMA = [
@@ -167,6 +166,9 @@ const freshDb = (() => {
     });
   } catch { return true }
 })();
+// копия делается один раз на запуск: она нужна и перед добавлением колонок, и
+// перед удалением таблицы убранного раздела, а двух одинаковых файлов быть не должно
+let preUpgradeCopy = '';
 if (missingColumns.length && !freshDb) {
   try {
     mkdir(join(DATA_DIR, 'backups'), { recursive: true });
@@ -174,6 +176,7 @@ if (missingColumns.length && !freshDb) {
     // сбрасываем WAL на диск: копия одного файла должна быть согласованной
     try { db.exec('PRAGMA wal_checkpoint(TRUNCATE)') } catch {}
     copyFileSync(join(DATA_DIR, 'crm.db'), pre);
+    preUpgradeCopy = pre;
     console.log(`Обновление схемы базы — страховочная копия: ${pre}`);
   } catch (e) { console.error('Не удалось сделать копию перед обновлением схемы:', e.message) }
 }
@@ -214,7 +217,6 @@ CREATE INDEX IF NOT EXISTS idx_conv_external ON conversations(external_chat_id);
 CREATE INDEX IF NOT EXISTS idx_msg_content_uri ON messages(content_uri);
 CREATE INDEX IF NOT EXISTS idx_camp_items ON campaign_items(campaign_id, status, id);
 CREATE INDEX IF NOT EXISTS idx_camp_queue ON campaigns(status, scheduled_at);
-CREATE INDEX IF NOT EXISTS idx_training_sort ON training_items(sort, id);
 `);
 try { db.exec('CREATE UNIQUE INDEX IF NOT EXISTS idx_msg_ext ON messages(external_id) WHERE external_id IS NOT NULL'); }
 catch (e) { console.error('Не удалось создать уникальный индекс по external_id (в базе есть дубли внешних id):', e.message); }
@@ -228,7 +230,44 @@ try {
   if (moneyFix.changes) console.log(`Суммы сделок приведены к целым рублям: строк исправлено ${moneyFix.changes}`);
 } catch (e) { console.error('Не удалось привести суммы сделок к целым рублям:', e.message) }
 
-const SCHEMA_VERSION = 8;
+// Раздела «Обучение» больше нет: материалы команда хранит у себя, а CRM остаётся
+// про продажи. Таблица и записи журнала о материалах убираются при запуске один
+// раз; проверка повторяется безопасно и пустую базу не трогает.
+try {
+  const old = db.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='training_items'").get();
+  if (old) {
+    // материалы — данные заказчика, а не служебная таблица: если в ней что-то
+    // лежит, перед удалением кладём копию базы рядом с ежедневными копиями
+    const had = db.prepare('SELECT COUNT(*) n FROM training_items').get().n;
+    if (had && !freshDb && !preUpgradeCopy) {
+      try {
+        mkdir(join(DATA_DIR, 'backups'), { recursive: true });
+        try { db.exec('PRAGMA wal_checkpoint(TRUNCATE)') } catch {}
+        const pre = join(DATA_DIR, 'backups', `pre-upgrade-${localStamp()}.db`);
+        copyFileSync(join(DATA_DIR, 'crm.db'), pre);
+        preUpgradeCopy = pre;
+        console.log(`Перед удалением раздела «Обучение» сделана копия базы, материалов в ней: ${had} — ${pre}`);
+      } catch (e) { console.error('Не удалось сделать копию перед удалением обучения:', e.message) }
+    } else if (had && preUpgradeCopy) {
+      console.log(`Материалов обучения в базе: ${had}, они остались в копии ${preUpgradeCopy}`);
+    }
+    db.exec('DROP TABLE training_items');
+    const acts = db.prepare("DELETE FROM activities WHERE entity_type='training_items'").run();
+    console.log(`Таблица training_items удалена, записей журнала очищено ${acts.changes}`);
+  }
+} catch (e) { console.error('Не удалось убрать таблицу training_items:', e.message) }
+
+// Любимый раздел хранится у сотрудника. «Качество» стало вкладкой аналитики,
+// «Рассылки» — вкладкой контактов, «Обучение» убрано: старые значения переводим
+// на раздел, где работа теперь живёт, чтобы CRM не открывалась пустым экраном.
+try {
+  const moved = db.prepare(`UPDATE users SET pref_view = CASE pref_view
+      WHEN 'quality' THEN 'analytics' WHEN 'campaigns' THEN 'contacts' WHEN 'training' THEN 'dashboard'
+      ELSE pref_view END WHERE pref_view IN ('quality','campaigns','training')`).run();
+  if (moved.changes) console.log(`Любимый раздел перенесён у сотрудников: ${moved.changes}`);
+} catch (e) { console.error('Не удалось перенести любимый раздел:', e.message) }
+
+const SCHEMA_VERSION = 9;
 
 // Дата в местном часовом поясе (в базе время хранится в UTC, а сроки задач —
 // в местном настенном времени; сравнивать их с UTC-«сегодня» нельзя).
@@ -530,7 +569,7 @@ const staticGzip = new Map(); // кэш сжатых ассетов: gzip счи
 // клиента перечитать раздел, которого у партнёра нет. Партнёрским соединениям
 // уходят события о его собственных диалогах и обновления тех таблиц, которые он
 // действительно может перечитать.
-const PARTNER_SSE_TABLES = new Set(['deals', 'contacts', 'tasks', 'notes', 'conversations', 'training_items', 'pipelines', 'products', 'prices', 'custom_fields', 'all']);
+const PARTNER_SSE_TABLES = new Set(['deals', 'contacts', 'tasks', 'notes', 'conversations', 'pipelines', 'products', 'prices', 'custom_fields', 'all']);
 export function partnerSeesEvent(r, ev, data) {
   if (!r || r.role !== 'partner') return true;
   const d = data && typeof data === 'object' ? data : {};
@@ -632,6 +671,14 @@ const wzHookHuman = v => v ? ruDate(v) + ' ' + String(v).slice(11, 16) : '';
 function campaignRecipients(aud, channel) {
   const a = aud && typeof aud === 'object' ? aud : {};
   const where = [], params = [];
+  // Отправка конкретным клиентам: их выбирает сотрудник в списке контактов, а не
+  // фильтр. Пустой набор означает «никому» — иначе рассылка ушла бы всей базе.
+  if (Array.isArray(a.ids)) {
+    const ids = [...new Set(a.ids.map(Number).filter(n => Number.isInteger(n) && n > 0))].slice(0, 5000);
+    if (!ids.length) return [];
+    where.push(`c.id IN (${ids.map(() => '?').join(',')})`);
+    params.push(...ids);
+  }
   if (a.source) { where.push('c.source=?'); params.push(String(a.source).slice(0, 60)); }
   if (a.tag) { where.push("(',' || REPLACE(c.tags,' ','') || ',') LIKE ?"); params.push(`%,${String(a.tag).replace(/[,%]/g, '').slice(0, 60)},%`); }
   if (a.owner_id) { where.push('c.responsible_id=?'); params.push(Number(a.owner_id)); }
@@ -2135,7 +2182,7 @@ export const server = http.createServer(async (req, res) => {
     if (p === '/api/me/pref' && req.method === 'PATCH') {
       const b = await readBody(req);
       const v = String(b.view || '');
-      if (!['dashboard', 'pipe', 'inbox', 'contacts', 'companies', 'tasks', 'products', 'competitors', 'analytics', 'settings', 'campaigns', 'quality', 'training'].includes(v)) return json(res, 400, { error: 'Неизвестный раздел' });
+      if (!['dashboard', 'pipe', 'inbox', 'contacts', 'companies', 'tasks', 'products', 'competitors', 'analytics', 'settings'].includes(v)) return json(res, 400, { error: 'Неизвестный раздел' });
       db.prepare('UPDATE users SET pref_view=? WHERE id=?').run(v, user.id);
       return json(res, 200, { ok: true });
     }
@@ -2154,14 +2201,14 @@ export const server = http.createServer(async (req, res) => {
       activeUsers: db.prepare('SELECT COUNT(*) n FROM users WHERE active=1').get().n,
     });
     if (user && p.startsWith('/api/') && user.role === 'viewer' && req.method !== 'GET' && !['/api/me/password', '/api/me/theme', '/api/conversations/read'].includes(p)) return json(res, 403, { error: 'Роль «Наблюдатель» — только просмотр' });
-    // Партнёр: своя учётка, свои лиды и обучающий портал. Аналитика, рассылки,
-    // контроль качества, настройки и чужие карточки закрыты здесь централизованно,
-    // а списки ниже дополнительно фильтруются по владельцу.
+    // Партнёр: своя учётка и свои лиды. Аналитика, рассылки, контроль качества,
+    // настройки и чужие карточки закрыты здесь централизованно, а списки ниже
+    // дополнительно фильтруются по владельцу.
     if (user && user.role === 'partner' && p.startsWith('/api/')) {
-      const PARTNER_GET = [/^\/api\/me$/, /^\/api\/meta$/, /^\/api\/events$/, /^\/api\/dashboard$/, /^\/api\/training(\/\d+)?$/, /^\/api\/pipelines$/, /^\/api\/users$/, /^\/api\/deals(\/\d+)?$/, /^\/api\/contacts(\/\d+)?$/, /^\/api\/tasks(\/\d+)?$/, /^\/api\/notes(\/\d+)?$/, /^\/api\/conversations$/, /^\/api\/conversations\/\d+\/messages$/, /^\/api\/custom-fields$/, /^\/api\/prices$/, /^\/api\/products$/, /^\/api\/templates$/, /^\/api\/companies$/, /^\/api\/deals\/\d+\/(print|products)$/];
+      const PARTNER_GET = [/^\/api\/me$/, /^\/api\/meta$/, /^\/api\/events$/, /^\/api\/dashboard$/, /^\/api\/pipelines$/, /^\/api\/users$/, /^\/api\/deals(\/\d+)?$/, /^\/api\/contacts(\/\d+)?$/, /^\/api\/tasks(\/\d+)?$/, /^\/api\/notes(\/\d+)?$/, /^\/api\/conversations$/, /^\/api\/conversations\/\d+\/messages$/, /^\/api\/custom-fields$/, /^\/api\/prices$/, /^\/api\/products$/, /^\/api\/templates$/, /^\/api\/companies$/, /^\/api\/deals\/\d+\/(print|products)$/];
       const PARTNER_WRITE = [/^\/api\/me\/(password|theme|pref)$/, /^\/api\/deals(\/\d+)?$/, /^\/api\/contacts(\/\d+)?$/, /^\/api\/tasks(\/\d+)?$/, /^\/api\/notes(\/\d+)?$/, /^\/api\/conversations$/, /^\/api\/conversations\/read$/, /^\/api\/conversations\/\d+\/(messages|upload|email)$/, /^\/api\/deals\/\d+\/(send-doc|products)$/, /^\/api\/deal_products\/\d+$/];
       if (!(req.method === 'GET' || req.method === 'HEAD' ? PARTNER_GET : PARTNER_WRITE).some(re => re.test(p)))
-        return json(res, 403, { error: 'Партнёру доступны его сделки, клиенты, задачи и раздел «Обучение»' });
+        return json(res, 403, { error: 'Партнёру доступны его сделки, клиенты и задачи' });
       if (!partnerOwnsPath(user, p)) return json(res, 403, { error: 'Это чужая карточка: партнёр видит только свои лиды' });
     }
     // настройки, команда, воронки, шаблоны, автоматизации, ключи и обслуживание — только администратор
@@ -2617,10 +2664,21 @@ export const server = http.createServer(async (req, res) => {
             scheduledAt = t.toISOString();
           }
           const rows = campaignRecipients(b.audience, channel);
-          if (!rows.length) return json(res, 400, { error: 'Под фильтр не подходит ни один клиент с заполненным ' + (channel === 'email' ? 'e-mail' : 'телефоном') + '. Проверьте сегмент или выберите другой канал' });
+          // ошибка называет причину: клиентов не отметили, у отмеченных не
+          // заполнен адрес канала или под фильтры сегмента никто не подходит
+          const picked = Array.isArray(b.audience && b.audience.ids);
+          const pickedIds = picked ? [...new Set(b.audience.ids.map(Number).filter(n => Number.isInteger(n) && n > 0))] : [];
+          if (!rows.length && picked && !pickedIds.length) return json(res, 400, { error: 'Отметьте клиентов: рассылка без получателей не создаётся' });
+          if (!rows.length) return json(res, 400, { error: (picked ? 'У выбранных клиентов не заполнен ' : 'Под фильтр не подходит ни один клиент с заполненным ')
+            + (channel === 'email' ? 'e-mail' : 'телефон') + '. Проверьте сегмент или выберите другой канал' });
           if (rows.length > 5000) return json(res, 400, { error: 'Слишком большой сегмент: предел одной рассылки — 5000 получателей' });
+          // список получателей уже лежит поштучно в campaign_items, поэтому в
+          // описании рассылки массив id не дублируем: пишем только число
+          const stored = { ...(b.audience && typeof b.audience === 'object' ? b.audience : {}) };
+          delete stored.ids;
+          if (picked) stored.picked = rows.length;
           const r = db.prepare('INSERT INTO campaigns(name,channel,subject,message,audience,status,scheduled_at,created_by,created_by_id,total) VALUES(?,?,?,?,?,?,?,?,?,?)')
-            .run(name, channel, subject, message, JSON.stringify(b.audience || {}), scheduledAt ? 'scheduled' : 'queued', scheduledAt, user.name, user.id, rows.length);
+            .run(name, channel, subject, message, JSON.stringify(stored), scheduledAt ? 'scheduled' : 'queued', scheduledAt, user.name, user.id, rows.length);
           const ins = db.prepare('INSERT INTO campaign_items(campaign_id,contact_id,address) VALUES(?,?,?)');
           for (const row of rows) ins.run(Number(r.lastInsertRowid), row.id, String(row.address));
           logActivity(`Рассылка «${name}»: ${rows.length} получателей, канал ${channel === 'email' ? 'почта' : 'WhatsApp'}${scheduledAt ? ', запланирована на ' + localNow(new Date(scheduledAt)) : ''}`, 'campaigns', Number(r.lastInsertRowid), user.name);
@@ -2717,58 +2775,6 @@ export const server = http.createServer(async (req, res) => {
           'Просроченные открытые задачи (−2 за каждую, не больше −15)',
         ],
       });
-    }
-    // ===== Обучающий портал: материалы для партнёров и сотрудников =====
-    if (p === '/api/training' || /^\/api\/training\/\d+$/.test(p)) {
-      if (req.method === 'GET' && p === '/api/training') return json(res, 200, db.prepare('SELECT * FROM training_items ORDER BY sort,id').all());
-      if (req.method === 'GET') {
-        const row = db.prepare('SELECT * FROM training_items WHERE id=?').get(Number(p.split('/').pop()));
-        return row ? json(res, 200, row) : json(res, 404, { error: 'Материал не найден' });
-      }
-      if (!requireAdmin(user, res)) return;
-      const kindOk = k => ['text', 'video', 'link'].includes(k);
-      if (req.method === 'POST') {
-        const b = await readBody(req);
-        const title = String(b.title || '').trim().slice(0, 140);
-        if (!title) return json(res, 400, { error: 'Укажите название материала' });
-        const kind = kindOk(String(b.kind)) ? String(b.kind) : 'text';
-        const body = String(b.body || '').slice(0, 50000);
-        const url = String(b.url || '').trim().slice(0, 500);
-        if (kind !== 'text' && !/^https?:\/\//i.test(url)) return json(res, 400, { error: 'Для видео и ссылки нужен адрес, который начинается с http:// или https://' });
-        if (kind === 'text' && !body.trim()) return json(res, 400, { error: 'Текст материала пустой' });
-        const r = db.prepare('INSERT INTO training_items(title,kind,body,url,sort) VALUES(?,?,?,?,?)').run(title, kind, body, url, Number(b.sort) || 0);
-        logActivity(`Материал «${title}» добавлен в обучение`, 'training_items', Number(r.lastInsertRowid), user.name);
-        broadcast('change', { table: 'training_items' });
-        return json(res, 201, db.prepare('SELECT * FROM training_items WHERE id=?').get(r.lastInsertRowid));
-      }
-      const mTr = p.match(/^\/api\/training\/(\d+)$/);
-      if (mTr) {
-        const id = Number(mTr[1]);
-        const row = db.prepare('SELECT * FROM training_items WHERE id=?').get(id);
-        if (!row) return json(res, 404, { error: 'Материал не найден — обновите страницу' });
-        if (req.method === 'PATCH') {
-          const b = await readBody(req);
-          if (b.title !== undefined) b.title = String(b.title).trim().slice(0, 140);
-          if (b.title !== undefined && !b.title) return json(res, 400, { error: 'Название не может быть пустым' });
-          const kind = b.kind !== undefined ? String(b.kind) : row.kind;
-          if (b.kind !== undefined && !kindOk(kind)) return json(res, 400, { error: 'Тип материала: текст, видео или ссылка' });
-          if (b.body !== undefined) b.body = String(b.body).slice(0, 50000);
-          if (b.url !== undefined) b.url = String(b.url).trim().slice(0, 500);
-          const url = b.url !== undefined ? b.url : row.url;
-          if (kind !== 'text' && !/^https?:\/\//i.test(url)) return json(res, 400, { error: 'Для видео и ссылки нужен адрес, который начинается с http:// или https://' });
-          const ks = Object.keys(b).filter(k => ['title', 'kind', 'body', 'url', 'sort'].includes(k));
-          if (ks.length) db.prepare(`UPDATE training_items SET ${ks.map(k => k + '=?').join(',')} WHERE id=?`).run(...ks.map(k => k === 'sort' ? (Number(b[k]) || 0) : b[k]), id);
-          broadcast('change', { table: 'training_items' });
-          return json(res, 200, db.prepare('SELECT * FROM training_items WHERE id=?').get(id));
-        }
-        if (req.method === 'DELETE') {
-          db.prepare('DELETE FROM training_items WHERE id=?').run(id);
-          logActivity(`Материал «${row.title}» удалён из обучения`, 'training_items', id, user.name);
-          broadcast('change', { table: 'training_items' });
-          return json(res, 200, { ok: true });
-        }
-      }
-      return json(res, 404, { error: 'Не найдено' });
     }
     if (p === '/api/pipelines') {
       if (req.method === 'GET') return json(res, 200, db.prepare('SELECT * FROM pipelines ORDER BY id').all().map(pl => ({ ...pl, stages: getStages(pl.id) })));

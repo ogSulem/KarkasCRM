@@ -36,6 +36,7 @@ CREATE TABLE messages(id INTEGER PRIMARY KEY,conversation_id INTEGER,channel TEX
 CREATE TABLE channels(id INTEGER PRIMARY KEY,provider TEXT,external_id TEXT UNIQUE,name TEXT,transport TEXT,phone TEXT,state TEXT,raw TEXT);
 CREATE TABLE price_rows(id INTEGER PRIMARY KEY,competitor_id INTEGER,scope TEXT DEFAULT 'competitor',item TEXT,price REAL,unit TEXT,sku TEXT,note TEXT,source_name TEXT,updated_at TEXT DEFAULT (datetime('now')));
 CREATE TABLE competitors(id INTEGER PRIMARY KEY,name TEXT NOT NULL,inn TEXT,ogrn TEXT,city TEXT,website TEXT,phone TEXT,notes TEXT DEFAULT '',price_url TEXT DEFAULT '',created_at TEXT DEFAULT (datetime('now')));
+CREATE TABLE training_items(id INTEGER PRIMARY KEY,title TEXT NOT NULL,kind TEXT DEFAULT 'text',body TEXT DEFAULT '',url TEXT DEFAULT '',sort INTEGER DEFAULT 0,created_at TEXT DEFAULT (datetime('now')));
 `);
 old.exec(`
 INSERT INTO contacts(name,phone,email,source) VALUES('Клиент из старой базы','+7 900 123-45-67','old@mail.ru','avito');
@@ -57,6 +58,8 @@ INSERT INTO messages(conversation_id,direction,body,created_at) VALUES(1,'in','�
 INSERT INTO pipelines(name) VALUES('Основная воронка');
 INSERT INTO stages(pipeline_id,code,name,color,sort,kind) VALUES(1,'new','Неразобранное','#f97316',0,'open');
 INSERT INTO settings(key,value) VALUES('COMPANY_NAME','Старая компания');
+INSERT INTO training_items(title,kind,body) VALUES('Материал из старой базы','text','Первая строка материала');
+INSERT INTO activities(text,entity_type,entity_id,user_name) VALUES('Материал «Материал из старой базы» добавлен в обучение','training_items',1,'Ирина');
 INSERT INTO products(name,sku,price,unit,active) VALUES('Дом из старой базы','OLD-1',1000000,'шт',1);
 INSERT INTO competitors(id,name) VALUES(7,'Старый конкурент');
 INSERT INTO price_rows(competitor_id,scope,item,price,unit,sku,note,source_name) VALUES
@@ -150,6 +153,10 @@ const H = { Authorization: 'Bearer ' + login.token, 'Content-Type': 'application
 const health = await (await fetch(`http://127.0.0.1:${PORT}/api/health`, { headers: H })).json();
 ok('администратор видит подробности health', health.counts.contacts >= 1, JSON.stringify(health.counts));
 ok('перед обновлением схемы сделана страховочная копия базы', health.backups.count >= 1 && String(health.backups.last || '').startsWith('pre-upgrade'), JSON.stringify(health.backups));
+ok('раздел «Обучение» убран: таблицы материалов в базе нет',
+  db.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='training_items'").get() === undefined);
+ok('записи журнала о материалах обучения убраны вместе с разделом',
+  db.prepare("SELECT COUNT(*) n FROM activities WHERE entity_type='training_items'").get().n === 0);
 ok('в мигрированную базу не добавляются посторонние записи', health.counts.contacts === 1 && health.counts.deals === 1, JSON.stringify(health.counts));
 const meta = await fetch(`http://127.0.0.1:${PORT}/api/meta`, { headers: H });
 ok('новые эндпоинты работают на мигрированной базе', meta.status === 200);
