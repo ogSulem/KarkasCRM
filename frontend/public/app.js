@@ -9,7 +9,6 @@ const ICON_PATHS = {
   pipe: '<path d="M22 3H2l8 9.46V19l4 2v-8.54L22 3z"/>',
   campaigns: '<path d="M22 2 11 13"/><path d="M22 2 15 22l-4-9-9-4Z"/>',
   quality: '<path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10Z"/><path d="m9 12 2 2 4-4"/>',
-  training: '<path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20"/><path d="M6.5 2H20v20H6.5A2.5 2.5 0 0 1 4 19.5v-15A2.5 2.5 0 0 1 6.5 2Z"/>',
   inbox: '<path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/>',
   chat: '<path d="M21 11.5a8.38 8.38 0 0 1-.9 3.8 8.5 8.5 0 0 1-7.6 4.7 8.38 8.38 0 0 1-3.8-.9L3 21l1.9-5.7a8.38 8.38 0 0 1-.9-3.8 8.5 8.5 0 0 1 4.7-7.6 8.38 8.38 0 0 1 3.8-.9h.5a8.48 8.48 0 0 1 8 8v.5z"/>',
   contacts: '<path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M23 21v-2a4 4 0 0 0-3-3.87"/><path d="M16 3.13a4 4 0 0 1 0 7.75"/>',
@@ -868,7 +867,7 @@ async function boot() {
     if (me.user.role === 'partner') {
       // партнёр начинает со своих сделок: рабочий стол с цифрами всей компании
       // для него закрыт, из личных разделов доступны воронка, переписка с его
-      // клиентами и обучение
+      // клиентами и его задачи
       if (!PARTNER_VIEWS.includes(state.view)) go(PARTNER_VIEWS.includes(me.user.pref_view) ? me.user.pref_view : 'pipe');
     } else if (me.user.pref_view && me.user.pref_view !== 'dashboard' && state.view === 'dashboard') go(me.user.pref_view);
     loadDrafts(); // черновики читаются заново: ключ зависит от сотрудника
@@ -905,7 +904,7 @@ function hydrateNavIcons() {
   const map = {
     dashboard: 'dashboard', pipe: 'pipe', inbox: 'inbox', contacts: 'contacts',
     companies: 'companies', tasks: 'tasks', products: 'products', competitors: 'competitors',
-    analytics: 'analytics', campaigns: 'campaigns', quality: 'quality', training: 'training', settings: 'settings'
+    analytics: 'analytics', settings: 'settings'
   };
   // Переключение разделов задано встроенным onclick в разметке — здесь только иконки.
   $$('#nav button').forEach(b => {
@@ -928,14 +927,11 @@ const TITLES = {
   pipe: ['Сделки', 'Воронка продаж — перетаскивайте карточки между этапами'],
   tasks: ['Задачи', 'Что и когда сделать: звонки, встречи и напоминания'],
   inbox: ['Чаты', 'Одна переписка на клиента: WhatsApp, Telegram, Instagram, Viber и почта'],
-  contacts: ['Контакты', 'Клиенты с историей, сделками и перепиской'],
+  contacts: ['Контакты', 'Клиенты с историей, сделками и перепиской; рассылки по сегментам'],
   companies: ['Компании', 'Юридические лица и связанные с ними клиенты'],
   products: ['Каталог', 'Ваш прайс-лист: дома, бани и услуги — то, что продаёте, и по каким ценам'],
-  analytics: ['Аналитика', 'Сколько продали, конверсия, план и результаты менеджеров'],
+  analytics: ['Аналитика', 'Сколько продали, конверсия, план и результаты менеджеров, качество ответов'],
   competitors: ['Конкуренты', 'Проверка по открытым источникам и сравнение цен'],
-  campaigns: ['Рассылки', 'Сообщения клиентам в WhatsApp или на почту — сразу или по расписанию'],
-  quality: ['Контроль качества', 'Ответы клиентам и движение сделок — автоматическая оценка для РОПа'],
-  training: ['Обучение', 'Материалы для партнёров и сотрудников: статьи, видео и ссылки'],
   settings: ['Настройки', 'Компания, интеграции, поля, команда и резервные копии']
 };
 
@@ -950,25 +946,21 @@ const SKELETONS = {
   settings: () => `<div class="card"><div class="sk-line w40"></div>${'<div class="sk-line"></div>'.repeat(6)}</div>`,
   companies: () => `<div class="card"><div class="sk-line w40"></div>${'<div class="sk-line"></div>'.repeat(5)}</div>`,
   products: () => `<div class="card"><div class="sk-line w40"></div>${'<div class="sk-line"></div>'.repeat(5)}</div>`,
-  campaigns: () => `<div class="card"><div class="sk-line w40"></div>${'<div class="sk-line"></div>'.repeat(4)}</div>`,
-  quality: () => `<div class="sk-grid">${'<div class="skeleton sk-kpi"></div>'.repeat(3)}</div><div class="card"><div class="sk-line w40"></div>${'<div class="sk-line"></div>'.repeat(4)}</div>`,
-  training: () => `<div class="grid">${'<div class="skeleton sk-kpi"></div>'.repeat(3)}</div>`
 };
 
-// Разделы по ролям: качество — РОПу, рассылки — менеджеру и администратору,
-// партнёру — его воронка, переписка, его задачи и обучение. Задачи партнёру
-// назначает офис, и новый лид сам создаёт ему задачу «позвонить клиенту», поэтому
-// раздел ему нужен; список на сервере ограничен его записями. Проверка стоит
-// перед отрисовкой, поэтому переход по старой ссылке или из палитры не
-// заканчивается экраном ошибки.
-const PARTNER_VIEWS = ['pipe', 'inbox', 'tasks', 'training', 'settings'];
-const VIEW_ROLES = { quality: ['admin'], campaigns: ['admin', 'manager'] };
+// Партнёру доступны его воронка, переписка с его клиентами и его задачи. Задачи
+// партнёру назначает офис, и новый лид сам создаёт ему задачу «позвонить
+// клиенту», поэтому раздел ему нужен; список на сервере ограничен его записями.
+// Остальные роли видят все разделы, а вкладки внутри них (рассылки в контактах,
+// оценка команды в аналитике) проверяются по роли отдельно. Проверка стоит перед
+// отрисовкой, поэтому переход по старой ссылке или из палитры не заканчивается
+// экраном ошибки.
+const PARTNER_VIEWS = ['pipe', 'inbox', 'tasks', 'settings'];
 function viewAllowed(view) {
   const role = state.me && state.me.role;
   if (!role) return true;
   if (role === 'partner') return PARTNER_VIEWS.includes(view);
-  const need = VIEW_ROLES[view];
-  return !need || need.includes(role);
+  return true;
 }
 async function go(view, subTab) {
   if (!viewAllowed(view)) view = (state.me && state.me.role) === 'partner' ? 'pipe' : 'dashboard';
@@ -1093,9 +1085,6 @@ async function renderNow() {
     if (state.view === 'products') return await products(v);
     if (state.view === 'competitors') return await competitorsView(v);
     if (state.view === 'analytics') return await analytics(v);
-    if (state.view === 'campaigns') return await campaignsView(v);
-    if (state.view === 'quality') return await qualityView(v);
-    if (state.view === 'training') return await trainingView(v);
     if (state.view === 'settings') return await settings(v);
   } catch (e) {
     v.innerHTML = `<div class="card err"><h3>Не удалось загрузить раздел</h3><p>${esc(e.message)}</p><button class="btn primary" onclick="render()">Повторить попытку</button></div>`;
@@ -2261,7 +2250,23 @@ function weekCalendar(tasksList) {
 }
 
 /* ---------- contacts ---------- */
+// Рассылки живут в разделе «Контакты»: как в amoCRM, отправка идёт от списка
+// клиентов, а не из отдельного пункта меню. Вкладку и массовое действие видят
+// менеджер и администратор — наблюдателю и партнёру отправка закрыта и сервером.
+function canCampaign() { return ['admin', 'manager'].includes(state.me?.role); }
+function contactsTabs(tab) {
+  if (!canCampaign()) return '';
+  return `<div class="card toolbar"><div class="tabs" style="margin:0">
+    <button class="${tab === 'clients' ? 'active' : ''}" onclick="setContactsTab('clients')">${icon('contacts', 14)} Клиенты</button>
+    <button class="${tab === 'campaigns' ? 'active' : ''}" onclick="setContactsTab('campaigns')">${icon('campaigns', 14)} Рассылки</button>
+  </div></div>`;
+}
+function setContactsTab(t) { state.cTab = t; render(); }
 async function contacts(v) {
+  if (canCampaign() && state.cTab === 'campaigns') {
+    v.innerHTML = contactsTabs('campaigns') + await campaignsBody();
+    return;
+  }
   await team();
   const f = (state.contactFilter = state.contactFilter || { q: '', owner: '', source: '', tag: '' });
   const list = await api('/api/contacts');
@@ -2275,7 +2280,7 @@ async function contacts(v) {
   });
   const tagsAll = [...new Set(list.flatMap(c => (c.tags || '').split(',').map(s => s.trim()).filter(Boolean)))];
 
-  v.innerHTML = `${viewerNote()}
+  v.innerHTML = contactsTabs('clients') + `${viewerNote()}
   <div class="card toolbar">
    <input id="contactSearch" class="searchfield" placeholder="Поиск по имени, тел, почте" value="${esc(f.q)}" oninput="liveSearch('contacts',()=>setContactQuery(this.value))">
    <select style="width:auto" onchange="setContactFilter('owner',this.value)"><option value="">Все ответственные</option>${__team.map(u => `<option value="${u.id}" ${f.owner == u.id ? 'selected' : ''}>${esc(u.name)}</option>`).join('')}</select>
@@ -2285,7 +2290,7 @@ async function contacts(v) {
    <span class="tag grey" style="margin-left:auto">показано ${Math.min(filtered.length, state.contactLimit || 50)} из ${filtered.length}${filtered.length !== list.length ? ` (всего в базе ${list.length})` : ''}</span>
    <button class="btn sm" onclick="openMenu(event, contactsMoreMenu())" title="Дубли, экспорт и импорт">${icon('more', 13)} Ещё</button>
    ${canEdit() ? `<button class="btn sm primary" onclick="openContact()">${icon('plus', 13)} Новый контакт</button>` : ''}</div>
-  ${canEdit() ? bulkSlot('contacts', `${bulkOwner('contacts')}<button class="btn sm" onclick="bulkAddTag()">${icon('tag', 13)} Добавить тег</button><button class="btn sm danger" onclick="bulkApply('contacts','delete')">${icon('trash', 13)} Удалить</button>`) : ''}
+  ${canEdit() ? bulkSlot('contacts', `${bulkOwner('contacts')}<button class="btn sm" onclick="bulkAddTag()">${icon('tag', 13)} Добавить тег</button>${canCampaign() ? `<button class="btn sm" onclick="bulkCampaign()">${icon('campaigns', 13)} Отправить рассылку</button>` : ''}<button class="btn sm danger" onclick="bulkApply('contacts','delete')">${icon('trash', 13)} Удалить</button>`) : ''}
   <div class="card"><div class="tbl-scroll"><table><tr><th class="sel"></th>${sortTh('contacts','name','Клиент')}<th>Телефон / E-mail</th>${sortTh('contacts','company','Компания')}${sortTh('contacts','source','Источник')}<th>Теги</th>${sortTh('contacts','owner','Ответственный')}<th></th></tr>
    ${applySort(filtered, 'contacts', { name: c => c.name, company: c => c.company || '', source: c => c.source || '', owner: c => __team.find(u => u.id === c.responsible_id)?.name || '' }).slice(0, state.contactLimit || 50).map(c => `<tr class="${selSet('contacts').has(c.id) ? 'selected' : ''}"><td class="sel">${canEdit() ? `<input type="checkbox" title="Выбрать для массового действия" data-selkey="contacts" data-selid="${c.id}" ${selSet('contacts').has(c.id) ? 'checked' : ''} onchange="toggleSel('contacts',${c.id})">` : ''}</td>
     <td><a href="#" onclick="openContactCard(${c.id});return false"><b>${esc(c.name)}</b></a></td><td>${esc(c.phone || '—')}<br><small>${esc(c.email || '')}</small></td><td>${esc(c.company || '—')}</td><td><span class="tag grey">${esc(sourceLabel(c.source))}</span></td>
@@ -2842,11 +2847,27 @@ async function saveProduct(e, id) {
 }
 
 /* ---------- analytics ---------- */
+// Вкладки аналитики: «Продажи» — цифры компании, «Команда» — качество работы
+// менеджеров, прежде отдельный раздел контроля качества. Вкладку «Команда» видит
+// администратор: разбор сотрудников не предназначен менеджеру и наблюдателю, и
+// сервер отвечает на /api/quality только администратору.
+function analyticsTabs(tab, right = '') {
+  if (state.me?.role !== 'admin') return '';
+  return `<div class="card toolbar"><div class="tabs" style="margin:0">
+    <button class="${tab === 'sales' ? 'active' : ''}" onclick="setAnalyticsTab('sales')">${icon('analytics', 14)} Продажи</button>
+    <button class="${tab === 'team' ? 'active' : ''}" onclick="setAnalyticsTab('team')">${icon('quality', 14)} Команда</button>
+  </div>${right}</div>`;
+}
+function setAnalyticsTab(t) { state.aTab = t; render(); }
 async function analytics(v) {
+  if (state.me?.role === 'admin' && state.aTab === 'team') {
+    v.innerHTML = analyticsTabs('team', qualityPeriod()) + await qualityBody();
+    return;
+  }
   const a = await api('/api/analytics');
   const max = Math.max(...a.stages.map(s => s.sum), 1);
   const plan = a.plan || {};
-  v.innerHTML = `
+  v.innerHTML = analyticsTabs('sales') + `
   <div class="grid">
    <div class="kpi" title="${esc(plan.month ? monthText(plan.month) : 'текущий месяц')}"><i>${icon('money', 20)}</i><span>Продано за ${esc(plan.month ? monthShort(plan.month) : 'этот месяц')}</span><b class="green">${fmt(plan.fact)}</b>${plan.target ? `<small class="${plan.percent >= 100 ? 'green' : ''}">план ${fmt(plan.target)} · выполнено ${plan.percent}%</small>` : '<small>план не задан — укажите цель внизу</small>'}</div>
    <div class="kpi"><i>${icon('analytics', 20)}</i><span>Конверсия воронки</span><b class="green">${a.conversion}%</b><small>успешных к закрытым</small></div>
@@ -2898,11 +2919,11 @@ function fmtSchedule(iso) {
   const p = n => String(n).padStart(2, '0');
   return `${p(d.getDate())}.${p(d.getMonth() + 1)}.${d.getFullYear()} ${p(d.getHours())}:${p(d.getMinutes())}`;
 }
-async function campaignsView(v) {
+async function campaignsBody() {
   const list = await api('/api/campaigns');
-  const can = ['admin', 'manager'].includes(state.me?.role);
+  const can = canCampaign();
   const features = state.meta?.features || {};
-  v.innerHTML = `${viewerNote()}<div class="card toolbar">
+  return `<div class="card toolbar">
     <b>Одно сообщение — сразу многим клиентам</b>
     <span class="tag grey" title="Сколько рассылок создано">Рассылок: ${list.length}</span>
     ${can ? `<button class="btn primary sm" style="margin-left:auto" onclick="openCampaign()">${icon('plus', 14)} Новая рассылка</button>` : ''}
@@ -2925,6 +2946,7 @@ async function campaignsView(v) {
 }
 function campaignForm(f) {
   const fd = new FormData(f);
+  const picked = String(fd.get('ids') || '').trim();
   const a = {};
   for (const k of ['source', 'tag', 'owner_id', 'pipeline_id', 'stage']) {
     const val = String(fd.get(k) || '').trim();
@@ -2933,15 +2955,21 @@ function campaignForm(f) {
   return {
     name: String(fd.get('name') || ''), channel: String(fd.get('channel') || 'whatsapp'),
     subject: String(fd.get('subject') || ''), message: String(fd.get('message') || ''),
-    audience: a, when: String(fd.get('when') || 'now'), scheduled_at: String(fd.get('scheduled_at') || '')
+    audience: picked ? { ids: picked.split(',').map(Number).filter(n => n > 0) } : a,
+    when: String(fd.get('when') || 'now'), scheduled_at: String(fd.get('scheduled_at') || '')
   };
 }
-async function openCampaign() {
-  const features = state.meta?.features || {};
+// picked — клиенты, отмеченные галочками в списке: рассылка уходит именно им,
+// фильтры сегмента тогда не нужны и не показываются
+async function openCampaign(picked) {
+  const ids = Array.isArray(picked) ? [...new Set(picked.map(Number).filter(n => Number.isInteger(n) && n > 0))].slice(0, 5000) : [];
+  // канал мог быть подключён только что: признаки берём свежие, а при отказе
+  // сети остаёмся на прежних, чтобы не запрещать отправку без причины
+  const features = ((await refreshMeta()) || state.meta)?.features || {};
   const waOk = !!features.wazzup, mailOk = !!features.email;
   if (!waOk && !mailOk) return toast('Подключите канал отправки: WhatsApp (Wazzup) или почту (SMTP) — Настройки → Интеграции', 'err');
-  const users = await api('/api/users').catch(() => []);
-  const pipes = await api('/api/pipelines').catch(() => []);
+  const users = ids.length ? [] : await api('/api/users').catch(() => []);
+  const pipes = ids.length ? [] : await api('/api/pipelines').catch(() => []);
   window.__campPipes = pipes;
   const sources = state.meta?.sources || [];
   const channel = waOk ? 'whatsapp' : 'email';
@@ -2957,14 +2985,17 @@ async function openCampaign() {
     </div>
     <label>Текст сообщения <b>*</b><textarea name="message" rows="5" required maxlength="4000" placeholder="Здравствуйте, {имя}!"></textarea>
       <small class="form-hint">{имя} заменится именем клиента. В WhatsApp получат только те, у кого заполнен телефон и кто уже переписывался с вами или дал номер; в почтовой рассылке — у кого указан e-mail.</small></label>
-    <p style="margin:14px 0 6px"><b>Кому отправить</b> <small class="form-hint">фильтры сужают сегмент, пустые — значит «все клиенты»</small></p>
+    ${ids.length ? `<p style="margin:14px 0 6px"><b>Кому отправить</b> <small class="form-hint">отмеченные клиенты — ${ids.length} шт.</small></p>
+    <p class="form-hint" style="margin:-6px 0 12px">Сообщение уйдёт только выбранным клиентам. В WhatsApp получат те, у кого заполнен телефон, в письме — у кого указан e-mail.</p>
+    <input type="hidden" name="ids" value="${ids.join(',')}">`
+    : `<p style="margin:14px 0 6px"><b>Кому отправить</b> <small class="form-hint">фильтры сужают сегмент, пустые — значит «все клиенты»</small></p>
     <div class="form-grid2">
       <label>Источник<select name="source"><option value="">Любой</option>${sources.map(x => `<option value="${esc(x)}">${esc(sourceLabel(x))}</option>`).join('')}</select></label>
       <label>Тег<input name="tag" maxlength="60" placeholder="Например: франшиза"></label>
       <label>Ответственный<select name="owner_id"><option value="">Любой</option>${users.map(x => `<option value="${x.id}">${esc(x.name)}</option>`).join('')}</select></label>
       <label>Воронка<select name="pipeline_id" onchange="campaignStages(this.value)"><option value="">Любая</option>${pipes.map(pl => `<option value="${pl.id}">${esc(pl.name)}</option>`).join('')}</select></label>
       <label>Этап сделки<select name="stage" id="campStage"><option value="">Любой</option></select></label>
-    </div>
+    </div>`}
     <div class="form-grid2">
       <label>Когда отправить<select name="when" onchange="document.getElementById('campWhenWrap').style.display=this.value==='later'?'':'none'">
         <option value="now">Сразу после создания</option>
@@ -2991,11 +3022,17 @@ function campaignStages(pid) {
   const pl = (window.__campPipes || []).find(x => String(x.id) === String(pid));
   sel.innerHTML = '<option value="">Любой</option>' + ((pl?.stages || []).map(st => `<option value="${esc(st.code)}">${esc(st.name)}</option>`).join(''));
 }
+function bulkCampaign() {
+  const ids = [...selSet('contacts')];
+  if (!ids.length) return toast('Сначала отметьте клиентов галочками', 'err');
+  openCampaign(ids);
+}
 async function campaignPreview(e) {
   const b = campaignForm(e.target.closest('form'));
   const r = await api('/api/campaigns/preview', { method: 'POST', body: JSON.stringify({ channel: b.channel, audience: b.audience }) });
   const el = document.getElementById('campCount');
-  if (el) el.textContent = r.count ? `Подходит получателей: ${r.count}` : 'Под фильтр никто не подходит — проверьте сегмент или канал';
+  if (el) el.textContent = r.count ? `Подходит получателей: ${r.count}`
+    : (b.audience.ids ? 'У выбранных клиентов не заполнен адрес для этого канала' : 'Под фильтр никто не подходит — проверьте сегмент или канал');
 }
 async function campaignSubmit(e) {
   e.preventDefault();
@@ -3010,6 +3047,8 @@ async function campaignSubmit(e) {
   }
   await api('/api/campaigns', { method: 'POST', body: JSON.stringify(body) });
   toast(body.scheduled_at ? 'Рассылка запланирована' : 'Рассылка создана и встанет в очередь');
+  // рассылка отмеченным клиентам: галочки снимаем и показываем очередь отправки
+  if (b.audience.ids) { clearSel('contacts'); state.cTab = 'campaigns'; }
   closeModal(); render(); return false;
 }
 const CAMPAIGN_ITEM = { queued: 'В очереди', sent: 'Отправлено', failed: 'Ошибка', canceled: 'Отменено' };
@@ -3048,18 +3087,20 @@ function campaignDelete(id) {
   }, { okText: 'Удалить' });
 }
 
-/* ---------- контроль качества ---------- */
-async function qualityView(v) {
+/* ---------- качество работы команды: вкладка «Команда» в аналитике ---------- */
+// Выбор периода показывается в шапке вкладки рядом с переключателем
+// «Продажи / Команда», поэтому в самом разборе остаётся только разбор.
+function qualityPeriod() {
   const days = state.qDays || 30;
-  const d = await api('/api/quality?days=' + days);
+  return `<span style="margin-left:auto;display:flex;align-items:center;gap:8px;flex-wrap:wrap"><b>Период:</b>
+    <span class="tabs" style="margin:0">${[7, 30, 90].map(n => `<button class="${days === n ? 'active' : ''}" onclick="setQualityDays(${n})">${n === 7 ? 'Неделя' : n === 30 ? '30 дней' : '90 дней'}</button>`).join('')}</span>
+    <span class="tag grey" title="Никто не заполняет отчёты руками — всё считается из переписки и сделок">Считается автоматически</span></span>`;
+}
+async function qualityBody() {
+  const d = await api('/api/quality?days=' + (state.qDays || 30));
   const t = d.totals || {};
   const verdictColor = score => score >= 85 ? 'var(--green)' : score >= 70 ? '#65a30d' : score >= 50 ? 'var(--orange)' : 'var(--danger)';
-  v.innerHTML = `<div class="card toolbar">
-    <b>Период:</b>
-    <span class="tabs" style="margin:0">${[7, 30, 90].map(n => `<button class="${days === n ? 'active' : ''}" onclick="setQualityDays(${n})">${n === 7 ? 'Неделя' : n === 30 ? '30 дней' : '90 дней'}</button>`).join('')}</span>
-    <span class="tag grey" title="Никто не заполняет отчёты руками — всё считается из переписки и сделок">Считается автоматически</span>
-  </div>
-  <div class="grid">
+  return `<div class="grid">
     <div class="kpi"><i>${icon('inbox', 20)}</i><span>Сообщений без ответа</span><b class="${t.unanswered ? 'red' : 'green'}">${t.unanswered ?? 0}</b><small>клиенты ждут ответа</small></div>
     <div class="kpi"><i>${icon('clock', 20)}</i><span>Медиана первого ответа</span><b>${t.medianResponseMin === null || t.medianResponseMin === undefined ? '—' : t.medianResponseMin + ' мин'}</b><small>по всем сотрудникам</small></div>
     <div class="kpi"><i>${icon('pipe', 20)}</i><span>Сделки без движения</span><b>${t.stalled ?? 0}</b><small>больше 14 дней на этапе</small></div>
@@ -3089,88 +3130,6 @@ async function qualityView(v) {
   </div>`;
 }
 function setQualityDays(n) { state.qDays = n; render(); }
-
-/* ---------- обучение ---------- */
-const TRAINING_KIND = { text: ['Статья', 'file'], video: ['Видео', 'eye'], link: ['Ссылка', 'paperclip'] };
-async function trainingView(v) {
-  const list = await api('/api/training');
-  state.cache.training = list;
-  const isAdmin = state.me?.role === 'admin';
-  v.innerHTML = `<div class="card toolbar">
-    <b>Материалы для партнёров и команды</b>
-    <span class="tag grey" title="Сколько материалов в портале">Материалов: ${list.length}</span>
-    ${isAdmin ? `<button class="btn primary sm" style="margin-left:auto" onclick="openTrainingEditor()">${icon('plus', 14)} Добавить материал</button>` : ''}
-  </div>
-  ${list.length ? `<div class="grid train-grid">${list.map(t => {
-    const kind = TRAINING_KIND[t.kind] || TRAINING_KIND.text;
-    const url = siteHref(t.url);
-    return `<div class="card train-card">
-      <p class="form-hint" style="margin:0 0 6px">${icon(kind[1], 15)} ${esc(kind[0])}</p>
-      <h3 style="margin:0 0 6px">${esc(t.title)}</h3>
-      ${t.kind === 'text'
-        ? `<p class="train-excerpt">${esc(String(t.body || '').slice(0, 140))}${String(t.body || '').length > 140 ? '…' : ''}</p>`
-        : `<p class="train-excerpt form-hint">${esc(url)}</p>`}
-      <div class="row" style="border:0;margin-top:10px">
-        ${t.kind === 'text'
-          ? `<button class="btn sm" onclick="openTraining(${t.id})">Читать</button>`
-          : url
-            ? `<a class="btn sm" href="${esc(url)}" target="_blank" rel="noopener">${t.kind === 'video' ? 'Смотреть' : 'Открыть'}</a>`
-            : '<span class="tag grey">Адрес не указан</span>'}
-        ${isAdmin ? `<button class="btn sm" onclick="openTrainingEditor(${t.id})">Изменить</button>
-          <button class="btn sm danger" onclick="trainingDelete(${t.id})">Удалить</button>` : ''}
-      </div>
-    </div>`;
-  }).join('')}</div>`
-  : `<div class="card"><p>Материалов пока нет.${isAdmin ? ' Добавьте первый: статью, видео или ссылку — партнёры и сотрудники увидят их в этом разделе.' : ' Когда администратор добавит материалы, они появятся здесь.'}</p></div>`}`;
-}
-async function openTraining(id) {
-  const t = (await api('/api/training')).find(x => x.id === id);
-  if (!t) return toast('Материал не найден — обновите страницу', 'err');
-  openModal(`<div class="modal-head"><h3>${esc(t.title)}</h3></div>
-    <div class="train-body">${esc(t.body).replace(/\n/g, '<br>')}</div>`);
-}
-async function openTrainingEditor(id) {
-  if (state.me?.role !== 'admin') return;
-  const t = id ? await api('/api/training/' + id) : null;
-  if (id && !t) return toast('Материал не найден — обновите страницу', 'err');
-  const isText = !t || t.kind === 'text';
-  openModal(`<div class="modal-head"><h3>${t ? 'Материал' : 'Новый материал'}</h3></div>
-  <form onsubmit="return trainingSubmit(event,${id || 0})">
-    <label>Название <b>*</b><input name="title" required maxlength="140" value="${esc(t?.title || '')}" placeholder="Например: Как проходит сделка"></label>
-    <label>Тип<select name="kind" onchange="trainingKind(this.value)">
-      <option value="text" ${isText ? 'selected' : ''}>Статья — текст читается в CRM</option>
-      <option value="video" ${t?.kind === 'video' ? 'selected' : ''}>Видео — ссылка на ролик</option>
-      <option value="link" ${t?.kind === 'link' ? 'selected' : ''}>Ссылка — открывается в новой вкладке</option>
-    </select></label>
-    <label id="trainBodyWrap" style="${isText ? '' : 'display:none'}">Текст<textarea name="body" rows="10" maxlength="50000" placeholder="Текст статьи: абзацы переносятся как есть">${esc(t?.body || '')}</textarea></label>
-    <label id="trainUrlWrap" style="${isText ? 'display:none' : ''}">Адрес (https://…)<input name="url" maxlength="500" value="${esc(t?.url || '')}" placeholder="https://"></label>
-    <label>Порядок в списке<input name="sort" type="number" value="${t?.sort ?? 0}"><small class="form-hint">Меньшее число — выше в списке</small></label>
-    <div class="row" style="border:0;justify-content:flex-end">
-      <button type="button" class="btn" onclick="closeModal()">Отмена</button>
-      <button class="btn primary" type="submit">Сохранить</button>
-    </div>
-  </form>`);
-}
-function trainingKind(k) {
-  const text = k === 'text';
-  const bw = document.getElementById('trainBodyWrap'), uw = document.getElementById('trainUrlWrap');
-  if (bw) bw.style.display = text ? '' : 'none';
-  if (uw) uw.style.display = text ? 'none' : '';
-}
-async function trainingSubmit(e, id) {
-  e.preventDefault();
-  const f = new FormData(e.target);
-  const b = { title: String(f.get('title') || ''), kind: String(f.get('kind') || 'text'), body: String(f.get('body') || ''), url: String(f.get('url') || '').trim(), sort: Number(f.get('sort')) || 0 };
-  if (id) await api('/api/training/' + id, { method: 'PATCH', body: JSON.stringify(b) });
-  else await api('/api/training', { method: 'POST', body: JSON.stringify(b) });
-  toast('Материал сохранён'); closeModal(); render(); return false;
-}
-function trainingDelete(id) {
-  askConfirm('Удалить материал из обучения?', async () => {
-    await api('/api/training/' + id, { method: 'DELETE' });
-    toast('Материал удалён'); render();
-  }, { okText: 'Удалить' });
-}
 
 /* ---------- competitors view ---------- */
 // Уровень риска сервер считает словами — цвета подбираем к тем же словам,
@@ -4033,7 +3992,7 @@ async function settings(v) {
       <p><small><b>Администратор</b> — всё: настройки, команда, интеграции, воронки, свои поля, каталог (он же прайс-лист), резервные копии.</small></p>
       <p><small><b>Менеджер</b> — клиенты, компании, сделки, задачи, заметки, все чаты, каталог (смотрит и берёт позиции в сделки), шаблоны сообщений и проверка конкурентов. E-mail коллег ему не показывается.</small></p>
       <p><small><b>Наблюдатель</b> — только просмотр и выгрузки: руководитель или бухгалтер видит цифры, но ничего не меняет.</small></p>
-      <p><small><b>Партнёр</b> — отдельный вход для партнёра или франчайзи: он видит только воронку по своим лидам и раздел «Обучение». Чужие клиенты, сделки, аналитика и настройки ему недоступны; назначьте партнёра ответственным в сделке или карточке клиента — и они появятся у него в списке.</small></p>
+      <p><small><b>Партнёр</b> — отдельный вход для партнёра или франчайзи: он видит только воронку по своим лидам, переписку с ними и свои задачи. Чужие клиенты, сделки, аналитика и настройки ему недоступны; назначьте партнёра ответственным в сделке или карточке клиента — и они появятся у него в списке.</small></p>
       <hr><p><small><b>Первый вход.</b> После создания сотрудника CRM показывает данные для входа одним окном — скопируйте и передайте их лично. При первом входе человек задаёт свой пароль (от 12 символов), а выданный вами перестаёт работать.</small></p>
       <p><small><b>Уволился сотрудник?</b> Снимите галочку «Сотрудник может входить в CRM» — все его сеансы завершатся сразу. Карточки и переписка останутся в базе; сделки и задачи можно передать другому человеку массовым действием.</small></p></div></div></div>`;
   } else if (state.settingsTab === 'data') {
@@ -4143,7 +4102,15 @@ async function saveChannel(id) {
     toast('Канал сохранён'); state.channels = []; render();
   } catch (e) { toast(e.message, 'err'); }
 }
-async function saveWazzup() { await api('/api/settings', { method: 'PUT', body: JSON.stringify({ WAZZUP_API_KEY: $('#wzKey').value, WAZZUP_CHANNEL_ID: $('#wzChannel').value, WAZZUP_WEBHOOK_SECRET: $('#wzSecret').value, WAZZUP_API_URL: $('#wzUrl').value, WAZZUP_FORWARD_URL: $('#wzForward').value }) }); toast('Ключ сохранён'); render(); }
+// Признаки подключённых каналов (Wazzup и почта) приходят в /api/meta. После
+// сохранения ключей их перечитываем: иначе форма рассылки до перезагрузки
+// страницы считает канал неподключённым и не даёт отправить сообщение.
+async function refreshMeta() {
+  const m = await api('/api/meta').catch(() => null);
+  if (m) state.meta = m;
+  return m;
+}
+async function saveWazzup() { await api('/api/settings', { method: 'PUT', body: JSON.stringify({ WAZZUP_API_KEY: $('#wzKey').value, WAZZUP_CHANNEL_ID: $('#wzChannel').value, WAZZUP_WEBHOOK_SECRET: $('#wzSecret').value, WAZZUP_API_URL: $('#wzUrl').value, WAZZUP_FORWARD_URL: $('#wzForward').value }) }); toast('Ключ сохранён'); await refreshMeta(); render(); }
 let __fields = null;
 async function loadFields() { if (!__fields) __fields = (await api('/api/custom-fields')).fields; return __fields; }
 // Транслитерация названия поля в технический ключ — пользователь его не видит.
@@ -4244,7 +4211,7 @@ function delField(i) {
 async function saveEmail(e) {
   e.preventDefault(); const b = Object.fromEntries(new FormData(e.target));
   await api('/api/settings', { method: 'PUT', body: JSON.stringify(b) });
-  toast('Настройки почты сохранены'); render(); return false;
+  toast('Настройки почты сохранены'); await refreshMeta(); render(); return false;
 }
 async function testEmail(form) {
   const b = Object.fromEntries(new FormData(form)); toast('Отправляем проверочное письмо…');
@@ -4506,7 +4473,7 @@ async function openUser(id) {
      ${fld('E-mail', `<input name="email" type="email" required value="${esc(x.email || '')}">`, true)}`)}
    ${fld(id ? 'Новый пароль (оставьте пустым, чтобы не менять)' : 'Пароль (мин. 12 символов)', `<div class="pw-wrap"><input name="password" type="password" minlength="12" autocomplete="new-password" ${id ? '' : 'required'} placeholder="минимум 12 знаков"><button type="button" class="pw-eye" title="Показать/скрыть пароль" onclick="togglePass(this)">${icon('eye', 16)}</button></div>`, !id)}
    <button type="button" class="btn w" onclick="generateUserPassword(this.form)">Сгенерировать пароль</button>
-   ${fld('Роль', `<select name="role">${Object.entries({ admin: 'Администратор — всё, включая настройки', manager: 'Менеджер — клиенты, сделки, задачи, чаты', viewer: 'Наблюдатель — только просмотр', partner: 'Партнёр — свои лиды, их переписка и обучение' }).map(([k, n]) => `<option value="${k}" ${k === (x.role || 'manager') ? 'selected' : ''}>${n}</option>`).join('')}</select>`)}
+   ${fld('Роль', `<select name="role">${Object.entries({ admin: 'Администратор — всё, включая настройки', manager: 'Менеджер — клиенты, сделки, задачи, чаты', viewer: 'Наблюдатель — только просмотр', partner: 'Партнёр — свои лиды, их переписка и свои задачи' }).map(([k, n]) => `<option value="${k}" ${k === (x.role || 'manager') ? 'selected' : ''}>${n}</option>`).join('')}</select>`)}
    <label style="display:flex;gap:8px;align-items:center"><input type="checkbox" name="active" style="width:auto" ${x.active === 0 ? '' : 'checked'}> Сотрудник может входить в CRM</label>
    <p><small>Сохраните пароль и передайте сотруднику по защищённому каналу. Он сможет изменить его в профиле.</small></p>
    <button class="btn primary w">Сохранить</button></form>`);
@@ -4780,14 +4747,11 @@ const PALETTE_ACTIONS = [
     { ico: 'pipe', title: 'Сделки', hint: 'канбан-воронка', view: 'pipe', run: () => go('pipe') },
     { ico: 'tasks', title: 'Задачи', hint: 'дела и календарь', view: 'tasks', run: () => go('tasks') },
     { ico: 'inbox', title: 'Чаты', hint: 'единый инбокс мессенджеров', view: 'inbox', run: () => go('inbox') },
-    { ico: 'contacts', title: 'Контакты', hint: 'база клиентов', view: 'contacts', run: () => go('contacts') },
+    { ico: 'contacts', title: 'Контакты', hint: 'база клиентов и рассылки', view: 'contacts', run: () => go('contacts') },
     { ico: 'companies', title: 'Компании', hint: 'юридические лица', view: 'companies', run: () => go('companies') },
     { ico: 'products', title: 'Каталог', hint: 'он же прайс-лист: дома, проекты и опции', view: 'products', run: () => go('products') },
-    { ico: 'analytics', title: 'Аналитика', hint: 'воронка и план продаж', view: 'analytics', run: () => go('analytics') },
-    { ico: 'quality', title: 'Качество', hint: 'оценка работы менеджеров для РОПа', view: 'quality', run: () => go('quality') },
-    { ico: 'campaigns', title: 'Рассылки', hint: 'сообщения клиентам по сегментам', view: 'campaigns', run: () => go('campaigns') },
+    { ico: 'analytics', title: 'Аналитика', hint: 'воронка, план и качество ответов', view: 'analytics', run: () => go('analytics') },
     { ico: 'competitors', title: 'Конкуренты', hint: 'разведка и проверка', view: 'competitors', run: () => go('competitors') },
-    { ico: 'training', title: 'Обучение', hint: 'материалы для партнёров и команды', view: 'training', run: () => go('training') },
     { ico: 'settings', title: 'Настройки', hint: 'интеграции и права', view: 'settings', run: () => go('settings') }
   ]},
   // edit: группу видят только роли с правом изменений — зрителю сервер всё
@@ -4799,6 +4763,7 @@ const PALETTE_ACTIONS = [
     { ico: 'plus', title: 'Новый контакт', hint: 'добавить клиента', run: () => openContact() },
     { ico: 'plus', title: 'Новая задача', hint: 'поставить дело', run: () => openTask() },
     { ico: 'company', title: 'Новая компания', hint: 'добавить юрлицо', roles: ['admin', 'manager'], run: () => openCompany() },
+    { ico: 'campaigns', title: 'Новая рассылка', hint: 'сообщение клиентам: WhatsApp или почта', roles: ['admin', 'manager'], run: () => openCampaign() },
     { ico: 'competitor', title: 'Проверить конкурента', hint: 'поиск и проверка по ИНН', roles: ['admin', 'manager'], run: () => { go('competitors'); setTimeout(async () => { await openCompetitor(); $('#compFind')?.focus(); }, 300); } },
     { ico: 'upload', title: 'Импорт контактов из CSV', hint: 'загрузить файл', roles: ['admin', 'manager'], run: () => importContacts() }
   ]},
@@ -4946,20 +4911,17 @@ const VIEW_TABLES = {
   dashboard: ['deals', 'tasks', 'pipelines', 'contacts'],
   pipe: ['deals', 'pipelines', 'tasks', 'contacts', 'companies', 'users'],
   tasks: ['tasks', 'deals', 'contacts', 'users'],
-  contacts: ['contacts', 'companies', 'users'],
+  contacts: ['contacts', 'companies', 'users', 'campaigns'],
   companies: ['companies'],
   products: ['products'],
-  analytics: ['deals', 'contacts', 'pipelines', 'users'],
+  analytics: ['deals', 'contacts', 'pipelines', 'users', 'tasks'],
   competitors: ['competitors', 'products'],
-  campaigns: ['campaigns', 'contacts'],
-  quality: ['deals', 'tasks', 'users'],
-  training: ['training_items'],
   settings: [], // формы настроек события не дёргают: заполнение не сбивается;
   // список «Команда» обновляется адресной веткой ниже
 };
 const KNOWN_TABLES = new Set(['tasks', 'deals', 'contacts', 'companies', 'products', 'templates',
   'automations', 'notes', 'pipelines', 'competitors', 'channels', 'conversations', 'settings', 'users',
-  'campaigns', 'training_items']);
+  'campaigns']);
 // Чаты обновляются только на событиях, которые их касаются: диалог взял
 // коллега, изменилась карточка клиента, канал или шаблон ответа. Ценник,
 // задачи и доска сделок переписку не перечитывают.

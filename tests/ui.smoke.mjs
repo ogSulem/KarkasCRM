@@ -1739,26 +1739,43 @@ try {
   // ── навигация работает на inline-обработчиках, не завися от boot() ───────
   check('все пункты меню несут inline-обработчик go()', $$('#nav button').length >= 9 && $$('#nav button').every(b => /^go\('/.test(b.getAttribute('onclick') || '')));
 
-  // ── рассылки, качество, обучение и доступ партнёра ──────────────────
+  // ── вкладки разделов, рассылки и доступ партнёра ───────────────────
   {
     const cssFlat = cssText.replace(/\s+/g, '');
-    check('в меню есть разделы рассылок, качества и обучения', ['campaigns', 'quality', 'training'].every(x => $(`#nav button[data-view="${x}"]`)));
-    check('партнёру остаются «Сделки», «Чаты», «Задачи» и «Обучение»', cssFlat.includes('body.role-partnernavbutton:not([data-view="pipe"]):not([data-view="inbox"]):not([data-view="tasks"]):not([data-view="training"]){display:none}'));
+    check('обучения, качества и рассылок в меню нет: качество в аналитике, рассылки в контактах',
+      ['campaigns', 'quality', 'training'].every(x => !$(`#nav button[data-view="${x}"]`)) && $$('#nav button').length === 10,
+      $$('#nav button').map(b => b.dataset.view).join(','));
+    check('партнёру остаются «Сделки», «Чаты» и «Задачи»', cssFlat.includes('body.role-partnernavbutton:not([data-view="pipe"]):not([data-view="inbox"]):not([data-view="tasks"]){display:none}'));
     // офис назначает партнёру задачи, и новый лид сам создаёт ему задачу позвонить:
     // без раздела он нашёл бы их только внутри карточки сделки
-    check('раздел задач партнёру открыт', appJsRaw.includes("const PARTNER_VIEWS = ['pipe', 'inbox', 'tasks', 'training', 'settings']"));
+    check('раздел задач партнёру открыт', appJsRaw.includes("const PARTNER_VIEWS = ['pipe', 'inbox', 'tasks', 'settings']"));
     check('массовые действия скрыты у того, кому сервер их запретил', (appJsRaw.match(/canEdit\(\) && !isPartner\(\) \? bulkSlot\(/g) || []).length === 2);
-    check('качество — раздел РОПа, рассылки скрыты от наблюдателя', cssFlat.includes('body.role-viewer[data-view="campaigns"],body.role-viewer[data-view="quality"],body.role-manager[data-view="quality"]{display:none}'));
+    check('вкладку «Рассылки» и массовую отправку видят менеджер и администратор',
+      appJsRaw.includes("function canCampaign() { return ['admin', 'manager'].includes(state.me?.role); }") && appJsRaw.includes("if (!canCampaign()) return '';"));
+    check('вкладку «Команда» с оценкой качества видит только администратор',
+      appJsRaw.includes("if (state.me?.role !== 'admin') return '';") && serverJsRaw.includes("if (p === '/api/quality') {\n      if (!requireAdmin(user, res)) return;"));
     check('партнёр начинает со своих сделок, а не с рабочего стола', appJsRaw.includes("me.user.role === 'partner'") && appJsRaw.includes("PARTNER_VIEWS.includes(me.user.pref_view) ? me.user.pref_view : 'pipe'"));
     check('раздел чужой роли не открывается даже прямым переходом', appJsRaw.includes('function viewAllowed(view)') && appJsRaw.includes('if (!viewAllowed(view))'));
     // проверяем саму логику доступа: у партнёра свои разделы, у РОПа — качество
     const savedRole = window.__state.me.role;
     window.__state.me.role = 'partner';
-    const partnerViews = { quality: window.viewAllowed('quality'), campaigns: window.viewAllowed('campaigns'), pipe: window.viewAllowed('pipe'), inbox: window.viewAllowed('inbox'), training: window.viewAllowed('training') };
+    const partnerViews = { pipe: window.viewAllowed('pipe'), inbox: window.viewAllowed('inbox'), tasks: window.viewAllowed('tasks'), contacts: window.viewAllowed('contacts'), analytics: window.viewAllowed('analytics') };
     window.__state.me.role = savedRole;
-    check('партнёру разрешены воронка, переписка и обучение, а качество и рассылки закрыты',
-      partnerViews.pipe === true && partnerViews.inbox === true && partnerViews.training === true && partnerViews.quality === false && partnerViews.campaigns === false, JSON.stringify(partnerViews));
-    check('администратору доступен раздел качества', window.viewAllowed('quality') === true);
+    check('партнёру разрешены воронка, переписка и задачи, а база клиентов и аналитика закрыты',
+      partnerViews.pipe === true && partnerViews.inbox === true && partnerViews.tasks === true && partnerViews.contacts === false && partnerViews.analytics === false, JSON.stringify(partnerViews));
+    // обучение убрано из всех слоёв: ни меню, ни маршрута, ни таблицы в базе
+    const indexRaw = readFileSync(join(ROOT, 'frontend/public/index.html'), 'utf8');
+    // на сервере остаётся только одноразовая уборка старой таблицы: маршрута и
+    // создания таблицы быть не должно
+    check('обучения нет ни в клиенте, ни в разметке, ни в маршрутах сервера',
+      !appJsRaw.includes('training') && !indexRaw.includes('training')
+      && !serverJsRaw.includes('/api/training') && !serverJsRaw.includes('CREATE TABLE IF NOT EXISTS training_items'));
+    check('старая таблица материалов убирается при запуске', serverJsRaw.includes("DROP TABLE training_items"));
+    const savedMgrRole = window.__state.me.role;
+    window.__state.me.role = 'manager';
+    const mgrTabs = { contacts: window.contactsTabs('clients'), analytics: window.analyticsTabs('sales') };
+    window.__state.me.role = savedMgrRole;
+    check('менеджер видит вкладку рассылок и не видит вкладку качества', mgrTabs.contacts.includes('Рассылки') && mgrTabs.analytics === '');
     // палитра команд: не предлагать роль то, что сервер ей всё равно закроет.
     // Раньше партнёр выбирал «Новая компания» или «Проверить конкурента» и получал
     // отказ, а разделы из чужого меню молча перебрасывали его в его воронку.
@@ -1768,7 +1785,7 @@ try {
     window.__state.me.role = savedPaletteRole;
     check('партнёру палитра не предлагает чужие разделы и закрытые действия',
       !partnerCmds.some(t => ['Рабочий стол', 'Компании', 'Конкуренты', 'Новая компания', 'Проверить конкурента', 'Импорт контактов из CSV'].includes(t))
-      && partnerCmds.includes('Сделки') && partnerCmds.includes('Обучение') && partnerCmds.includes('Новый контакт'), partnerCmds.join(' / '));
+      && partnerCmds.includes('Сделки') && partnerCmds.includes('Новый контакт') && !partnerCmds.includes('Новая рассылка'), partnerCmds.join(' / '));
     const officeCmds = window.paletteCommands().flatMap(g => g.items.map(i => i.title));
     check('сотруднику офиса палитра предлагает все разделы и действия',
       ['Рабочий стол', 'Компании', 'Новая компания', 'Импорт контактов из CSV'].every(t => officeCmds.includes(t)), officeCmds.join(' / '));
@@ -1794,7 +1811,7 @@ try {
     const local = new Date('2030-01-02T03:04:05.000Z');
     check('время отправки показывается в местном поясе', window.fmtSchedule('2030-01-02T03:04:05.000Z') === `${p2(local.getDate())}.${p2(local.getMonth() + 1)}.${local.getFullYear()} ${p2(local.getHours())}:${p2(local.getMinutes())}`, window.fmtSchedule('2030-01-02T03:04:05.000Z'));
     check('отметка о доставке читается тем же правилом', window.fmtSchedule('2030-01-02 03:04:05') === `${p2(local.getDate())}.${p2(local.getMonth() + 1)}.${local.getFullYear()} ${p2(local.getHours())}:${p2(local.getMinutes())}`);
-    check('карточки обучения на телефоне в одну колонку, длинный адрес переносится', cssFlat.includes('@media(max-width:560px){.train-grid{grid-template-columns:1fr}}') && cssText.includes('overflow-wrap:anywhere'));
+    check('вкладки разделов оформлены общим стилем табов', cssText.includes('.tabs') && appJsRaw.includes('class="tabs" style="margin:0"'));
     check('файл настроек с секретами закрыт правами 0600', serverJsRaw.includes('mode: 0o600') && serverJsRaw.includes('chmodSync(tmp, 0o600)'));
     check('на телефоне любая таблица прокручивается внутри экрана', cssFlat.includes('#viewtable,#modalBodytable{display:block;max-width:100%;overflow-x:auto'));
     check('настройки дублируются в файл data/settings.env и возвращаются из него', serverJsRaw.includes('settings.env') && serverJsRaw.includes('seedSettingsFromFile') && serverJsRaw.includes('mirrorSettingsToFile'));
@@ -1803,35 +1820,46 @@ try {
     check('сервер смоука уже создал settings.env со значениями', envOk);
   }
   {
-    await window.go('quality'); await wait(500);
-    check('раздел «Качество» показывает оценку сотрудников и правила счёта', $('#view').textContent.includes('Оценка по сотрудникам') && $('#view').textContent.includes('Как считается оценка'));
-    window.setQualityDays(7); await wait(500);
+    await window.go('analytics'); await wait(700);
+    check('аналитика предлагает вкладки «Продажи» и «Команда»', $('#view').textContent.includes('Продажи') && $('#view').textContent.includes('Команда'));
+    check('на вкладке продаж — воронка, план и результаты менеджеров',
+      $('#view').textContent.includes('Сделки по этапам воронки') && $('#view').textContent.includes('Результаты по менеджерам'));
+    window.setAnalyticsTab('team'); await wait(700);
+    check('вкладка «Команда» показывает оценку сотрудников и правила счёта',
+      $('#view').textContent.includes('Оценка по сотрудникам') && $('#view').textContent.includes('Как считается оценка'));
+    check('период оценки переключается рядом с вкладками', $('#view').textContent.includes('Период:') && $('#view').textContent.includes('Считается автоматически'));
+    window.setQualityDays(7); await wait(700);
     check('период качества переключается и пересчитывается', window.__state.qDays === 7 && $('#view').textContent.includes('Неделя'));
-  }
-  {
-    await window.go('training'); await wait(400);
-    check('обучение начинается с понятной пустой витрины', $('#view').textContent.includes('Материалов пока нет'));
-    const tr = await (await fetch(BASE + '/api/training', { method: 'POST', headers: authH(), body: JSON.stringify({ title: 'Как проходит сделка', kind: 'text', body: 'Первая строка.\nВторая строка.' }) })).json();
-    await window.go('training'); await wait(400);
-    check('добавленный материал виден в портале', $('#view').textContent.includes('Как проходит сделка'));
-    await window.openTraining(tr.id); await wait(300);
-    check('статья открывается в окне, переносы строк сохранены', $('#modalBody').innerHTML.includes('Первая строка.<br>Вторая строка.'));
-    window.closeModal(); await wait(150);
+    window.setAnalyticsTab('sales'); await wait(500);
+    check('возврат на вкладку продаж сохраняет раздел', window.__state.aTab === 'sales' && $('#view').textContent.includes('Сделки по этапам воронки'));
+    window.__state.aTab = 'sales';
   }
   {
     // ключ Wazzup в настройках уже есть (сценарий чатов выше) — канал доступен,
     // а отправка запланирована на 2030 год: очередь за время теста не отправляет
-    await window.go('campaigns'); await wait(400);
-    check('раздел «Рассылки» объясняет, что это и кому нужно', $('#view').textContent.includes('Рассылок пока нет'));
-    await fetch(BASE + '/api/contacts', { method: 'POST', headers: authH(), body: JSON.stringify({ name: 'Получатель рассылки', phone: '+79001112233' }) });
-    const camp = await (await fetch(BASE + '/api/campaigns', { method: 'POST', headers: authH(), body: JSON.stringify({ name: 'Смоук-рассылка', channel: 'whatsapp', message: 'Здравствуйте, {имя}!', scheduled_at: '2030-01-01T10:00' }) })).json();
-    await window.go('campaigns'); await wait(400);
+    await window.go('contacts'); await wait(600);
+    check('в контактах есть вкладки «Клиенты» и «Рассылки»', $('#view').textContent.includes('Клиенты') && $('#view').textContent.includes('Рассылки'));
+    window.setContactsTab('campaigns'); await wait(600);
+    check('вкладка рассылок объясняет, что это и кому нужно', $('#view').textContent.includes('Рассылок пока нет'));
+    const rc = await (await fetch(BASE + '/api/contacts', { method: 'POST', headers: authH(), body: JSON.stringify({ name: 'Получатель рассылки', phone: '+79001112233' }) })).json();
+    const camp = await (await fetch(BASE + '/api/campaigns', { method: 'POST', headers: authH(), body: JSON.stringify({ name: 'Смоук-рассылка', channel: 'whatsapp', message: 'Здравствуйте, {имя}!', scheduled_at: '2030-01-01T10:00', audience: { ids: [rc.id] } }) })).json();
+    window.setContactsTab('campaigns'); await wait(600);
     check('запланированная рассылка видна в списке со статусом', $('#view').textContent.includes('Смоук-рассылка') && $('#view').textContent.includes('Запланирована'));
     await window.openCampaignCard(camp.id); await wait(400);
     check('карточка рассылки показывает прогресс и получателей', $('#modalBody').textContent.includes('Получателей:') && $('#modalBody').textContent.includes('79001112233'));
+    check('рассылка собрана только из отмеченного клиента', $('#modalBody').textContent.includes('Получателей: 1'));
     await window.campaignAct(camp.id, 'cancel'); await wait(400);
     check('рассылку можно отменить из карточки', $('#modalBody').textContent.includes('Отменена'));
     window.closeModal(); await wait(150);
+    // массовое действие: отметил клиентов галочками — отправил им сообщение
+    window.setContactsTab('clients'); await wait(600);
+    window.selSet('contacts').add(rc.id);
+    window.bulkCampaign(); await wait(500);
+    check('из списка клиентов рассылка открывается сразу на отмеченных', $('#modalBody').textContent.includes('отмеченные клиенты — 1 шт.'));
+    check('для отмеченных клиентов фильтры сегмента не показываются', !$('#modalBody').innerHTML.includes('name="source"') && $('#modalBody').innerHTML.includes('name="ids"'));
+    window.closeModal(); await wait(150);
+    window.clearSel('contacts');
+    window.__state.cTab = 'clients';
   }
 
   // Полный сценарий: администратор выдаёт данные, сотрудник меняет пароль.
