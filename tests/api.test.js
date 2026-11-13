@@ -1969,3 +1969,82 @@ test('партнёр: отдельный вход, только свои лид�
   assert.equal(partnerSeesEvent(managerSock, 'message', { conversation_id: 999999, title: 'Клиент', preview: 'текст', direction: 'in' }), true, 'сотрудникам офиса поток не урезается');
   h = savedH;
 });
+
+test('карточка получает только свои записи, нагрузка сотрудников считается на сервере', async () => {
+  // Карточки клиента, компании и формы задач раньше забирали списки целиком и
+  // отбирали нужное на месте: на базе в тысячи записей окно открывалось секунды.
+  // Теперь сервер отдаёт только то, что относится к карточке, а числа нагрузки
+  // считает группировкой — вкладкам настроек не нужны все сделки и задачи базы.
+  const adminId = (await call('/api/users')).body.find(x => x.role === 'admin').id;
+  const before = (await call('/api/users?stats=1')).body.find(x => x.id === adminId);
+  const pipeBefore = (await call('/api/pipelines?stats=1')).body.find(x => x.id === 1);
+
+  const co = await call('/api/companies', { method: 'POST', body: JSON.stringify({ name: 'ООО Фильтр Девяносто Шесть', inn: '7700000096' }) });
+  assert.equal(co.status, 201, 'компания создана');
+  const c1 = await call('/api/contacts', { method: 'POST', body: JSON.stringify({ name: 'Клиент Фильтр Один', phone: '+79009600011', company_id: co.body.id }) });
+  const c2 = await call('/api/contacts', { method: 'POST', body: JSON.stringify({ name: 'Клиент Фильтр Два', phone: '+79009600022' }) });
+  const d1 = await call('/api/deals', { method: 'POST', body: JSON.stringify({ title: 'Сделка Фильтр Один', amount: 100000, contact_id: c1.body.id, company_id: co.body.id, responsible_id: adminId }) });
+  const d2 = await call('/api/deals', { method: 'POST', body: JSON.stringify({ title: 'Сделка Фильтр Два', amount: 200000, contact_id: c2.body.id, responsible_id: adminId }) });
+  const t1 = await call('/api/tasks', { method: 'POST', body: JSON.stringify({ title: 'Задача Фильтр Один', contact_id: c1.body.id, deal_id: d1.body.id, responsible_id: adminId }) });
+  await call('/api/tasks', { method: 'POST', body: JSON.stringify({ title: 'Задача Фильтр Два', contact_id: c2.body.id, responsible_id: adminId }) });
+  assert.equal(d1.status, 201, 'сделка компании создана');
+  assert.equal(t1.status, 201, 'задача сделки создана');
+
+  const byContact = await call(`/api/deals?contact_id=${c1.body.id}`);
+  assert.equal(byContact.status, 200, 'сделки по клиенту отдаются');
+  assert.ok(byContact.body.deals.every(d => d.contact_id === c1.body.id), 'в ответе только сделки этого клиента');
+  assert.ok(byContact.body.deals.some(d => d.id === d1.body.id), 'нужная сделка на месте');
+  assert.ok(!byContact.body.deals.some(d => d.id === d2.body.id), 'чужая сделка не приходит');
+
+  const byCompany = await call(`/api/deals?company_id=${co.body.id}`);
+  assert.ok(byCompany.body.deals.some(d => d.id === d1.body.id), 'сделка компании на месте');
+  const staff = await call(`/api/contacts?company_id=${co.body.id}`);
+  assert.ok(staff.body.length >= 1 && staff.body.every(x => Number(x.company_id) === Number(co.body.id)), 'сотрудники только этой компании');
+  assert.ok(staff.body.some(x => x.id === c1.body.id), 'нужный сотрудник на месте');
+
+  const tByContact = await call(`/api/tasks?contact_id=${c1.body.id}`);
+  assert.ok(tByContact.body.length >= 1 && tByContact.body.every(x => x.contact_id === c1.body.id), 'задачи только этого клиента');
+  const tByDeal = await call(`/api/tasks?deal_id=${d1.body.id}`);
+  assert.ok(tByDeal.body.every(x => x.deal_id === d1.body.id) && tByDeal.body.some(x => x.id === t1.body.id), 'задачи только этой сделки');
+
+  // имя компании приходит в карточке сделки: справочник компаний ради одной
+  // подписи больше не грузится
+  const dealOne = await call(`/api/deals/${d1.body.id}`);
+  assert.equal(dealOne.body.deal.company_name, 'ООО Фильтр Девяносто Шесть', 'имя компании есть в карточке сделки');
+
+  // нагрузка: две новые сделки в работе на 300 000 и две новые открытые задачи
+  const after = (await call('/api/users?stats=1')).body.find(x => x.id === adminId);
+  assert.equal(Number(after.deals_open) - Number(before.deals_open), 2, 'сделки в работе посчитаны');
+  assert.equal(Number(after.deals_sum) - Number(before.deals_sum), 300000, 'сумма сделок в работе посчитана');
+  assert.equal(Number(after.tasks_open) - Number(before.tasks_open), 2, 'открытые задачи посчитаны');
+  assert.ok(!('deals_open' in (await call('/api/users')).body[0]), 'без параметра нагрузка не отдаётся');
+  const pipeAfter = (await call('/api/pipelines?stats=1')).body.find(x => x.id === 1);
+  assert.equal(Number(pipeAfter.deals_total) - Number(pipeBefore.deals_total), 2, 'счётчик сделок воронки посчитан');
+  assert.equal(Number(pipeAfter.deals_open) - Number(pipeBefore.deals_open), 2, 'счётчик открытых сделок воронки посчитан');
+  assert.ok(!('deals_total' in (await call('/api/pipelines')).body[0]), 'без параметра счётчиков воронок нет');
+
+  // подбор в формах просит один вид записей: лишние выборки не выполняются,
+  // а общий поиск в шапке по-прежнему получает все пять списков
+  const onlyC = await call('/api/search?q=' + encodeURIComponent('Фильтр') + '&only=contacts');
+  assert.equal(onlyC.status, 200, 'поиск с only отвечает');
+  assert.ok(onlyC.body.contacts.length > 0, 'нужный список найден');
+  assert.equal(onlyC.body.deals.length, 0, 'чужие списки не выполняются');
+  assert.equal(onlyC.body.products.length, 0, 'каталог не ищется без нужды');
+  const fullSearch = await call('/api/search?q=' + encodeURIComponent('Фильтр'));
+  assert.ok(fullSearch.body.contacts.length > 0 && fullSearch.body.deals.length > 0, 'общий поиск отдаёт все списки');
+
+  // чужой объём работы партнёру не виден, даже если он попросит числа
+  const created = await call('/api/users', { method: 'POST', body: JSON.stringify({ name: 'Партнёр Нагрузка', email: 'partner-stats@example.com', password: 'partnerpassword1', role: 'partner' }) });
+  assert.equal(created.status, 201, 'партнёр создан');
+  const lp = await readyLogin('/api/auth/login', { method: 'POST', body: JSON.stringify({ email: 'partner-stats@example.com', password: 'partnerpassword1' }) });
+  const ph = { Authorization: 'Bearer ' + lp.body.token };
+  const pUsers = await call('/api/users?stats=1', { headers: ph });
+  assert.equal(pUsers.status, 200, 'партнёру список сотрудников доступен');
+  assert.equal(pUsers.body.length, 1, 'партнёр видит только себя');
+  assert.ok(!('deals_open' in pUsers.body[0]), 'чужая нагрузка партнёру не отдаётся');
+  const pPipes = await call('/api/pipelines?stats=1', { headers: ph });
+  assert.equal(pPipes.status, 200, 'воронки партнёру доступны');
+  assert.ok(!('deals_total' in pPipes.body[0]), 'счётчики чужих воронок партнёру не отдаются');
+  const pDeals = await call(`/api/deals?contact_id=${c1.body.id}`, { headers: ph });
+  assert.ok(pDeals.body.deals.length === 0, 'чужие сделки партнёру не отдаются и с фильтром');
+});

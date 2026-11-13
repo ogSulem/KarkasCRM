@@ -60,7 +60,7 @@ Object.assign(window, {
   isoDate, todayISO, fmtDayMonth, kindStage, fld, grid2, formLegend, pushToast, notify, captureFocus, restoreFocus, PALETTE_ACTIONS,
   openMenu, closeMenu, contactsMoreMenu, openOurPrices, comparePrices, setBuiltinTab, BUILTIN_FIELDS, amAdmin, canEdit,
   ourPriceRows, filterOurPrices, toggleAutomation, openAutomation, autoWarn, noteRow, editNote, lockFormsForViewer, AUTO_TRIGGERS, AUTO_ACTIONS,
-  busyButton, priceImportText,
+  busyButton, priceImportText, pickSlot, pickField, pickValue, pickReset, pickSearch, PICK,
   punyDecodeLabel, humanOrigin, wazzupHookUrl, wzAlive, wzState, wzTitle, closeConv,
   nameFromUri, sendAccountFor, refreshSendAccount, WZ_CHAT_TRANSPORTS, msgTime,
   setConvScope, convScopeList, convMine, convEmptyHtml, openNotifications,
@@ -472,7 +472,7 @@ try {
   await window.openDeal(); await wait(250);
   check('в форме сделки нет сворачиваемого «Дополнительно»', !$('#modalBody details.form-more'));
   check('главные и второстепенные поля сделки видны сразу',
-    Boolean($('#modalBody input[name=title]')) && Boolean($('#modalBody select[name=contact_id]'))
+    Boolean($('#modalBody input[name=title]')) && Boolean($('#modalBody [name=contact_id]'))
     && Boolean($('#modalBody select[name=responsible_id]')) && Boolean($('#modalBody input[name=deadline]')));
   check('название сделки подписано как обязательное', Boolean($('#modalBody label.req input[name=title]')));
   check('обязательное поле идёт раньше необязательных',
@@ -489,13 +489,43 @@ try {
   // этап «успех» находится по смыслу, а не по жёсткому коду
   check('этап успеха определяется по виду этапа', window.__state.stages.some(s => s.kind === 'won') ? window.kindStage('won') === window.__state.stages.find(s => s.kind === 'won').code : true);
   // задача из карточки: связи уже известны — подпись вместо двух длинных списков
-  const linkDeal = window.__state.deals[0], linkContact = window.__state.contacts[0];
+  // связи берём из базы, а не из состояния раздела: к этому месту сценарии уже
+  // создавали и удаляли записи, а подпись обязана показывать живую сделку
+  const linkDeal = (await window.api('/api/deals')).deals[0];
+  const linkContact = (await window.api('/api/contacts'))[0];
   window.closeModal();
   await window.openTask(null, { deal_id: linkDeal.id, contact_id: linkContact.id }); await wait(250);
-  check('задача из карточки показывает привязки подписью', Boolean($('#modalBody .task-link')) && !$('#modalBody select[name=deal_id]') && Boolean($('#modalBody input[type=hidden][name=deal_id]')));
-  window.taskUnlink($('#modalBody .task-link .link-btn'), 'contact_id');
-  check('привязку можно сменить на другое значение', Boolean($('#modalBody select[name=contact_id]')));
+  check('задача из карточки показывает привязки подписью', Boolean($('#modalBody .pick-value')) && !$('#modalBody .pick[data-kind=deal_id]') && Boolean($('#modalBody input[type=hidden][name=deal_id]')));
+  window.pickReset($('.pick-slot[data-kind=contact_id] .link-btn'));
+  check('привязку можно сменить на другое значение', Boolean($('.pick-slot[data-kind=contact_id] .pick input[type=text]')));
   window.closeModal();
+
+  // подбор клиента и сделки: поле с поиском по базе вместо списка всех записей.
+  // Список всех клиентов и всех сделок в форме на базе в тысячи записей делал
+  // окно тяжёлым, а нужное значение всё равно искалось прокруткой.
+  await window.openTask(); await wait(250);
+  check('в форме задачи нет списков всех клиентов и сделок', $$('#modalBody option').length < 40, 'вариантов в форме: ' + $$('#modalBody option').length);
+  const pickIn = $('.pick[data-kind=contact_id] input[type=text]');
+  check('клиент в задаче подбирается полем поиска', Boolean(pickIn) && !$('#modalBody select[name=contact_id]'));
+  const pickName = String(((await window.api('/api/contacts'))[0] || {}).name || 'Клиент');
+  pickIn.value = pickName.slice(0, 4);
+  window.pickSearch(pickIn); await wait(600);
+  const found = $$('.pick[data-kind=contact_id] .pick-list div[onclick]');
+  check('поиск предлагает найденных клиентов', found.length > 0, 'найдено: ' + found.length + ' по «' + pickIn.value + '»');
+  if (found.length) found[0].click();
+  const pickedId = ($('#modalBody input[type=hidden][name=contact_id]') || {}).value || '';
+  check('выбранный клиент уходит в форму скрытым полем', /^\d+$/.test(pickedId), 'значение: ' + pickedId);
+  check('после выбора видны подпись и кнопка «изменить»', Boolean($('.pick-slot[data-kind=contact_id] .pick-value b')) && /изменить/.test($('.pick-slot[data-kind=contact_id]').textContent));
+  window.closeModal();
+  // карточки и вкладки настроек просят у сервера только нужные им данные
+  check('карточка клиента просит только его сделки, чаты и задачи', ['/api/deals?contact_id=', '/api/conversations?contact_id=', '/api/tasks?contact_id='].every(x => appJsRaw.includes(x)));
+  check('карточка компании просит только её сотрудников и сделки', ['/api/contacts?company_id=', '/api/deals?company_id='].every(x => appJsRaw.includes(x)));
+  check('вкладки настроек берут готовые числа, а не все сделки и задачи базы', appJsRaw.includes("api('/api/users?stats=1')") && appJsRaw.includes("api('/api/pipelines?stats=1')"));
+  check('сервер считает нагрузку группировкой и отдаёт её только администратору', serverJsRaw.includes('GROUP BY responsible_id') && serverJsRaw.includes("u.searchParams.get('stats') === '1' && user.role === 'admin'"));
+  check('сделки компании видны и тогда, когда заведены на её сотрудника', serverJsRaw.includes('d.contact_id IN (SELECT id FROM contacts WHERE company_id=?)'));
+  check('поиск по базе не обрезан последними записями', !/FROM (contacts|deals|tasks|companies|products) ORDER BY id DESC LIMIT/.test(serverJsRaw));
+  check('подбор просит сервер искать только свой вид записей', appJsRaw.includes('&only=${cfg.key}') && serverJsRaw.includes('const want = k => !only || only === k;'));
+  check('условия списков подставляются параметрами, а не склейкой строки', !/responsible_id=\$\{Number\(user\.id\)\}/.test(serverJsRaw));
   // локальная дата не зависит от UTC
   check('isoDate возвращает локальную дату', window.isoDate(new Date(2026, 0, 1)) === '2026-01-01' && window.isoDate(new Date(2026, 11, 31)) === '2026-12-31');
   check('todayISO совпадает с локальным днём', window.todayISO() === `${new Date().getFullYear()}-${String(new Date().getMonth() + 1).padStart(2, '0')}-${String(new Date().getDate()).padStart(2, '0')}`);
@@ -714,6 +744,20 @@ try {
   const dealId = window.__state.deals[0].id;
   for (const tab of ['details', 'chat', 'products', 'tasks', 'notes', 'history']) { window.__state.dealTab = tab; await window.openDealCard(dealId); await wait(200); check('сделка → ' + tab, $('#modalBody').innerHTML.length > 100) }
   window.closeModal();
+  // карточка сделки: клиент и компания подписаны, а их значения лежат скрытыми
+  // полями. Пустой список выбора при сохранении отправил бы пустое значение и
+  // молча отвязал сделку от клиента, поэтому привязка обязана сохраняться
+  const linkedDeal = ((await window.api('/api/deals')).deals || []).find(d => d.contact_id);
+  if (linkedDeal) {
+    window.__state.dealTab = 'details';
+    await window.openDealCard(linkedDeal.id); await wait(350);
+    const hid = $('#modalBody input[type=hidden][name=contact_id]');
+    check('в карточке сделки клиент показан подписью и сохранён скрытым полем',
+      Boolean($('.pick-slot[data-kind=contact_id] .pick-value')) && Boolean(hid) && hid.value === String(linkedDeal.contact_id),
+      'значение: ' + (hid ? hid.value : 'нет поля'));
+    check('в карточке сделки нет списков всех клиентов и компаний', $$('#modalBody option').length < 60, 'вариантов: ' + $$('#modalBody option').length);
+    window.closeModal();
+  }
   const printed = await fetch(BASE + '/api/deals/' + dealId + '/print?doc=invoice&token=' + encodeURIComponent(window.__token || ''));
   check('счёт на оплату отдаётся сервером с токеном', printed.status === 200 && /Счёт на оплату/.test(await printed.text()));
 
@@ -1037,6 +1081,13 @@ try {
   check('слово Каркас нейтральное и подсвечивается при наведении', cssText.includes('.brand:hover .brand-part-karkas') && cssText.includes('.brand-login:hover .brand-part-karkas') && !cssText.includes('.brand:hover .brand-part-crm'));
 
   check('вход: логотип над названием и подсказка о доступе', cssText.includes('.login-card .brand-login{flex-direction:column') && $('.login-note')?.textContent.includes('администратор'));
+  // Неизвестное имя иконки не ломает страницу, а молча рисует значок файла:
+  // так в панели клиента чата вместо источника и ответственного стояли файлы.
+  const iconNames = [...new Set([...appJsRaw.matchAll(/icon\('([A-Za-z0-9_]+)'/g)].map(m => m[1]))];
+  const missingIcons = iconNames.filter(n => !(n in window.ICON_PATHS));
+  check('все имена иконок в разметке есть в наборе', missingIcons.length === 0, 'не найдено: ' + missingIcons.join(', '));
+  check('иконки подбора клиента, сделки и компании есть в наборе',
+    Object.values(window.PICK).every(c => c.ico in window.ICON_PATHS));
   await window.openUser();
   const userForm = $('#modalBody form');
   window.generateUserPassword(userForm);
@@ -1789,16 +1840,21 @@ try {
     const officeCmds = window.paletteCommands().flatMap(g => g.items.map(i => i.title));
     check('сотруднику офиса палитра предлагает все разделы и действия',
       ['Рабочий стол', 'Компании', 'Новая компания', 'Импорт контактов из CSV'].every(t => officeCmds.includes(t)), officeCmds.join(' / '));
-    // поле компании: пустой селект при сохранении отправил бы пустое значение и
-    // молча отвязал карточку от компании, поэтому привязка сохраняется скрытым полем
-    check('поле компании хранит привязку, когда справочник не получен',
-      window.companyField([], 7, '— без компании —').includes('type="hidden"') && window.companyField([], 7, '— без компании —').includes('value="7"'),
-      window.companyField([], 7, '— без компании —'));
-    check('поле компании показывает выбранный справочник',
-      window.companyField([{ id: 3, name: 'ООО Ромашка' }], 3, '— без компании —').includes('<select name="company_id"')
-      && window.companyField([{ id: 3, name: 'ООО Ромашка' }], 3, '— без компании —').includes('selected'));
-    check('без привязки поле компании остаётся обычным списком', window.companyField([], null, '— частное лицо —').includes('<select name="company_id"'));
-    check('форма клиента открывается и без доступа к справочнику компаний', appJsRaw.includes("await api('/api/companies').catch(() => [])"));
+    // поле компании: пустой список выбора при сохранении отправил бы пустое
+    // значение и молча отвязал карточку от компании, поэтому привязка всегда
+    // живёт скрытым полем, а сама компания подбирается поиском по базе
+    check('поле компании хранит привязку скрытым полем',
+      window.pickSlot('company_id', { id: 7, name: 'ООО Ромашка' }).includes('type="hidden" name="company_id" value="7"'),
+      window.pickSlot('company_id', { id: 7, name: 'ООО Ромашка' }));
+    check('привязанная компания показана подписью с кнопкой «изменить»',
+      /ООО Ромашка/.test(window.pickSlot('company_id', { id: 7, name: 'ООО Ромашка' }))
+      && window.pickSlot('company_id', { id: 7, name: 'ООО Ромашка' }).includes('pickReset(this)'));
+    check('без привязки компания подбирается поиском, а не списком справочника',
+      window.pickSlot('company_id', null).includes('<div class="pick" data-kind="company_id"')
+      && !window.pickSlot('company_id', null).includes('<select'));
+    check('форма клиента не грузит справочник компаний целиком',
+      appJsRaw.includes("await api('/api/companies/' + c.company_id)")
+      && !appJsRaw.includes("const comps = await api('/api/companies')"));
     check('справочник компаний партнёру отдаётся только по его карточкам', serverJsRaw.includes("table === 'companies' && isPartner"));
     check('документы и состав сделки партнёр меняет только по своим лидам',
       serverJsRaw.includes('партнёр печатает документы только по своим') && serverJsRaw.includes("partnerOwns(user, 'deals', Number(row.deal_id))"));

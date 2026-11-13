@@ -36,8 +36,8 @@ const CHECKS = {
 };
 
 const TABLES = ['users', 'companies', 'contacts', 'pipelines', 'stages', 'deals', 'tasks', 'notes',
-  'products', 'deal_products', 'templates', 'automations', 'channels', 'conversations', 'messages',
-  'settings', 'activities'];
+  'products', 'deal_products', 'templates', 'automations', 'automation_queue', 'channels',
+  'conversations', 'messages', 'read_marks', 'campaigns', 'campaign_items', 'settings', 'activities'];
 
 /** Что лежит в базе и есть ли «висячие» строки. Только чтение. */
 export function auditDatabase(db) {

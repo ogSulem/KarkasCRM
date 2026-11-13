@@ -201,6 +201,10 @@ CREATE INDEX IF NOT EXISTS idx_conv_contact ON conversations(contact_id);
 CREATE INDEX IF NOT EXISTS idx_templates_owner ON templates(user_id);
 CREATE INDEX IF NOT EXISTS idx_deals_pipeline ON deals(pipeline_id, stage);
 CREATE INDEX IF NOT EXISTS idx_deals_contact ON deals(contact_id);
+-- карточка компании спрашивает её сделки и сотрудников: без индекса оба
+-- фильтра перебирали бы таблицу целиком
+CREATE INDEX IF NOT EXISTS idx_deals_company ON deals(company_id);
+CREATE INDEX IF NOT EXISTS idx_contacts_company ON contacts(company_id);
 CREATE INDEX IF NOT EXISTS idx_deals_responsible ON deals(responsible_id);
 CREATE INDEX IF NOT EXISTS idx_tasks_deal ON tasks(deal_id);
 CREATE INDEX IF NOT EXISTS idx_tasks_contact ON tasks(contact_id);
@@ -2375,12 +2379,20 @@ export const server = http.createServer(async (req, res) => {
       const needleDigits = digits(raw);
       const hit = (...vals) => vals.some(v => String(v ?? '').toLowerCase().includes(needle)
         || (needleDigits.length >= 3 && digits(v).includes(needleDigits)));
-      const contacts = db.prepare('SELECT id,name,phone,email,company FROM contacts ORDER BY id DESC LIMIT 2000').all().filter(c => hit(c.name, c.phone, c.email, c.company)).slice(0, 8);
-      const deals = db.prepare('SELECT id,title,amount FROM deals ORDER BY id DESC LIMIT 2000').all().filter(d => hit(d.title, d.amount)).slice(0, 8);
-      const companies = db.prepare('SELECT id,name,inn FROM companies ORDER BY id DESC LIMIT 1000').all().filter(c => hit(c.name, c.inn)).slice(0, 5);
-      const tasks = db.prepare('SELECT id,title,due,done,type FROM tasks ORDER BY id DESC LIMIT 2000').all().filter(t => hit(t.title)).slice(0, 6);
+      // Ищем по всей базе: прежнее ограничение на последние две тысячи записей
+      // означало, что клиент, с которым работали год назад, не находится ни
+      // общим поиском, ни подбором в формах.
+      // Параметр only нужен подбору в формах: ему достаточно одного вида
+      // записей, и лишние выборки не выполняются. Общий поиск в шапке параметр
+      // не передаёт и получает все пять списков, как раньше.
+      const only = String(u.searchParams.get('only') || '');
+      const want = k => !only || only === k;
+      const contacts = want('contacts') ? db.prepare('SELECT id,name,phone,email,company FROM contacts ORDER BY id DESC').all().filter(c => hit(c.name, c.phone, c.email, c.company)).slice(0, 8) : [];
+      const deals = want('deals') ? db.prepare('SELECT id,title,amount FROM deals ORDER BY id DESC').all().filter(d => hit(d.title, d.amount)).slice(0, 8) : [];
+      const companies = want('companies') ? db.prepare('SELECT id,name,inn FROM companies ORDER BY id DESC').all().filter(c => hit(c.name, c.inn)).slice(0, 5) : [];
+      const tasks = want('tasks') ? db.prepare('SELECT id,title,due,done,type FROM tasks ORDER BY id DESC').all().filter(t => hit(t.title)).slice(0, 6) : [];
       // каталог он же прайс-лист: позицию можно найти из любого раздела
-      const products = db.prepare('SELECT id,name,sku,price,unit,active FROM products ORDER BY id DESC LIMIT 1000').all().filter(pr => hit(pr.name, pr.sku)).slice(0, 5);
+      const products = want('products') ? db.prepare('SELECT id,name,sku,price,unit,active FROM products ORDER BY id DESC').all().filter(pr => hit(pr.name, pr.sku)).slice(0, 5) : [];
       return json(res, 200, { contacts, deals, companies, tasks, products });
     }
     if (p === '/api/export/json' || p === '/api/backup') {
@@ -2454,13 +2466,36 @@ export const server = http.createServer(async (req, res) => {
         return json(res, 403, { error: 'Каталог и прайс-лист меняет администратор. Позицию, которой нет в каталоге, можно добавить прямо в сделку.' });
       if (req.method === 'GET' && !id) {
         const isPartner = user.role === 'partner';
-        if (table === 'tasks') return json(res, 200, db.prepare(`SELECT t.*,c.name contact_name,d.title deal_title,u.name responsible_name FROM tasks t LEFT JOIN contacts c ON c.id=t.contact_id LEFT JOIN deals d ON d.id=t.deal_id LEFT JOIN users u ON u.id=t.responsible_id${isPartner ? ` WHERE t.responsible_id=${Number(user.id)} OR EXISTS(SELECT 1 FROM deals pd WHERE pd.id=t.deal_id AND pd.responsible_id=${Number(user.id)}) OR EXISTS(SELECT 1 FROM contacts pc WHERE pc.id=t.contact_id AND pc.responsible_id=${Number(user.id)})` : ''} ORDER BY done,due,id DESC`).all());
+        if (table === 'tasks') {
+          // карточке клиента нужны только его задачи: фильтр собираем на сервере,
+          // иначе карточка тянула бы весь список задач компании
+          const tw = [], tp = [];
+          if (isPartner) {
+            tw.push('(t.responsible_id=? OR EXISTS(SELECT 1 FROM deals pd WHERE pd.id=t.deal_id AND pd.responsible_id=?) OR EXISTS(SELECT 1 FROM contacts pc WHERE pc.id=t.contact_id AND pc.responsible_id=?))');
+            tp.push(Number(user.id), Number(user.id), Number(user.id));
+          }
+          const tContact = Number(u.searchParams.get('contact_id') || 0);
+          if (tContact) { tw.push('t.contact_id=?'); tp.push(tContact); }
+          const tDeal = Number(u.searchParams.get('deal_id') || 0);
+          if (tDeal) { tw.push('t.deal_id=?'); tp.push(tDeal); }
+          return json(res, 200, db.prepare(`SELECT t.*,c.name contact_name,d.title deal_title,u.name responsible_name FROM tasks t LEFT JOIN contacts c ON c.id=t.contact_id LEFT JOIN deals d ON d.id=t.deal_id LEFT JOIN users u ON u.id=t.responsible_id${tw.length ? ' WHERE ' + tw.join(' AND ') : ''} ORDER BY done,due,id DESC`).all(...tp));
+        }
         if (table === 'notes') {
           const et = String(u.searchParams.get('type') || ''), eid = Number(u.searchParams.get('entity'));
           if (isPartner && !partnerOwns(user, et, eid)) return json(res, 403, { error: 'Это чужая карточка: партнёр видит только свои лиды' });
           return json(res, 200, db.prepare('SELECT * FROM notes WHERE entity_type=? AND entity_id=? ORDER BY id DESC').all(et, eid));
         }
-        if (table === 'contacts' && isPartner) return json(res, 200, db.prepare('SELECT * FROM contacts WHERE responsible_id=? OR id IN (SELECT contact_id FROM deals WHERE responsible_id=? AND contact_id IS NOT NULL) ORDER BY id DESC').all(user.id, user.id));
+        if (table === 'contacts') {
+          // карточке компании нужны только её сотрудники: фильтр на сервере
+          const cw = [], cp = [];
+          if (isPartner) {
+            cw.push('(responsible_id=? OR id IN (SELECT contact_id FROM deals WHERE responsible_id=? AND contact_id IS NOT NULL))');
+            cp.push(Number(user.id), Number(user.id));
+          }
+          const cCompany = Number(u.searchParams.get('company_id') || 0);
+          if (cCompany) { cw.push('company_id=?'); cp.push(cCompany); }
+          return json(res, 200, db.prepare(`SELECT * FROM contacts${cw.length ? ' WHERE ' + cw.join(' AND ') : ''} ORDER BY id DESC`).all(...cp));
+        }
         // компании партнёру нужны как справочник для его же карточек: без них
         // форма клиента не открывается, а привязка сделки к компании теряется
         if (table === 'companies' && isPartner) return json(res, 200, db.prepare('SELECT * FROM companies WHERE id IN (SELECT company_id FROM contacts WHERE responsible_id=? AND company_id IS NOT NULL) OR id IN (SELECT company_id FROM deals WHERE responsible_id=? AND company_id IS NOT NULL) ORDER BY id DESC').all(user.id, user.id));
@@ -2777,7 +2812,20 @@ export const server = http.createServer(async (req, res) => {
       });
     }
     if (p === '/api/pipelines') {
-      if (req.method === 'GET') return json(res, 200, db.prepare('SELECT * FROM pipelines ORDER BY id').all().map(pl => ({ ...pl, stages: getStages(pl.id) })));
+      if (req.method === 'GET') {
+        // счётчики сделок нужны вкладке «Воронки», где видно, можно ли удалить
+        // воронку. Отдаём их только администратору: партнёру объём чужих
+        // воронок не предназначен, а список воронок ему нужен для его доски
+        const st = u.searchParams.get('stats') === '1' && user.role === 'admin'
+          ? new Map(db.prepare(`SELECT COALESCE(pipeline_id,1) id, COUNT(*) total,
+              COALESCE(SUM(COALESCE(stage,'') NOT IN ('won','lost')),0) open
+              FROM deals GROUP BY COALESCE(pipeline_id,1)`).all().map(r => [Number(r.id), r]))
+          : null;
+        return json(res, 200, db.prepare('SELECT * FROM pipelines ORDER BY id').all().map(pl => {
+          const c = st && st.get(Number(pl.id));
+          return { ...pl, stages: getStages(pl.id), ...(c ? { deals_total: Number(c.total), deals_open: Number(c.open) } : {}) };
+        }));
+      }
       if (req.method === 'POST') { if (!requireAdmin(user, res)) return; const b = await readBody(req); const r = db.prepare('INSERT INTO pipelines(name) VALUES(?)').run(b.name || 'Новая воронка'); const st = db.prepare('INSERT INTO stages(pipeline_id,code,name,color,sort,kind) VALUES(?,?,?,?,?,?)'); [['new', 'Неразобранное', '#f97316', 0, 'open'], ['won', 'Успешно реализовано', '#15803d', 1, 'won'], ['lost', 'Закрыто и не реализовано', '#78716c', 2, 'lost']].forEach(x => st.run(r.lastInsertRowid, ...x)); return json(res, 201, { id: r.lastInsertRowid }); }
     }
     const mPipe = p.match(/^\/api\/pipelines\/(\d+)$/);
@@ -2840,12 +2888,20 @@ export const server = http.createServer(async (req, res) => {
         // фильтр по воронке включается только явным параметром (доска сделок);
         // карточки клиента и компании просят сделки без параметра — там нужен
         // список по всем воронкам
-        const where = u.searchParams.has('pipeline') ? ' WHERE COALESCE(d.pipeline_id,1)=?' : '';
-        // партнёр видит на доске только свои сделки — вторым условием, чтобы
-        // не менять набор параметров подготовленного запроса
-        const partnerAnd = user.role === 'partner' ? ` AND d.responsible_id=${Number(user.id)}` : '';
-        const partnerWhere = user.role === 'partner' && !where ? ` WHERE d.responsible_id=${Number(user.id)}` : '';
-        return json(res, 200, { pipelines: db.prepare('SELECT * FROM pipelines').all(), stages: getStages(pid), deals: db.prepare('SELECT d.*,c.name contact_name,c.phone contact_phone,co.name company_name,(SELECT COUNT(*) FROM tasks t WHERE t.deal_id=d.id AND t.done=0) as tasks_open,(SELECT MIN(t.due) FROM tasks t WHERE t.deal_id=d.id AND t.done=0) as next_task_due FROM deals d LEFT JOIN contacts c ON c.id=d.contact_id LEFT JOIN companies co ON co.id=d.company_id' + where + partnerAnd + partnerWhere + ' ORDER BY d.id DESC').all(...(where ? [pid] : [])) });
+        const conds = [], params = [];
+        if (u.searchParams.has('pipeline')) { conds.push('COALESCE(d.pipeline_id,1)=?'); params.push(pid); }
+        // карточке клиента и карточке компании нужны только их сделки: без
+        // фильтра сервер отдавал бы весь список, а клиент отбирал бы на месте
+        const byContact = Number(u.searchParams.get('contact_id') || 0);
+        if (byContact) { conds.push('d.contact_id=?'); params.push(byContact); }
+        const byCompany = Number(u.searchParams.get('company_id') || 0);
+        // сделка компании — и та, что заведена на её сотрудника: иначе работа
+        // по компании разваливалась на два списка в карточке и в форме
+        if (byCompany) { conds.push('(d.company_id=? OR d.contact_id IN (SELECT id FROM contacts WHERE company_id=?))'); params.push(byCompany, byCompany); }
+        // партнёр видит на доске только свои сделки
+        if (user.role === 'partner') { conds.push('d.responsible_id=?'); params.push(Number(user.id)); }
+        const where = conds.length ? ' WHERE ' + conds.join(' AND ') : '';
+        return json(res, 200, { pipelines: db.prepare('SELECT * FROM pipelines').all(), stages: getStages(pid), deals: db.prepare('SELECT d.*,c.name contact_name,c.phone contact_phone,co.name company_name,(SELECT COUNT(*) FROM tasks t WHERE t.deal_id=d.id AND t.done=0) as tasks_open,(SELECT MIN(t.due) FROM tasks t WHERE t.deal_id=d.id AND t.done=0) as next_task_due FROM deals d LEFT JOIN contacts c ON c.id=d.contact_id LEFT JOIN companies co ON co.id=d.company_id' + where + ' ORDER BY d.id DESC').all(...params) });
       }
       if (req.method === 'POST') { const b = await readBody(req); if (!String(b.title || '').trim()) return json(res, 400, { error: 'Укажите название сделки' });
         b.title = String(b.title).trim().slice(0, 200);
@@ -2952,7 +3008,9 @@ ${user?.name || ''}`.trim();
         return json(res, 405, { error: 'Метод не поддерживается' });
       }
       if (req.method === 'GET') {
-        const deal = db.prepare('SELECT d.*,c.name contact_name,c.phone contact_phone,c.email contact_email,u.name responsible_name FROM deals d LEFT JOIN contacts c ON c.id=d.contact_id LEFT JOIN users u ON u.id=d.responsible_id WHERE d.id=?').get(id);
+        // имя компании нужно карточке, чтобы показать привязку подписью:
+        // справочник компаний целиком ради одной строки больше не грузится
+        const deal = db.prepare('SELECT d.*,c.name contact_name,c.phone contact_phone,c.email contact_email,co.name company_name,u.name responsible_name FROM deals d LEFT JOIN contacts c ON c.id=d.contact_id LEFT JOIN companies co ON co.id=d.company_id LEFT JOIN users u ON u.id=d.responsible_id WHERE d.id=?').get(id);
         if (!deal) return json(res, 404, { error: 'Сделка не найдена' });
         const products = db.prepare('SELECT dp.*,pr.name product_name FROM deal_products dp LEFT JOIN products pr ON pr.id=dp.product_id WHERE dp.deal_id=?').all(id);
         // переписка клиента по этой сделке — единый диалог прямо в карточке
@@ -3048,11 +3106,32 @@ ${user?.name || ''}`.trim();
     if (p === '/api/users') {
       // Список нужен всем для выбора ответственного, но e-mail сотрудников —
       // только администратору: остальным достаточно имени и роли.
-      if (req.method === 'GET') return json(res, 200, user.role === 'admin'
-        ? db.prepare('SELECT id,name,email,role,active,last_login,must_change_password FROM users ORDER BY id').all()
-        : user.role === 'partner'
-          ? [{ id: user.id, name: user.name, role: 'partner', active: 1 }]
-          : db.prepare('SELECT id,name,role,active FROM users ORDER BY id').all());
+      if (req.method === 'GET') {
+        const rows = user.role === 'admin'
+          ? db.prepare('SELECT id,name,email,role,active,last_login,must_change_password FROM users ORDER BY id').all()
+          : user.role === 'partner'
+            ? [{ id: user.id, name: user.name, role: 'partner', active: 1 }]
+            : db.prepare('SELECT id,name,role,active FROM users ORDER BY id').all();
+        // Вкладке «Команда» нужны числа нагрузки сотрудника. Считаем их двумя
+        // группировками на сервере: иначе вкладка тянула бы все сделки и все
+        // задачи базы, чтобы отобрать из них четыре числа на строку.
+        if (u.searchParams.get('stats') === '1' && user.role === 'admin') {
+          const dStat = new Map(db.prepare(`SELECT responsible_id id,
+              COALESCE(SUM(COALESCE(stage,'') NOT IN ('won','lost')),0) open,
+              COALESCE(SUM(CASE WHEN COALESCE(stage,'') NOT IN ('won','lost') THEN COALESCE(amount,0) ELSE 0 END),0) sum,
+              COALESCE(SUM(stage='won'),0) won
+              FROM deals WHERE responsible_id IS NOT NULL GROUP BY responsible_id`).all().map(r => [Number(r.id), r]));
+          const tStat = new Map(db.prepare('SELECT responsible_id id, COUNT(*) n FROM tasks WHERE done=0 AND responsible_id IS NOT NULL GROUP BY responsible_id').all().map(r => [Number(r.id), Number(r.n)]));
+          for (const r of rows) {
+            const d = dStat.get(Number(r.id)) || {};
+            r.deals_open = Number(d.open || 0);
+            r.deals_sum = Number(d.sum || 0);
+            r.deals_won = Number(d.won || 0);
+            r.tasks_open = tStat.get(Number(r.id)) || 0;
+          }
+        }
+        return json(res, 200, rows);
+      }
       if (req.method === 'POST') {
         if (!requireAdmin(user, res)) return;
         const b = await readBody(req);
@@ -3165,8 +3244,16 @@ ${user?.name || ''}`.trim();
 
     // ===== inbox =====
     if (p === '/api/conversations' && req.method === 'GET') {
-      // партнёру видна переписка его клиентов — и только она
-      const pw = user.role === 'partner' ? `WHERE c.responsible_id=${Number(user.id)} OR c.id IN (SELECT contact_id FROM deals WHERE responsible_id=${Number(user.id)} AND contact_id IS NOT NULL) ` : '';
+      // партнёру видна переписка его клиентов — и только она; карточке клиента
+      // нужен только его диалог, поэтому условия собираются списком
+      const conds = [], params = [];
+      if (user.role === 'partner') {
+        conds.push('(c.responsible_id=? OR c.id IN (SELECT contact_id FROM deals WHERE responsible_id=? AND contact_id IS NOT NULL))');
+        params.push(Number(user.id), Number(user.id));
+      }
+      const convContact = Number(u.searchParams.get('contact_id') || 0);
+      if (convContact) { conds.push('cv.contact_id=?'); params.push(convContact); }
+      const pw = conds.length ? 'WHERE ' + conds.join(' AND ') + ' ' : '';
       return json(res, 200, db.prepare(`SELECT cv.*,c.phone,c.email,c.company,c.source,c.position,
       c.responsible_id AS contact_responsible_id, ru.name AS contact_responsible_name,
       (SELECT CASE
@@ -3179,7 +3266,7 @@ ${user?.name || ''}`.trim();
       (SELECT author FROM messages WHERE conversation_id=cv.id ORDER BY id DESC LIMIT 1) last_author,
       (SELECT d.amount FROM deals d WHERE d.contact_id=cv.contact_id AND d.stage NOT IN ('won','lost') ORDER BY d.id DESC LIMIT 1) deal_amount,
       (SELECT COUNT(*) FROM messages m WHERE m.conversation_id=cv.id AND m.direction='in' AND m.id > COALESCE((SELECT rm.last_msg_id FROM read_marks rm WHERE rm.conversation_id=cv.id AND rm.user_id=?),0)) unread
-      FROM conversations cv LEFT JOIN contacts c ON c.id=cv.contact_id LEFT JOIN users ru ON ru.id=c.responsible_id ${pw}ORDER BY cv.last_at DESC, cv.id DESC`).all(user.id).map(r => ({ ...r, unread: r.unread || 0 })));
+      FROM conversations cv LEFT JOIN contacts c ON c.id=cv.contact_id LEFT JOIN users ru ON ru.id=c.responsible_id ${pw}ORDER BY cv.last_at DESC, cv.id DESC`).all(user.id, ...params).map(r => ({ ...r, unread: r.unread || 0 })));
     }
     // Начать переписку первым. Беседа появлялась только из входящего сообщения,
     // поэтому менеджер не мог написать клиенту, который ещё не обращался.
