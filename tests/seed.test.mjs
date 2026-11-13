@@ -61,11 +61,18 @@ ok('demo: каталог, шаблоны, правило, конкуренты',
   const fixed = new DatabaseSync(join(r.dir, 'crm.db'));
   const row = fixed.prepare('SELECT body, channel FROM templates WHERE id=1').get();
   ok('старая база: перепутанные текст и канал исправляются при запуске', /Здравствуйте/.test(String(row.body)) && row.channel === 'any', JSON.stringify(row).slice(0, 80));
-  // очистка демо убирает и события ленты, привязанные к демо-сущностям
+  // Демонстрационный разбор ОКК не должен оставаться сиротой после очистки демо-сделки.
+  const demoDeal = fixed.prepare('SELECT id,title FROM deals WHERE demo=1 LIMIT 1').get();
+  const demoReview = fixed.prepare('INSERT INTO quality_reviews(deal_id,deal_title,reviewer_name,demo) VALUES(?,?,?,1)')
+    .run(demoDeal.id,demoDeal.title,'Администратор');
+  fixed.prepare("INSERT INTO quality_review_items(review_id,criterion_key,status,evidence_source,evidence_text) VALUES(?,'greeting','unknown','other','Демо-основание для очистки')")
+    .run(demoReview.lastInsertRowid);
   const removed = cleanDemo(fixed);
-  ok('cleanDemo: демо-события убраны вместе с сущностями', removed > 0
+  ok('cleanDemo: демо-события и проверки ОКК убраны вместе с сущностями', removed > 0
     && fixed.prepare("SELECT COUNT(*) n FROM activities WHERE entity_type IN ('deals','contacts')").get().n === 0
-    && fixed.prepare("SELECT COUNT(*) n FROM activities WHERE text LIKE 'Демонстрационные данные загружены%'").get().n === 0);
+    && fixed.prepare("SELECT COUNT(*) n FROM activities WHERE text LIKE 'Демонстрационные данные загружены%'").get().n === 0
+    && fixed.prepare('SELECT COUNT(*) n FROM quality_reviews').get().n === 0
+    && fixed.prepare('SELECT COUNT(*) n FROM quality_review_items').get().n === 0);
   fixed.close();
 }
 rmSync(r.dir, { recursive: true, force: true });

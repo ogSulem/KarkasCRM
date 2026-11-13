@@ -2,6 +2,7 @@
 // мессенджеров и почты, аналитика, разведка конкурентов. Без внешних зависимостей:
 // Node >= 22.5 (http, node:sqlite, crypto, fetch).
 import http from 'node:http';
+import https from 'node:https';
 import { DatabaseSync } from 'node:sqlite';
 import { createHmac, randomBytes, scrypt, scryptSync, timingSafeEqual } from 'node:crypto';
 import { promisify } from 'node:util';
@@ -90,6 +91,9 @@ PRAGMA synchronous=NORMAL;     -- быстрая запись при WAL и пр
 PRAGMA temp_store=MEMORY;      -- временные таблицы в памяти
 PRAGMA cache_size=-16000;      -- кэш страниц ~16 МБ
 PRAGMA mmap_size=268435456;    -- файл базы читается через память, SELECT быстрее`);
+// SQLite по умолчанию приводит к нижнему регистру только латиницу. Для поиска
+// сделок ОКК регистр русских имён не должен влиять на результат.
+db.function('lower_ru', { deterministic: true }, value => String(value ?? '').toLocaleLowerCase('ru-RU'));
 db.exec(`
 CREATE TABLE IF NOT EXISTS users(id INTEGER PRIMARY KEY,name TEXT,email TEXT UNIQUE,pass TEXT,role TEXT DEFAULT 'manager',active INTEGER DEFAULT 1);
 CREATE TABLE IF NOT EXISTS companies(id INTEGER PRIMARY KEY,name TEXT NOT NULL,inn TEXT,phone TEXT,email TEXT,site TEXT,notes TEXT DEFAULT '',created_at TEXT DEFAULT (datetime('now')));
@@ -106,6 +110,49 @@ CREATE TABLE IF NOT EXISTS automations(id INTEGER PRIMARY KEY,name TEXT NOT NULL
 CREATE TABLE IF NOT EXISTS channels(id INTEGER PRIMARY KEY,provider TEXT DEFAULT 'wazzup',external_id TEXT UNIQUE,name TEXT,transport TEXT,phone TEXT,state TEXT,raw TEXT);
 CREATE TABLE IF NOT EXISTS conversations(id INTEGER PRIMARY KEY,contact_id INTEGER REFERENCES contacts(id) ON DELETE CASCADE,title TEXT,channels TEXT DEFAULT '',channel_id TEXT,external_chat_id TEXT,chat_type TEXT,unread INTEGER DEFAULT 0,assigned_id INTEGER,demo INTEGER DEFAULT 0,last_at TEXT DEFAULT (datetime('now')),UNIQUE(contact_id));
 CREATE TABLE IF NOT EXISTS messages(id INTEGER PRIMARY KEY,conversation_id INTEGER REFERENCES conversations(id) ON DELETE CASCADE,channel TEXT DEFAULT 'whatsapp',direction TEXT DEFAULT 'in',body TEXT,content_uri TEXT,status TEXT,external_id TEXT,author TEXT,subject TEXT,created_at TEXT DEFAULT (datetime('now')));
+-- Проверки ОКК хранят только ручной разбор и доказательства. Снимки названия,
+-- контакта и ответственного остаются в архиве, даже если карточку позже удалят.
+-- Результаты доступны только администратору; сами проверки не меняют CRM-записи.
+CREATE TABLE IF NOT EXISTS quality_reviews(
+  id INTEGER PRIMARY KEY,
+  deal_id INTEGER NOT NULL,
+  deal_title TEXT NOT NULL,
+  contact_id INTEGER,
+  contact_name TEXT DEFAULT '',
+  responsible_id INTEGER,
+  responsible_name TEXT DEFAULT '',
+  stage TEXT DEFAULT '',
+  stage_name TEXT DEFAULT '',
+  source TEXT DEFAULT '',
+  demo INTEGER NOT NULL DEFAULT 0,
+  reviewer_id INTEGER,
+  reviewer_name TEXT NOT NULL,
+  updated_by_id INTEGER,
+  updated_by_name TEXT DEFAULT '',
+  status TEXT NOT NULL DEFAULT 'draft' CHECK(status IN ('draft','complete','no_contact','unavailable')),
+  data_status TEXT NOT NULL DEFAULT 'partial' CHECK(data_status IN ('complete','partial','unavailable')),
+  interaction_type TEXT NOT NULL DEFAULT 'unknown' CHECK(interaction_type IN ('unknown','call','chat','mixed','other')),
+  period_start TEXT DEFAULT '',
+  period_end TEXT DEFAULT '',
+  data_notes TEXT DEFAULT '',
+  summary TEXT DEFAULT '',
+  issues TEXT NOT NULL DEFAULT '[]',
+  next_steps TEXT NOT NULL DEFAULT '[]',
+  crm_observation TEXT DEFAULT '',
+  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+  completed_at TEXT DEFAULT ''
+);
+CREATE TABLE IF NOT EXISTS quality_review_items(
+  id INTEGER PRIMARY KEY,
+  review_id INTEGER NOT NULL REFERENCES quality_reviews(id) ON DELETE CASCADE,
+  criterion_key TEXT NOT NULL,
+  status TEXT NOT NULL DEFAULT '' CHECK(status IN ('','yes','no','na','unknown')),
+  evidence_source TEXT NOT NULL DEFAULT '' CHECK(evidence_source IN ('','message','recording','crm','other')),
+  message_id INTEGER,
+  evidence_text TEXT NOT NULL DEFAULT '',
+  UNIQUE(review_id, criterion_key)
+);
 CREATE TABLE IF NOT EXISTS settings(key TEXT PRIMARY KEY,value TEXT);
 CREATE TABLE IF NOT EXISTS read_marks(user_id INTEGER NOT NULL,conversation_id INTEGER NOT NULL REFERENCES conversations(id) ON DELETE CASCADE,
   last_msg_id INTEGER NOT NULL DEFAULT 0,updated_at TEXT DEFAULT (datetime('now')),PRIMARY KEY(user_id,conversation_id));
@@ -225,6 +272,10 @@ CREATE INDEX IF NOT EXISTS idx_conv_external ON conversations(external_chat_id);
 CREATE INDEX IF NOT EXISTS idx_msg_content_uri ON messages(content_uri);
 CREATE INDEX IF NOT EXISTS idx_camp_items ON campaign_items(campaign_id, status, id);
 CREATE INDEX IF NOT EXISTS idx_camp_queue ON campaigns(status, scheduled_at);
+CREATE INDEX IF NOT EXISTS idx_quality_reviews_status_date ON quality_reviews(status, updated_at DESC, id DESC);
+CREATE INDEX IF NOT EXISTS idx_quality_reviews_deal_date ON quality_reviews(deal_id, completed_at DESC);
+CREATE INDEX IF NOT EXISTS idx_quality_items_review ON quality_review_items(review_id, criterion_key);
+CREATE INDEX IF NOT EXISTS idx_quality_items_key_status ON quality_review_items(criterion_key, status);
 `);
 try { db.exec('CREATE UNIQUE INDEX IF NOT EXISTS idx_msg_ext ON messages(external_id) WHERE external_id IS NOT NULL'); }
 catch (e) { console.error('Не удалось создать уникальный индекс по external_id (в базе есть дубли внешних id):', e.message); }
@@ -275,7 +326,7 @@ try {
   if (moved.changes) console.log(`Любимый раздел перенесён у сотрудников: ${moved.changes}`);
 } catch (e) { console.error('Не удалось перенести любимый раздел:', e.message) }
 
-const SCHEMA_VERSION = 10;
+const SCHEMA_VERSION = 11;
 
 // Дата в местном часовом поясе (в базе время хранится в UTC, а сроки задач —
 // в местном настенном времени; сравнивать их с UTC-«сегодня» нельзя).
@@ -1122,28 +1173,99 @@ async function upsertOutgoing(m) {
 // Вложения Wazzup лежат на сервере вендора и со временем перестают открываться —
 // в истории остаётся пустой пузырь. Забираем файл к себе фоном: ответ вебхуку
 // уходит сразу, а когда копия скачана, ссылка подменяется на локальную.
-const ATTACH_EXT = { 'image/png': 'png', 'image/jpeg': 'jpg', 'image/gif': 'gif', 'image/webp': 'webp', 'image/svg+xml': 'svg', 'application/pdf': 'pdf', 'text/plain': 'txt', 'text/csv': 'csv', 'application/zip': 'zip', 'application/msword': 'doc', 'application/vnd.openxmlformats-officedocument.wordprocessingml.document': 'docx', 'application/vnd.ms-excel': 'xls', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet': 'xlsx', 'video/mp4': 'mp4', 'audio/mpeg': 'mp3', 'audio/ogg': 'ogg' };
+const ATTACH_EXT = { 'image/png': 'png', 'image/jpeg': 'jpg', 'image/gif': 'gif', 'image/webp': 'webp', 'image/svg+xml': 'svg', 'application/pdf': 'pdf', 'text/plain': 'txt', 'text/csv': 'csv', 'application/zip': 'zip', 'application/msword': 'doc', 'application/vnd.openxmlformats-officedocument.wordprocessingml.document': 'docx', 'application/vnd.ms-excel': 'xls', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet': 'xlsx', 'video/mp4': 'mp4', 'video/webm': 'webm', 'video/quicktime': 'mov', 'video/3gpp': '3gp', 'video/x-msvideo': 'avi',
+  'audio/mpeg': 'mp3', 'audio/ogg': 'ogg', 'audio/wav': 'wav', 'audio/mp4': 'm4a',
+  'audio/x-m4a': 'm4a', 'audio/x-wav': 'wav', 'audio/x-aac': 'aac', 'audio/x-opus+ogg': 'ogg', 'audio/aac': 'aac', 'audio/amr': 'amr', 'audio/webm': 'weba' };
 // Вложение забираем только с публичных адресов: ссылка из вебхука не должна
 // становиться способом заглянуть на внутренние ресурсы сервера (SSRF).
 // Перенаправления проходим вручную и каждый адрес проверяем заново.
+function ipv6Groups(raw) {
+  const ip = String(raw || '').split('%')[0].toLowerCase();
+  if (!ip.includes(':')) return null;
+  let source = ip;
+  // DNS может вернуть IPv4 в записи IPv6. Разбираем её явно, чтобы запись
+  // с внутренним IPv4 не обошла проверку диапазонов.
+  if (source.includes('.')) {
+    const last = source.slice(source.lastIndexOf(':') + 1).split('.').map(Number);
+    if (last.length !== 4 || last.some(n => !Number.isInteger(n) || n < 0 || n > 255)) return null;
+    source = source.slice(0, source.lastIndexOf(':')) + ':' + ((last[0] << 8) | last[1]).toString(16) + ':' + ((last[2] << 8) | last[3]).toString(16);
+  }
+  const parts = source.split('::');
+  if (parts.length > 2) return null;
+  const left = parts[0] ? parts[0].split(':') : [];
+  const right = parts.length === 2 && parts[1] ? parts[1].split(':') : [];
+  if (left.concat(right).some(x => !/^[0-9a-f]{1,4}$/.test(x))) return null;
+  const missing = 8 - left.length - right.length;
+  if ((parts.length === 1 && missing !== 0) || (parts.length === 2 && missing < 1)) return null;
+  return [...left.map(x => parseInt(x,16)), ...Array(missing).fill(0), ...right.map(x => parseInt(x,16))];
+}
 const isPublicIp = ip => {
-  if (!ip || ip.includes(':') || ip.includes('%')) return false;
-  const [a, b] = ip.split('.').map(Number);
-  if (!Number.isFinite(a) || !Number.isFinite(b)) return false;
-  if (a === 0 || a === 10 || a === 127) return false;
-  if (a === 169 && b === 254) return false;
-  if (a === 172 && b >= 16 && b <= 31) return false;
-  if (a === 192 && b === 168) return false;
-  return a < 224;
+  if (!ip || String(ip).includes('%')) return false;
+  if (String(ip).includes(':')) {
+    const g = ipv6Groups(ip);
+    if (!g || g.length !== 8) return false;
+    // Общедоступный IPv6 находится в 2000::/3. Отдельно блокируем сети
+    // документации, служебные диапазоны, 6to4 и известный префикс NAT64.
+    if (g[0] < 0x2000 || g[0] > 0x3fff) return false;
+    if (g[0] === 0x2001 && (g[1] <= 0x01ff || g[1] === 0x0db8)) return false;
+    if (g[0] === 0x2002 || g[0] === 0x3fff) return false;
+    if (g[0] === 0x0064 && g[1] === 0xff9b) return false;
+    return true;
+  }
+  const octets = String(ip).split('.').map(Number);
+  if (octets.length !== 4 || octets.some(n => !Number.isInteger(n) || n < 0 || n > 255)) return false;
+  const [a,b,c,d] = octets;
+  if (a === 0 || a === 10 || a === 127 || a >= 224) return false;
+  if (a === 100 && b >= 64 && b <= 127) return false;             // служебная сеть провайдеров
+  if (a === 169 && b === 254) return false;                       // link-local
+  if (a === 172 && b >= 16 && b <= 31) return false;               // private
+  if (a === 192 && (b === 0 || b === 2 || b === 168)) return false; // служебная, тестовая и частная сеть
+  if (a === 192 && b === 88 && c === 99) return false;             // устаревший ретранслятор
+  if (a === 198 && (b === 18 || b === 19 || (b === 51 && c === 100))) return false; // тестовая сеть
+  if (a === 203 && b === 0 && c === 113) return false;
+  if (a === 255 && b === 255 && c === 255 && d === 255) return false;
+  return true;
 };
 async function safeRemoteUrl(raw) {
   let url; try { url = new URL(String(raw)); } catch { return null; }
-  if (!/^https?:$/.test(url.protocol)) return null;
+  if (!/^https?:$/.test(url.protocol) || url.username || url.password) return null;
+  if (url.hostname.startsWith('[')) return null; // IPv6 передаём только как проверенную DNS-запись
   if (/^(localhost|.*\.localhost|.*\.local|.*\.internal)$/i.test(url.hostname)) return null;
-  if (url.hostname.startsWith('[')) return null;
+  const defaultPort = url.protocol === 'https:' ? '443' : '80';
+  if (url.port && url.port !== defaultPort) return null;
   const ips = await dnsLookup(url.hostname, { all: true }).catch(() => []);
-  if (!ips.length || !ips.every(i => isPublicIp(i.address))) return null;
-  return url;
+  // Проверяется каждый адрес; выбранный адрес передаётся HTTP-клиенту напрямую,
+  // чтобы подмена DNS между проверкой и скачиванием не обошла фильтр SSRF.
+  const publicIps = ips.filter(i => isPublicIp(i.address));
+  if (!ips.length || publicIps.length !== ips.length) return null;
+  return { url, address: publicIps[0].address };
+}
+function requestPublicAttachment(url, address) {
+  const client = url.protocol === 'https:' ? https : http;
+  return new Promise((resolve,reject)=>{
+    let settled=false,timer;
+    const fail=e=>{ if(settled)return; settled=true; clearTimeout(timer); reject(e); };
+    const req=client.request({
+      protocol:url.protocol,hostname:url.hostname,port:url.port||undefined,
+      path:url.pathname+url.search,method:'GET',
+      headers:{'User-Agent':'KarkasCRM attachment fetch',Accept:'*/*','Accept-Encoding':'identity'},
+      // Подключаемся ровно к проверенному IP; имя сервера TLS и сертификат при этом
+      // сверяются с исходным доменом хранилища.
+      lookup:(_host,_options,cb)=>cb(null,address,address.includes(':')?6:4),
+      ...(url.protocol==='https:'?{servername:url.hostname}:{}),
+    },res=>{
+      if(settled){res.destroy();return;}
+      settled=true;
+      // Таймер действует до конца тела ответа, а не только до заголовков.
+      res.once('end',()=>clearTimeout(timer));
+      res.once('close',()=>clearTimeout(timer));
+      resolve(res);
+    });
+    timer=setTimeout(()=>req.destroy(new Error('Ссылка на файл не ответила за 15 секунд')),15000);
+    timer.unref?.();
+    req.on('error',fail);
+    req.end();
+  });
 }
 /* Файл вложения появляется в папке uploads уже готовым: пишем во временное имя
    и переименовываем. Без этого сбой в момент записи оставляет обрезанный файл,
@@ -1156,33 +1278,111 @@ function storeUpload(stored, buf) {
   renameSync(tmp, dest);
   return '/uploads/' + stored;
 }
-async function fetchAttachment(uri) {
-  let url = await safeRemoteUrl(uri);
-  if (!url) return null;
-  let res = null;
-  for (let hop = 0; hop < 3; hop++) {
-    res = await fetch(url, { signal: AbortSignal.timeout(15000), redirect: 'manual' });
-    if ([301, 302, 303, 307, 308].includes(res.status)) {
-      const loc = res.headers.get('location');
-      if (!loc) break;
-      url = await safeRemoteUrl(new URL(loc, url).toString());
-      if (!url) return null;
-      continue;
-    }
-    break;
+// Вложения скачиваются ограниченным числом потоков. Даже при 50 сотрудниках
+// несколько крупных записей не должны одновременно занять всю память контейнера.
+const ATTACH_FETCH_LIMIT = 4;
+const ATTACH_FETCH_QUEUE_LIMIT = 128;
+let attachFetchActive = 0;
+const attachFetchWaiters = [];
+const attachPending = new Set();
+async function acquireAttachmentSlot() {
+  if (attachFetchActive >= ATTACH_FETCH_LIMIT) {
+    if (attachFetchWaiters.length >= ATTACH_FETCH_QUEUE_LIMIT) return false;
+    await new Promise(resolve => attachFetchWaiters.push(resolve));
   }
-  if (!res || !res.ok) return null;
-  if (Number(res.headers.get('content-length') || 0) > 15 * 1024 * 1024) return null;
-  const buf = Buffer.from(await res.arrayBuffer());
-  if (!buf.length || buf.length > 15 * 1024 * 1024) return null;
-  const ct = String(res.headers.get('content-type') || '').split(';')[0].trim().toLowerCase();
-  const ext = ATTACH_EXT[ct] || (String(uri).match(/\.(png|jpe?g|gif|webp|svg|pdf|txt|csv|zip|docx?|xlsx?|mp4|mp3|ogg)(?:\?|$)/i)?.[1] || 'bin').toLowerCase();
-  const stored = `${localDate().replace(/-/g, '')}-${randomBytes(6).toString('hex')}-wazzup.${ext}`;
-  mkdir(UPLOAD_DIR, { recursive: true });
-  return storeUpload(stored, buf);
+  attachFetchActive++;
+  return true;
+}
+function releaseAttachmentSlot() {
+  attachFetchActive = Math.max(0, attachFetchActive - 1);
+  attachFetchWaiters.shift()?.();
+}
+async function fetchAttachment(uri) {
+  if (!await acquireAttachmentSlot()) {
+    const e = new Error('Очередь загрузки вложений занята. Подождите и повторите попытку.');
+    e.statusCode = 503;
+    throw e;
+  }
+  try {
+    let target = await safeRemoteUrl(uri);
+    if (!target) return null;
+    let res = null;
+    for (let hop = 0; hop < 3; hop++) {
+      res = await requestPublicAttachment(target.url, target.address);
+      if ([301,302,303,307,308].includes(Number(res.statusCode))) {
+        const loc = res.headers.location;
+        res.resume();
+        if (!loc) return null;
+        const next = new URL(loc, target.url);
+        if (target.url.protocol === 'https:' && next.protocol !== 'https:') return null;
+        target = await safeRemoteUrl(next.toString());
+        if (!target) return null;
+        continue;
+      }
+      break;
+    }
+    if (!res || res.statusCode !== 200) { res?.resume(); return null; }
+    const maxBytes = 15 * 1024 * 1024;
+    if (Number(res.headers['content-length'] || 0) > maxBytes) { res.destroy(); return null; }
+    // Content-Length у CDN может отсутствовать или лгать: читаем поток с жёстким
+    // пределом, чтобы одна ссылка из вебхука не заняла всю память сервера.
+    const chunks = []; let total = 0;
+    try {
+      for await (const chunk of res) {
+        total += chunk.length;
+        if (total > maxBytes) { res.destroy(); return null; }
+        chunks.push(Buffer.from(chunk));
+      }
+    } catch { return null; }
+    if (!total) return null;
+    const buf = Buffer.concat(chunks, total);
+    const ct = String(res.headers['content-type'] || '').split(';')[0].trim().toLowerCase();
+    const ext = ATTACH_EXT[ct] || (String(uri).match(/\.(png|jpe?g|gif|webp|svg|pdf|txt|csv|zip|docx?|xlsx?|mp4|m4v|webm|mov|3gp|avi|mp3|ogg|opus|wav|weba|m4a|aac|amr)(?:\?|$)/i)?.[1] || 'bin').toLowerCase();
+    const stored = `${localDate().replace(/-/g, '')}-${randomBytes(6).toString('hex')}-wazzup.${ext}`;
+    mkdir(UPLOAD_DIR, { recursive: true });
+    return storeUpload(stored, buf);
+  } finally { releaseAttachmentSlot(); }
+}
+/* Ссылка вендора живёт несколько часов: если файл не успели забрать, в чате
+   остаётся адрес, который уже не открывается. Повторная загрузка возвращает
+   вложение в CRM — файл ложится в uploads и сообщение ссылается на него. */
+async function refetchAttachment(messageId) {
+  const m = db.prepare('SELECT * FROM messages WHERE id=?').get(messageId);
+  if (!m) return { status: 404, body: { error: 'Сообщение не найдено' } };
+  const uri = String(m.content_uri || '');
+  if (!uri) return { status: 400, body: { error: 'У сообщения нет вложения' } };
+  if (!/^https?:\/\//i.test(uri)) return { status: 400, body: { error: 'Файл уже сохранён в CRM' } };
+  const key = 'message:' + Number(messageId);
+  if (attachPending.has(key)) return { status: 409, body: { error: 'Этот файл уже загружается в CRM. Подождите несколько секунд и обновите чат.' } };
+  attachPending.add(key);
+  try {
+    let local;
+    try { local = await fetchAttachment(uri); }
+    catch (e) {
+      if (e.statusCode === 503) return { status: 503, body: { error: e.message } };
+      return { status: 502, body: { error: 'Не удалось получить файл с источника. Ссылка могла устареть; попросите клиента отправить файл ещё раз.' } };
+    }
+    if (!local) return { status: 502, body: { error: 'Источник не отдал файл: ссылка устарела или недоступна. Попросите клиента отправить его ещё раз.' } };
+    db.prepare('UPDATE messages SET content_uri=? WHERE id=?').run(local, messageId);
+    let size = null, type = null;
+    try {
+      const st = statSync(join(UPLOAD_DIR, basename(local)));
+      if (st.isFile()) { size = st.size; db.prepare('UPDATE messages SET content_size=? WHERE id=?').run(size, messageId); }
+      type = MIME[extname(local).toLowerCase()] || null;
+      if (type) db.prepare('UPDATE messages SET content_type=? WHERE id=?').run(type, messageId);
+    } catch { }
+    return {
+      status: 200,
+      body: { saved: true, url: local, size, contentType: type, message: db.prepare('SELECT * FROM messages WHERE id=?').get(messageId) },
+    };
+  } finally { attachPending.delete(key); }
 }
 function queueAttachmentDownload(convId, uri, externalId) {
   if (!externalId || !/^https?:\/\//i.test(String(uri || ''))) return;
+  const rowId = db.prepare('SELECT id FROM messages WHERE external_id=? AND content_uri=?').get(externalId, uri)?.id;
+  const pendingKey = rowId ? 'message:' + Number(rowId) : 'external:' + externalId;
+  if (attachPending.has(pendingKey)) return;
+  attachPending.add(pendingKey);
   setTimeout(async () => {
     try {
       const local = await fetchAttachment(uri);
@@ -1194,10 +1394,14 @@ function queueAttachmentDownload(convId, uri, externalId) {
         try {
           const st = statSync(join(UPLOAD_DIR, basename(local)));
           if (st.isFile()) db.prepare('UPDATE messages SET content_size=? WHERE external_id=? AND content_uri=?').run(st.size, externalId, local);
+          const type = MIME[extname(local).toLowerCase()];
+          if (type) db.prepare('UPDATE messages SET content_type=? WHERE external_id=? AND content_uri=?').run(type, externalId, local);
         } catch { }
-        broadcast('message', { conversation_id: convId, direction: 'out' });
+        const direction = db.prepare('SELECT direction FROM messages WHERE external_id=? AND content_uri=?').get(externalId, local)?.direction || 'in';
+        broadcast('message', { conversation_id: convId, direction });
       }
     } catch { /* ссылка вендора осталась — показываем её как есть */ }
+    finally { attachPending.delete(pendingKey); }
   }, 50);
 }
 
@@ -1760,11 +1964,22 @@ const readBody = async (req, maxBytes = 5e6) => {
   try { return s ? JSON.parse(s) : {}; }
   catch { const e = new Error('Некорректный JSON в запросе — проверьте данные формы'); e.statusCode = 400; throw e; }
 };
-const MIME = { '.html': 'text/html', '.js': 'text/javascript', '.css': 'text/css', '.svg': 'image/svg+xml', '.png': 'image/png', '.jpg': 'image/jpeg', '.jpeg': 'image/jpeg', '.gif': 'image/gif', '.webp': 'image/webp', '.ico': 'image/x-icon', '.pdf': 'application/pdf', '.zip': 'application/zip', '.txt': 'text/plain', '.csv': 'text/csv', '.doc': 'application/msword', '.docx': 'application/vnd.openxmlformats-officedocument.wordprocessingml.document', '.xls': 'application/vnd.ms-excel', '.xlsx': 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet', '.patch': 'text/plain', '.diff': 'text/plain' };
+const MIME = { '.html': 'text/html', '.js': 'text/javascript', '.css': 'text/css', '.svg': 'image/svg+xml', '.png': 'image/png', '.jpg': 'image/jpeg', '.jpeg': 'image/jpeg', '.gif': 'image/gif', '.webp': 'image/webp', '.ico': 'image/x-icon', '.pdf': 'application/pdf', '.zip': 'application/zip', '.txt': 'text/plain', '.csv': 'text/csv', '.doc': 'application/msword', '.docx': 'application/vnd.openxmlformats-officedocument.wordprocessingml.document', '.xls': 'application/vnd.ms-excel', '.xlsx': 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet', '.mp4': 'video/mp4', '.m4v': 'video/mp4', '.webm': 'video/webm', '.mov': 'video/quicktime', '.3gp': 'video/3gpp', '.avi': 'video/x-msvideo', '.mp3': 'audio/mpeg', '.ogg': 'audio/ogg', '.opus': 'audio/ogg', '.wav': 'audio/wav', '.weba': 'audio/webm', '.m4a': 'audio/mp4', '.aac': 'audio/aac', '.amr': 'audio/amr', '.patch': 'text/plain', '.diff': 'text/plain',
+  // записи звонков, голосовые и видео из мессенджеров: без своего типа файл
+  // отдаётся как application/octet-stream и браузер не умеет его проигрывать
+  '.mp4': 'video/mp4', '.webm': 'video/webm', '.mov': 'video/quicktime', '.3gp': 'video/3gpp',
+  '.mp3': 'audio/mpeg', '.ogg': 'audio/ogg', '.opus': 'audio/ogg', '.wav': 'audio/wav',
+  '.m4a': 'audio/mp4', '.aac': 'audio/aac', '.amr': 'audio/amr' };
 const IMAGE_UPLOAD_TYPES = ['image/png', 'image/jpeg', 'image/gif', 'image/webp'];
+const CHAT_UPLOADS_AT_ONCE = 8;
+let chatUploadsActive = 0;
 const FILE_UPLOAD_TYPES = [...IMAGE_UPLOAD_TYPES, 'application/pdf', 'text/plain', 'text/csv', 'application/zip',
   'application/msword', 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
-  'application/vnd.ms-excel', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'];
+  'application/vnd.ms-excel', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+  // видео и звук: менеджер отправляет клиенту ролик объекта или голосовое,
+  // а РОП прикладывает к сделке запись звонка
+  'video/mp4', 'video/webm', 'video/quicktime', 'video/3gpp', 'video/x-msvideo',
+  'audio/mpeg', 'audio/ogg', 'audio/wav', 'audio/webm', 'audio/mp4', 'audio/aac', 'audio/amr'];
 const safeFileName = name => String(name || 'файл').normalize('NFKD').replace(/[^\wа-яё ._\-()]/gi, '_').replace(/\s+/g, ' ').trim().slice(0, 120) || 'файл';
 // Имя файла на диске и в URL — только ASCII (кириллица транслитерируется), исходное имя остаётся в content_name.
 const TRANSLIT = { а: 'a', б: 'b', в: 'v', г: 'g', д: 'd', е: 'e', ё: 'e', ж: 'zh', з: 'z', и: 'i', й: 'y', к: 'k', л: 'l', м: 'm', н: 'n', о: 'o', п: 'p', р: 'r', с: 's', т: 't', у: 'u', ф: 'f', х: 'h', ц: 'ts', ч: 'ch', ш: 'sh', щ: 'sch', ъ: '', ы: 'y', ь: '', э: 'e', ю: 'yu', я: 'ya' };
@@ -2021,6 +2236,50 @@ try {
   if (synced) console.log(`База: имя ответственного обновлено у ${synced} сделок.`);
 } catch (e) { console.error('Уборка базы при старте:', e.message) }
 
+const QUALITY_CRITERIA = [
+  { key: 'response_speed', block: 'Скорость', title: 'Первый живой ответ в срок', guide: 'От сообщения клиента до ответа сотрудника: до 5 минут в чате, до 15 минут в других каналах. Автоответ не считается.', critical: true, evidence: 'таймлайн CRM и переписка' },
+  { key: 'greeting', block: 'Контакт', title: 'Приветствие', guide: 'Вежливо поздоровался. Учитывайте канал и формат короткого первого ответа.', critical: false, evidence: 'переписка или запись звонка' },
+  { key: 'introduce_company', block: 'Контакт', title: 'Представился и назвал компанию', guide: 'Назвал своё имя и «Каркас Тайги», если это уместно в канале.', critical: false, evidence: 'переписка или запись звонка' },
+  { key: 'first_answer', block: 'Контакт', title: 'Ответил по сути первого вопроса', guide: 'Сначала ответ на вопрос клиента, затем просьба о контакте. Не повторять уже известные сведения.', critical: true, evidence: 'первое обращение и ответ' },
+  { key: 'customer_name', block: 'Контакт', title: 'Уточнил имя клиента', guide: 'Проверяйте уместность: имя может быть уже указано в карточке или не требоваться для короткого ответа.', critical: false, evidence: 'переписка или запись звонка' },
+  { key: 'need', block: 'Диагностика', title: 'Выяснил потребность', guide: 'Объект, назначение, площадь или другие важные для клиента параметры.', critical: false, evidence: 'переписка или запись звонка' },
+  { key: 'budget', block: 'Диагностика', title: 'Выяснил бюджет', guide: 'Уточнил ориентир тактично, без давления. Не требовать, если контекст делает вопрос неуместным.', critical: false, evidence: 'переписка или запись звонка' },
+  { key: 'location', block: 'Диагностика', title: 'Выяснил участок и город строительства', guide: 'Не считать город подтверждением наличия участка. Не додумывать, если это не прозвучало.', critical: false, evidence: 'переписка, запись или поля CRM' },
+  { key: 'timeline', block: 'Диагностика', title: 'Выяснил сроки', guide: 'Когда клиент планирует покупать или начинать строительство.', critical: false, evidence: 'переписка или запись звонка' },
+  { key: 'benefits', block: 'Презентация', title: 'Объяснил выгоды простым языком', guide: 'Связал подтверждённые преимущества с запросом конкретного клиента.', critical: false, evidence: 'переписка или запись звонка' },
+  { key: 'configuration', block: 'Презентация', title: 'Предложил подходящую комплектацию', guide: 'Вариант соответствует запросу, а состав и ограничения не придуманы.', critical: false, evidence: 'переписка или запись звонка' },
+  { key: 'payment', block: 'Презентация', title: 'Обсудил подходящий способ оплаты', guide: 'Условия проверены и соответствуют интересу клиента; не обещать неподтверждённую рассрочку или ипотеку.', critical: false, evidence: 'переписка, запись или утверждённые условия' },
+  { key: 'objection', block: 'Возражения', title: 'Ответил на возражение по существу', guide: 'Только если клиент действительно возражал: выслушал, уточнил причину, ответил фактами без спора.', critical: true, evidence: 'переписка или запись звонка' },
+  { key: 'next_step', block: 'Договорённость', title: 'Согласовал следующий шаг с датой и временем', guide: 'Действие, срок и канал подтверждены клиентом; «свяжемся» без даты недостаточно.', critical: true, evidence: 'переписка, запись или задача CRM' },
+  { key: 'crm_fields', block: 'CRM', title: 'Карточка заполнена по фактам', guide: 'Объект, город, участок, бюджет, сроки и оплата заполнены только если это выяснено.', critical: false, evidence: 'карточка сделки и контакт' },
+  { key: 'task_followup', block: 'CRM', title: 'Есть задача на следующий контакт', guide: 'Задача назначена с понятным сроком; просроченной задачи по этому шагу нет.', critical: true, evidence: 'список задач CRM' },
+  { key: 'materials', block: 'Сервис', title: 'Отправил запрошенные материалы', guide: 'Только нужные клиенту фото, каталог или видео; без спама и с пояснением.', critical: false, evidence: 'переписка' },
+  { key: 'followup', block: 'Сервис', title: 'Сделал уместное повторное касание', guide: 'Если клиент не ответил — одно-два своевременных касания с новой пользой, не дублирующие спам.', critical: false, evidence: 'переписка и задачи CRM' },
+];
+const QUALITY_KEYS = new Set(QUALITY_CRITERIA.map(x => x.key));
+const QUALITY_SOURCES = new Set(['message', 'recording', 'crm', 'other']);
+const qParseArray = value => { try { const v = JSON.parse(value || '[]'); return Array.isArray(v) ? v : []; } catch { return []; } };
+const qStats = items => {
+  const counts = { yes: 0, no: 0, na: 0, unknown: 0, empty: 0 };
+  for (const item of items) counts[item.status] = (counts[item.status] || 0) + 1;
+  const applicable = counts.yes + counts.no;
+  const criticalFailures = QUALITY_CRITERIA.filter(c => c.critical
+    && items.some(item => item.criterion_key === c.key && item.status === 'no')).length;
+  return {
+    confirmed: counts.yes, applicable, criticalFailures,
+    notApplicable: counts.na, insufficient: counts.unknown,
+    unreviewed: counts.empty,
+    percent: applicable ? Math.round(counts.yes * 100 / applicable) : null,
+    coverage: Math.round(applicable * 100 / QUALITY_CRITERIA.length),
+    total: QUALITY_CRITERIA.length,
+  };
+};
+const qReviewShape = (row, items) => ({
+  ...row,
+  issues: qParseArray(row.issues), next_steps: qParseArray(row.next_steps),
+  score: ['complete'].includes(row.status) ? qStats(items) : null,
+});
+
 export const server = http.createServer(async (req, res) => {
   const u = new URL(req.url, `http://${req.headers.host}`), p = u.pathname;
   applySecurityHeaders(req, res);
@@ -2256,7 +2515,7 @@ export const server = http.createServer(async (req, res) => {
     // дополнительно фильтруются по владельцу.
     if (user && user.role === 'partner' && p.startsWith('/api/')) {
       const PARTNER_GET = [/^\/api\/me$/, /^\/api\/meta$/, /^\/api\/events$/, /^\/api\/dashboard$/, /^\/api\/pipelines$/, /^\/api\/users$/, /^\/api\/deals(\/\d+)?$/, /^\/api\/contacts(\/\d+)?$/, /^\/api\/tasks(\/\d+)?$/, /^\/api\/notes(\/\d+)?$/, /^\/api\/conversations$/, /^\/api\/conversations\/\d+\/messages$/, /^\/api\/custom-fields$/, /^\/api\/prices$/, /^\/api\/products$/, /^\/api\/templates$/, /^\/api\/companies$/, /^\/api\/deals\/\d+\/(print|products)$/];
-      const PARTNER_WRITE = [/^\/api\/me\/(password|theme|pref)$/, /^\/api\/deals(\/\d+)?$/, /^\/api\/contacts(\/\d+)?$/, /^\/api\/tasks(\/\d+)?$/, /^\/api\/notes(\/\d+)?$/, /^\/api\/conversations$/, /^\/api\/conversations\/read$/, /^\/api\/conversations\/\d+\/(messages|upload|email)$/, /^\/api\/deals\/\d+\/(send-doc|products)$/, /^\/api\/deal_products\/\d+$/];
+      const PARTNER_WRITE = [/^\/api\/me\/(password|theme|pref)$/, /^\/api\/deals(\/\d+)?$/, /^\/api\/contacts(\/\d+)?$/, /^\/api\/tasks(\/\d+)?$/, /^\/api\/notes(\/\d+)?$/, /^\/api\/conversations$/, /^\/api\/conversations\/read$/, /^\/api\/conversations\/\d+\/(messages|upload|email)$/, /^\/api\/messages\/\d+\/refetch$/, /^\/api\/deals\/\d+\/(send-doc|products)$/, /^\/api\/deal_products\/\d+$/];
       if (!(req.method === 'GET' || req.method === 'HEAD' ? PARTNER_GET : PARTNER_WRITE).some(re => re.test(p)))
         return json(res, 403, { error: 'Партнёру доступны его сделки, клиенты и задачи' });
       if (!partnerOwnsPath(user, p)) return json(res, 403, { error: 'Это чужая карточка: партнёр видит только свои лиды' });
@@ -2805,61 +3064,277 @@ export const server = http.createServer(async (req, res) => {
       }
       return json(res, 404, { error: 'Не найдено' });
     }
-    // ===== Контроль качества (ОКК): автоматический разбор работы менеджеров для РОПа =====
+    // ===== ОКК: ручная проверка с цитатами и связью с источником =====
+    // Ни один балл не выводится из догадок или исторических порогов. Проверку
+    // создаёт руководитель, каждому критерию назначает статус и сохраняет
+    // подтверждение. Разбор не меняет сделку, задачу и переписку.
+    if (p === '/api/quality/deals' && req.method === 'GET') {
+      if (!requireAdmin(user, res)) return;
+      const q = String(u.searchParams.get('q') || '').trim().slice(0, 100);
+      const needle = q;
+      const limit = Math.min(60, Math.max(1, Math.trunc(Number(u.searchParams.get('limit')) || 30)));
+      // Сначала ограничиваем выборку 30 сделками, затем считаем историю чатов и
+      // число проверок только для них. Иначе поиск списка на большой базе сделал
+      // бы два коррелированных подсчёта для каждой из десятков тысяч сделок.
+      const rows = db.prepare(`WITH candidate AS (
+          SELECT d.id,d.title,d.stage,COALESCE(st.name,d.stage) stage_name,d.responsible,d.responsible_id,
+            COALESCE(c.id,0) contact_id,COALESCE(c.name,'') contact_name,COALESCE(c.source,'') source,d.created_at,d.updated_at
+          FROM deals d LEFT JOIN contacts c ON c.id=d.contact_id
+          LEFT JOIN stages st ON st.pipeline_id=d.pipeline_id AND st.code=d.stage
+          WHERE (?='' OR instr(lower_ru(d.title),lower_ru(?))>0 OR instr(lower_ru(COALESCE(c.name,'')),lower_ru(?))>0
+            OR instr(lower_ru(COALESCE(d.responsible,'')),lower_ru(?))>0 OR instr(CAST(d.id AS TEXT),?)>0)
+          ORDER BY COALESCE(d.updated_at,d.created_at) DESC,d.id DESC LIMIT ?
+        )
+        SELECT x.id,x.title,x.stage,x.stage_name,x.responsible,x.responsible_id,x.contact_name,x.source,x.created_at,x.updated_at,
+          (SELECT COUNT(*) FROM conversations cv JOIN messages m ON m.conversation_id=cv.id WHERE cv.contact_id=x.contact_id) message_count,
+          (SELECT MAX(m.created_at) FROM conversations cv JOIN messages m ON m.conversation_id=cv.id WHERE cv.contact_id=x.contact_id) last_message_at,
+          (SELECT COUNT(*) FROM quality_reviews qr WHERE qr.deal_id=x.id) review_count
+        FROM candidate x ORDER BY COALESCE(x.updated_at,x.created_at) DESC,x.id DESC`).all(q, needle, needle, needle, needle, limit);
+      return json(res, 200, { rows });
+    }
+    if (p === '/api/quality/reviews' && req.method === 'GET') {
+      if (!requireAdmin(user, res)) return;
+      const days = Math.min(365, Math.max(1, Math.trunc(Number(u.searchParams.get('days')) || 90)));
+      const since = new Date(Date.now() - days * 864e5).toISOString().slice(0, 19).replace('T', ' ');
+      const rows = db.prepare(`SELECT * FROM quality_reviews
+        WHERE status='draft' OR completed_at>=?
+        ORDER BY CASE WHEN status='draft' THEN 0 ELSE 1 END,updated_at DESC,id DESC LIMIT 100`).all(since);
+      const reviews = rows.map(row => {
+        const items = db.prepare('SELECT criterion_key,status,evidence_source,message_id,evidence_text FROM quality_review_items WHERE review_id=?').all(row.id);
+        return qReviewShape(row, items);
+      });
+      const summary = { drafts: 0, complete: 0, no_contact: 0, unavailable: 0 };
+      db.prepare(`SELECT status,COUNT(*) n FROM quality_reviews
+        WHERE status='draft' OR completed_at>=? GROUP BY status`).all(since)
+        .forEach(r => { summary[r.status] = r.n; });
+      const grouped = db.prepare(`SELECT i.criterion_key,i.status,COUNT(*) n
+        FROM quality_review_items i JOIN quality_reviews r ON r.id=i.review_id
+        WHERE r.status='complete' AND r.completed_at>=?
+        GROUP BY i.criterion_key,i.status`).all(since);
+      const byCriterion = new Map();
+      for (const row of grouped) {
+        if (!byCriterion.has(row.criterion_key)) byCriterion.set(row.criterion_key, { yes: 0, no: 0, na: 0, unknown: 0 });
+        byCriterion.get(row.criterion_key)[row.status] = row.n;
+      }
+      const criteria = QUALITY_CRITERIA.map(c => {
+        const n = byCriterion.get(c.key) || { yes: 0, no: 0, na: 0, unknown: 0 };
+        const applicable = n.yes + n.no;
+        return { ...c, ...n, applicable, percent: applicable ? Math.round(n.yes * 100 / applicable) : null, coverage: summary.complete ? Math.round(applicable * 100 / summary.complete) : 0 };
+      });
+      const total = db.prepare(`SELECT COUNT(*) n FROM quality_reviews WHERE status='draft' OR completed_at>=?`).get(since).n;
+      return json(res, 200, { days, total, summary, criteria, reviews, truncated: total > reviews.length });
+    }
+    if (p === '/api/quality/reviews' && req.method === 'POST') {
+      if (!requireAdmin(user, res)) return;
+      const b = await readBody(req);
+      const dealId = Number(b.deal_id);
+      if (!Number.isSafeInteger(dealId) || dealId < 1) return json(res, 400, { error: 'Выберите сделку для проверки' });
+      const deal = db.prepare(`SELECT d.id,d.title,d.stage,d.responsible,d.responsible_id,d.demo,
+          COALESCE(c.id,0) contact_id,COALESCE(c.name,'') contact_name,COALESCE(c.source,'') source,
+          COALESCE(st.name,d.stage) stage_name,u.name current_responsible
+        FROM deals d LEFT JOIN contacts c ON c.id=d.contact_id
+        LEFT JOIN stages st ON st.pipeline_id=d.pipeline_id AND st.code=d.stage
+        LEFT JOIN users u ON u.id=d.responsible_id WHERE d.id=?`).get(dealId);
+      if (!deal) return json(res, 404, { error: 'Сделка не найдена — обновите список' });
+      const dbTitle = String(deal.title || '').trim();
+      if (!dbTitle) return json(res, 400, { error: 'У сделки нет названия — сначала заполните карточку' });
+      let id;
+      db.exec('BEGIN IMMEDIATE');
+      try {
+        const result = db.prepare(`INSERT INTO quality_reviews
+          (deal_id,deal_title,contact_id,contact_name,responsible_id,responsible_name,stage,stage_name,source,
+           demo,reviewer_id,reviewer_name,updated_by_id,updated_by_name)
+          VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)`).run(
+          deal.id, dbTitle.slice(0,300), Number(deal.contact_id) || null, String(deal.contact_name || '').slice(0,200),
+          deal.responsible_id || null, String(deal.current_responsible || deal.responsible || '').slice(0,200),
+          String(deal.stage || '').slice(0,40), String(deal.stage_name || '').slice(0,120), String(deal.source || '').slice(0,60), Number(deal.demo) === 1 ? 1 : 0,
+          user.id, user.name, user.id, user.name);
+        id = Number(result.lastInsertRowid);
+        const insert = db.prepare('INSERT INTO quality_review_items(review_id,criterion_key) VALUES(?,?)');
+        for (const criterion of QUALITY_CRITERIA) insert.run(id, criterion.key);
+        db.exec('COMMIT');
+      } catch (e) { db.exec('ROLLBACK'); throw e; }
+      return json(res, 201, { id, status: 'draft' });
+    }
+    const mReview = p.match(/^\/api\/quality\/reviews\/(\d+)$/);
+    if (mReview) {
+      if (!requireAdmin(user, res)) return;
+      const id = Number(mReview[1]);
+      const review = db.prepare('SELECT * FROM quality_reviews WHERE id=?').get(id);
+      if (!review) return json(res, 404, { error: 'Проверка ОКК не найдена' });
+      if (req.method === 'GET') {
+        const items = db.prepare('SELECT * FROM quality_review_items WHERE review_id=? ORDER BY id').all(id);
+        const messages = review.contact_id ? db.prepare(`SELECT m.id,m.conversation_id,m.direction,m.channel,m.body,m.content_uri,m.content_name,m.content_type,m.content_size,m.author,m.created_at
+          FROM conversations cv JOIN messages m ON m.conversation_id=cv.id
+          WHERE cv.contact_id=? ORDER BY m.created_at DESC,m.id DESC LIMIT 100`).all(review.contact_id).reverse().map(m => ({
+            ...m, body: String(m.body || '').slice(0, 1200),
+          })) : [];
+        // Если доказательство старше окна последних ста сообщений, добавляем
+        // именно его по сохранённому id: завершённая проверка всегда открывает
+        // свой источник, не вытягивая всю историю чата в браузер.
+        if (review.contact_id) {
+          const have = new Set(messages.map(m => Number(m.id)));
+          const linked = db.prepare(`SELECT m.id,m.conversation_id,m.direction,m.channel,m.body,m.content_uri,m.content_name,m.content_type,m.content_size,m.author,m.created_at
+            FROM conversations cv JOIN messages m ON m.conversation_id=cv.id WHERE cv.contact_id=? AND m.id=?`);
+          for (const item of items) if (item.message_id && !have.has(Number(item.message_id))) {
+            const m = linked.get(review.contact_id, Number(item.message_id));
+            if (m) messages.push({ ...m, body: String(m.body || '').slice(0, 1200) });
+          }
+          messages.sort((a,b)=>String(a.created_at).localeCompare(String(b.created_at))||a.id-b.id);
+        }
+        return json(res, 200, { review: qReviewShape(review, items), criteria: QUALITY_CRITERIA, items, messages });
+      }
+      if (req.method === 'DELETE') {
+        if (review.status !== 'draft') return json(res, 409, { error: 'Завершённая проверка сохраняется в истории и не удаляется. Для нового разбора создайте новую проверку.' });
+        db.prepare("DELETE FROM quality_reviews WHERE id=? AND status='draft'").run(id);
+        return json(res, 200, { deleted: true });
+      }
+      if (req.method === 'PUT') {
+        if (review.status !== 'draft') return json(res, 409, { error: 'Завершённую проверку нельзя переписать. Создайте новую, чтобы сохранить историю.' });
+        const b = await readBody(req);
+        const targetStatus = String(b.status || 'draft');
+        if (!['draft','complete','no_contact','unavailable'].includes(targetStatus)) return json(res, 400, { error: 'Неизвестный результат проверки' });
+        const dataStatus = String(b.data_status || 'partial');
+        if (!['complete','partial','unavailable'].includes(dataStatus)) return json(res, 400, { error: 'Выберите полноту доступной истории' });
+        const interactionType = String(b.interaction_type || 'unknown');
+        if (!['unknown','call','chat','mixed','other'].includes(interactionType)) return json(res, 400, { error: 'Выберите тип контакта' });
+        const day = raw => {
+          const value = String(raw || '').trim();
+          if (!value) return '';
+          if (!/^\d{4}-\d{2}-\d{2}$/.test(value)) return null;
+          const date = new Date(value + 'T00:00:00Z');
+          return Number.isNaN(date.getTime()) || date.toISOString().slice(0,10) !== value ? null : value;
+        };
+        const periodStart = day(b.period_start), periodEnd = day(b.period_end);
+        if (periodStart === null || periodEnd === null) return json(res, 400, { error: 'Укажите дату в формате календаря' });
+        if (periodStart && periodEnd && periodStart > periodEnd) return json(res, 400, { error: 'Начало периода позже его окончания' });
+        if (targetStatus === 'complete' && (!periodStart || !periodEnd)) return json(res, 400, { error: 'Для завершённой проверки укажите начало и конец периода, который вы прослушали или прочитали' });
+        const text = (value, limit, label) => {
+          const v = String(value || '').trim();
+          if (v.length > limit) return { error: `${label}: максимум ${limit} знаков` };
+          return { value: v };
+        };
+        const notes = text(b.data_notes, 1200, 'Комментарий о доступности данных');
+        const summaryText = text(b.summary, 2000, 'Сильные стороны');
+        const crmText = text(b.crm_observation, 2000, 'Проверка CRM');
+        if (notes.error || summaryText.error || crmText.error) return json(res, 400, { error: notes.error || summaryText.error || crmText.error });
+        const lineList = (value, label) => {
+          if (!Array.isArray(value)) return { error: `${label}: передайте список строк` };
+          const out = value.map(x => String(x || '').trim()).filter(Boolean);
+          if (out.length > 3) return { error: `${label}: не больше трёх пунктов` };
+          if (out.some(x => x.length > 500)) return { error: `${label}: один пункт не длиннее 500 знаков` };
+          return { value: out };
+        };
+        const issues = lineList(b.issues ?? [], 'Проблемы');
+        const nextSteps = lineList(b.next_steps ?? [], 'Следующие шаги');
+        if (issues.error || nextSteps.error) return json(res, 400, { error: issues.error || nextSteps.error });
+        const inputItems = Array.isArray(b.items) ? b.items : [];
+        const seen = new Set(), normalized = [];
+        for (const raw of inputItems) {
+          if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return json(res, 400, { error: 'Пункт проверки заполнен неверно' });
+          const key = String(raw.key || '');
+          if (!QUALITY_KEYS.has(key) || seen.has(key)) return json(res, 400, { error: 'В списке проверки есть неизвестный или повторный критерий' });
+          seen.add(key);
+          const status = String(raw.status || '');
+          if (!['','yes','no','na','unknown'].includes(status)) return json(res, 400, { error: 'Укажите допустимый статус критерия' });
+          const evidenceSource = String(raw.evidence_source || '');
+          if (evidenceSource && !QUALITY_SOURCES.has(evidenceSource)) return json(res, 400, { error: 'Укажите допустимый источник подтверждения' });
+          const evidenceText = String(raw.evidence_text || '').trim();
+          if (evidenceText.length > 1200) return json(res, 400, { error: 'Подтверждение одного критерия не длиннее 1200 знаков' });
+          const messageId = raw.message_id === '' || raw.message_id == null ? null : Number(raw.message_id);
+          if (messageId !== null && (!Number.isSafeInteger(messageId) || messageId < 1)) return json(res, 400, { error: 'Ссылка на сообщение некорректна' });
+          if (targetStatus === 'complete') {
+            if (!status) return json(res, 400, { error: `Не заполнен критерий «${QUALITY_CRITERIA.find(c => c.key === key).title}»` });
+            if (evidenceText.length < 8) return json(res, 400, { error: `Добавьте подтверждение или причину (не меньше 8 знаков) для критерия «${QUALITY_CRITERIA.find(c => c.key === key).title}»` });
+            if (!evidenceSource) return json(res, 400, { error: `Укажите источник для критерия «${QUALITY_CRITERIA.find(c => c.key === key).title}»` });
+          }
+          if (messageId) {
+            if (!review.contact_id || !db.prepare('SELECT 1 ok FROM messages m JOIN conversations cv ON cv.id=m.conversation_id WHERE m.id=? AND cv.contact_id=?').get(messageId, review.contact_id))
+              return json(res, 400, { error: 'Доказательство должно относиться к чату контакта этой сделки' });
+          }
+          normalized.push({ key, status, evidenceSource, messageId, evidenceText });
+        }
+        if (targetStatus === 'complete' && seen.size !== QUALITY_CRITERIA.length)
+          return json(res, 400, { error: 'Проверьте все 18 критериев: выберите статус и укажите подтверждение или причину' });
+        if (targetStatus === 'complete' && !['complete','partial'].includes(dataStatus))
+          return json(res, 400, { error: 'Для завершённой оценки выберите полную или частичную историю' });
+        if ((targetStatus === 'no_contact' || targetStatus === 'unavailable') && notes.value.length < 10)
+          return json(res, 400, { error: 'Кратко объясните, почему контакт не состоялся или данные недоступны (не меньше 10 знаков)' });
+        if ((targetStatus === 'no_contact' || targetStatus === 'unavailable') && inputItems.some(x => String(x?.status || '')))
+          return json(res, 400, { error: 'Для отдельного статуса без оценки очистите баллы и сохраните черновик перед завершением' });
+        const finalDataStatus = targetStatus === 'no_contact' || targetStatus === 'unavailable' ? 'unavailable' : dataStatus;
+        const finalInteraction = targetStatus === 'no_contact' || targetStatus === 'unavailable' ? 'unknown' : interactionType;
+        const completedAt = targetStatus === 'draft' ? '' : new Date().toISOString().slice(0,19).replace('T',' ');
+        db.exec('BEGIN IMMEDIATE');
+        try {
+          const result = db.prepare(`UPDATE quality_reviews SET status=?,data_status=?,interaction_type=?,period_start=?,period_end=?,
+            data_notes=?,summary=?,issues=?,next_steps=?,crm_observation=?,updated_by_id=?,updated_by_name=?,
+            updated_at=datetime('now'),completed_at=? WHERE id=? AND status='draft'`).run(
+            targetStatus, finalDataStatus, finalInteraction, periodStart || '', periodEnd || '', notes.value,
+            summaryText.value, JSON.stringify(issues.value), JSON.stringify(nextSteps.value), crmText.value,
+            user.id, user.name, completedAt, id);
+          if (!result.changes) throw Object.assign(new Error('Проверку уже изменил другой руководитель — обновите страницу'), { statusCode: 409 });
+          const update = db.prepare('UPDATE quality_review_items SET status=?,evidence_source=?,message_id=?,evidence_text=? WHERE review_id=? AND criterion_key=?');
+          for (const item of normalized) update.run(item.status, item.evidenceSource, item.messageId, item.evidenceText, id, item.key);
+          if (targetStatus === 'no_contact' || targetStatus === 'unavailable') {
+            db.prepare("UPDATE quality_review_items SET status='',evidence_source='',message_id=NULL,evidence_text='' WHERE review_id=?").run(id);
+          }
+          db.exec('COMMIT');
+        } catch (e) { db.exec('ROLLBACK'); throw e; }
+        const saved = db.prepare('SELECT * FROM quality_reviews WHERE id=?').get(id);
+        const savedItems = db.prepare('SELECT * FROM quality_review_items WHERE review_id=? ORDER BY id').all(id);
+        return json(res, 200, { review: qReviewShape(saved, savedItems), saved: true });
+      }
+    }
     if (p === '/api/quality') {
       if (!requireAdmin(user, res)) return;
       const days = Math.min(365, Math.max(1, Math.trunc(Number(u.searchParams.get('days')) || 30)));
-      // время в базе — UTC (datetime('now')): границу периода считаем в том же формате
+      // История переписки — за выбранный период. Задачи и сделки без движения —
+      // текущая очередь, поэтому не включаем их в искусственную оценку сотрудника.
       const since = new Date(Date.now() - days * 864e5).toISOString().slice(0, 19).replace('T', ' ');
       const managers = db.prepare("SELECT id,name FROM users WHERE active=1 AND role IN ('admin','manager') ORDER BY id").all();
-      // один запрос на менеджера вместо запроса на каждый диалог: отчёт по
-      // команде и году истории не должен превращаться в тысячи обращений к базе.
-      // Автоматические исходящие (правила и рассылки) в зачёт не идут: качество
-      // измеряется ответами живого сотрудника.
-      const convMsgQ = db.prepare(`SELECT cv.id AS cid, m.direction, m.created_at FROM conversations cv
+      // Один запрос на сотрудника; автоматические исходящие (правила и рассылки)
+      // не считаются ответом живого менеджера.
+      const convMsgQ = db.prepare(`SELECT cv.id AS cid,m.direction,m.created_at FROM conversations cv
         JOIN contacts c ON c.id=cv.contact_id
         JOIN messages m ON m.conversation_id=cv.id AND m.created_at>=?
         WHERE (c.responsible_id=? OR EXISTS(SELECT 1 FROM deals d WHERE d.contact_id=cv.contact_id AND d.responsible_id=?))
           AND (m.direction='in' OR (COALESCE(m.automation_id,0)=0 AND COALESCE(m.author,'')<>'Рассылка'))
-        ORDER BY cv.id, m.id`);
+        ORDER BY cv.id,m.id`);
       const median = arr => { if (!arr.length) return null; const mid = Math.floor(arr.length / 2); return arr.length % 2 ? arr[mid] : Math.round((arr[mid - 1] + arr[mid]) / 2); };
       const rows = managers.map(m => {
         const deals = db.prepare('SELECT stage FROM deals WHERE responsible_id=?').all(m.id);
         const won = deals.filter(d => d.stage === 'won').length, lost = deals.filter(d => d.stage === 'lost').length;
-        let unanswered = 0; const resp = [];
+        let unansweredDialogs = 0; const responseTimes = [];
         let curCid = null, pendingIn = null;
-        for (const msg of convMsgQ.all(since, m.id, m.id)) {
-          if (msg.cid !== curCid) { curCid = msg.cid; pendingIn = null; }
-          if (msg.direction === 'in') { if (!pendingIn) { pendingIn = msg.created_at; unanswered++; } }
-          else if (pendingIn) { resp.push((Date.parse(msg.created_at.replace(' ', 'T') + 'Z') - Date.parse(pendingIn.replace(' ', 'T') + 'Z')) / 60000); pendingIn = null; unanswered--; }
+        for (const msg of convMsgQ.all(since,m.id,m.id)) {
+          if (msg.cid !== curCid) { curCid=msg.cid; pendingIn=null; }
+          if (msg.direction === 'in') { if (!pendingIn) { pendingIn=msg.created_at; unansweredDialogs++; } }
+          else if (pendingIn) { responseTimes.push((Date.parse(msg.created_at.replace(' ','T')+'Z')-Date.parse(pendingIn.replace(' ','T')+'Z'))/60000); pendingIn=null; unansweredDialogs--; }
         }
-        unanswered = Math.max(0, unanswered);
-        resp.sort((a, b) => a - b);
-        const medianResponseMin = median(resp.map(x => Math.round(x)));
-        const stalled = db.prepare("SELECT COUNT(*) n FROM deals WHERE responsible_id=? AND stage NOT IN ('won','lost') AND COALESCE(updated_at,created_at) < datetime('now','-14 days')").get(m.id).n;
-        const overdueTasks = db.prepare("SELECT COUNT(*) n FROM tasks WHERE done=0 AND due IS NOT NULL AND due != '' AND (CASE WHEN length(due)=10 THEN due || ' 23:59:59' ELSE due END) < datetime('now','localtime') AND (responsible_id=? OR EXISTS(SELECT 1 FROM deals d WHERE d.id=tasks.deal_id AND d.responsible_id=?))").get(m.id, m.id).n;
-        const slowPenalty = medianResponseMin === null ? 0 : medianResponseMin > 60 ? 15 : medianResponseMin > 30 ? 10 : medianResponseMin > 15 ? 5 : 0;
-        const score = Math.max(0, 100 - Math.min(30, unanswered * 5) - slowPenalty - Math.min(15, stalled * 3) - Math.min(15, overdueTasks * 2));
-        const verdict = score >= 85 ? 'Отлично' : score >= 70 ? 'Хорошо' : score >= 50 ? 'Требует внимания' : 'Критично';
-        return { id: m.id, name: m.name, deals: deals.length, won, lost, conversion: won + lost ? Math.round(won / (won + lost) * 100) : null, unanswered, medianResponseMin, stalled, overdueTasks, score, verdict };
+        unansweredDialogs = Math.max(0,unansweredDialogs);
+        responseTimes.sort((a,b)=>a-b);
+        const medianResponseMin = median(responseTimes.map(x=>Math.round(x)));
+        const stalled = db.prepare("SELECT COUNT(*) n FROM deals WHERE responsible_id=? AND stage NOT IN ('won','lost') AND COALESCE(updated_at,created_at)<datetime('now','-14 days')").get(m.id).n;
+        const overdueTasks = db.prepare("SELECT COUNT(*) n FROM tasks WHERE done=0 AND due IS NOT NULL AND due!='' AND (CASE WHEN length(due)=10 THEN due||' 23:59:59' ELSE due END)<datetime('now','localtime') AND (responsible_id=? OR EXISTS(SELECT 1 FROM deals d WHERE d.id=tasks.deal_id AND d.responsible_id=?))").get(m.id,m.id).n;
+        const closed = won + lost;
+        return { id:m.id,name:m.name,deals:deals.length,won,lost,conversion:closed?Math.round(won*100/closed):null,
+          unansweredDialogs,medianResponseMin,stalled,overdueTasks };
       });
-      const medians = rows.map(r => r.medianResponseMin).filter(x => x !== null).sort((a, b) => a - b);
-      return json(res, 200, {
+      const medians = rows.map(r=>r.medianResponseMin).filter(x=>x!==null).sort((a,b)=>a-b);
+      return json(res,200,{
         days,
-        totals: {
-          managers: rows.length,
-          unanswered: rows.reduce((a, r) => a + r.unanswered, 0),
-          stalled: rows.reduce((a, r) => a + r.stalled, 0),
-          overdueTasks: rows.reduce((a, r) => a + r.overdueTasks, 0),
-          medianResponseMin: medians.length ? medians[Math.floor(medians.length / 2)] : null,
-        },
-        managers: rows,
-        factors: [
-          'Сообщения без ответа: сообщение клиента, за которое никто не ответил (−5 за каждое, не больше −30)',
-          'Медиана первого ответа дольше 15 / 30 / 60 минут (−5 / −10 / −15)',
-          'Сделки без движения больше 14 дней (−3 за каждую, не больше −15)',
-          'Просроченные открытые задачи (−2 за каждую, не больше −15)',
+        totals:{managers:rows.length,unansweredDialogs:rows.reduce((a,r)=>a+r.unansweredDialogs,0),stalled:rows.reduce((a,r)=>a+r.stalled,0),
+          overdueTasks:rows.reduce((a,r)=>a+r.overdueTasks,0),medianResponseMin:medians.length?medians[Math.floor(medians.length/2)]:null},
+        managers:rows,
+        definitions:[
+          'Диалоги с вопросом клиента без следующего ответа живого сотрудника за выбранный период; автоответы и рассылки не закрывают ожидание.',
+          'Медианное время ответа сотрудника в тех диалогах, где клиент ждал ответа; не включает автоответы.',
+          'Открытые сделки, у которых нет движения больше 14 дней (снимок текущей очереди).',
+          'Открытые задачи, срок которых уже прошёл (снимок текущей очереди).',
+          'Конверсия — выигранные среди закрытых сделок; числитель и знаменатель видны в строке сотрудника.',
         ],
+        note:'Это рабочие показатели и сигналы для проверки, а не оценка качества менеджера. Содержание разговора оценивается отдельно в ручной проверке ОКК с подтверждениями.',
       });
     }
     if (p === '/api/pipelines') {
@@ -3444,26 +3919,57 @@ ${user?.name || ''}`.trim();
       broadcast('message', { conversation_id: conv.id });
       return json(res, 201, { message: db.prepare('SELECT * FROM messages WHERE id=?').get(ins.lastInsertRowid), send });
     }
+    // ===== вложение: забрать файл с адреса вендора повторно =====
+    const mRefetch = p.match(/^\/api\/messages\/(\d+)\/refetch$/);
+    if (mRefetch && req.method === 'POST') {
+      const id = Number(mRefetch[1]);
+      const row = db.prepare('SELECT conversation_id FROM messages WHERE id=?').get(id);
+      if (!row) return json(res, 404, { error: 'Сообщение не найдено' });
+      // право то же, что на чтение файла: партнёр возвращает вложения только
+      // своих лидов, сотрудники офиса — любых чатов
+      if (user.role === 'partner' && !partnerOwns(user, 'conversations', row.conversation_id))
+        return json(res, 403, { error: 'Это чужой чат: партнёр видит только документы своих лидов' });
+      // загрузка идёт во внешнюю сеть и весит до 15 МБ: частые нажатия кнопки
+      // не должны превращаться в канал загрузки всего, что попало
+      const rl = rateLimit('refetch:' + user.id, 20, 60000);
+      if (!rl.ok) { res.setHeader('Retry-After', String(rl.retryAfter || 60)); return json(res, 429, { error: `Слишком много попыток. Повторите через ${rl.retryAfter || 60} с.` }) }
+      const r = await refetchAttachment(id);
+      if (r.status === 200) broadcast('message', { conversation_id: row.conversation_id });
+      return json(res, r.status, r.body);
+    }
     // ===== загрузка файла в чат (фото, документы) =====
     const mUpload = p.match(/^\/api\/conversations\/(\d+)\/upload$/);
     if (mUpload && req.method === 'POST') {
       const cid = Number(mUpload[1]);
       if (!db.prepare('SELECT id FROM conversations WHERE id=?').get(cid)) return json(res, 404, { error: 'Чат не найден' });
-      const b = await readBody(req, 22e6);
-      const contentType = String(b.contentType || 'application/octet-stream').split(';')[0].trim().toLowerCase();
-      if (!FILE_UPLOAD_TYPES.includes(contentType)) return json(res, 400, { error: 'Такой тип файла загружать нельзя. Доступны изображения, PDF, документы Word/Excel, CSV, TXT и ZIP.' });
-      const raw = Buffer.from(String(b.dataBase64 || '').split(',').pop() || '', 'base64');
-      if (!raw.length || raw.length > 15 * 1024 * 1024) return json(res, 400, { error: 'Файл пустой или превышает 15 МБ' });
-      const extByType = { 'image/png': 'png', 'image/jpeg': 'jpg', 'image/gif': 'gif', 'image/webp': 'webp', 'application/pdf': 'pdf', 'text/plain': 'txt', 'text/csv': 'csv', 'application/zip': 'zip', 'application/msword': 'doc', 'application/vnd.openxmlformats-officedocument.wordprocessingml.document': 'docx', 'application/vnd.ms-excel': 'xls', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet': 'xlsx' };
-      const ext = extByType[contentType] || 'bin';
-      const safeName = safeFileName(b.filename || ('файл.' + ext));
-      const stored = `${localDate().replace(/-/g, '')}-${randomBytes(6).toString('hex')}-${asciiFileName(b.filename || ('file.' + ext))}`;
-      mkdir(UPLOAD_DIR, { recursive: true });
-      storeUpload(stored, raw);
-      // В журнал загрузка не пишется: файл тут же становится сообщением чата
-      // с именем, форматом и размером — след живёт в самой переписке, а
-      // недоотправленные остатки убирает ночная чистка сиротских файлов
-      return json(res, 201, { url: '/uploads/' + stored, name: safeName, contentType, size: raw.length });
+      const uploadRate = rateLimit('chat-upload:' + user.id, 20, 60000);
+      if (!uploadRate.ok) { res.setHeader('Retry-After', String(uploadRate.retryAfter || 60)); return json(res, 429, { error: `Слишком много файлов за минуту. Повторите через ${uploadRate.retryAfter || 60} с.` }); }
+      if (chatUploadsActive >= CHAT_UPLOADS_AT_ONCE) { res.setHeader('Retry-After','3'); return json(res, 429, { error: 'CRM уже принимает несколько больших файлов. Подождите пару секунд и повторите отправку.' }); }
+      chatUploadsActive++;
+      try {
+        const b = await readBody(req, 22e6);
+        const contentType = String(b.contentType || 'application/octet-stream').split(';')[0].trim().toLowerCase();
+        if (!FILE_UPLOAD_TYPES.includes(contentType)) return json(res, 400, { error: 'Такой тип файла загружать нельзя. Доступны изображения, PDF, документы Word/Excel, CSV, TXT, ZIP, видео и звук.' });
+        const raw = Buffer.from(String(b.dataBase64 || '').split(',').pop() || '', 'base64');
+        if (!raw.length || raw.length > 15 * 1024 * 1024) return json(res, 400, { error: 'Файл пустой или превышает 15 МБ' });
+        const extByType = { 'image/png': 'png', 'image/jpeg': 'jpg', 'image/gif': 'gif', 'image/webp': 'webp', 'application/pdf': 'pdf', 'text/plain': 'txt', 'text/csv': 'csv', 'application/zip': 'zip', 'application/msword': 'doc', 'application/vnd.openxmlformats-officedocument.wordprocessingml.document': 'docx', 'application/vnd.ms-excel': 'xls', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet': 'xlsx',
+          'video/mp4': 'mp4', 'video/webm': 'webm', 'video/quicktime': 'mov', 'video/3gpp': '3gp', 'video/x-msvideo': 'avi',
+          'audio/mpeg': 'mp3', 'audio/ogg': 'ogg', 'audio/wav': 'wav', 'audio/webm': 'weba', 'audio/mp4': 'm4a', 'audio/aac': 'aac', 'audio/amr': 'amr' };
+        const ext = extByType[contentType] || 'bin';
+        const safeName = safeFileName(b.filename || ('файл.' + ext));
+        // Путь и MIME определяет проверенный contentType, не расширение из имени.
+        // Иначе «фото.html» с заявленным image/png открывалось бы как HTML-файл,
+        // ломало превью и могло получить неверный заголовок ответа.
+        const storageName = asciiFileName(b.filename || ('file.' + ext));
+        const storageBase = storageName.replace(/\.[A-Za-z0-9]{1,8}$/, '').slice(0, 96) || 'file';
+        const stored = `${localDate().replace(/-/g, '')}-${randomBytes(6).toString('hex')}-${storageBase}.${ext}`;
+        mkdir(UPLOAD_DIR, { recursive: true });
+        storeUpload(stored, raw);
+        // В журнал загрузка не пишется: файл тут же становится сообщением чата
+        // с именем, форматом и размером — след живёт в самой переписке, а
+        // недоотправленные остатки убирает ночная чистка сиротских файлов
+        return json(res, 201, { url: '/uploads/' + stored, name: safeName, contentType, size: raw.length });
+      } finally { chatUploadsActive = Math.max(0, chatUploadsActive - 1); }
     }
     // CSV export/import
     if (p === '/api/export/contacts') {
@@ -3830,8 +4336,40 @@ ${user?.name || ''}`.trim();
       // SVG открываем только скачиванием: внутри svg возможен скрипт, а наша CSP
       // разрешает inline-скрипты для собственного интерфейса — нельзя давать
       // чужому файлу выполняться в странице CRM
-      const inline = (type.startsWith('image/') && extname(src).toLowerCase() !== '.svg') || type === 'application/pdf';
-      res.writeHead(200, { 'Content-Type': type, 'Content-Length': st.size, 'Cache-Control': 'private, max-age=3600', 'Content-Disposition': `${inline ? 'inline' : 'attachment'}; filename*=UTF-8''${encodeURIComponent(name)}` });
+      // Проигрыватель в странице работает только с inline: скачиваемый файл
+      // открывался бы отдельной загрузкой на каждое нажатие «play».
+      const inline = (type.startsWith('image/') && extname(src).toLowerCase() !== '.svg')
+        || type === 'application/pdf' || type.startsWith('video/') || type.startsWith('audio/');
+      const headers = {
+        'Content-Type': type, 'Cache-Control': 'private, max-age=3600',
+        'Content-Disposition': `${inline ? 'inline' : 'attachment'}; filename*=UTF-8''${encodeURIComponent(name)}`,
+        ...((type.startsWith('video/') || type.startsWith('audio/')) ? { 'Accept-Ranges': 'bytes' } : {}),
+      };
+      const range = String(req.headers.range || '');
+      const match = range.match(/^bytes=(\d*)-(\d*)$/);
+      if (match && (type.startsWith('video/') || type.startsWith('audio/'))) {
+        let start, end;
+        if (match[1] === '') {
+          const suffix = Number(match[2]);
+          if (!Number.isSafeInteger(suffix) || suffix <= 0) { res.writeHead(416, { 'Content-Range': `bytes */${st.size}`, 'Accept-Ranges': 'bytes' }); return res.end(); }
+          start = Math.max(0, st.size - suffix); end = st.size - 1;
+        } else {
+          start = Number(match[1]); end = match[2] ? Number(match[2]) : st.size - 1;
+          if (!Number.isSafeInteger(start) || !Number.isSafeInteger(end) || start > end || start >= st.size) {
+            res.writeHead(416, { 'Content-Range': `bytes */${st.size}`, 'Accept-Ranges': 'bytes' }); return res.end();
+          }
+          end = Math.min(end, st.size - 1);
+        }
+        headers['Accept-Ranges'] = 'bytes';
+        headers['Content-Range'] = `bytes ${start}-${end}/${st.size}`;
+        headers['Content-Length'] = end - start + 1;
+        res.writeHead(206, headers);
+        if (req.method === 'HEAD') return res.end();
+        return createReadStream(src, { start, end }).pipe(res);
+      }
+      headers['Content-Length'] = st.size;
+      if (req.method === 'HEAD') { res.writeHead(200, headers); return res.end(); }
+      res.writeHead(200, headers);
       return createReadStream(src).pipe(res);
     }
 

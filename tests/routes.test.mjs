@@ -19,9 +19,13 @@ const beSrc = ['backend/src/server.js', 'backend/src/competitors.js'].map(read).
 // и склейки вида '/api/deals/' + id + '/print'. Подстановка заменяется на {}.
 function frontendPaths(src) {
   const out = new Set();
-  for (const m of src.matchAll(/['"`](\/api\/[^'"`\s]*)['"`]/g)) out.add(m[1].replace(/\$\{[^}]*\}/g, '{}'));
-  for (const m of src.matchAll(/['"`](\/api\/[^'"`\s]*\/)['"`]\s*\+/g)) out.add(m[1] + '{}');
-  // '/api/deals/' — префикс склейки (он же станет '/api/deals/{}'),
+  for (const m of src.matchAll(/[\'\"`](\/api\/[^\'\"`\s]*)[\'\"`]/g)) out.add(m[1].replace(/\$\{[^}]*\}/g, '{}'));
+  // Склейки могут иметь продолжение после идентификатора: '/api/messages/' + id + '/refetch'.
+  for (const m of src.matchAll(/[\'\"`](\/api\/[^\'\"`\s]*\/)[\'\"`]\s*\+\s*([A-Za-z_$][\w$]*)/g)) {
+    const rest=src.slice(m.index+m[0].length);
+    const suffix=/^\s*\+\s*[\'\"`](\/[^\'\"`\s]*)[\'\"`]/.exec(rest);
+    out.add(m[1]+'{}'+(suffix?suffix[1]:''));
+  }
   // '/api/' + table + '/' + id — путь целиком динамический, статически не проверить
   return [...out].map(p => p.split('?')[0])
     .filter(p => p.length > 5 && p !== '/api/' && !p.endsWith('/') && !/^\/api\/\{\}/.test(p));

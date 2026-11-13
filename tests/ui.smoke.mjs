@@ -67,6 +67,10 @@ Object.assign(window, {
   resetUserPassword, randomPassword, credentialsText, showCredentials,
   punyDecodeLabel, humanOrigin, wazzupHookUrl, wzAlive, wzState, wzTitle, closeConv,
   nameFromUri, sendAccountFor, refreshSendAccount, WZ_CHAT_TRANSPORTS, msgTime,
+  attachKind, attachName, attachmentHtml, openAttachment, refetchAttachment, closeModal,
+  qualityNewReview, qualityDealSearch, qualityCreateReview, qualityOpenReview, qualityBackToReviews,
+  qualitySave, qualityDeleteDraft, qualityUseEvidence, qualityFilterMessages, setQualityTab,
+  qualityStatusLabel, qualityScoreText,
   setConvScope, convScopeList, convMine, convEmptyHtml, openNotifications,
   msgsHtml, dayLabel, saveDraft, loadDrafts, autoGrow, msgKey, showJumpNew, scrollChatBottom, chatScrolled,
   selectAllVisible, toggleConvSelect, markConvsRead, convRow, imgFail, listStamp,
@@ -560,7 +564,7 @@ try {
   check('скрепка прикрепления файла стоит рядом с полем ввода', Boolean($('#chatFile')) && Boolean($('.composer-ico [data-lucide], .composer-ico svg')));
   check('кнопка отправки — круглая со стрелкой вверх, без бумажного самолётика', Boolean($('.send-btn svg')) && !appJsRaw.includes("icon('send'"));
   check('под полем ввода есть выбор канала и шаблонов', Boolean($('#msgChannel')) && Boolean($('#msgTmpl')));
-  check('в композере нет кнопки «ссылка на файл»', !window.openAttachment && !$$('.composer-ico').some(b => /ссылк/i.test(b.title)));
+  check('в композере нет кнопки, отправляющей вместо файла внешнюю ссылку', !$$('.composer-ico').some(b => /ссылк/i.test(b.title)));
   check('выбор канала подписан «Куда отправить»', /Куда отправить/.test($('.composer-sub').textContent));
   check('в композере ровно три действия: файл, поле, отправка', $$('.composer-row:first-child > *').length === 4);
   check('есть быстрый переход к настройке шаблонов', Boolean($('.tmpl-settings')));
@@ -684,7 +688,7 @@ try {
   const byMe = window.msgHtml({ direction: 'out', body: 'мой ответ', author: myName, created_at: '2026-10-27 10:00:00' });
   check('своё исходящее собственным именем не подписывается', !myName || !byMe.includes(myName));
   const fileMsg = window.msgHtml({ direction: 'in', body: 'Документ', content_uri: '/uploads/a.pdf', content_type: 'application/pdf', content_name: 'смета.pdf', channel: 'whatsapp', created_at: '2026-01-01 10:00' });
-  check('msgHtml рисует файл-вложение ссылкой с именем', fileMsg.includes('chat-attach file') && fileMsg.includes('смета.pdf'));
+  check('msgHtml рисует файл-вложение понятной кнопкой с именем', fileMsg.includes('chat-attach wrap') && fileMsg.includes('class="file"') && fileMsg.includes('смета.pdf'));
   const sizeMsg = window.msgHtml({ direction: 'in', body: '', content_uri: '/uploads/a.pdf', content_type: 'application/pdf', content_name: 'смета.pdf', content_size: 2516582, created_at: '2026-10-27 10:00:00' });
   check('чип файла показывает формат и размер, а не просто «Документ»', sizeMsg.includes('PDF') && sizeMsg.includes('2,4 МБ'), sizeMsg);
   const capMsg = window.msgHtml({ direction: 'in', body: '', content_uri: '/uploads/x.png', content_type: 'image/png', content_name: 'plan-doma.png', content_size: 20480, created_at: '2026-10-27 10:00:00' });
@@ -1517,7 +1521,7 @@ try {
   check('вчерашний чат подписан «Вчера»', window.listStamp(new Date(Date.now() - 864e5).toISOString().slice(0, 19).replace('T', ' ')) === 'Вчера');
   check('старый чат — короткая дата без века', window.listStamp('2023-05-14 10:00:00') === '14.05.23', window.listStamp('2023-05-14 10:00:00'));
   check('страница объявлена адаптивной', html.includes('width=device-width') && html.includes('viewport-fit=cover'));
-  check('скачивание вложений защищено от внутренних адресов', serverJsRaw.includes('safeRemoteUrl') && serverJsRaw.includes('isPublicIp') && serverJsRaw.includes("redirect: 'manual'"));
+  check('скачивание вложений защищено от внутренних адресов и DNS-подмены', serverJsRaw.includes('safeRemoteUrl') && serverJsRaw.includes('isPublicIp') && serverJsRaw.includes('lookup:(_host,_options,cb)=>cb(null,address') && serverJsRaw.includes('[301,302,303,307,308]') && serverJsRaw.includes('maxBytes = 15 * 1024 * 1024'));
   check('регистрация вебхука Wazzup только для администратора', /wazzup\/webhook' && req\.method === 'POST'\) \{ if \(!requireAdmin/.test(serverJsRaw));
   check('вебхук регистрируется только с секретом', serverJsRaw.includes("if (!hookU.searchParams.has('secret')) hookU.searchParams.set('secret', hookSecret)"));
   check('эмодзи нет в competitors.js', !hasEmojis(competitorsJsRaw));
@@ -1728,8 +1732,32 @@ try {
   check('под списком мессенджеров видно, с какого аккаунта уйдёт ответ', Boolean($('#sendAccountHint')) && /Ответ уйдёт с аккаунта|Рабочего аккаунта/.test($('#sendAccountHint').textContent), $('#sendAccountHint') ? $('#sendAccountHint').textContent : 'нет подсказки');
   // вложение в пузыре: чип с именем файла без технической подписи рядом
   check('вложение в пузыре не дублируется подписью «Вложение: …»', !window.msgHtml({ content_uri: 'https://cdn.example/f/otchet.pdf', body: 'Вложение: otchet.pdf', channel: 'maxgroup', direction: 'in' }).includes('Вложение:'));
-  check('вложение без ссылки остаётся понятной строкой', window.msgHtml({ body: 'Вложение: otchet.pdf', channel: 'maxgroup', direction: 'in' }).includes('Вложение: otchet.pdf'));
+  check('сообщение о неполученном вложении не показывает сырой маркер', window.msgHtml({ body: '[вложение]', channel: 'maxgroup', direction: 'in' }).includes('Вложение не получено') && window.msgHtml({ body: '[вложение]', channel: 'maxgroup', direction: 'in' }).includes('Попросите отправить его ещё раз'));
+  check('имя недоступного вложения сохраняется, но служебная подпись не дублируется', window.msgHtml({ body: 'Вложение: otchet.pdf', channel: 'maxgroup', direction: 'in' }).includes('Вложение: otchet.pdf') && !window.msgHtml({ body: 'Вложение: otchet.pdf', content_uri: '/uploads/otchet.pdf', channel: 'maxgroup', direction: 'in' }).includes('Вложение: otchet.pdf'));
   check('имя файла берётся из ссылки, когда имени нет', window.nameFromUri('https://cdn.example/files/prices%20final.pdf?x=1') === 'prices final.pdf');
+  const photoHtml = window.attachmentHtml({ id: 21, content_uri: '/uploads/photo.png', content_name: 'Дом.png', content_type: 'image/png', content_size: 2048 });
+  check('фото в чате открывается в окне просмотра, локальное и с подписью', photoHtml.includes('class="chat-attach img"') && photoHtml.includes('openAttachment(this)') && photoHtml.includes('Дом.png') && !photoHtml.includes('attach-remote'));
+  const videoHtml = window.attachmentHtml({ id: 22, content_uri: '/uploads/room.mp4', content_name: 'Видео дома.mp4', content_size: 4096 });
+  check('видеовложение определяется по расширению и проигрывается прямо в чате', videoHtml.includes('<video controls') && videoHtml.includes('Видео дома.mp4'));
+  const audioHtml = window.attachmentHtml({ id: 23, content_uri: '/uploads/call.opus', content_name: 'Звонок.opus' });
+  check('голосовое или запись звонка проигрывается прямо в чате', audioHtml.includes('<audio controls') && audioHtml.includes('Звонок.opus'));
+  const remoteHtml = window.attachmentHtml({ id: 24, content_uri: 'https://cdn.example/a/%D1%81%D0%BC%D0%B5%D1%82%D0%B0.pdf?signature=secret', content_name: '', content_type: 'application/pdf' });
+  const remoteNode = window.document.createElement('div'); remoteNode.innerHTML = remoteHtml;
+  check('кириллическое имя вложения читается, ссылка CDN не показывается человеку', remoteNode.textContent.includes('смета.pdf') && !remoteNode.textContent.includes('signature=secret') && remoteNode.textContent.includes('файл не сохранён в CRM') && remoteNode.textContent.includes('Скачать в CRM'));
+  check('SVG не встраивается как картинка, которую сервер отдаёт только скачиванием', window.attachKind({ content_uri: '/uploads/doc.svg', content_type: 'image/svg+xml' }) === 'file');
+  const pdfLink = window.document.createElement('a');
+  Object.assign(pdfLink.dataset, { url: '/uploads/20260101-example.pdf', name: 'Смета.pdf', kind: 'pdf', local: '1', size: '24 КБ' });
+  window.openAttachment(pdfLink);
+  check('локальный PDF открывается в окне CRM без новой вкладки', Boolean($('.modal-card.lightbox-card iframe')) && $('#modalBody').textContent.includes('Смета.pdf'));
+  window.closeModal();
+  check('закрытие предпросмотра убирает вложение из разметки', !$('.modal-card.lightbox-card') && !$('#modalBody iframe'));
+  const staleLink = window.document.createElement('a'); staleLink.href = 'https://cdn.example/expired/photo.png';
+  Object.assign(staleLink.dataset, { id: '25', url: staleLink.href, name: 'Фото.png', kind: 'image', local: '0' });
+  const staleImg = window.document.createElement('img'); staleImg.dataset.id = '25';
+  const staleWrap = window.document.createElement('div'); staleWrap.className = 'chat-attach img'; staleLink.append(staleImg); staleWrap.append(staleLink); window.document.body.append(staleWrap);
+  window.imgFail(staleImg);
+  check('битая CDN-картинка показывает причину и способы вернуть файл', Boolean($('.attach-broken')) && $('.attach-broken').textContent.includes('Скачать в CRM') && $('.attach-broken').textContent.includes('Открыть источник'));
+  $('.attach-broken')?.remove();
   window.__state.channels = [
     { id: 1, external_id: 'w-alive', transport: 'whatsapp', state: 'active', label: 'WhatsApp — Ирина' },
     { id: 2, external_id: 'w-dead', transport: 'whatsapp', state: 'blocked', label: 'WhatsApp — склад' }
@@ -1933,11 +1961,30 @@ try {
     check('на вкладке продаж — воронка, план и результаты менеджеров',
       $('#view').textContent.includes('Сделки по этапам воронки') && $('#view').textContent.includes('Результаты по менеджерам'));
     window.setAnalyticsTab('team'); await wait(700);
-    check('вкладка «Команда» показывает оценку сотрудников и правила счёта',
-      $('#view').textContent.includes('Оценка по сотрудникам') && $('#view').textContent.includes('Как считается оценка'));
-    check('период оценки переключается рядом с вкладками', $('#view').textContent.includes('Период:') && $('#view').textContent.includes('Считается автоматически'));
+    check('вкладка «Команда» показывает проверяемые показатели, а не придуманный рейтинг',
+      $('#view').textContent.includes('Показатели по сотрудникам') && $('#view').textContent.includes('не рейтинг сотрудников') && !$('#view').textContent.includes('Старт — 100 баллов'));
+    check('период показателей переключается рядом с вкладками', $('#view').textContent.includes('Период:') && $('#view').textContent.includes('Данные CRM'));
     window.setQualityDays(7); await wait(700);
     check('период качества переключается и пересчитывается', window.__state.qDays === 7 && $('#view').textContent.includes('Неделя'));
+    window.setQualityTab('reviews'); await wait(600);
+    check('ОКК показывает отдельный список ручных проверок и ограничения порогов', $('#view').textContent.includes('Результаты по критериям') && $('#view').textContent.includes('Исторические пороги') && $('#view').textContent.includes('Новая проверка'));
+    const qContactUi = await window.api('/api/contacts', { method: 'POST', body: JSON.stringify({ name: 'Контакт для проверки ОКК', phone: '79990000117' }) });
+    const qDealUi = await window.api('/api/deals', { method: 'POST', body: JSON.stringify({ title: 'Сделка для проверки ОКК', contact_id: qContactUi.id }) });
+    await window.render(); await wait(400);
+    window.qualityNewReview(); await wait(400);
+    check('новую проверку начинают с поиска реальной сделки CRM', Boolean($('#qualityDealSearch')) && $('#modal').classList.contains('hidden') === false);
+    window.qualityDealSearch('Сделка для проверки ОКК'); await wait(500);
+    const qOption = [...window.document.querySelectorAll('.quality-deal-option')].find(x => x.textContent.includes('Сделка для проверки ОКК'));
+    check('сделка находится поиском без импорта таблицы с клиентскими данными', Boolean(qOption));
+    qOption?.click(); await wait(700);
+    check('в черновике отображаются все 18 критериев из рабочей таблицы', window.document.querySelectorAll('.quality-criterion').length === 18);
+    check('пустой черновик не выставляет баллы без решения руководителя', [...window.document.querySelectorAll('[data-q-status]')].length === 18 && [...window.document.querySelectorAll('[data-q-status]')].every(x => x.value === ''));
+    check('источник сообщения можно приложить только к выбранному критерию', [...window.document.querySelectorAll('[data-q-status] option[value=""]')].length === 18 && Boolean($('#qualityEvidenceTarget')) && $('#qualityEvidenceTarget').value === '');
+    window.qualitySave('draft'); await wait(700);
+    check('черновик сохраняется без оценки и остаётся продолжимым', $('#view').textContent.includes('Черновик ОКК сохранён') || $('#view').textContent.includes('Черновик'));
+    $('.quality-delete')?.click(); await wait(100);
+    $('#askConfirmYes')?.click(); await wait(500);
+    check('черновик удаляется только после отдельного подтверждения', $('#view').textContent.includes('Проверки (0)') || !$('#view').textContent.includes('Сделка для проверки ОКК'));
     window.setAnalyticsTab('sales'); await wait(500);
     check('возврат на вкладку продаж сохраняет раздел', window.__state.aTab === 'sales' && $('#view').textContent.includes('Сделки по этапам воронки'));
     window.__state.aTab = 'sales';

@@ -64,6 +64,12 @@ const ICON_PATHS = {
   alert: '<path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"/><line x1="12" y1="9" x2="12" y2="13"/><line x1="12" y1="17" x2="12.01" y2="17"/>',
   lock: '<rect x="3" y="11" width="18" height="11" rx="2" ry="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/>',
   key: '<path d="M21 2l-2 2m-1.5 1.5L14 9l-2-2-4 4 2 2-4 4-2-2-2 2a4.24 4.24 0 0 0 6 6l11-11a2.12 2.12 0 0 0 0-3l-2-2z"/>',
+  play: '<circle cx="12" cy="12" r="10"/><polygon points="10 8 16 12 10 16 10 8"/>',
+  video: '<path d="m23 7-7 5 7 5V7z"/><rect x="1" y="5" width="15" height="14" rx="2" ry="2"/>',
+  music: '<path d="M9 18V5l12-2v13"/><circle cx="6" cy="18" r="3"/><circle cx="18" cy="16" r="3"/>',
+  image: '<rect x="3" y="3" width="18" height="18" rx="2" ry="2"/><circle cx="8.5" cy="8.5" r="1.5"/><path d="m21 15-5-5L5 21"/>',
+  external: '<path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"/><polyline points="15 3 21 3 21 9"/><line x1="10" y1="14" x2="21" y2="3"/>',
+  save: '<path d="M19 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11l5 5v11a2 2 0 0 1-2 2z"/><polyline points="17 21 17 13 7 13 7 21"/><polyline points="7 3 7 8 15 8"/>',
   fields: '<path d="M20.5 11H19V7a2 2 0 0 0-2-2h-4V3.5a2.5 2.5 0 0 0-5 0V5H4a2 2 0 0 0-2 2v4h1.5a2.5 2.5 0 0 1 0 5H2v4a2 2 0 0 0 2 2h4v-1.5a2.5 2.5 0 0 1 5 0V22h4a2 2 0 0 0 2-2v-4h1.5a2.5 2.5 0 0 0 0-5z"/>',
   sparkles: '<path d="M12 3l1.91 5.82a2 2 0 0 0 1.27 1.27L21 12l-5.82 1.91a2 2 0 0 0-1.27 1.27L12 21l-1.91-5.82a2 2 0 0 0-1.27-1.27L3 12l5.82-1.91a2 2 0 0 0 1.27-1.27L12 3z"/>',
   star: '<polygon points="12 2 15.09 8.26 22 9.27 17 14.14 18.18 21.02 12 17.77 5.82 21.02 7 14.14 2 9.27 8.91 8.26 12 2"/>',
@@ -345,7 +351,9 @@ const state = {
   view: 'dashboard', settingsTab: 'integrations', pipeline: 1, conv: null, listOnly: false,
   deals: [], stages: [], pipelines: [], contacts: [], companies: [], channels: [],
   cache: {}, dealTab: 'details', meta: null, dupes: null, me: null, users: [], convScope: 'all', convSelect: false, drafts: {},
-  taskScope: 'mine', taskFilter: '', dealScope: 'all', taskView: 'list', sel: {}, bulkActions: {}
+  taskScope: 'mine', taskFilter: '', dealScope: 'all', taskView: 'list', sel: {}, bulkActions: {},
+  qTab: 'metrics', qDays: 30, qReviewDays: 90, qReviewId: null, qReviewData: null,
+  qDealQuery: '', qDealSeq: 0
 };
 // первичное применение темы — после объявления state: синхронизация личной
 // темы сотрудника обращается к нему и не должна выполняться до инициализации
@@ -598,7 +606,15 @@ function lockForm(root, text) {
 }
 function closeModal() {
   $('#modal').classList.add('hidden');
-  if ($('#createdCredentials')) $('#modalBody').replaceChildren();
+  $('.modal-card')?.classList.remove('wide', 'lightbox-card');
+  // Проигрыватель и кадр документа продолжают работать, если их просто спрятать:
+  // звук шёл из закрытого окна, а временный пароль оставался в разметке страницы.
+  const body = $('#modalBody');
+  if (body && (body.querySelector('video,audio,iframe') || $('#createdCredentials'))) {
+    // Изъятие элемента останавливает медиа в браузере; не вызываем pause/load
+    // отдельно: в тестовом DOM этих API нет, а видео не должно оставаться скрытым.
+    body.replaceChildren();
+  }
 }
 // Единое окно подтверждения вместо системного confirm().
 function askConfirm(message, onYes, { okText = 'Подтвердить', danger = true, extraText = '', onExtra = null } = {}) {
@@ -1640,20 +1656,127 @@ async function delRow(table, id, parentId) {
 }
 
 /* ---------- inbox ---------- */
-// Вложение в пузыре сообщения: картинка показывается превью, остальное — ссылкой на файл.
+// Вид вложения решает, что показать в пузыре: картинку, проигрыватель, кадр
+// документа или чип файла. Определяем и по типу, и по расширению — вендор
+// присылает тип не всегда, а файл без типа открывался скачиванием.
+const ATTACH_EXT = {
+  image: ['png', 'jpg', 'jpeg', 'gif', 'webp'],
+  video: ['mp4', 'webm', 'mov', '3gp', 'm4v', 'avi'],
+  audio: ['mp3', 'ogg', 'opus', 'wav', 'm4a', 'aac', 'amr'],
+  pdf: ['pdf'],
+};
+function attachKind(m) {
+  const type = String(m.content_type || '').toLowerCase();
+  const ext = (String(m.content_uri || '').split('?')[0].match(/\.([A-Za-z0-9]{1,5})$/) || [, ''])[1].toLowerCase();
+  // SVG открывается только скачиванием на сервере: показывать его как картинку
+  // означало бы вечный onerror и ложное обещание превью.
+  if (ext === 'svg' || type === 'image/svg+xml') return 'file';
+  for (const kind of ['image', 'video', 'audio', 'pdf']) {
+    if (type.startsWith(kind + '/') || (kind === 'image' && type.startsWith('image/')) || ATTACH_EXT[kind].includes(ext)) return kind;
+  }
+  if (type === 'application/pdf') return 'pdf';
+  return 'file';
+}
+const ATTACH_ICON = { image: 'image', video: 'video', audio: 'music', pdf: 'fileText', file: 'file' };
+const ATTACH_WORD = { image: 'изображение', video: 'видео', audio: 'аудио', pdf: 'PDF', file: 'файл' };
+/* Имя файла человеку, а не адрес вендора. Из вебхука приходит и процентная
+   кодировка, и хвост подписи: «%D1%81%D0%BC%D0%B5%D1%82%D0%B0.pdf?token=8f3…»
+   читалось в пузыре как мусор и не давало понять, что за файл прислали. */
+function attachName(m) {
+  let raw = String(m.content_name || '').trim() || nameFromUri(m.content_uri) || '';
+  try { if (/%[0-9A-Fa-f]{2}/.test(raw)) raw = decodeURIComponent(raw); } catch { /* имя с битой кодировкой остаётся как есть */ }
+  raw = raw.split('?')[0].split('#')[0].split('/').pop().replace(/\s+/g, ' ').trim();
+  if (!raw || raw === '.' || raw === '..') raw = ATTACH_WORD[attachKind(m)] || 'вложение';
+  return raw.length > 48 ? raw.slice(0, 28) + '…' + raw.slice(-16) : raw;
+}
+// Файл лежит в CRM или остался по адресу вендора: второй случай помечаем
+// отдельно, потому что ссылка вендора живёт несколько часов и перестаёт работать.
+const attachIsLocal = m => String(m.content_uri || '').startsWith('/uploads/');
+// Данные вложения передаём атрибутами, а не строкой в onclick: имя файла
+// содержит кавычки и скобки, и вложенный JavaScript ломал разметку пузыря.
+function attachData(m, extra = '') {
+  const kind = attachKind(m);
+  return `data-id="${Number(m.id) || 0}" data-url="${esc(m.content_uri)}" data-name="${esc(attachName(m))}" data-kind="${kind}" data-size="${esc(fmtBytes(m.content_size))}" data-local="${attachIsLocal(m) ? 1 : 0}"${extra}`;
+}
+// Кнопка повторной загрузки: ссылка вендора протухла, а файл нужен в CRM.
+function attachRefetch(m) {
+  if (attachIsLocal(m) || !canEdit()) return '';
+  return `<button type="button" class="btn sm attach-refetch" onclick="refetchAttachment(${Number(m.id) || 0},this)">${icon('refresh', 13)} Скачать в CRM</button>`;
+}
+// Вложение в пузыре сообщения: картинка, видео и звук показываются на месте,
+// документ и прочие файлы — чипом, который открывает окно просмотра.
 function attachmentHtml(m) {
   // только безопасные схемы: javascript:/data: в ссылке вложения недопустимы
   if (!m.content_uri || !/^(https?:\/\/|\/uploads\/)/i.test(m.content_uri)) return '';
-  const url = esc(m.content_uri);
-  const isImage = (m.content_type || '').startsWith('image/') || /\.(png|jpe?g|gif|webp|svg)$/i.test(m.content_uri);
-  const imgName = m.content_name || nameFromUri(m.content_uri) || '';
-  const imgCap = imgName || m.content_size
-    ? `<small class="attach-cap">${esc(imgName || 'изображение')}${m.content_size ? ' · ' + esc(fmtBytes(m.content_size)) : ''}</small>` : '';
-  if (isImage) return `<a href="${url}" target="_blank" rel="noopener" class="chat-attach img"><img loading="lazy" src="${url}" alt="${esc(m.content_name || 'изображение')}" onerror="imgFail(this)">${imgCap}</a>`;
-  const nm = m.content_name || nameFromUri(m.content_uri) || 'вложение';
-  const ext = (String(nm).match(/\.([A-Za-z0-9]{1,5})$/) || [, ''])[1].toUpperCase();
-  const sub = [ext, fmtBytes(m.content_size)].filter(Boolean).join(' · ');
-  return `<a href="${url}" target="_blank" rel="noopener" class="chat-attach file">${icon('file', 14)}<span><span class="attach-name">${esc(nm)}</span>${sub ? `<small class="attach-meta">${esc(sub)}</small>` : ''}</span></a>`;
+  const kind = attachKind(m), url = esc(m.content_uri), name = attachName(m);
+  const size = fmtBytes(m.content_size);
+  const data = attachData(m);
+  const remote = attachIsLocal(m) ? '' : `<small class="attach-remote" title="Ссылка источника живёт несколько часов: сохраните файл в CRM, пока он доступен">${icon('alert', 12)} файл не сохранён в CRM</small>`;
+  if (kind === 'image') {
+    const cap = name || size ? `<small class="attach-cap">${esc(name)}${size ? ' · ' + esc(size) : ''}</small>` : '';
+    return `<div class="chat-attach img"><a href="${url}" target="_blank" rel="noopener" ${data} onclick="return openAttachment(this)" title="Открыть в большом виде"><img loading="lazy" src="${url}" alt="${esc(name)}" onerror="imgFail(this)"></a>${cap}${remote}${attachRefetch(m)}</div>`;
+  }
+  if (kind === 'video') {
+    return `<div class="chat-attach video"><video controls preload="metadata" playsinline src="${url}" title="${esc(name)}"></video>
+      <small class="attach-cap">${icon('video', 12)} ${esc(name)}${size ? ' · ' + esc(size) : ''} <a href="${url}" ${data} onclick="return openAttachment(this)">увеличить</a></small>${remote}${attachRefetch(m)}</div>`;
+  }
+  if (kind === 'audio') {
+    // Запись звонка и голосовое проигрываются прямо в чате: скачивание файла
+    // на каждое прослушивание делало разбор разговора долгим.
+    return `<div class="chat-attach audio"><span class="attach-name">${icon('music', 13)} ${esc(name)}${size ? `<small class="attach-meta">${esc(size)}</small>` : ''}</span>
+      <audio controls preload="none" src="${url}"></audio>${remote}${attachRefetch(m)}</div>`;
+  }
+  const ext = (String(name).match(/\.([A-Za-z0-9]{1,5})$/) || [, ''])[1].toUpperCase();
+  const sub = [kind === 'pdf' ? 'PDF' : ext, size].filter(Boolean).join(' · ');
+  const hint = kind === 'pdf' ? 'нажмите, чтобы открыть' : 'нажмите, чтобы посмотреть';
+  return `<div class="chat-attach wrap"><a href="${url}" target="_blank" rel="noopener" class="file" ${data} onclick="return openAttachment(this)" title="${esc(hint)}">${icon(ATTACH_ICON[kind], 15)}<span><span class="attach-name">${esc(name)}</span><small class="attach-meta">${esc(sub || ATTACH_WORD[kind])}</small></span></a>${remote}${attachRefetch(m)}</div>`;
+}
+/* Окно просмотра вложения: картинка в полный размер, проигрыватель, кадр PDF
+   и действия «Скачать» и «В новой вкладке». Прежде вложение открывалось
+   новой вкладкой, а документ и звук скачивались — посмотреть их в чате было
+   нельзя, и это выглядело как «вложение не открывается». */
+function openAttachment(el) {
+  const d = el.dataset || {};
+  const kind = d.kind || 'file', url = d.url || el.getAttribute('href') || '';
+  if (!url || !/^(https?:\/\/|\/uploads\/)/i.test(url)) return false;
+  const name = d.name || 'вложение', size = d.size || '';
+  const local = d.local === '1';
+  const media = kind === 'image' ? `<img src="${esc(url)}" alt="${esc(name)}" data-id="${Number(d.id)||0}" data-url="${esc(url)}" data-name="${esc(name)}" data-kind="image" data-local="${local?'1':'0'}" onerror="imgFail(this)">`
+    : kind === 'video' ? `<video src="${esc(url)}" controls playsinline></video>`
+      : kind === 'audio' ? `<audio src="${esc(url)}" controls></audio>`
+        : kind === 'pdf' && local ? `<iframe src="${esc(url)}" title="${esc(name)}"></iframe>`
+          : `<div class="lb-none">${icon(ATTACH_ICON[kind] || 'file', 42)}<p>${kind === 'pdf'
+            ? 'PDF не удалось встроить по внешней ссылке. Сохраните его в CRM — после этого он откроется в этом окне.'
+            : 'Предпросмотра для такого файла нет. Скачайте его или откройте в новой вкладке.'}</p></div>`;
+  openModal(`<h3 class="lb-head">${icon(ATTACH_ICON[kind] || 'file', 17)} ${esc(name)}</h3>
+    <div class="lightbox lb-${kind}">${media}</div>
+    <div class="lb-bar">
+      <small>${esc([ATTACH_WORD[kind] || 'файл', size].filter(Boolean).join(' · '))}${local ? '' : ' · по адресу источника'}</small>
+      <span class="lb-actions">
+        ${!local && canEdit() ? `<button type="button" class="btn sm" onclick="refetchAttachment(${Number(d.id) || 0},this,true)">${icon('refresh', 14)} Скачать в CRM</button>` : ''}
+        <a class="btn sm" href="${esc(url)}" download="${esc(name)}">${icon('download', 14)} Скачать</a>
+        <a class="btn sm" href="${esc(url)}" target="_blank" rel="noopener">${icon('external', 14)} В новой вкладке</a>
+      </span>
+    </div>`);
+  $('.modal-card')?.classList.add('lightbox-card');
+  return false;
+}
+/* Файл с адреса вендора забирается в CRM одной кнопкой: ссылка источника живёт
+   несколько часов, и без этого вложение оставалось в чате неоткрываемым. */
+async function refetchAttachment(id, btn, inModal) {
+  if (!id) return;
+  const was = btn ? btn.innerHTML : '';
+  if (btn) { btn.disabled = true; btn.innerHTML = icon('refresh', 13) + ' Забираем…'; }
+  try {
+    const r = await api('/api/messages/' + id + '/refetch', { method: 'POST' });
+    toast('Файл сохранён в CRM — теперь он открывается всегда');
+    if (inModal) closeModal();
+    const cid = state.conv;
+    if (cid) openConv(cid); else render();
+  } catch (e) {
+    if (btn) { btn.disabled = false; btn.innerHTML = was; }
+    toast(e.message || 'Файл не скачался', 'err');
+  }
 }
 // Слово «входящее» в подписях не используется: направление видно по стороне
 // пузыря, а лишнее слово только путает. Статусы — про доставку своего сообщения.
@@ -1680,8 +1803,34 @@ function prettyPhone(s) {
 function displayTitle(t) { return /^\+?\d[\d\s()-]{8,}$/.test(String(t || '').trim()) ? prettyPhone(t) : String(t || ''); }
 // Короткое имя источника для ссылки без заголовка: домен без www
 const hostOf = u => { try { return new URL(String(u)).hostname.replace(/^www\./, ''); } catch { return 'источник'; } };
-// ссылка вендора могла протухнуть: вместо битой картинки показываем ссылку на файл
-function imgFail(el) { const span = document.createElement('span'); span.className = 'attach-fallback'; span.textContent = 'Изображение не открылось — нажмите, чтобы скачать'; el.replaceWith(span); }
+/* Картинка не открылась: вместо битой рамки показываем чип с именем файла и
+   кнопкой «Скачать в CRM» — ссылка вендора протухает за несколько часов, и
+   единственный способ вернуть изображение — забрать файл повторно. */
+function imgFail(el) {
+  const link = el.closest('a') || el;
+  const d = link.dataset || {};
+  const box = document.createElement('div');
+  box.className = 'attach-broken';
+  box.innerHTML = `${icon('image', 16)}<span><b>${esc(d.name || 'Изображение')}</b><small>не открылось: ссылка источника устарела или файл недоступен</small></span>`;
+  const url = d.url || link.getAttribute('href') || '';
+  const act = document.createElement('span');
+  act.className = 'lb-actions';
+  if (d.local !== '1' && canEdit() && Number(d.id)) {
+    const retry = document.createElement('button');
+    retry.type = 'button'; retry.className = 'btn sm';
+    retry.innerHTML = icon('refresh', 13) + ' Скачать в CRM';
+    retry.onclick = () => refetchAttachment(Number(d.id), retry);
+    act.append(retry);
+  }
+  if (url) {
+    const open = document.createElement('a');
+    open.className = 'btn sm'; open.href = url; open.target = '_blank'; open.rel = 'noopener';
+    open.innerHTML = icon('external', 13) + ' Открыть источник';
+    act.append(open);
+  }
+  box.append(act);
+  (el.closest('.chat-attach') || el).replaceWith(box);
+}
 // аккаунт Wazzup, через который прошло сообщение: человек видит не только
 // мессенджер, но и конкретный номер или бота из своего кабинета
 // Разделители дат: в длинной переписке без них не понять, к какому дню ответ.
@@ -1703,10 +1852,16 @@ function msgsHtml(list) {
 }
 function msgHtml(m) {
   const attach = attachmentHtml(m);
-  // подпись «Вложение: имя» дублировала бы чип с тем же именем; текст оставляем
-  // только когда это настоящая подпись к файлу или когда файл не открыть
-  const placeholder = /^вложение[:\s]/i.test(String(m.body || '')) || m.body === '[вложение]';
-  const body = m.body && !(placeholder && attach) ? esc(m.body) : '';
+  // Подпись «Вложение: имя» дублировала бы чип. Если вебхук сохранил метку,
+  // но не передал файл, показываем причину и имя, а не сырую служебную строку.
+  const rawBody=String(m.body||'').trim();
+  const placeholder=/^вложение(?:[:\s].*)?$|^\[(?:вложение|изображение|голосовое сообщение|видео|документ)\]$/i.test(rawBody);
+  const body=m.body&&!placeholder?esc(m.body):'';
+  const placeholderName=rawBody.replace(/^вложение\s*:?\s*/i,'').replace(/^\[.*\]$/,'').trim();
+  const safePlaceholderName=/^https?:\/\//i.test(placeholderName)?nameFromUri(placeholderName):placeholderName;
+  const missingAttach=!attach&&placeholder
+    ? `<span class="attach-missing">${icon('paperclip',14)}<span><b>${esc(safePlaceholderName?'Вложение: '+safePlaceholderName:'Вложение не получено')}</b><small>Файл не поступил в CRM. Попросите отправить его ещё раз.</small></span></span>`
+    : '';
   const own = m.direction === 'out';
   const failed = m.status === 'failed';
   const badge = failed ? ' <span class="msg-fail" title="Не доставлено — проверьте подключение канала">не доставлено</span>' : '';
@@ -1730,7 +1885,7 @@ function msgHtml(m) {
   // отсюда путаница «вроде от меня, вроде мне»
   const authorLine = who ? `<div class="msg-author">${who}</div>` : '';
   const meta = [chan, msgTime(m.created_at), st].filter(Boolean).join(' · ') + badge;
-  const content = attach || body ? `${attach}${body}` : '<span class="msg-empty">Сообщение без текста</span>';
+  const content = attach || body ? `${attach}${body}` : missingAttach || '<span class="msg-empty">Сообщение без текста</span>';
   return `<div class="msg ${own ? 'out' : ''}"><div>${authorLine}${content}</div><small>${meta}</small></div>`;
 }
 function msgTime(s) { const f = dt(s); if (!f) return ''; const i = f.indexOf(' '); return i > 0 ? f.slice(i + 1) : f; }
@@ -2929,7 +3084,8 @@ function analyticsTabs(tab, right = '') {
 function setAnalyticsTab(t) { state.aTab = t; render(); }
 async function analytics(v) {
   if (state.me?.role === 'admin' && state.aTab === 'team') {
-    v.innerHTML = analyticsTabs('team', qualityPeriod()) + await qualityBody();
+    const right = state.qTab === 'metrics' ? qualityPeriod() : state.qTab === 'reviews' ? qualityReviewPeriod() : '';
+    v.innerHTML = analyticsTabs('team', right) + await qualityBody();
     return;
   }
   const a = await api('/api/analytics');
@@ -3160,45 +3316,307 @@ function campaignDelete(id) {
 // «Продажи / Команда», поэтому в самом разборе остаётся только разбор.
 function qualityPeriod() {
   const days = state.qDays || 30;
-  return `<span style="margin-left:auto;display:flex;align-items:center;gap:8px;flex-wrap:wrap"><b>Период:</b>
-    <span class="tabs" style="margin:0">${[7, 30, 90].map(n => `<button class="${days === n ? 'active' : ''}" onclick="setQualityDays(${n})">${n === 7 ? 'Неделя' : n === 30 ? '30 дней' : '90 дней'}</button>`).join('')}</span>
-    <span class="tag grey" title="Никто не заполняет отчёты руками — всё считается из переписки и сделок">Считается автоматически</span></span>`;
+  return `<span class="quality-period"><b>Период:</b>
+    <span class="tabs" style="margin:0">${[7,30,90].map(n=>`<button class="${days===n?'active':''}" onclick="setQualityDays(${n})">${n===7?'Неделя':n===30?'30 дней':'90 дней'}</button>`).join('')}</span>
+    <span class="tag grey" title="Показатели собираются из CRM и не выставляют оценку сотруднику">Данные CRM</span></span>`;
 }
+function qualityReviewPeriod() {
+  const days=state.qReviewDays||90;
+  return `<span class="quality-period"><b>Период отчёта:</b>
+    <span class="tabs" style="margin:0">${[30,90,365].map(n=>`<button class="${days===n?'active':''}" onclick="setQualityReviewDays(${n})">${n===30?'30 дней':n===90?'90 дней':'Год'}</button>`).join('')}</span></span>`;
+}
+function qualityTabs(tab) {
+  return `<div class="card toolbar quality-tabs"><div class="tabs" style="margin:0">
+    <button class="${tab==='metrics'?'active':''}" onclick="setQualityTab('metrics')">${icon('analytics',14)} Текущие показатели</button>
+    <button class="${tab==='reviews'?'active':''}" onclick="setQualityTab('reviews')">${icon('quality',14)} Проверки ОКК</button>
+  </div></div>`;
+}
+function setQualityTab(tab) { state.qTab=tab; if(tab!=='edit') state.qReviewId=null; render(); }
 async function qualityBody() {
-  const d = await api('/api/quality?days=' + (state.qDays || 30));
-  const t = d.totals || {};
-  const verdictColor = score => score >= 85 ? 'var(--green)' : score >= 70 ? '#65a30d' : score >= 50 ? 'var(--orange)' : 'var(--danger)';
-  return `<div class="grid">
-    <div class="kpi"><i>${icon('inbox', 20)}</i><span>Сообщений без ответа</span><b class="${t.unanswered ? 'red' : 'green'}">${t.unanswered ?? 0}</b><small>клиенты ждут ответа</small></div>
-    <div class="kpi"><i>${icon('clock', 20)}</i><span>Медиана первого ответа</span><b>${t.medianResponseMin === null || t.medianResponseMin === undefined ? '—' : t.medianResponseMin + ' мин'}</b><small>по всем сотрудникам</small></div>
-    <div class="kpi"><i>${icon('pipe', 20)}</i><span>Сделки без движения</span><b>${t.stalled ?? 0}</b><small>больше 14 дней на этапе</small></div>
-    <div class="kpi"><i>${icon('tasks', 20)}</i><span>Просроченные задачи</span><b class="${t.overdueTasks ? 'red' : ''}">${t.overdueTasks ?? 0}</b><small>открытые, срок прошёл</small></div>
+  if (state.qTab==='reviews') return qualityReviewsBody();
+  if (state.qTab==='edit') return qualityReviewEditor();
+  return qualityMetricsBody();
+}
+async function qualityMetricsBody() {
+  const d=await api('/api/quality?days='+(state.qDays||30));
+  const t=d.totals||{};
+  const managers=d.managers||[];
+  return `${qualityTabs('metrics')}
+  <div class="notice info quality-note">${icon('alertCircle',16)} <span><b>Это сигналы для проверки, не рейтинг сотрудников.</b> Содержание разговора оценивается отдельно во вкладке «Проверки ОКК» и только по подтверждённым данным. Показатели очереди частично отражают текущую нагрузку.</span></div>
+  <div class="grid">
+    <div class="kpi"><i>${icon('inbox',20)}</i><span>Диалоги, где клиент ждёт ответа</span><b class="${t.unansweredDialogs?'red':'green'}">${t.unansweredDialogs??0}</b><small>за выбранный период; автоответ не засчитывается</small></div>
+    <div class="kpi"><i>${icon('clock',20)}</i><span>Медиана ответа сотрудника</span><b>${t.medianResponseMin===null||t.medianResponseMin===undefined?'—':t.medianResponseMin+' мин'}</b><small>только там, где клиент ждал ответа</small></div>
+    <div class="kpi"><i>${icon('pipe',20)}</i><span>Открытые сделки без движения</span><b>${t.stalled??0}</b><small>текущий список, больше 14 дней</small></div>
+    <div class="kpi"><i>${icon('tasks',20)}</i><span>Просроченные открытые задачи</span><b class="${t.overdueTasks?'red':''}">${t.overdueTasks??0}</b><small>текущий список задач</small></div>
   </div>
-  <div class="card"><h3>Оценка по сотрудникам</h3>
+  <div class="card"><h3>Показатели по сотрудникам</h3>
+    <p class="form-hint">Переписка считается за выбранный период; сделки и задачи — в текущем состоянии. Конверсия показана как выигранные среди закрытых, рядом видны число сделок и отказы.</p>
     <div class="tbl-scroll"><table>
-      <tr><th>Сотрудник</th><th>Оценка</th><th>Вывод</th><th>Сделок</th><th>Успех</th><th>Отказ</th><th>Конверсия</th><th>Без ответа</th><th>Ответ, мин</th><th>Без движения</th><th>Просрочено</th></tr>
-      ${(d.managers || []).map(m => `<tr>
-        <td>${esc(m.name)}</td>
-        <td><b style="color:${verdictColor(m.score)}">${m.score}</b></td>
-        <td>${esc(m.verdict)}</td>
-        <td>${m.deals}</td>
-        <td class="green">${m.won}</td>
-        <td>${m.lost}</td>
-        <td>${m.conversion === null ? '—' : m.conversion + '%'}</td>
-        <td>${m.unanswered ? `<b class="red">${m.unanswered}</b>` : '0'}</td>
-        <td>${m.medianResponseMin === null ? '—' : m.medianResponseMin}</td>
-        <td>${m.stalled || '0'}</td>
-        <td>${m.overdueTasks || '0'}</td>
-      </tr>`).join('') || '<tr><td colspan="11"><small>Активных менеджеров нет</small></td></tr>'}
-    </table></div></div>
-  <div class="card"><h3>Как считается оценка</h3>
-    <p class="form-hint" style="margin-top:-2px">Старт — 100 баллов. Баллы снимаются за то, что мешает продаже:</p>
-    <ul>${(d.factors || []).map(f => `<li>${esc(f)}</li>`).join('')}</ul>
-    <p class="form-hint">Оценка показывает, где клиент ждёт, а сделка стоит. Разбор конкретного случая — в карточке сделки и в переписке клиента.</p>
+      <tr><th>Сотрудник</th><th>Сделок</th><th>Выиграно</th><th>Отказ</th><th>Конверсия закрытых</th><th>Диалогов без ответа</th><th>Ответ, мин</th><th>Без движения</th><th>Просрочено</th></tr>
+      ${managers.map(m=>`<tr>
+        <td><b>${esc(m.name)}</b></td><td>${numFmt(m.deals)}</td><td class="green">${numFmt(m.won)}</td><td>${numFmt(m.lost)}</td>
+        <td>${m.conversion===null?'—':m.conversion+'%'}</td>
+        <td>${m.unansweredDialogs?`<b class="red">${numFmt(m.unansweredDialogs)}</b>`:'0'}</td>
+        <td>${m.medianResponseMin===null?'—':numFmt(m.medianResponseMin)}</td><td>${numFmt(m.stalled)}</td><td>${numFmt(m.overdueTasks)}</td>
+      </tr>`).join('')||'<tr><td colspan="9"><small>Активных сотрудников нет</small></td></tr>'}
+    </table></div>
+  </div>
+  <div class="card quality-definitions"><h3>Как читать показатели</h3>
+    <ul>${(d.definitions||[]).map(x=>`<li>${esc(x)}</li>`).join('')}</ul>
+    <p class="form-hint">Автоматических штрафов и общего балла нет. При проверке звонка неизвестный факт остаётся «данных недостаточно», а неприменимый — отдельно от «нет».</p>
   </div>`;
 }
-function setQualityDays(n) { state.qDays = n; render(); }
-
+function setQualityDays(n) { state.qDays=n; render(); }
+function setQualityReviewDays(n) { state.qReviewDays=n; render(); }
+function qualityStatusLabel(status) {
+  return ({draft:'Черновик',complete:'Проверена',no_contact:'Контакта не было',unavailable:'Данные недоступны'})[status]||'Неизвестно';
+}
+function qualityStatusClass(status) {
+  return ({draft:'grey',complete:'green',no_contact:'orange',unavailable:'grey'})[status]||'grey';
+}
+function qualityInteractionLabel(kind) { return ({call:'Звонок',chat:'Переписка',mixed:'Звонок и переписка',other:'Другое',unknown:'Не определён'})[kind]||'Не указан'; }
+function qualityDataStatusLabel(kind) { return ({complete:'История полная',partial:'История частичная',unavailable:'История недоступна'})[kind]||'Полнота не указана'; }
+function qualityScoreText(score) {
+  if(!score) return 'Баллы не начисляются';
+  const pct=score.percent===null?'—':score.percent+'%';
+  return `${score.confirmed}/${score.applicable} применимых · ${pct} · охват ${score.applicable}/${score.total}`;
+}
+async function qualityReviewsBody() {
+  const d=await api('/api/quality/reviews?days='+(state.qReviewDays||90));
+  const a=d.summary||{};
+  const rows=d.reviews||[];
+  return `${qualityTabs('reviews')}
+    <div class="notice info quality-note">${icon('quality',16)} <span><b>Ручная проверка с доказательствами.</b> Берём только факты из переписки, звонка и карточки CRM. «Нет», «не применимо» и «данных недостаточно» — разные результаты. Исторические пороги из таблицы не утверждаем программой: сначала руководитель должен согласовать их.</span></div>
+    <div class="grid quality-summary">
+      <div class="kpi"><i>${icon('checkCircle',20)}</i><span>Завершено</span><b>${numFmt(a.complete||0)}</b><small>за период отчёта</small></div>
+      <div class="kpi"><i>${icon('edit',20)}</i><span>Черновики</span><b>${numFmt(a.drafts||0)}</b><small>можно продолжить</small></div>
+      <div class="kpi"><i>${icon('phone',20)}</i><span>Контакта не было</span><b>${numFmt(a.no_contact||0)}</b><small>не превращается в ноль баллов</small></div>
+      <div class="kpi"><i>${icon('alert',20)}</i><span>Данные недоступны</span><b>${numFmt(a.unavailable||0)}</b><small>не включено в оценку критериев</small></div>
+    </div>
+    <div class="card quality-criteria-stats"><div class="row"><span><h3>Результаты по критериям</h3><small>Доля «да» считается только среди «да» и «нет»; охват — среди завершённых разборов.</small></span></div>
+      <div class="tbl-scroll"><table><tr><th>Критерий</th><th>Да / применимых</th><th>Доля «да»</th><th>Охват</th></tr>
+      ${(d.criteria||[]).map(c=>`<tr><td>${esc(c.title)}${c.critical?' <span class="tag orange">критичный</span>':''}</td>
+        <td>${numFmt(c.yes||0)} / ${numFmt(c.applicable||0)}</td><td>${c.percent===null?'—':c.percent+'%'}</td>
+        <td>${numFmt(c.applicable||0)} / ${numFmt(a.complete||0)}${a.complete?` · ${c.coverage}%`:''}</td></tr>`).join('')}</table></div>
+      <p class="form-hint">Это агрегаты проверок руководителя, не автоматическая оценка всех диалогов. Статус «недостаточно данных» не считается ответом «нет».</p>
+    </div>
+    <div class="card quality-review-list"><div class="toolbar"><h3>Проверки (${numFmt(d.total||0)})</h3><button class="btn primary" onclick="qualityNewReview()">${icon('plus',14)} Новая проверка</button></div>
+      <div class="tbl-scroll"><table><tr><th>Сделка и клиент</th><th>Менеджер</th><th>Результат</th><th>Рецензент</th><th>Обновлена</th><th></th></tr>
+      ${rows.map(r=>`<tr>
+        <td><b>${esc(r.deal_title)}</b><br><small>${esc(r.contact_name||'Контакт не указан')} · ${esc(r.stage_name||r.stage||'этап не указан')}</small></td>
+        <td>${esc(r.responsible_name||'—')}</td>
+        <td><span class="tag ${qualityStatusClass(r.status)}">${qualityStatusLabel(r.status)}</span><br><small>${esc(qualityScoreText(r.score))}</small><br><small>${esc(qualityDataStatusLabel(r.data_status))}</small>${r.score?.criticalFailures?`<br><small class="red">Критичных пропусков: ${numFmt(r.score.criticalFailures)}</small>`:''}</td>
+        <td>${esc(r.reviewer_name||'—')}</td><td>${esc(dt(r.updated_at)||'')}</td>
+        <td><button class="btn sm" onclick="qualityOpenReview(${r.id})">${r.status==='draft'?'Продолжить':'Открыть'}</button></td>
+      </tr>`).join('')||'<tr><td colspan="6"><small>Проверок пока нет. Откройте новую и выберите сделку из CRM.</small></td></tr>'}
+      </table></div>${d.truncated?'<p class="form-hint">Показаны последние 100 проверок; сводные показатели рассчитаны по всему выбранному периоду.</p>':''}
+    </div>`;
+}
+let qualitySearchTimer=null;
+function qualityNewReview() {
+  state.qDealQuery=''; state.qDealSeq++;
+  openModal(`<h3>Новая проверка ОКК</h3><p class="form-hint">Выберите сделку из CRM. Проверка сохраняет только выводы руководителя и доказательства; карточка, задачи и переписка не изменяются.</p>
+    <label>Найти сделку<input id="qualityDealSearch" class="searchfield" autocomplete="off" placeholder="Название сделки, клиент или номер" oninput="qualityDealSearch(this.value)"></label>
+    <div id="qualityDealMatches" class="quality-deal-matches"><small>Загружаем последние сделки…</small></div>`);
+  qualityDealSearch('');
+}
+function qualityDealSearch(value) {
+  state.qDealQuery=String(value||'');
+  const seq=++state.qDealSeq;
+  const box=$('#qualityDealMatches'); if(box) box.innerHTML='<small>Ищем сделки…</small>';
+  clearTimeout(qualitySearchTimer);
+  qualitySearchTimer=setTimeout(async()=>{
+    const q=state.qDealQuery.trim();
+    if(q.length===1){ const el=$('#qualityDealMatches'); if(el) el.innerHTML='<small>Введите ещё хотя бы один знак.</small>'; return; }
+    try {
+      const d=await api('/api/quality/deals?limit=30'+(q?'&q='+encodeURIComponent(q):''));
+      if(seq!==state.qDealSeq) return;
+      const el=$('#qualityDealMatches'); if(!el) return;
+      el.innerHTML=(d.rows||[]).map(r=>`<button type="button" class="quality-deal-option" onclick="qualityCreateReview(${r.id})">
+        <span><b>${esc(r.title)}</b><small>${esc(r.contact_name||'Контакт не указан')} · ${esc(r.responsible||'Без ответственного')} · ${esc(r.stage_name||r.stage||'')}</small></span>
+        <span class="quality-deal-meta">${r.message_count?`${numFmt(r.message_count)} сообщений`:'истории в чате нет'}${r.review_count?` · проверок ${numFmt(r.review_count)}`:''}</span>
+      </button>`).join('')||'<div class="empty">Подходящих сделок нет. Проверьте название или номер.</div>';
+    } catch(e) { const el=$('#qualityDealMatches'); if(el) el.innerHTML=`<div class="err">${esc(e.message)}</div>`; }
+  }, state.qDealQuery.trim()?180:0);
+}
+async function qualityCreateReview(dealId) {
+  try {
+    const r=await api('/api/quality/reviews',{method:'POST',body:JSON.stringify({deal_id:Number(dealId)})});
+    closeModal(); state.qReviewId=r.id; state.qTab='edit'; await render();
+  } catch(e) { toast(e.message,'err'); }
+}
+function qualityOpenReview(id) { state.qReviewId=Number(id); state.qTab='edit'; state.qReviewData=null; render(); }
+function qualityBackToReviews() { state.qReviewId=null; state.qTab='reviews'; render(); }
+function qualityItemStatus(v) { return ({yes:'Да',no:'Нет',na:'Не применимо',unknown:'Данных недостаточно','':'Не выбрано'})[v]??'Не выбрано'; }
+function qualitySourceLabel(v) { return ({message:'Переписка',recording:'Запись звонка',crm:'Карточка CRM',other:'Другое','':'Источник не указан'})[v]||v; }
+function qualityCriteriaEditor(criteria,items,readOnly) {
+  const map=new Map(items.map(x=>[x.criterion_key,x]));
+  const groups=new Map();
+  for(const c of criteria){ if(!groups.has(c.block)) groups.set(c.block,[]); groups.get(c.block).push(c); }
+  return [...groups].map(([block,list])=>`<section class="quality-group"><h3>${esc(block)}</h3>
+    ${list.map(c=>{const i=map.get(c.key)||{};const disabled=readOnly?'disabled':'';
+      return `<article class="quality-criterion ${c.critical?'critical':''}">
+        <div class="quality-criterion-title"><b>${esc(c.title)}</b>${c.critical?'<span class="tag orange">критичный пункт</span>':''}</div>
+        <p>${esc(c.guide)}</p>
+        <div class="quality-fields">
+          <label>Результат<select data-q-status="${esc(c.key)}" ${disabled}>
+            ${[['','Выберите статус'],['yes','Да — подтверждено'],['no','Нет — есть основание'],['na','Не применимо'],['unknown','Данных недостаточно']].map(([v,t])=>`<option value="${v}" ${v===(i.status||'')?'selected':''}>${t}</option>`).join('')}
+          </select></label>
+          <label>Откуда подтверждение<select data-q-source="${esc(c.key)}" ${disabled}>
+            ${[['','Выберите источник'],['message','Переписка / событие CRM'],['recording','Запись звонка'],['crm','Карточка CRM'],['other','Другое']].map(([v,t])=>`<option value="${v}" ${v===(i.evidence_source||'')?'selected':''}>${t}</option>`).join('')}
+          </select></label>
+        </div>
+        <label class="quality-evidence-label">Подтверждение или причина<textarea data-q-evidence="${esc(c.key)}" data-message-id="${Number(i.message_id)||''}" maxlength="1200" rows="2" ${disabled} placeholder="Цитата, проверенный фрагмент записи или объяснение, почему данных недостаточно">${esc(i.evidence_text||'')}</textarea></label>
+        ${i.message_id?`<small class="form-hint">Связано с сообщением №${Number(i.message_id)}. ${esc(qualitySourceLabel(i.evidence_source||''))}</small>`:''}
+      </article>`;
+    }).join('')}
+  </section>`).join('');
+}
+function qualityMessagesPanel(messages,readOnly) {
+  return `<aside class="card quality-source-card"><div class="quality-source-head"><h3>Источники по сделке</h3><small>${numFmt(messages.length)} последних сообщений</small></div>
+    <label class="quality-message-search">Найти фразу в истории<input id="qualityMessageSearch" type="search" placeholder="Введите слова из переписки" oninput="qualityFilterMessages(this.value)" ${messages.length?'':'disabled'}></label>
+    ${readOnly?'':`<label class="quality-message-search">К какому критерию приложить<select id="qualityEvidenceTarget"><option value="">Сначала выберите критерий</option>${(state.qReviewData?.criteria||[]).map(c=>`<option value="${esc(c.key)}">${esc(c.block)} — ${esc(c.title)}</option>`).join('')}</select></label>`}
+    <p class="form-hint">Выберите критерий выше, затем добавьте сообщение как источник. Для звонка используйте запись, если она прикреплена, и сверяйте фрагмент вручную.</p>
+    <div class="quality-message-list">
+    ${messages.map(m=>{
+      const who=m.direction==='out'?(m.author||'Сотрудник'):(m.author||'Клиент');
+      const text=String(m.body||'').trim();
+      const attach=m.content_uri?attachmentHtml(m):'';
+      const searchable=`${who} ${text} ${m.content_name||''} ${m.channel||''}`.toLocaleLowerCase('ru-RU');
+      const used=(state.qReviewData?.items||[]).some(x=>Number(x.message_id)===Number(m.id));
+      return `<article class="quality-source-item ${used?'has-evidence':''}" data-q-message-text="${esc(searchable)}">
+        <div class="quality-source-meta"><b>${esc(who)}</b><span>${esc(channelLabel(m.channel)||m.channel||'')} · ${esc(dt(m.created_at)||'')}</span></div>
+        ${used?'<span class="tag green quality-used-tag">Указано в проверке</span>':''}
+        ${text?`<p>${esc(text)}</p>`:''}${attach}${!text&&!attach?'<small>Текст сообщения недоступен</small>':''}
+        ${readOnly?'':`<button type="button" class="btn sm quality-use-source" onclick="qualityUseEvidence(${Number(m.id)})">${icon('copy',13)} Использовать как доказательство</button>`}
+      </article>`;
+    }).join('')||'<div class="empty">В переписке CRM пока нет сообщений. Если проверяете звонок, сначала убедитесь, что запись доступна руководителю.</div>'}
+    </div>
+  </aside>`;
+}
+function qualityFilterMessages(value) {
+  const q=String(value||'').trim().toLocaleLowerCase('ru-RU');
+  document.querySelectorAll('.quality-source-item').forEach(row=>{ row.hidden=Boolean(q)&&!String(row.dataset.qMessageText||'').includes(q); });
+}
+function qualityUseEvidence(messageId) {
+  const data=state.qReviewData;
+  const msg=(data?.messages||[]).find(x=>Number(x.id)===Number(messageId));
+  if(!msg) return;
+  const target=$('#qualityEvidenceTarget')?.value||'';
+  if(!target){toast('Сначала выберите критерий, к которому приложить источник.','err');return;}
+  const type=String(msg.content_type||'').toLowerCase();
+  const isRecording=type.startsWith('audio/')||type.startsWith('video/')||/\.(mp3|ogg|opus|wav|m4a|aac|mp4|webm|mov|3gp)$/i.test(msg.content_uri||'');
+  const source=isRecording?'recording':'message';
+  const who=msg.direction==='out'?(msg.author||'Сотрудник'):(msg.author||'Клиент');
+  const proof=String(msg.body||'').trim()||`[Вложение: ${attachName(msg)}]`;
+  const stamp=`${who}, ${dt(msg.created_at)||'время не указано'}: «${proof.slice(0,700)}»`;
+  const field=document.querySelector(`[data-q-evidence="${target}"]`);
+  const select=document.querySelector(`[data-q-source="${target}"]`);
+  if(field){field.value=stamp;field.dataset.messageId=String(msg.id);}
+  if(select) select.value=source;
+  toast('Источник добавлен. Проверьте цитату и самостоятельно выберите результат критерия.');
+}
+function qualityCollectItems() {
+  return [...document.querySelectorAll('[data-q-status]')].map(el=>{
+    const key=el.dataset.qStatus;
+    const evidence=document.querySelector(`[data-q-evidence="${key}"]`);
+    const source=document.querySelector(`[data-q-source="${key}"]`);
+    return {key,status:el.value,evidence_source:source?.value||'',message_id:evidence?.value.trim()?Number(evidence.dataset.messageId)||null:null,evidence_text:evidence?.value||''};
+  });
+}
+async function qualitySave(status,button) {
+  const data=state.qReviewData;
+  if(!data?.review?.id) return;
+  const original=button?.innerHTML;
+  if(button){button.disabled=true;button.innerHTML=icon('refresh',13)+' Сохраняем…';}
+  const splitLines=id=>String($(id)?.value||'').split(/\r?\n/).map(x=>x.trim()).filter(Boolean);
+  let items=qualityCollectItems();
+  if(status==='no_contact'||status==='unavailable') items=items.map(x=>({...x,status:'',evidence_source:'',message_id:null,evidence_text:''}));
+  const body={
+    status,
+    data_status:$('#qualityDataStatus')?.value||'partial',
+    interaction_type:$('#qualityInteractionType')?.value||'mixed',
+    period_start:$('#qualityPeriodStart')?.value||'',period_end:$('#qualityPeriodEnd')?.value||'',
+    data_notes:$('#qualityDataNotes')?.value||'',summary:$('#qualitySummaryText')?.value||'',
+    issues:splitLines('#qualityIssues'),next_steps:splitLines('#qualityNextSteps'),
+    crm_observation:$('#qualityCrmObservation')?.value||'',items
+  };
+  try {
+    await api('/api/quality/reviews/'+data.review.id,{method:'PUT',body:JSON.stringify(body)});
+    toast(status==='draft'?'Черновик ОКК сохранён':status==='complete'?'Проверка ОКК завершена':'Результат ОКК сохранён');
+    await render();
+  } catch(e) { toast(e.message,'err'); }
+  finally { if(button){button.disabled=false;button.innerHTML=original;} }
+}
+function qualityFinish(status) {
+  const message=status==='complete'
+    ?'Завершить проверку? После сохранения её нельзя переписать или удалить. Проверьте цитаты, даты и выбранный знаменатель.'
+    :status==='no_contact'
+      ?'Отметить, что контакта с клиентом не было? Запись останется в истории отдельно и баллы за отсутствующий разговор не начисляются.'
+      :'Отметить, что история недоступна? Запись останется отдельно и не превратится в нулевую оценку.';
+  askConfirm(message,()=>qualitySave(status),{okText:'Завершить проверку',danger:status!=='complete'});
+}
+function qualityDeleteDraft() {
+  const id=state.qReviewData?.review?.id;
+  if(!id) return;
+  askConfirm('Удалить этот черновик ОКК? Завершённые проверки удалить нельзя.',async()=>{
+    await api('/api/quality/reviews/'+id,{method:'DELETE'});
+    toast('Черновик удалён'); qualityBackToReviews();
+  },{okText:'Удалить черновик',danger:true});
+}
+async function qualityReviewEditor() {
+  const d=await api('/api/quality/reviews/'+Number(state.qReviewId));
+  state.qReviewData=d;
+  const r=d.review,readOnly=r.status!=='draft',score=r.score;
+  const final=readOnly?`<div class="notice ${r.status==='complete'?'info':'warn'} quality-note"><span><b>${esc(qualityStatusLabel(r.status))}.</b> ${r.status==='complete'?`Итог по применимым пунктам: ${esc(qualityScoreText(score))}. Это не рейтинг сотрудника; охват и знаменатель показаны рядом.`:esc(r.data_notes||'Баллы не начисляются.')}</span></div>`:'';
+  const manager=r.responsible_name||'не назначен';
+  const selectorText=`${qualityStatusLabel(r.status)} · ${esc(r.contact_name||'Контакт не указан')} · ${esc(manager)}`;
+  const criteria=readOnly&&r.status!=='complete'
+    ?`<div class="empty quality-no-score">${icon(r.status==='no_contact'?'phone':'alert',22)}<b>Критерии не оценивались</b><span>${esc(r.data_notes||'Для этого результата баллы не начисляются.')}</span></div>`
+    :`<div class="quality-criterion-list">${qualityCriteriaEditor(d.criteria||[],d.items||[],readOnly)}</div>`;
+  return `<div class="card toolbar quality-editor-toolbar"><button class="btn" onclick="qualityBackToReviews()">${icon('arrowLeft',14)} К проверкам</button>
+    <span><b>Проверка ОКК</b><small>${selectorText}</small></span>
+    <span class="tag ${qualityStatusClass(r.status)}">${qualityStatusLabel(r.status)}</span>
+  </div>
+  ${final}
+  <div class="card quality-review-context"><div><small>Сделка</small><b>${esc(r.deal_title)}</b></div><div><small>Клиент</small><b>${esc(r.contact_name||'не указан')}</b></div><div><small>Ответственный на дату проверки</small><b>${esc(manager)}</b></div><div><small>Этап на дату проверки</small><b>${esc(r.stage_name||r.stage||'—')}</b></div><div><small>Источник</small><b>${esc(sourceLabel(r.source)||r.source||'—')}</b></div><div><small>Проверяющий</small><b>${esc(r.reviewer_name||'—')}</b></div>${readOnly?`<div><small>Тип контакта</small><b>${esc(qualityInteractionLabel(r.interaction_type))}</b></div><div><small>Полнота истории</small><b>${esc(qualityDataStatusLabel(r.data_status))}</b></div><div><small>Проверенный период</small><b>${esc(r.period_start&&r.period_end?`${dt(r.period_start)} — ${dt(r.period_end)}`:'не указан')}</b></div>`:''}</div>
+  ${readOnly?`<div class="quality-final-notes card"><h3>Запись руководителя</h3>
+    ${r.summary?`<div><b>Сильные стороны</b><p>${esc(r.summary)}</p></div>`:''}
+    ${(r.issues||[]).length?`<div><b>Подтверждённые проблемы</b><ul>${r.issues.map(x=>`<li>${esc(x)}</li>`).join('')}</ul></div>`:''}
+    ${(r.next_steps||[]).length?`<div><b>Следующие действия</b><ul>${r.next_steps.map(x=>`<li>${esc(x)}</li>`).join('')}</ul></div>`:''}
+    ${r.crm_observation?`<div><b>Проверка карточки CRM</b><p>${esc(r.crm_observation)}</p></div>`:''}
+    ${r.data_notes?`<div><b>Доступность данных</b><p>${esc(r.data_notes)}</p></div>`:''}
+  </div>`:''}
+  ${readOnly?'':`<div class="card quality-review-form">
+    <h3>Контекст проверки</h3><p class="form-hint">Проверяйте доступную историю. Не заполняйте неизвестное догадками и не меняйте карточку сделки, задачи или переписку из этого экрана.</p>
+    <div class="quality-form-grid">
+      <label>Тип контакта<select id="qualityInteractionType"><option value="unknown" ${r.interaction_type==='unknown'?'selected':''}>Не определён</option><option value="chat" ${r.interaction_type==='chat'?'selected':''}>Переписка</option><option value="call" ${r.interaction_type==='call'?'selected':''}>Звонок</option><option value="mixed" ${r.interaction_type==='mixed'?'selected':''}>Звонок и переписка</option><option value="other" ${r.interaction_type==='other'?'selected':''}>Другое</option></select></label>
+      <label>Полнота истории<select id="qualityDataStatus"><option value="complete" ${r.data_status==='complete'?'selected':''}>Доступная история полная</option><option value="partial" ${r.data_status!=='complete'?'selected':''}>История частичная</option></select></label>
+      <label>Начало периода<input id="qualityPeriodStart" type="date" value="${esc(r.period_start||'')}"></label>
+      <label>Конец периода<input id="qualityPeriodEnd" type="date" value="${esc(r.period_end||'')}"></label>
+    </div>
+    <label>Доступность источников и причина результата<textarea id="qualityDataNotes" rows="2" maxlength="1200" placeholder="Например: менеджер ещё не связался с клиентом; запись обрывается до договорённости; условия нужно сверить с руководителем">${esc(r.data_notes||'')}</textarea></label>
+  </div>`}
+  <div class="quality-review-layout">
+    <div class="quality-checklist-column"><div class="card quality-checklist-head"><h3>18 критериев проверки</h3><p class="form-hint">Для каждого пункта выберите «да», «нет», «не применимо» или «данных недостаточно» и запишите источник с цитатой либо причину. Критичные пункты выделены, но автоматически не вычитают баллы.</p>
+      ${readOnly&&r.status==='complete'?`<div class="quality-result-summary"><b>${esc(qualityScoreText(score))}</b><small>${score?.insufficient?`Недостаточно данных: ${numFmt(score.insufficient)}.`:''} Неприменимо: ${numFmt(score?.notApplicable||0)}. ${score?.criticalFailures?`Критичных пунктов со статусом «нет»: ${numFmt(score.criticalFailures)}. `:''}Пороговые статусы не назначаются.</small></div>`:''}
+    </div>${criteria}
+    ${readOnly?'':`<div class="card quality-review-form">
+      <h3>Краткое заключение</h3>
+      <label>Подтверждённые сильные стороны<textarea id="qualitySummaryText" rows="2" maxlength="2000">${esc(r.summary||'')}</textarea></label>
+      <label>До трёх подтверждённых проблем<textarea id="qualityIssues" rows="3" maxlength="1500" placeholder="Одна проблема на строку">${esc((r.issues||[]).join('\n'))}</textarea></label>
+      <label>До трёх действий на следующее касание<textarea id="qualityNextSteps" rows="3" maxlength="1500" placeholder="Одно действие на строку">${esc((r.next_steps||[]).join('\n'))}</textarea></label>
+      <label>Проверка CRM<textarea id="qualityCrmObservation" rows="2" maxlength="2000" placeholder="Факты в карточке, задача, ответственный; ничего не меняется автоматически">${esc(r.crm_observation||'')}</textarea></label>
+    </div>
+    <div class="card quality-editor-actions"><button class="btn" onclick="qualitySave('draft',this)">${icon('save',14)} Сохранить черновик</button>
+      <button class="btn primary" onclick="qualityFinish('complete')">${icon('checkCircle',14)} Завершить проверку</button>
+      <button class="btn sm ghost" onclick="qualityFinish('no_contact')">Контакта не было</button>
+      <button class="btn sm ghost" onclick="qualityFinish('unavailable')">Данные недоступны</button>
+      <button class="btn sm danger quality-delete" onclick="qualityDeleteDraft()">${icon('trash',13)} Удалить черновик</button>
+    </div>`}
+    ${qualityMessagesPanel(d.messages||[],readOnly)}
+  </div>`;
+}
 /* ---------- competitors view ---------- */
 // Уровень риска сервер считает словами — цвета подбираем к тем же словам,
 // иначе плашка всегда оставалась серой и подписи «нет» вместо уровня.
@@ -4063,7 +4481,7 @@ async function settings(v) {
       <p><small><b>Уволился сотрудник?</b> Снимите галочку «Сотрудник может входить в CRM» — все его сеансы завершатся сразу. Карточки и переписка останутся в базе; сделки и задачи можно передать другому человеку массовым действием.</small></p></div></div></div>`;
   } else if (state.settingsTab === 'data') {
     const demoRows = Object.values(s.demo || {}).reduce((a, b) => a + b, 0);
-    body = `${demoRows ? `<div class="card tint-info"><h3>${icon('sparkles', 16)} Демонстрационные данные</h3><p><small>Сейчас в базе примеры: клиентов ${s.demo?.contacts || 0}, сделок ${s.demo?.deals || 0}, задач ${s.demo?.tasks || 0}, чатов ${s.demo?.conversations || 0}, конкурентов ${s.demo?.competitors || 0}, товаров каталога ${s.demo?.products || 0}, шаблонов ${s.demo?.templates || 0}, правил ${s.demo?.automations || 0}. Их можно редактировать как обычные данные или удалить одной кнопкой — тогда CRM будет полностью чистой.</small></p><button class="btn danger sm" onclick="cleanDemo()">${icon('trash', 13)} Удалить демонстрационные данные</button></div>` : ''}
+    body = `${demoRows ? `<div class="card tint-info"><h3>${icon('sparkles', 16)} Демонстрационные данные</h3><p><small>Сейчас в базе примеры: клиентов ${s.demo?.contacts || 0}, сделок ${s.demo?.deals || 0}, задач ${s.demo?.tasks || 0}, чатов ${s.demo?.conversations || 0}, конкурентов ${s.demo?.competitors || 0}, товаров каталога ${s.demo?.products || 0}, шаблонов ${s.demo?.templates || 0}, правил ${s.demo?.automations || 0}, проверок ОКК ${s.demo?.qualityReviews || 0}. Их можно редактировать как обычные данные или удалить одной кнопкой — тогда CRM будет полностью чистой.</small></p><button class="btn danger sm" onclick="cleanDemo()">${icon('trash', 13)} Удалить демонстрационные данные</button></div>` : ''}
     <div class="settings-cols"><div><div class="card"><h3>Название компании</h3><form onsubmit="return saveCompanySettings(event)"><div class="form-grid-21"><label>Название<input name="COMPANY_NAME" value="${esc(s.company.name)}"></label><label>Валюта<input name="CURRENCY" value="${esc(s.company.currency)}"></label></div>
      <p class="form-hint">Название и валюта попадают в печатные документы и во все суммы. Автосоздание и распределение сделок — во вкладке «Автоматизации».</p>
      <button class="btn primary">Сохранить</button></form></div>
