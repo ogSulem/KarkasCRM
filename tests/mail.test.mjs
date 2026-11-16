@@ -58,11 +58,13 @@ let admin;
 // его нужно собрать и раскодировать
 const mailText = raw => Buffer.from(String(raw).split('\r\n\r\n').slice(1).join('\r\n\r\n').replace(/\r\n/g, ''), 'base64').toString('utf8');
 
+const DEAL_TEST_DEFAULTS={amount:0,deal_object:'Объект для теста',land_status:'unknown',construction_date:'unknown',payment_type:'unknown',lead_source:'Тест'};
 const call = async (path, { method = 'GET', body, token } = {}) => {
+  const payload=path==='/api/deals'&&method==='POST'&&body?{...DEAL_TEST_DEFAULTS,...body}:body;
   const r = await fetch(base + path, {
     method,
     headers: { 'Content-Type': 'application/json', ...(token ? { Authorization: 'Bearer ' + token } : {}) },
-    body: body === undefined ? undefined : JSON.stringify(body),
+    body: payload === undefined ? undefined : JSON.stringify(payload),
   });
   const text = await r.text();
   let data; try { data = JSON.parse(text) } catch { data = text }

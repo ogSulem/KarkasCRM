@@ -174,7 +174,7 @@ export function migrateOurPricesToCatalog(db) {
 }
 
 export function createCompetitors(ctx) {
-  const { db, json, readBody, log, broadcast, getSetting, setSetting, rateLimit } = ctx;
+  const { db, json, readBody, log, logAccess, broadcast, getSetting, setSetting, rateLimit } = ctx;
   // проверки идут во внешние платные сервисы (ФНС, карты, отзывы): серия частых
   // запусков одним сотрудником не должна сжигать квоту заказчика
   const checkLimit = (res, user) => {
@@ -894,6 +894,10 @@ export function createCompetitors(ctx) {
   };
 
   async function handle(req, res, { p, u, user }) {
+    const readers = ['admin','manager','viewer'];
+    const writers = ['admin','manager'];
+    if (!readers.includes(user?.role)) return json(res, 403, { error: 'Раздел конкурентов доступен администратору, менеджеру и наблюдателю.' });
+    if (!['GET','HEAD'].includes(req.method) && !writers.includes(user.role)) return json(res, 403, { error: 'Менять данные конкурентов может только администратор или менеджер.' });
     const admin = async () => { if (user.role !== 'admin') { json(res, 403, { error: 'Только для администратора' }); return false } return true };
     // список источников и их статус
     if (p === '/api/competitor-sources') {
@@ -982,8 +986,12 @@ export function createCompetitors(ctx) {
         return json(res, 201, { findings: list() });
       }
       if (req.method === 'DELETE' && mFind[2]) {
-        const r = db.prepare('DELETE FROM competitor_findings WHERE id=? AND competitor_id=?').run(Number(mFind[2]), id);
+        if (!await admin()) return;
+        const findingId=Number(mFind[2]);
+        const r = db.prepare('DELETE FROM competitor_findings WHERE id=? AND competitor_id=?').run(findingId, id);
         if (!r.changes) return json(res, 404, { error: 'Находка не найдена' });
+        logAccess?.(user,'competitor_finding_delete','competitor_findings',findingId,'DELETE');
+        log(`Удалена находка проверки конкурента ${id}`,'competitors',id,user.name);
         return json(res, 200, { deleted: true, findings: list() });
       }
       return json(res, 405, { error: 'Метод не поддерживается' });
@@ -991,20 +999,31 @@ export function createCompetitors(ctx) {
     // Массовое удаление карточек конкурентов. Прайс-строки в price_rows
     // не имеют внешнего ключа, поэтому чистим их явно и одной транзакцией.
     if (p === '/api/competitors/bulk-delete' && req.method === 'POST') {
+      if (!await admin()) return;
       const b = await readBody(req);
-      const ids = [...new Set((b.ids || []).map(Number).filter(n => Number.isInteger(n) && n > 0))].slice(0, 200);
-      if (!ids.length) return json(res, 400, { error: 'Не выбрано ни одной карточки конкурента' });
-      let removed = 0;
+      const input=Array.isArray(b?.ids)?b.ids:null;
+      if(!input?.length)return json(res,400,{error:'Не выбрано ни одной карточки конкурента'});
+      if(input.length>200)return json(res,400,{error:'За один раз можно удалить не более 200 карточек'});
+      const parsed=input.map(value=>typeof value==='number'&&Number.isSafeInteger(value)?value
+        :typeof value==='string'&&/^\d+$/.test(value)?Number(value):NaN);
+      if(parsed.some(id=>!Number.isSafeInteger(id)||id<1))return json(res,400,{error:'Список карточек содержит некорректный номер'});
+      const ids=[...new Set(parsed)];
+      let removed=0;
       db.exec('BEGIN IMMEDIATE');
       try {
-        for (const id of ids) {
+        const marks=ids.map(()=>'?').join(',');
+        const rows=db.prepare(`SELECT id,name FROM competitors WHERE id IN (${marks})`).all(...ids);
+        if(rows.length!==ids.length){db.exec('ROLLBACK');return json(res,404,{error:'Одна или несколько карточек уже удалены. Обновите список и повторите.'});}
+        for(const id of ids){
           db.prepare("DELETE FROM price_rows WHERE scope='competitor' AND competitor_id=?").run(id);
-          removed += db.prepare('DELETE FROM competitors WHERE id=?').run(id).changes;
+          removed+=db.prepare('DELETE FROM competitors WHERE id=?').run(id).changes;
         }
         db.exec('COMMIT');
-      } catch (e) { try { db.exec('ROLLBACK') } catch {} throw e }
-      log(`Массовое удаление конкурентов: ${removed} карточек`, 'competitors', null, user.name);
-      return json(res, 200, { deleted: removed });
+      }catch(e){try{db.exec('ROLLBACK')}catch{}throw e;}
+      for (const id of ids) logAccess?.(user,'competitor_delete','competitors',id,'DELETE');
+      logAccess?.(user,'competitor_bulk_delete','competitors',ids.length,'POST');
+      log(`Массовое удаление конкурентов: ${removed} карточек`,'competitors',null,user.name);
+      return json(res,200,{deleted:removed});
     }
     const mId = p.match(/^\/api\/competitors\/(\d+)(?:\/(check|reviews|prices|report))?$/);
     if (mId) {
@@ -1025,10 +1044,22 @@ export function createCompetitors(ctx) {
         }
         const f = ['name', 'inn', 'ogrn', 'city', 'website', 'phone', 'notes', 'price_url']; const ks = Object.keys(b).filter(k => f.includes(k)); if (ks.length) db.prepare(`UPDATE competitors SET ${ks.map(k => k + '=?')} WHERE id=?`).run(...ks.map(k => b[k]), id); return json(res, 200, competitorFull(id)); }
       if (!action && req.method === 'DELETE') {
-        // у price_rows нет внешнего ключа на competitors: строки прайса
-        // конкурента удаляем явно, иначе они навсегда останутся в базе
-        db.prepare("DELETE FROM price_rows WHERE scope='competitor' AND competitor_id=?").run(id);
-        db.prepare('DELETE FROM competitors WHERE id=?').run(id);
+        if (!await admin()) return;
+        let name=comp.name||'';
+        db.exec('BEGIN IMMEDIATE');
+        try {
+          const current=db.prepare('SELECT name FROM competitors WHERE id=?').get(id);
+          if(!current){db.exec('ROLLBACK');return json(res,404,{error:'Конкурент не найден'});}
+          name=current.name||name;
+          // у price_rows нет внешнего ключа на competitors: строки прайса
+          // конкурента удаляем в той же транзакции, что и карточку
+          db.prepare("DELETE FROM price_rows WHERE scope='competitor' AND competitor_id=?").run(id);
+          const deleted=db.prepare('DELETE FROM competitors WHERE id=?').run(id);
+          if(!deleted.changes){db.exec('ROLLBACK');return json(res,404,{error:'Конкурент не найден'});}
+          db.exec('COMMIT');
+        } catch(e) { try{db.exec('ROLLBACK')}catch{} throw e; }
+        logAccess?.(user,'competitor_delete','competitors',id,'DELETE');
+        log(`Удалён конкурент «${name}»`,'competitors',id,user.name);
         return json(res, 200, { deleted: true });
       }
       if (action === 'report' && req.method === 'GET') return json(res, 200, competitorFull(id));
@@ -1049,7 +1080,14 @@ export function createCompetitors(ctx) {
     }
     if (p === '/api/reviews' && req.method === 'POST') { const b = await readBody(req); if (!b.competitor_id) return json(res, 400, { error: 'Не указан конкурент' }); const r = db.prepare('INSERT INTO reviews(competitor_id,source,rating,text,author,url) VALUES(?,?,?,?,?,?)').run(b.competitor_id, b.source || 'вручную', b.rating ?? null, b.text || '', b.author || user.name, b.url || ''); return json(res, 201, { id: r.lastInsertRowid }); }
     const mRev = p.match(/^\/api\/reviews\/(\d+)$/);
-    if (mRev && req.method === 'DELETE') { db.prepare('DELETE FROM reviews WHERE id=?').run(mRev[1]); return json(res, 200, { deleted: true }); }
+    if (mRev && req.method === 'DELETE') {
+      if (!await admin()) return;
+      const id=Number(mRev[1]),r=db.prepare('DELETE FROM reviews WHERE id=?').run(id);
+      if(!r.changes)return json(res,404,{error:'Отзыв не найден'});
+      logAccess?.(user,'competitor_review_delete','reviews',id,'DELETE');
+      log('Удалён отзыв конкурента','competitors',null,user.name);
+      return json(res,200,{deleted:true});
+    }
     if ((p === '/api/prices' || p === '/api/prices/ours') && req.method === 'POST') {
       const b = await readBody(req);
       if (p === '/api/prices/ours') b.scope = 'ours';
@@ -1062,10 +1100,13 @@ export function createCompetitors(ctx) {
       return json(res, 201, finishImport(out, null, user));
     }
     if (p === '/api/prices/export' && req.method === 'GET') {
+      // Выгрузка — отдельное право, не наследуется от просмотра прайса.
+      if (!await admin()) return;
       // «сгрузить» прайс обратно в таблицу: колонки те же, что при загрузке,
       // поэтому файл можно поправить в Excel и загрузить снова
       const scope = u.searchParams.get('scope') === 'competitor' ? 'competitor' : 'ours';
       const compId = scope === 'competitor' ? Number(u.searchParams.get('competitor') || 0) : null;
+      logAccess?.(user,'export_prices',scope==='ours'?'catalog':'competitor_prices',compId||'','GET');
       const rows = scope === 'ours'
         ? catalogPrices(db)
         : db.prepare('SELECT item,price,unit,sku,note FROM price_rows WHERE scope=? AND competitor_id=? ORDER BY item').all(scope, compId);

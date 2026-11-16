@@ -21,7 +21,14 @@ process.env.SEED_MODE = 'off';
 const { server } = await import('../backend/src/server.js');
 const base = 'http://127.0.0.1:18077';
 let h;
-const call = (p, opt = {}) => fetch(base + p, { ...opt, headers: { 'Content-Type': 'application/json', ...(h || {}), ...(opt.headers || {}) } }).then(async r => ({ status: r.status, body: (r.headers.get('content-type') || '').includes('json') ? await r.json() : await r.text() }));
+const DEAL_TEST_DEFAULTS={amount:0,deal_object:'Объект для теста',land_status:'unknown',construction_date:'unknown',payment_type:'unknown',lead_source:'Тест'};
+const call = (p, opt = {}) => {
+  if(p==='/api/deals'&&String(opt.method||'GET').toUpperCase()==='POST'&&typeof opt.body==='string'){
+    const body=JSON.parse(opt.body);
+    opt={...opt,body:JSON.stringify({...DEAL_TEST_DEFAULTS,...body})};
+  }
+  return fetch(base + p, { ...opt, headers: { 'Content-Type': 'application/json', ...(h || {}), ...(opt.headers || {}) } }).then(async r => ({ status: r.status, body: (r.headers.get('content-type') || '').includes('json') ? await r.json() : await r.text() }));
+};
 
 // Местный месяц YYYY-MM и отметка в формате базы (UTC, «ГГГГ-ММ-ДД ЧЧ:ММ:СС»).
 const ym = d => `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}`;

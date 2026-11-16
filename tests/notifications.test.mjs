@@ -15,12 +15,14 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
 let admin;
 const streams = [];
 const ctx = {};
+const DEAL_TEST_DEFAULTS={amount:0,deal_object:'Объект для теста',land_status:'unknown',construction_date:'unknown',payment_type:'unknown',lead_source:'Тест'};
 
 const call = async (path, { method = 'GET', body, token } = {}) => {
+  const payload=path==='/api/deals'&&method==='POST'&&body?{...DEAL_TEST_DEFAULTS,...body}:body;
   const r = await fetch(base + path, {
     method,
     headers: { 'Content-Type': 'application/json', ...(token ? { Authorization: 'Bearer ' + token } : {}) },
-    body: body === undefined ? undefined : JSON.stringify(body),
+    body: payload === undefined ? undefined : JSON.stringify(payload),
   });
   const text = await r.text();
   let data; try { data = JSON.parse(text); } catch { data = text; }
@@ -108,15 +110,17 @@ test('уведомления: поток событий открыт у всех
   assert.ok(a.events.length && b.events.length && c.events.length);
 });
 
-test('входящее сообщение: общее уведомление с именем клиента и превью', async () => {
-  const { bStream, cStream } = ctx;
+test('входящее нераспределённое сообщение не раскрывает клиента менеджерам', async () => {
+  const { adminStream, bStream, cStream } = ctx;
   const r = await call('/webhooks/generic', { method: 'POST', body: { channel: 'site', name: 'Клиент Сайта', phone: '+7 999 000-11-22', body: 'Нужен расчёт дома' } });
   assert.equal(r.status, 200);
-  const noteB = await waitFor(bStream, 'message', d => d.preview === 'Нужен расчёт дома');
-  const noteC = await waitFor(cStream, 'message', d => d.preview === 'Нужен расчёт дома');
-  assert.ok(noteB && noteC, 'оба сотрудника получили уведомление о сообщении');
-  assert.equal(noteB.title, 'Клиент Сайта');
-  assert.equal(noteB.direction, 'in');
+  const noteAdmin = await waitFor(adminStream, 'message', d => d.preview === 'Нужен расчёт дома');
+  assert.ok(noteAdmin,'администратор видит новое нераспределённое обращение');
+  assert.equal(noteAdmin.title, 'Клиент Сайта');
+  assert.equal(noteAdmin.direction, 'in');
+  await sleep(250);
+  assert.ok(!bStream.events.some(e=>e.ev==='message'&&e.data?.preview==='Нужен расчёт дома'),'менеджер без назначения не получает имя и текст чужого лида');
+  assert.ok(!cStream.events.some(e=>e.ev==='message'&&e.data?.preview==='Нужен расчёт дома'),'второй менеджер без назначения тоже не видит обращение');
 });
 
 test('контакт передан коллеге: contact_assigned только получателю', async () => {

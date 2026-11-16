@@ -61,7 +61,7 @@ Object.assign(window, {
   uploadChatFile, toggleDeadChannels, checkHealth,
   sourceLabel, channelLabel, roleLabel, askConfirm, askInput, translit, SOURCE_LABELS, CHANNEL_LABELS, ROLE_LABELS,
   isoDate, todayISO, fmtDayMonth, kindStage, fld, grid2, formLegend, pushToast, notify, captureFocus, restoreFocus, PALETTE_ACTIONS,
-  openMenu, closeMenu, contactsMoreMenu, openOurPrices, comparePrices, setBuiltinTab, BUILTIN_FIELDS, amAdmin, canEdit,
+  openMenu, closeMenu, contactsMoreMenu, openOurPrices, comparePrices, setBuiltinTab, BUILTIN_FIELDS, amAdmin, canEdit, canBulk, canExport, canDeleteCompetitors,
   ourPriceRows, filterOurPrices, toggleAutomation, openAutomation, autoWarn, noteRow, editNote, lockFormsForViewer, AUTO_TRIGGERS, AUTO_ACTIONS,
   busyButton, priceImportText, pickSlot, pickField, pickValue, pickReset, pickSearch, PICK,
   resetUserPassword, randomPassword, credentialsText, showCredentials,
@@ -109,6 +109,9 @@ window.EventSource = class { addEventListener() {} close() {} };
 window.confirm = () => { throw new Error('native confirm() не должен использоваться'); };
 window.prompt = () => { throw new Error('native prompt() не должен использоваться'); };
 const PNG_B64 = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==';
+// Сценарии smoke, проверяющие не форму создания, а последующие действия,
+// передают явные значения обязательных параметров сделки.
+const DEAL_REQUIRED_FIELDS={amount:0,deal_object:'Объект для теста',land_status:'unknown',construction_date:'unknown',payment_type:'unknown',lead_source:'Тест'};
 window.FileReader = class { readAsDataURL() { this.result = 'data:image/png;base64,' + PNG_B64; this.onload && this.onload() } };
 window.eval(appJs);
 
@@ -168,6 +171,7 @@ try {
   check('первый вход администратора показывает смену пароля, а не CRM', !$('#passwordChange').classList.contains('hidden') && $('#app').classList.contains('hidden'), $('#loginErr').textContent);
   const adminChange = $('#passwordChangeForm');
   check('временный пароль подставлен в первое поле — второй раз его набирать не нужно', adminChange.elements.old_password.value === ADMIN_TMP);
+  check('все поля первого входа можно проверить перед отправкой', $$('#passwordChangeForm .pw-eye').length === 3);
   adminChange.elements.new_password.value = 'СовсемДругойПароль2026';
   adminChange.elements.confirm_password.value = ADMIN_PASS;
   await adminChange.onsubmit({ preventDefault() {}, target: adminChange });
@@ -316,7 +320,7 @@ try {
 
     // Перенос карточки: новое место показывается сразу из локальных данных,
     // а сохранение на сервере не откатывает карточку назад
-    const mvDeal = await window.api('/api/deals', { method: 'POST', body: JSON.stringify({ title: 'Сделка переноса' }) });
+    const mvDeal = await window.api('/api/deals', { method: 'POST', body: JSON.stringify({ ...DEAL_REQUIRED_FIELDS,title: 'Сделка переноса' }) });
     await window.render(); await wait(500);
     const stageBefore = (window.__state.deals.find(x => x.id === mvDeal.id) || {}).stage;
     await window.moveDeal(mvDeal.id, 1); await wait(400);
@@ -553,7 +557,7 @@ try {
   check('сервер считает нагрузку группировкой и отдаёт её только администратору', serverJsRaw.includes('GROUP BY responsible_id') && serverJsRaw.includes("u.searchParams.get('stats') === '1' && user.role === 'admin'"));
   check('сделки компании видны и тогда, когда заведены на её сотрудника', serverJsRaw.includes('d.contact_id IN (SELECT id FROM contacts WHERE company_id=?)'));
   check('поиск по базе не обрезан последними записями', !/FROM (contacts|deals|tasks|companies|products) ORDER BY id DESC LIMIT/.test(serverJsRaw));
-  check('подбор просит сервер искать только свой вид записей', appJsRaw.includes('&only=${cfg.key}') && serverJsRaw.includes('const want = k => !only || only === k;'));
+  check('подбор просит сервер искать только свой вид записей', appJsRaw.includes('&only=${cfg.key}') && serverJsRaw.includes('const want = key => (!only || only === key)') && serverJsRaw.includes("!isPartner || ['contacts','deals','companies','tasks'].includes(key)"));
   check('условия списков подставляются параметрами, а не склейкой строки', !/responsible_id=\$\{Number\(user\.id\)\}/.test(serverJsRaw));
   // локальная дата не зависит от UTC
   check('isoDate возвращает локальную дату', window.isoDate(new Date(2026, 0, 1)) === '2026-01-01' && window.isoDate(new Date(2026, 11, 31)) === '2026-12-31');
@@ -1173,7 +1177,8 @@ try {
     $$('.tabs button').find(b => /^Команда$/.test(b.textContent.trim())).click(); await wait(500);
     check('вкладка настроек переключается кликом', window.__state.settingsTab === 'team' && /Права ролей/.test($('#view').textContent));
     $$('.tabs button').find(b => /^Профиль$/.test(b.textContent.trim())).click(); await wait(400);
-    check('в профиле есть тема и смена пароля', window.__state.settingsTab === 'profile' && /Тема оформления/.test($('#view').textContent) && Boolean($('#view form [name=new_password]')));
+    check('в профиле есть тема и смена пароля с повтором нового пароля', window.__state.settingsTab === 'profile' && /Тема оформления/.test($('#view').textContent) && Boolean($('#view form [name=new_password]')) && Boolean($('#view form [name=confirm_password]')));
+    check('поля пароля профиля можно проверить перед сохранением', $$('#view .pw-wrap .pw-eye').length >= 3);
 
     window.go('tasks'); await wait(450);
     $$('#view .tabs button').find(b => /Неделя/.test(b.textContent)).click(); await wait(450);
@@ -1279,7 +1284,7 @@ try {
 
     await window.api('/api/automations', { method: 'POST', body: JSON.stringify({ name: 'Отложить напоминание', trigger_type: 'stage_changed', trigger_value: 'offer', action_type: 'create_task', action_value: 'Позвонить позже', active: 1, delay_days: 3 }) });
     const cq = await window.api('/api/contacts', { method: 'POST', body: JSON.stringify({ name: 'Очередь Тест', phone: '+7 900 000-00-01' }) });
-    const dq = await window.api('/api/deals', { method: 'POST', body: JSON.stringify({ title: 'Сделка очереди', amount: 1000, stage: 'new', contact_id: cq.id }) });
+    const dq = await window.api('/api/deals', { method: 'POST', body: JSON.stringify({ ...DEAL_REQUIRED_FIELDS,title: 'Сделка очереди', amount: 1000, stage: 'new', contact_id: cq.id }) });
     await window.api('/api/deals/' + dq.id, { method: 'PATCH', body: JSON.stringify({ stage: 'offer' }) });
     window.__state.settingsTab = 'automations'; window.go('settings'); await wait(700);
     const txt1 = $('#view').textContent;
@@ -1496,7 +1501,9 @@ try {
   check('тосты не прячутся под системную полосу телефона', cssText.includes('bottom:calc(12px + env(safe-area-inset-bottom,0px))'));
   check('пункты меню видны при навигации с клавиатуры', cssText.includes('.dropdown-pop button:focus-visible,.user-menu-item:focus-visible'));
   check('пароль сотрудника — минимум 12 символов, как при смене', appJsRaw.includes('minlength="12"') && appJsRaw.includes('(мин. 12 символов)') && serverJsRaw.includes('b.password.length < 12'));
-  check('хеш пароля не отдаётся ни в списке сотрудников, ни в выгрузке данных', serverJsRaw.includes('SELECT id,name,email,role,active,last_login,must_change_password,pass_changed_at FROM users') && serverJsRaw.includes('out.users = out.users.map(({ pass, ...rest }) => rest)'));
+  check('хеш пароля не отдаётся ни в списке сотрудников, ни в выгрузке данных',
+    serverJsRaw.includes('SELECT id,name,role,active FROM users ORDER BY id')
+    && serverJsRaw.includes('out.users = out.users.map(({ pass, ...rest }) => rest)'));
   check('каждое действие с доступом сотрудника остаётся в журнале', serverJsRaw.includes('выдан временный пароль') && serverJsRaw.includes('сброшен пароль, прежние сеансы закрыты') && serverJsRaw.includes('Временный пароль заменён личным'));
   check('причина закрытого сеанса называется человеку', serverJsRaw.includes('SESSION_REVOKED') && serverJsRaw.includes('USER_DISABLED') && serverJsRaw.includes('USER_GONE') && appJsRaw.includes('endSession(d.error ||'));
   check('массовое «Выполнено» продлевает повторяющиеся задачи', serverJsRaw.includes("if (table === 'tasks' && Number(patch.done) === 1) for (const id of ids) extendRepeatingTask(id, user.name)"));
@@ -1873,27 +1880,48 @@ try {
   // ── вкладки разделов, рассылки и доступ партнёра ───────────────────
   {
     const cssFlat = cssText.replace(/\s+/g, '');
+    const navViews = $$('#nav button').map(b => b.dataset.view);
     check('обучения, качества и рассылок в меню нет: качество в аналитике, рассылки в контактах',
-      ['campaigns', 'quality', 'training'].every(x => !$(`#nav button[data-view="${x}"]`)) && $$('#nav button').length === 10,
-      $$('#nav button').map(b => b.dataset.view).join(','));
+      ['campaigns', 'quality', 'training'].every(x => !$(`#nav button[data-view="${x}"]`))
+      && ['routing','classification'].every(x => navViews.includes(x)) && navViews.length === 12,
+      navViews.join(','));
     check('партнёру остаются «Сделки», «Чаты» и «Задачи»', cssFlat.includes('body.role-partnernavbutton:not([data-view="pipe"]):not([data-view="inbox"]):not([data-view="tasks"]){display:none}'));
     // офис назначает партнёру задачи, и новый лид сам создаёт ему задачу позвонить:
     // без раздела он нашёл бы их только внутри карточки сделки
     check('раздел задач партнёру открыт', appJsRaw.includes("const PARTNER_VIEWS = ['pipe', 'inbox', 'tasks', 'settings']"));
-    check('массовые действия скрыты у того, кому сервер их запретил', (appJsRaw.match(/canEdit\(\) && !isPartner\(\) \? bulkSlot\(/g) || []).length === 2);
+    check('массовые действия используют отдельное разрешение, совпадающее с матрицей API',
+      appJsRaw.includes("const canBulk = () => ['admin','manager'].includes(state.me?.role);")
+      && serverJsRaw.includes("if (!['admin','manager'].includes(user.role))")
+      && serverJsRaw.includes("!['contacts','companies','tasks','deals'].includes(table)"));
     check('вкладку «Рассылки» и массовую отправку видят менеджер и администратор',
       appJsRaw.includes("function canCampaign() { return ['admin', 'manager'].includes(state.me?.role); }") && appJsRaw.includes("if (!canCampaign()) return '';"));
     check('вкладку «Команда» с оценкой качества видит только администратор',
       appJsRaw.includes("if (state.me?.role !== 'admin') return '';") && serverJsRaw.includes("if (p === '/api/quality') {\n      if (!requireAdmin(user, res)) return;"));
-    check('партнёр начинает со своих сделок, а не с рабочего стола', appJsRaw.includes("me.user.role === 'partner'") && appJsRaw.includes("PARTNER_VIEWS.includes(me.user.pref_view) ? me.user.pref_view : 'pipe'"));
+    check('партнёр начинает со своих сделок, а не с рабочего стола',
+      appJsRaw.includes("if (role === 'partner') return 'pipe';")
+      && appJsRaw.includes('defaultViewForRole(me.user.role, me.user.pref_view || state.view)')
+      && window.defaultViewForRole('partner','dashboard') === 'pipe'
+      && window.defaultViewForRole('partner','inbox') === 'inbox');
     check('раздел чужой роли не открывается даже прямым переходом', appJsRaw.includes('function viewAllowed(view)') && appJsRaw.includes('if (!viewAllowed(view))'));
     // проверяем саму логику доступа: у партнёра свои разделы, у РОПа — качество
     const savedRole = window.__state.me.role;
     window.__state.me.role = 'partner';
     const partnerViews = { pipe: window.viewAllowed('pipe'), inbox: window.viewAllowed('inbox'), tasks: window.viewAllowed('tasks'), contacts: window.viewAllowed('contacts'), analytics: window.viewAllowed('analytics') };
+    const partnerBulk = window.canBulk();
+    window.__state.me.role = 'manager';
+    const managerBulk = window.canBulk(),managerExport=window.canExport(),managerCompetitorDelete=window.canDeleteCompetitors();
+    const managerContactMenu=window.contactsMoreMenu();
+    window.__state.me.role = 'viewer';
+    const viewerExport=window.canExport(),viewerCompetitorDelete=window.canDeleteCompetitors();
+    window.__state.me.role = 'admin';
+    const adminBulk = window.canBulk(),adminExport=window.canExport(),adminCompetitorDelete=window.canDeleteCompetitors();
     window.__state.me.role = savedRole;
     check('партнёру разрешены воронка, переписка и задачи, а база клиентов и аналитика закрыты',
       partnerViews.pipe === true && partnerViews.inbox === true && partnerViews.tasks === true && partnerViews.contacts === false && partnerViews.analytics === false, JSON.stringify(partnerViews));
+    check('пакетные действия видят администратор и менеджер, но не партнёр', partnerBulk === false && managerBulk === true && adminBulk === true);
+    check('выгрузка и удаление общего справочника доступны только администратору',
+      !managerExport && !managerCompetitorDelete && !viewerExport && !viewerCompetitorDelete && adminExport && adminCompetitorDelete
+      && !/Выгрузить в CSV/.test(managerContactMenu));
     // обучение убрано из всех слоёв: ни меню, ни маршрута, ни таблицы в базе
     const indexRaw = readFileSync(join(ROOT, 'frontend/public/index.html'), 'utf8');
     // на сервере остаётся только одноразовая уборка старой таблицы: маршрута и
@@ -1936,12 +1964,16 @@ try {
       appJsRaw.includes("await api('/api/companies/' + c.company_id)")
       && !appJsRaw.includes("const comps = await api('/api/companies')"));
     check('справочник компаний партнёру отдаётся только по его карточкам', serverJsRaw.includes("table === 'companies' && isPartner"));
-    check('документы и состав сделки партнёр меняет только по своим лидам',
-      serverJsRaw.includes('партнёр печатает документы только по своим') && serverJsRaw.includes("partnerOwns(user, 'deals', Number(row.deal_id))"));
-    check('в настройках партнёру остаётся только «Профиль»', appJsRaw.includes('isPartner') && appJsRaw.includes('(isViewer || isPartner) ? k === \'profile\''));
+    check('документы и состав сделки партнёр меняет только по переданным лидам',
+      serverJsRaw.includes('партнёр печатает документы только по активной передаче')
+      && serverJsRaw.includes("partnerOwns(user, 'deals', Number(row.deal_id))")
+      && serverJsRaw.includes("partnerOwns(user, 'deals', Number(id))"));
+    check('в настройках партнёру остаётся только «Профиль»',
+      appJsRaw.includes("const isRestricted=['viewer','partner','rop','classifier'].includes(state.me?.role);")
+      && appJsRaw.includes("(isRestricted ? k === 'profile'"));
     check('рассылкой распоряжается автор или администратор', appJsRaw.includes('Number(c.created_by_id) === Number(state.me?.id)') && serverJsRaw.includes('Отменить рассылку может её автор или администратор'));
     check('поток событий не отдаёт партнёру чужие переписки', serverJsRaw.includes('partnerSeesEvent') && serverJsRaw.includes("res.role = user.role"));
-    check('автоответы правил и рассылок не считаются ответом менеджера', serverJsRaw.includes("COALESCE(m.author,'')<>'Рассылка'"));
+    check('автоответы правил и рассылок не считаются ответом менеджера', serverJsRaw.includes("lower(trim(COALESCE(m.author,''))) NOT IN ('рассылка','автоматизация')"));
     // момент отправки рассылки хранится в UTC и показывается в поясе сотрудника
     const p2 = n => String(n).padStart(2, '0');
     const local = new Date('2030-01-02T03:04:05.000Z');
@@ -1967,9 +1999,11 @@ try {
     window.setQualityDays(7); await wait(700);
     check('период качества переключается и пересчитывается', window.__state.qDays === 7 && $('#view').textContent.includes('Неделя'));
     window.setQualityTab('reviews'); await wait(600);
-    check('ОКК показывает отдельный список ручных проверок и ограничения порогов', $('#view').textContent.includes('Результаты по критериям') && $('#view').textContent.includes('Исторические пороги') && $('#view').textContent.includes('Новая проверка'));
+    const reviewText=$('#view').textContent;
+    const reviewSignals=['Рабочий чек-лист — 18 критериев','Пороговые категории не включены','Новая проверка'];
+    check('ОКК показывает ручной чек-лист и объясняет, почему пороговые категории выключены', !$('#view .card.err') && reviewSignals.every(x=>reviewText.includes(x)), reviewSignals.map(x=>reviewText.includes(x)).join('/'));
     const qContactUi = await window.api('/api/contacts', { method: 'POST', body: JSON.stringify({ name: 'Контакт для проверки ОКК', phone: '79990000117' }) });
-    const qDealUi = await window.api('/api/deals', { method: 'POST', body: JSON.stringify({ title: 'Сделка для проверки ОКК', contact_id: qContactUi.id }) });
+    const qDealUi = await window.api('/api/deals', { method: 'POST', body: JSON.stringify({ ...DEAL_REQUIRED_FIELDS,title: 'Сделка для проверки ОКК', contact_id: qContactUi.id }) });
     await window.render(); await wait(400);
     window.qualityNewReview(); await wait(400);
     check('новую проверку начинают с поиска реальной сделки CRM', Boolean($('#qualityDealSearch')) && $('#modal').classList.contains('hidden') === false);
@@ -1977,7 +2011,9 @@ try {
     const qOption = [...window.document.querySelectorAll('.quality-deal-option')].find(x => x.textContent.includes('Сделка для проверки ОКК'));
     check('сделка находится поиском без импорта таблицы с клиентскими данными', Boolean(qOption));
     qOption?.click(); await wait(700);
-    check('в черновике отображаются все 18 критериев из рабочей таблицы', window.document.querySelectorAll('.quality-criterion').length === 18);
+    const coreCriteria=window.document.querySelectorAll('.quality-criterion:not(.quality-growth-criterion)').length;
+    const growthCriteria=window.document.querySelectorAll('.quality-growth-criterion').length;
+    check('в черновике отдельно показаны 18 критериев таблицы и 10 дополнительных пунктов', coreCriteria===18&&growthCriteria===10, `основных=${coreCriteria}, развивающих=${growthCriteria}`);
     check('пустой черновик не выставляет баллы без решения руководителя', [...window.document.querySelectorAll('[data-q-status]')].length === 18 && [...window.document.querySelectorAll('[data-q-status]')].every(x => x.value === ''));
     check('источник сообщения можно приложить только к выбранному критерию', [...window.document.querySelectorAll('[data-q-status] option[value=""]')].length === 18 && Boolean($('#qualityEvidenceTarget')) && $('#qualityEvidenceTarget').value === '');
     window.qualitySave('draft'); await wait(700);

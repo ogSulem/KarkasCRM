@@ -37,6 +37,10 @@ function frontendPaths(src) {
 function backendRoutes(src) {
   const eq = new Set(), pre = new Set(), res = [];
   for (const m of src.matchAll(/p\s*===?\s*'(\/api\/[^']+)'/g)) eq.add(m[1]);
+  // Группа родственных отчётов обрабатывается одним if через массив литералов
+  // и .includes(p); это реальные точные маршруты, а не общий API-префикс.
+  for (const block of src.matchAll(/\[([^\]]*\/api\/[^\]]*)\]\.includes\(p\)/g))
+    for (const path of block[1].matchAll(/['\"](\/api\/[^'\"]+)['\"]/g)) eq.add(path[1]);
   for (const m of src.matchAll(/p\.startsWith\(\s*'(\/api\/[^']+)'/g)) if (m[1] !== '/api/') pre.add(m[1]);
   for (const m of src.matchAll(/\/(\^(?:[^/\\\n]|\\.)+)\/(?=[a-z]*\s*[).;,])/g)) {
     if (!/api/.test(m[1])) continue;

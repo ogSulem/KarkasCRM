@@ -279,7 +279,8 @@ test('конкурент редактируется и удаляется', asyn
   const patched = await call('/api/competitors/' + id, { method: 'PATCH', body: JSON.stringify({ name: 'ООО Изменённый', website: 'https://example.com' }) });
   assert.equal(patched.body.name, 'ООО Изменённый');
   assert.equal(patched.body.website, 'https://example.com');
-  await call(`/api/competitors/${id}/prices`, { method: 'POST', body: JSON.stringify({ scope: 'competitor', text: 'Позиция удаляемого;100;шт' }) });
+  const price = await call(`/api/competitors/${id}/prices`, { method: 'POST', body: JSON.stringify({ scope: 'competitor', text: 'Наименование;Цена;Ед.\nПозиция удаляемого;100;шт' }) });
+  assert.equal(price.status, 201, JSON.stringify(price.body));
   const del = await call('/api/competitors/' + id, { method: 'DELETE' });
   assert.equal(del.body.deleted, true);
   assert.equal((await call('/api/competitors/' + id)).status, 404);
@@ -289,12 +290,20 @@ test('конкурент редактируется и удаляется', asyn
 test('массовое удаление конкурентов чистит карточки и их прайсы', async () => {
   const a = await call('/api/competitors', { method: 'POST', body: JSON.stringify({ name: 'ООО «Массовый А»' }) });
   const b = await call('/api/competitors', { method: 'POST', body: JSON.stringify({ name: 'ООО «Массовый Б»' }) });
-  await call(`/api/competitors/${a.body.id}/prices`, { method: 'POST', body: JSON.stringify({ scope: 'competitor', text: 'Позиция А;100;шт' }) });
-  const del = await call('/api/competitors/bulk-delete', { method: 'POST', body: JSON.stringify({ ids: [a.body.id, b.body.id, a.body.id, 999999] }) });
+  const price = await call(`/api/competitors/${a.body.id}/prices`, { method: 'POST', body: JSON.stringify({ scope: 'competitor', text: 'Наименование;Цена;Ед.\nПозиция А;100;шт' }) });
+  assert.equal(price.status, 201, JSON.stringify(price.body));
+  const stale = await call('/api/competitors/bulk-delete', { method: 'POST', body: JSON.stringify({ ids: [a.body.id, b.body.id, a.body.id, 999999] }) });
+  assert.equal(stale.status, 404, 'если один выбранный id уже исчез, операция целиком отменяется');
+  assert.equal((await call('/api/competitors/' + a.body.id)).status, 200, 'устаревший список не удалил часть карточек');
+  assert.equal(db.prepare("SELECT COUNT(*) n FROM price_rows WHERE scope='competitor' AND competitor_id=?").get(a.body.id).n, 1, 'отмена сохранила прайс');
+  const del = await call('/api/competitors/bulk-delete', { method: 'POST', body: JSON.stringify({ ids: [a.body.id, b.body.id, a.body.id] }) });
   assert.equal(del.status, 200);
-  assert.equal(del.body.deleted, 2, 'повторы и несуществующие id не ломают счёт');
+  assert.equal(del.body.deleted, 2, 'повторяющиеся id удаляются один раз');
   assert.equal((await call('/api/competitors/' + a.body.id)).status, 404);
-  assert.equal(db.prepare("SELECT COUNT(*) n FROM price_rows WHERE scope='competitor' AND competitor_id=?").get(a.body.id).n, 0, 'прайсы обеих карточек удалены');
+  assert.equal(db.prepare("SELECT COUNT(*) n FROM price_rows WHERE scope='competitor' AND competitor_id=?").get(a.body.id).n, 0, 'прайсы удалённых карточек не остаются в базе');
+  const adminId = db.prepare("SELECT id FROM users WHERE email='admin@example.com'").get().id;
+  const deletedIds = db.prepare("SELECT resource_id FROM access_log WHERE user_id=? AND action='competitor_delete' AND resource_type='competitors' ORDER BY id DESC LIMIT 2").all(adminId).map(x => Number(x.resource_id)).sort((x,y) => x-y);
+  assert.deepEqual(deletedIds, [a.body.id,b.body.id].sort((x,y) => x-y), 'журнал доступа содержит id каждой массово удалённой карточки');
   const empty = await call('/api/competitors/bulk-delete', { method: 'POST', body: JSON.stringify({ ids: [] }) });
   assert.equal(empty.status, 400, 'пустой список — понятная ошибка');
 });
