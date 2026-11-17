@@ -70,7 +70,7 @@ test('адресный фильтр запрещает частные, спец�
 test('HTTP-загрузка через CRM не подключается к loopback IPv4 или IPv6', async () => {
   const port = localSource.address().port;
   for (const url of [`http://127.0.0.1:${port}/secret.csv`, `http://[::1]:${port}/secret.csv`]) {
-    const result = await api('/api/prices', { method: 'POST', body: JSON.stringify({ url }) });
+    const result = await api('/api/prices/ours', { method: 'POST', body: JSON.stringify({ url }) });
     assert.equal(result.status, 400, `внутренний адрес отклонён: ${url}`);
     assert.match(result.body.error, /внутренний|специальный/i);
   }

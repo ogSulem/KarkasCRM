@@ -4414,8 +4414,6 @@ async function openCompetitor(id) {
    ${grid2(`${fld('Город', `<input name="city" value="${esc(c.city || '')}">`)}
      ${fld('Сайт', `<input name="website" value="${esc(c.website || '')}" placeholder="brusdom.ru">`)}`)}
    ${fld('Телефон', `<input name="phone" value="${esc(c.phone || '')}">`)}
-   ${fld('Ссылка на прайс', `<input name="price_url" value="${esc(c.price_url || '')}" placeholder="https://…/price.csv">`)}
-   <p class="form-hint" style="margin-top:-4px">Если конкурент публикует прайс таблицей, укажите адрес — CRM сама подтянет его при каждой проверке, и позиции попадут в сравнение цен.</p>
    ${fld('Заметки', `<textarea name="notes" rows="2">${esc(c.notes || '')}</textarea>`)}
    <button class="btn primary w">Сохранить</button></form>`);
 }
@@ -4458,10 +4456,10 @@ async function openCompetitorCard(id) {
 // оценкой. Держать два места для одного смысла — значит расходиться в данных.
 const FINDING_KINDS = ['долги', 'суды', 'связи', 'прочее'];
 
-// Банк данных ФССП, «Связи» на Rusprofile и отзывы на Авито автоматически не
-// отдаются: API закрыт, сайт закрыт от роботов, данные за платным доступом.
-// Поэтому то, что менеджер посмотрел сам, записывается сюда и попадает в отчёт
-// и в оценку риска — иначе проверка испаряется вместе с закрытой вкладкой.
+// Долги ФССП, связи в Rusprofile и отзывы Авито не собираются автоматически:
+// API закрыт или отсутствует, часть сведений доступна по платной подписке.
+// Поэтому то, что менеджер проверил сам, записывается сюда и попадает в отчёт
+// и оценку риска — иначе проверка испаряется вместе с закрытой вкладкой.
 function findingsBlock(c) {
   const finds = c.findings || [];
   return `<hr><div class="row" style="border:0"><h4>Найдено вручную (${finds.length})</h4></div>
@@ -4555,17 +4553,16 @@ function competitorTab(c) {
     // Паспорт компании собран из ответов реестров: карточка предприятия уже
     // приходит в проверке источников, но в отчёте до сих пор не показывалась
     const fCard = (g('fns').data || {}).card || {};
-    const rCard = (g('rusprofile').data || {}).card || {};
     const pget = (...vals) => { for (const v of vals) if (v !== undefined && v !== null && v !== '') return v; return ''; };
     const num = v => { const n = Number(v); return Number.isFinite(n) ? n : 0; };
-    const status = String(pget(fCard.status, rCard.status));
+    const status = String(pget(fCard.status));
     const statusTag = !status ? '' : /недейств|прекращ|ликвидац|банкрот/i.test(status)
       ? `<span class="tag orange">${esc(status)}</span>` : `<span class="tag">${esc(status)}</span>`;
     const passport = [
       ['Статус', statusTag],
-      ['ИНН / ОГРН', [c.inn || fCard.inn || rCard.inn, c.ogrn || fCard.ogrn || rCard.ogrn].filter(Boolean).map(esc).join(' · ')],
+      ['ИНН / ОГРН', [c.inn || fCard.inn, c.ogrn || fCard.ogrn].filter(Boolean).map(esc).join(' · ')],
       ['Регистрация', [pget(fCard.regDate), pget(fCard.region)].filter(Boolean).map(esc).join(' · ')],
-      ['Адрес', esc(pget(fCard.address, rCard.address))],
+      ['Адрес', esc(pget(fCard.address))],
       ['Руководитель', esc(pget(fCard.director))],
       ['Учредители', esc((fCard.founders || []).join(', '))],
       ['Численность', fCard.employees ? esc(numFmt(fCard.employees)) + ' чел.' : ''],
@@ -4663,7 +4660,7 @@ function competitorTab(c) {
       <p class="form-hint">Ключи добавляет администратор в разделе «Настройки → Интеграции». Пока ключа нет, данные смотрятся по ссылкам.</p>
       <div class="list">${noKey.map(row).join('')}</div>` : ''}
      ${manual.length ? `<hr><h4>Проверяется вручную по официальным ссылкам</h4>
-      <p class="form-hint">Эти реестры не отдают данные программам: нет открытого API или сайт закрыт от роботов. Откройте ссылку и запишите найденное в блок «Найдено вручную».</p>
+      <p class="form-hint">Эти источники CRM не проверяет автоматически: у них нет открытого API, доступ закрыт или данные доступны по подписке. Откройте ссылку и запишите найденное в блок «Найдено вручную».</p>
       <div class="list">${manual.map(row).join('')}</div>` : ''}
      ${checks.length ? '' : '<p class="form-hint">Источники ещё не опрашивались — нажмите «Проверить сейчас».</p>'}`;
   }
@@ -4757,11 +4754,11 @@ function openPriceImport(competitorId, scope) {
    ${ours && canExport() ? `<div class="notice info" style="margin-bottom:10px">Удобнее всего так: скачайте текущий прайс, поправьте цены в Excel и загрузите файл обратно — знакомые позиции обновятся, новые добавятся.<div style="margin-top:8px"><button type="button" class="btn sm" onclick="download('/api/prices/export?scope=ours','price-list.csv')">${icon('download', 13)} Скачать текущий прайс</button></div></div>`
      : !ours ? `<p class="form-hint">Загрузка заменит предыдущий прайс этого конкурента.</p>` : ''}
    <p><small>Первая строка — заголовки: <code>Наименование;Цена;Ед</code>. Например: <code>Дом 8×10;3850000;шт</code>. Подойдёт файл CSV (обычная таблица) или первый лист Excel; цены — числами. <a href="/examples/prices.csv" download>Скачать пример</a>.</small></p>
-   <div class="tabs"><button class="active" onclick="this.parentElement.nextElementSibling.classList.remove('hidden');this.nextElementSibling.classList.remove('active');this.classList.add('active');">Файл .xlsx / .csv</button><button onclick="openPriceTextForm(${competitorId},'${scope}')">Текст / ссылки</button></div>
+   <div class="tabs"><button class="active" onclick="this.parentElement.nextElementSibling.classList.remove('hidden');this.nextElementSibling.classList.remove('active');this.classList.add('active');">Файл .xlsx / .csv</button><button onclick="openPriceTextForm(${competitorId},'${scope}')">${ours ? 'Текст / ссылка' : 'Вставить текст'}</button></div>
    <div><form onsubmit="return importPriceFile(event,${competitorId || 'null'},'${scope}')">
      <label>Выберите файл таблицы (.xlsx или .csv)<input type="file" accept=".xlsx,.csv,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet,text/csv" required></label>
      ${ours ? priceModeField() : ''}
-     <button class="btn primary w">Загрузить и разобрать</button></form></div>`);
+     <button class="btn primary w">Загрузить прайс</button></form></div>`);
 }
 
 async function importPriceFile(e, competitorId, scope) {
@@ -4784,17 +4781,21 @@ async function importPriceFile(e, competitorId, scope) {
 }
 
 function openPriceTextForm(competitorId, scope) {
-  openModal(`<h3>Загрузка прайса текстом или по URL</h3><form onsubmit="return importPriceText(event,${competitorId || 'null'},'${scope}')">
-   <label>Ссылка на опубликованную таблицу Google Sheets / CSV<input name="url" placeholder="https://docs.google.com/spreadsheets/d/…/export?format=csv"></label>
-   <label>Или вставьте строки (Позиция;Цена;Ед)<textarea name="text" rows="6" placeholder="Каркасный дом 8х10;3850000;шт&#10;Баня 4х6;890000;шт"></textarea></label>
-   ${scope === 'ours' ? priceModeField() : ''}
+  const ours = scope === 'ours';
+  openModal(`<h3>${ours ? 'Загрузка прайса текстом или по ссылке' : 'Вставить прайс конкурента'}</h3><form onsubmit="return importPriceText(event,${competitorId || 'null'},'${scope}')">
+   ${ours ? '<label>Ссылка на опубликованную таблицу Google Sheets / CSV<input name="url" placeholder="https://docs.google.com/spreadsheets/d/…/export?format=csv"></label>'
+     : '<p class="form-hint">Мы не скачиваем прайсы с сайтов конкурентов. Скопируйте строки из таблицы сюда или загрузите файл.</p>'}
+   <label>${ours ? 'Или вставьте' : 'Вставьте'} строки (Позиция;Цена;Ед)<textarea name="text" rows="6" placeholder="Каркасный дом 8х10;3850000;шт&#10;Баня 4х6;890000;шт"></textarea></label>
+   ${ours ? priceModeField() : ''}
    <button class="btn primary w">Сохранить</button></form>`);
 }
 
 async function importPriceText(e, competitorId, scope) {
   e.preventDefault(); const f = Object.fromEntries(new FormData(e.target));
   const endpoint = competitorId ? `/api/competitors/${competitorId}/prices` : '/api/prices/ours';
-  const out = await api(endpoint, { method: 'POST', body: JSON.stringify({ url: f.url, text: f.text, scope, mode: f.mode || 'merge' }) });
+  const body = { text: f.text, scope, mode: f.mode || 'merge' };
+  if (scope === 'ours' && f.url) body.url = f.url;
+  const out = await api(endpoint, { method: 'POST', body: JSON.stringify(body) });
   closeModal(); toast(priceImportText(out));
   afterPriceImport(competitorId);
   return false;
@@ -4977,12 +4978,12 @@ async function settings(v) {
     </div><div>
      <div class="card"><h3>Как работает разведка конкурентов</h3>
       <p><small>CRM опрашивает открытые реестры и карты, собирает долги, суды, банкротство и отзывы, считает риск-оценку от 0 до 100 и подсказывает менеджеру аргументы для переговоров.</small></p>
-      <p><small><b>Без ключей</b> CRM сама опрашивает картотеку арбитражных судов (Кад.Арбитр) и пробует Федресурс (банкротство) и Rusprofile. Эти два сайта часто закрываются от автоматических запросов — тогда в отчёте остаются прямые ссылки на официальные реестры: ФНС, ГИР БО, Федресурс, Госзакупки, Яндекс Карты, 2ГИС и Авито. <b>С ключами</b> добавляются данные ЕГРЮЛ (api-fns.ru) и рейтинги с карт (Google, 2ГИС, Яндекс).</small></p>
+      <p><small><b>Без ключей</b> CRM проверяет картотеку арбитражных судов (Кад.Арбитр) и Федресурс (банкротство). Rusprofile не скачивается и не разбирается автоматически: в отчёте есть ссылка для ручной проверки. Для остальных реестров и карт тоже остаются прямые ссылки — ФНС, ГИР БО, Федресурс, Госзакупки, Яндекс Карты, 2ГИС и Авито. <b>С ключами</b> добавляются данные ЕГРЮЛ (api-fns.ru) и рейтинги с карт (Google, 2ГИС, Яндекс).</small></p>
       <p><small><b>Долги у приставов автоматически не подтягиваются.</b> Официальный API ФССП закрыт с марта 2022 года и, по ответу службы, восстанавливаться не будет. В отчёте есть ссылка на банк исполнительных производств: сотрудник открывает её и вводит ИНН — это занимает минуту. CRM в этом случае показывает прочерк, а не «0 ₽», чтобы ноль нельзя было принять за отсутствие долгов.</small></p>
       <p><small>Отзывы и прайс конкурента можно внести вручную прямо в его карточке — сравнение цен и рейтинг появятся в отчёте сразу.</small></p>
       <p><small><b>Наши цены</b> для сравнения берутся из раздела «Каталог» — это один и тот же список: поправили цену там, и сравнение в карточке конкурента сразу свежее. Позиций в каталоге: <b>${ours.rows.length}</b>; в сравнении участвуют только те, у которых указана цена.</small></p>
       <button class="btn sm" onclick="go('products')">${icon('products', 13)} Открыть каталог</button></div>
-     ${isAdmin ? `<div class="card"><h3>Адреса сервисов проверки</h3><p><small>Нужны только техническому специалисту — обычно здесь ничего менять не надо. Если сервис сменил адрес, его можно поправить.</small></p><form onsubmit="return saveCompetitorUrls(event)">${[['FNS_API_URL', 'ФНС API'], ['FEDRESURS_API_URL', 'Федресурс'], ['KAD_API_URL', 'Арбитр'], ['RUSPROFILE_URL', 'Rusprofile'], ['GOOGLE_API_URL', 'Google Places'], ['TWOGIS_API_URL', '2ГИС'], ['YANDEX_API_URL', 'Яндекс Геопоиск']].map(([k, n]) => `<label>${n}<input name="${k}" value="${esc((cs.urls || {})[k] || '')}"></label>`).join('')}<button class="btn">Сохранить адреса</button></form></div>` : ''}
+     ${isAdmin ? `<div class="card"><h3>Адреса сервисов проверки</h3><p><small>Нужны только техническому специалисту — обычно здесь ничего менять не надо. Если сервис сменил адрес, его можно поправить.</small></p><form onsubmit="return saveCompetitorUrls(event)">${[['FNS_API_URL', 'ФНС API'], ['FEDRESURS_API_URL', 'Федресурс'], ['KAD_API_URL', 'Арбитр'], ['GOOGLE_API_URL', 'Google Places'], ['TWOGIS_API_URL', '2ГИС'], ['YANDEX_API_URL', 'Яндекс Геопоиск']].map(([k, n]) => `<label>${n}<input name="${k}" value="${esc((cs.urls || {})[k] || '')}"></label>`).join('')}<button class="btn">Сохранить адреса</button></form></div>` : ''}
     </div></div>`;
   } else if (state.settingsTab === 'pipelines') {
     // счётчики сделок для каждой воронки считает сервер: вкладке не нужно

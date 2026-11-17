@@ -64,7 +64,7 @@ INSERT INTO settings(key,value) VALUES('COMPANY_NAME','Старая компан
 INSERT INTO training_items(title,kind,body) VALUES('Материал из старой базы','text','Первая строка материала');
 INSERT INTO activities(text,entity_type,entity_id,user_name) VALUES('Материал «Материал из старой базы» добавлен в обучение','training_items',1,'Ирина');
 INSERT INTO products(name,sku,price,unit,active) VALUES('Дом из старой базы','OLD-1',1000000,'шт',1);
-INSERT INTO competitors(id,name) VALUES(7,'Старый конкурент');
+INSERT INTO competitors(id,name,price_url) VALUES(7,'Старый конкурент','https://competitor.example/price.csv');
 INSERT INTO price_rows(competitor_id,scope,item,price,unit,sku,note,source_name) VALUES
   (NULL,'ours','Дом из старой базы',1200000,'шт','OLD-1','под ключ','наш прайс'),
   (NULL,'ours','Баня из старого прайса',890000,'шт','','','наш прайс'),
@@ -110,6 +110,7 @@ for (const [table, names] of Object.entries(expect)) {
   ok(`таблица ${table}: новые колонки добавлены`, missing.length === 0, missing.length ? 'нет: ' + missing.join(', ') : names.join(', '));
 }
 ok('разведка конкурентов: таблицы созданы', cols('competitors').includes('demo') && cols('price_rows').includes('demo'));
+ok('устаревшая ссылка автосбора прайса очищена при обновлении', db.prepare('SELECT price_url FROM competitors WHERE id=7').get()?.price_url === '');
 ok('история этапов создана без выдуманных старых переходов', cols('deal_stage_history').includes('event_type') && db.prepare("SELECT event_type FROM deal_stage_history WHERE deal_id=1").get()?.event_type === 'baseline');
 const migratedFields=db.prepare('SELECT deal_object,land_status,construction_date,payment_type,lead_source FROM deals WHERE id=1').get();
 ok('старые сделки получают явные значения новых обязательных полей', migratedFields.deal_object==='Не уточнён'&&migratedFields.land_status==='unknown'&&migratedFields.construction_date==='unknown'&&migratedFields.payment_type==='unknown'&&migratedFields.lead_source==='avito',JSON.stringify(migratedFields));

@@ -2,7 +2,7 @@
   "name": "karkascrm",
   "version": "1.2.12",
   "private": true,
-  "description": "КаркасCRM — сделки и воронки, клиенты, задачи, единый инбокс мессенджеров, почта и разведка конкурентов. Без внешних зависимостей, один контейнер.",
+  "description": "КаркасCRM — сделки и воронки, клиенты, задачи, единый инбокс мессенджеров, почта и разведка конкурентов. Нет runtime-зависимостей; один контейнер.",
   "license": "UNLICENSED",
   "type": "module",
   "engines": {
@@ -26,5 +26,8 @@
     "test:notify": "node --experimental-sqlite --test tests/notifications.test.mjs",
     "db:check": "node --experimental-sqlite scripts/db-check.mjs",
     "db:clean": "node --experimental-sqlite scripts/db-check.mjs --clean"
+  },
+  "devDependencies": {
+    "jsdom": "26.1.0"
   }
 }

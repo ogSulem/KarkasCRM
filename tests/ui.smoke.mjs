@@ -1,8 +1,8 @@
 // Smoke-тест интерфейса: реальный backend + SPA, отрисованная в jsdom.
-// Требует jsdom (в рантайме проекта его нет):
-//   npm i --prefix /tmp/jsdomtest jsdom
-//   JSDOM_PATH=/tmp/jsdomtest/node_modules/jsdom/lib/api.js node --experimental-sqlite tests/ui.smoke.mjs
-// Если jsdom не установлен — тест сообщает об этом и завершается успешно.
+// Тестовая зависимость jsdom закреплена в package.json/package-lock.json:
+//   npm ci
+//   npm run test:ui
+// Без jsdom тест завершается ошибкой, а не зелёным пропуском.
 import { spawn } from 'node:child_process';
 import { readFileSync, readdirSync, rmSync, accessSync, constants } from 'node:fs';
 import { fileURLToPath } from 'node:url';
@@ -21,9 +21,9 @@ try {
   if (process.env.JSDOM_PATH) { try { ({ JSDOM, VirtualConsole } = await import(process.env.JSDOM_PATH)) } catch {} }
 }
 if (!JSDOM) {
-  console.log('jsdom не установлен — тест интерфейса пропущен.');
-  console.log('   Установите и повторите:  npm i --prefix /tmp/jsdomtest jsdom');
-  process.exit(0);
+  console.error('ОШИБКА: jsdom не установлен — UI-проверки не выполнены.');
+  console.error('   Установите закреплённые зависимости и повторите: npm ci');
+  process.exit(1);
 }
 
 const PORT = 18079, BASE = `http://127.0.0.1:${PORT}`, DATA = '/tmp/karkas-ui-smoke';
@@ -890,7 +890,7 @@ try {
     // источники уводим на недоступный локальный адрес. Иначе поиск ждёт настоящие
     // сайты до таймаута, и карточка не успевает открыться к проверке.
     await window.api('/api/competitor-sources', { method: 'PUT', body: JSON.stringify({
-      RUSPROFILE_URL: 'http://127.0.0.1:9', FEDRESURS_API_URL: 'http://127.0.0.1:9', KAD_API_URL: 'http://127.0.0.1:9',
+      FEDRESURS_API_URL: 'http://127.0.0.1:9', KAD_API_URL: 'http://127.0.0.1:9',
       FNS_API_URL: 'http://127.0.0.1:9', FNS_SEARCH_URL: 'http://127.0.0.1:9', GOOGLE_API_URL: 'http://127.0.0.1:9',
       TWOGIS_API_URL: 'http://127.0.0.1:9', YANDEX_API_URL: 'http://127.0.0.1:9', COMPETITOR_TIMEOUT_MS: '1500',
     }) }).catch(() => {});
@@ -976,9 +976,8 @@ try {
   }
   check('шапка контакта тоже не заходит под крестик', /padding-right:3[0-9]px/.test((cssText.match(/\.contact-head\{[^}]*\}/) || [''])[0]));
   check('первый текстовый ряд окна не налезает на крестик', cssText.includes('#modalBody>h3:first-child,#modalBody>p:first-child{padding-right:34px}'));
-  // Долги у приставов и «Связи» Rusprofile автоматически не отдаются: API ФССП
-  // закрыт, сайт Rusprofile закрыт от роботов. Поэтому то, что менеджер посмотрел
-  // сам, можно записать — иначе проверка испаряется вместе с закрытой вкладкой.
+  // Долги у приставов и «Связи» Rusprofile не собираются автоматически: API ФССП
+  // закрыт, а страницы Rusprofile не разбираются. Ручная находка сохраняет результат.
   {
     const html = window.findingsBlock({ id: 7, findings: [
       { id: 3, kind: 'долги', title: '3 исполнительных производства', amount: 450000, author: 'Администратор', created_at: '2026-10-01 10:00', source_url: 'https://fssp.gov.ru/iss/ip' },
@@ -994,11 +993,16 @@ try {
     check('без записей блок объясняет, что делать', /Записей пока нет/.test(emptyHtml) && /Запишите, что увидели в реестре/.test(emptyHtml));
   }
   window.closeModal();
-  // «Ссылка на прайс»: сервер умел подтягивать таблицу конкурента по адресу,
-  // но поля в форме не было — функция оставалась недостижимой из интерфейса.
+  // У сайтов конкурентов нет серверного парсера: прайс добавляется только файлом
+  // или вставкой строк, а не скрытой ссылкой, которая скачивается при проверке.
   await window.openCompetitor(); await wait(350);
-  check('в форме конкурента есть поле «Ссылка на прайс»', Boolean($('#modalBody [name="price_url"]')) && /Ссылка на прайс/.test($('#modalBody').textContent));
-  check('подсказка объясняет, зачем конкуренту ссылка на прайс', /сама подтянет|при каждой проверке/i.test($('#modalBody').textContent), $('#modalBody').textContent.replace(/\s+/g, ' ').slice(0, 120));
+  check('в карточке конкурента нет поля для автоматического сбора прайса', !$('#modalBody [name="price_url"]') && !/Ссылка на прайс/.test($('#modalBody').textContent));
+  window.closeModal(); await wait(150);
+  window.openPriceImport(id, 'theirs'); await wait(150);
+  check('для прайса конкурента доступны файл и вставка текста, не URL', /Вставить текст/.test($('#modalBody').textContent) && !$('#modalBody [name="url"]'));
+  const textTab = $$('#modalBody .tabs button').find(b => /Вставить текст/.test(b.textContent));
+  if (textTab) { textTab.click(); await wait(100); }
+  check('ручная вставка объясняет, что сайт конкурента не скачивается', /не скачиваем прайсы с сайтов конкурентов/i.test($('#modalBody').textContent) && !$('#modalBody [name="url"]'));
   window.closeModal(); await wait(150);
   // Ссылки для ручной проверки приходят с сервера (ФНС, ГИР БО, ФССП, Федресурс,
   // арбитраж, карты, отзывы, Авито, Госзакупки), а не зашиты в интерфейс парой штук.
@@ -1316,6 +1320,8 @@ try {
     check('в настройках сказано, что официального API ФССП больше нет', /API ФССП закрыт/.test(st) && /банк исполнительных производств/.test(st));
     check('в настройках нет мёртвого поля токена ФССП', !/Токен ФССП/.test(st) && !/FSSP_TOKEN/.test($('#view').innerHTML));
     check('источники без рабочего API помечены как ручные', /данные по ссылке вручную/.test(st));
+    check('Rusprofile явно не скачивается и не разбирается автоматически', /не скачивается и не разбирается автоматически/.test(st));
+    check('для Rusprofile нет редактируемого сетевого адреса', !/name="RUSPROFILE_URL"/.test($('#view').innerHTML));
     check('для Google сохранена подсказка про действующий Places API (New)', /Places API \(New\)/.test(appJsRaw));
     check('есть проверка доступности источников', /Проверить доступность источников/.test(st));
   }

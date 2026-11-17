@@ -1,9 +1,15 @@
 #!/usr/bin/env bash
-# Проверка KarkasCRM: синтаксис, интеграционные тесты, миграции базы и (опционально) интерфейс.
+# Проверка KarkasCRM: синтаксис, интеграционные тесты, миграции базы и обязательный UI smoke-тест.
 set -euo pipefail
 cd "$(dirname "$0")"
 
 command -v node >/dev/null || { echo "Node.js не найден (нужен 22.5+)"; exit 1; }
+if [ -n "${JSDOM_PATH:-}" ]; then
+  [ -f "$JSDOM_PATH" ] || { echo "ОШИБКА: JSDOM_PATH=$JSDOM_PATH не существует." >&2; exit 1; }
+elif ! node -e "import('jsdom').then(()=>process.exit(0)).catch(()=>process.exit(1))" 2>/dev/null; then
+  echo "ОШИБКА: jsdom отсутствует. Установите закреплённые зависимости: npm ci" >&2
+  exit 1
+fi
 
 echo "[1/4] Проверка синтаксиса"
 node --check backend/src/server.js
@@ -202,25 +208,13 @@ grep -q "CRM_TLS" scripts/update.sh || { echo "  ОШИБКА: update.sh не ч
 grep -q "set_env CRM_TLS" install.sh || { echo "  ОШИБКА: install.sh не проставляет CRM_TLS"; exit 1; }
 echo "  ok   CRM_TLS: install.sh проставляет, update.sh читает, шаблон описывает"
 
-echo "[4/4] Smoke-тест интерфейса (нужен jsdom, иначе шаг пропускается)"
-# Указанный JSDOM_PATH обязан существовать. Иначе тест молча завершится успехом,
-# не выполнив ни одной проверки интерфейса, и прогон будет выглядеть зелёным.
-if [ -n "${JSDOM_PATH:-}" ] && [ ! -f "${JSDOM_PATH}" ]; then
-  echo "  ОШИБКА: JSDOM_PATH=${JSDOM_PATH} не существует — проверки интерфейса не выполнены."
-  echo "  Установить: npm i --prefix /tmp/jsdomtest jsdom"
-  exit 1
-fi
-if node -e "import('jsdom').then(()=>process.exit(0)).catch(()=>process.exit(1))" 2>/dev/null; then
-  node --experimental-sqlite tests/ui.smoke.mjs
-elif [ -n "${JSDOM_PATH:-}" ]; then
+echo "[4/4] Smoke-тест интерфейса (jsdom 26.1.0)"
+# UI-тест обязателен: отсутствие зависимости не превращает неполный прогон
+# в успешный. Версия закреплена в package.json и package-lock.json.
+if [ -n "${JSDOM_PATH:-}" ]; then
   JSDOM_PATH="$JSDOM_PATH" node --experimental-sqlite tests/ui.smoke.mjs
 else
-  if npm i --prefix /tmp/jsdomtest jsdom >/dev/null 2>&1; then
-    JSDOM_PATH=/tmp/jsdomtest/node_modules/jsdom/lib/api.js node --experimental-sqlite tests/ui.smoke.mjs
-  else
-    echo "  ВНИМАНИЕ: jsdom недоступен, проверки интерфейса НЕ ВЫПОЛНЕНЫ."
-    echo "  Прогон не покрыл интерфейс. Установить: npm i --prefix /tmp/jsdomtest jsdom"
-  fi
+  node --experimental-sqlite tests/ui.smoke.mjs
 fi
 
 echo

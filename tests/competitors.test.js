@@ -97,6 +97,8 @@ test('настройка источников: ключи и адреса, ст�
   const fsspDef = s.body.sources.find(x => x.key === 'fssp');
   assert.equal(fsspDef.needs.length, 0, 'ФССП больше не требует ключ');
   assert.match(fsspDef.about, /закрыт/, 'в описании источника сказано, что API закрыт');
+  assert.ok(!('RUSPROFILE_URL' in s.body.urls), 'адрес Rusprofile нельзя настроить для автоматических запросов');
+  assert.match(s.body.sources.find(x => x.key === 'rusprofile').about, /не разбираются автоматически/);
 });
 
 test('«Пишем название конкурента» → полная проверка: долги, суды, банкротство, отзывы', async () => {
@@ -124,7 +126,10 @@ test('«Пишем название конкурента» → полная пр
   const kadCall = calls.filter(c => c.name === 'kad').pop();
   assert.equal(kadCall.method, 'POST');
   assert.deepEqual(JSON.parse(kadCall.body).Sides, [{ Name: INN, Type: -1, ExactMatch: false }], 'сторона задаётся строкой Name (ИНН), Type -1 = любая сторона');
-  assert.equal(by('rusprofile').status, 'ok'); assert.equal(by('rusprofile').data.card.status, 'действующая');
+  assert.equal(by('rusprofile').status, 'skipped', 'Rusprofile доступен только для ручной проверки');
+  assert.equal(by('rusprofile').data.manual, true);
+  assert.match(by('rusprofile').summary, /не проверяется автоматически/);
+  assert.equal(calls.filter(c => c.name === 'rusprofile').length, 0, 'CRM не отправляет запросы и не разбирает HTML Rusprofile');
   assert.equal(by('google').status, 'ok'); assert.equal(by('2gis').status, 'ok'); assert.equal(by('yandex').status, 'ok');
   // риск-скор и факторы
   assert.ok(rep.risk >= 60, 'высокий риск из-за долгов и банкротства: ' + rep.risk);
@@ -142,13 +147,8 @@ test('«Пишем название конкурента» → полная пр
   // ссылки ручной проверки ведут только на существующие адреса
   const links = rep.links.map(x => x.url);
   assert.ok(links.some(u => u.includes(INN)), 'в ссылках ручной проверки есть ИНН конкурента');
-  // Страница «Связи» у Rusprofile существует (/connections/5448224), но номер в
-  // адресе — внутренний номер сайта, а не ОГРН. Поэтому ссылку строим только
-  // тогда, когда номер пришёл из ответа самого сайта.
-  assert.ok(links.includes('https://www.rusprofile.ru/connections/5448224'), 'ссылка на «Связи» построена по внутреннему номеру Rusprofile');
-  assert.ok(links.includes('https://www.rusprofile.ru/id/5448224'), 'карточка Rusprofile открыта по внутреннему номеру, а не поиском');
-  assert.ok(!links.some(u => /rusprofile\.ru\/search\/advanced/.test(u)), 'адреса search/advanced у Rusprofile нет');
-  assert.ok(!links.some(u => /rusprofile\.ru\/(?:id|ip|connections)\/\d{13}/.test(u)), 'карточка и «Связи» не собираются из ОГРН');
+  assert.ok(links.some(u => /rusprofile\.ru\/search\?query=7700000009/.test(u)), 'Rusprofile открывается через поиск по известному ИНН');
+  assert.ok(!links.some(u => /rusprofile\.ru\/(?:id|connections)\//.test(u)), 'внутренние ID карточек и связей не извлекаются из сайта');
   assert.equal(rep.found.ogrn, OGRN, 'ОГРН подтянут из ФНС в отчёт');
   assert.equal(rep.found.director, 'Иванов Иван Иванович');
   assert.ok(links.some(u => u.startsWith('https://pb.nalog.ru')), 'ссылка на ФНС');
@@ -158,21 +158,42 @@ test('«Пишем название конкурента» → полная пр
   assert.ok(rep.summary.some(s => /источников/.test(s)));
 });
 
-test('повторная проверка показывает изменения, а заблокированный сайт не ломает отчёт', async () => {
+test('Rusprofile остаётся ручным источником и не получает сетевых запросов', async () => {
   const list = await call('/api/competitors');
-  const comp = list.body[0];
-  assert.ok(comp.risk >= 60 && comp.level === 'высокий', 'риск виден в списке');
+  const comp = list.body.find(c => c.inn === INN);
+  assert.ok(comp && comp.risk >= 60 && comp.level === 'высокий', 'риск виден в списке');
   assert.equal(comp.reviews, 2, 'отзывы посчитаны');
-  // имитируем блокировку Rusprofile
-  await call('/api/competitor-sources', { method: 'PUT', body: JSON.stringify({ RUSPROFILE_URL: url('rusprofile') + '/blocked' }) });
-  const r = await call(`/api/competitors/${comp.id}/check`, { method: 'POST', body: '{}' });
+  const callsBefore = calls.filter(c => c.name === 'rusprofile').length;
+  const r = await call(`/api/competitors/${comp.id}/check`, { method: 'POST', body: JSON.stringify({ sources: ['rusprofile'] }) });
   assert.equal(r.status, 200, 'проверка не падает');
   const rp = r.body.results.find(x => x.source === 'rusprofile');
-  assert.equal(rp.status, 'blocked', 'источник помечен как заблокированный');
-  assert.match(rp.summary, /проверьте по ссылке/);
+  assert.equal(rp.status, 'skipped', 'Rusprofile только для ручной проверки');
+  assert.equal(rp.data.manual, true);
+  assert.match(rp.summary, /ручной проверки/);
+  assert.equal(calls.filter(c => c.name === 'rusprofile').length, callsBefore, 'ни HTML, ни другой ответ Rusprofile не загружаются');
   assert.ok(rp.links.length > 3, 'ссылки ручной проверки на месте');
-  assert.ok(r.body.report.risk >= 40, 'отчёт всё равно сформирован');
+  assert.ok(r.body.report, 'сводный отчёт всё равно сформирован');
   assert.ok(Array.isArray(r.body.history) && r.body.history.length >= 2, 'история проверок ведётся');
+});
+
+test('картотека не извлекает число дел из HTML-страницы', async () => {
+  await mock('kadhtml', (req, r) => {
+    r.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
+    r.end('<html><body><input id="documentsTotalCount" value="42"><p>42 арбитражных дела</p></body></html>');
+  });
+  await call('/api/competitor-sources', { method: 'PUT', body: JSON.stringify({ KAD_API_URL: url('kadhtml') }) });
+  try {
+    const comp = (await call('/api/competitors')).body.find(c => c.inn === INN);
+    const r = await call(`/api/competitors/${comp.id}/check`, { method: 'POST', body: JSON.stringify({ sources: ['kad'] }) });
+    const kad = r.body.results.find(x => x.source === 'kad');
+    assert.equal(kad.status, 'error', 'вместо JSON получена страница, а не данные картотеки');
+    assert.equal(kad.data.total, 0, 'число дел из HTML не извлечено');
+    assert.deepEqual(kad.data.cases, []);
+    assert.match(kad.summary, /не структурированный ответ/);
+    assert.equal(calls.filter(c => c.name === 'kadhtml').length, 1, 'выполнен только запрос документированного JSON-эндпоинта');
+  } finally {
+    await call('/api/competitor-sources', { method: 'PUT', body: JSON.stringify({ KAD_API_URL: url('kad') }) });
+  }
 });
 
 test('без ключей источники помечаются «skipped»', async () => {
@@ -389,7 +410,7 @@ test('поиск конкурента понимает поле query из ин�
 
 test('диагностика источников: видно, кто отвечает, а кто просит ключ', async () => {
   await call('/api/competitor-sources', { method: 'PUT', body: JSON.stringify({
-    RUSPROFILE_URL: url('rusprofile'), FEDRESURS_API_URL: url('fedresurs'), KAD_API_URL: url('kad'),
+    FEDRESURS_API_URL: url('fedresurs'), KAD_API_URL: url('kad'),
     FNS_API_URL: url('fns'), GOOGLE_API_URL: url('google'), FNS_SEARCH_URL: url('fnssearch'),
     TWOGIS_API_URL: url('2gis'), YANDEX_API_URL: url('yandex'), COMPETITOR_TIMEOUT_MS: '5000',
     FNS_API_KEY: 'test-fns-key', GOOGLE_PLACES_KEY: 'test-google-key',
@@ -414,14 +435,14 @@ test('диагностика источников: видно, кто отвеч
 });
 
 test('источник без соединения помечается «blocked», а отчёт сообщает о нехватке данных', async () => {
-  await call('/api/competitor-sources', { method: 'PUT', body: JSON.stringify({ RUSPROFILE_URL: 'http://127.0.0.1:9', FEDRESURS_API_URL: 'http://127.0.0.1:9', KAD_API_URL: 'http://127.0.0.1:9', COMPETITOR_TIMEOUT_MS: '1500', FNS_API_KEY: '', GOOGLE_PLACES_KEY: '', TWOGIS_KEY: '', YANDEX_API_KEY: '' }) });
+  await call('/api/competitor-sources', { method: 'PUT', body: JSON.stringify({ FEDRESURS_API_URL: 'http://127.0.0.1:9', KAD_API_URL: 'http://127.0.0.1:9', COMPETITOR_TIMEOUT_MS: '1500', FNS_API_KEY: '', GOOGLE_PLACES_KEY: '', TWOGIS_KEY: '', YANDEX_API_KEY: '' }) });
   const r = await call('/api/competitors/find', { method: 'POST', body: JSON.stringify({ name: 'ООО Без Связи', inn: '6600000003' }) });
   const st = r.body.results.map(x => x.status);
   assert.ok(st.includes('blocked'), 'недоступные сайты помечены blocked: ' + JSON.stringify(st));
   assert.ok(st.includes('skipped'), 'источники без ключей помечены skipped');
   assert.equal(r.body.report.noData, true, 'отчёт понимает, что данных нет');
   assert.match(r.body.report.verdict, /Данных пока мало/, 'вердикт не делает выводов из неполных данных');
-  assert.ok(r.body.report.dataQuality.blocked + r.body.report.dataQuality.skipped === 8, 'посчитано качество данных по источникам');
+  assert.equal(Object.values(r.body.report.dataQuality).reduce((sum, count) => sum + count, 0), 8, 'качество посчитано по всем восьми источникам');
   assert.ok(r.body.report.links.length >= 10, 'ссылки ручной проверки всё равно сформированы');
 });
 
@@ -461,24 +482,56 @@ test('сравнение цен находит позицию с чуть дру
   assert.ok(!pairs.some(p => /Летний/.test(p.item)), 'разные комплектации одного размера не склеиваются');
 });
 
-test('ссылка на прайс: CRM сама подтягивает таблицу конкурента при каждой проверке', async () => {
+test('сайты конкурентов не опрашиваются; URL-импорт оставлен только для нашего каталога', async () => {
   await mock('pricetable', (req, r) => {
     r.writeHead(200, { 'Content-Type': 'text/csv; charset=utf-8' });
-    r.end('Наименование;Цена;Ед\nКаркасный дом 8×10 «Север»;4300000;шт\nБаня 4×6 под ключ;920000;шт\n');
+    r.end('Наименование;Цена;Ед\nКаталог по ссылке;4300000;шт\nБаня из каталога;920000;шт\n');
   });
   const comp = (await call('/api/competitors')).body.find(c => c.inn === INN);
   const addr = url('pricetable') + '/price.csv';
-  const patched = await call(`/api/competitors/${comp.id}`, { method: 'PATCH', body: JSON.stringify({ price_url: addr }) });
-  assert.equal(patched.status, 200);
-  assert.equal(patched.body.price_url, addr, 'ссылка сохранена в карточке конкурента');
-  const r = await call(`/api/competitors/${comp.id}/check`, { method: 'POST', body: JSON.stringify({ sources: ['fns'] }) });
-  const pulled = r.body.results.find(x => x.source === 'prices');
-  assert.ok(pulled && pulled.status === 'ok', 'таблица по ссылке подтянута: ' + JSON.stringify(pulled));
-  assert.match(pulled.summary, /Загружено позиций: 2/);
-  const rows = await call(`/api/prices?scope=competitor&competitor=${comp.id}`);
-  assert.equal(rows.body.rows.length, 2, 'подтянутые позиции лежат отдельно от нашего прайса');
-  assert.ok(rows.body.rows.some(x => /8×10/.test(x.item) && x.price === 4300000));
-  assert.ok(r.body.report.pricing.pairs.some(x => x.theirs === 4300000), 'подтянутая цена сразу попала в сравнение');
+  const sourceCallsBefore = calls.filter(c => c.name === 'pricetable').length;
+
+  const competitorImport = await call(`/api/competitors/${comp.id}/prices`, {
+    method: 'POST', body: JSON.stringify({ url: addr, scope: 'competitor' }),
+  });
+  assert.equal(competitorImport.status, 400, 'прайс конкурента нельзя скачать с сайта');
+  assert.match(competitorImport.body.error, /не загружается|отключён/i);
+  const legacyCompetitorImport = await call('/api/prices', {
+    method: 'POST', body: JSON.stringify({ url: addr, scope: 'competitor', competitor_id: comp.id }),
+  });
+  assert.equal(legacyCompetitorImport.status, 400, 'старый общий маршрут тоже не скачивает прайс конкурента');
+  const createdWithUrl = await call('/api/competitors', {
+    method: 'POST', body: JSON.stringify({ name: 'Конкурент с URL', price_url: addr }),
+  });
+  assert.equal(createdWithUrl.status, 400, 'старый параметр price_url не включает автоматический сбор');
+  const patched = await call(`/api/competitors/${comp.id}`, {
+    method: 'PATCH', body: JSON.stringify({ price_url: addr }),
+  });
+  assert.equal(patched.status, 400, 'ссылка не сохраняется в карточке конкурента');
+  assert.equal(calls.filter(c => c.name === 'pricetable').length, sourceCallsBefore,
+    'запрос к сайту конкурента не отправлялся');
+
+  const full = await call(`/api/competitors/${comp.id}`);
+  const list = await call('/api/competitors');
+  assert.ok(!Object.hasOwn(full.body, 'price_url'), 'карточка не раскрывает устаревшую настройку');
+  assert.ok(list.body.every(row => !Object.hasOwn(row, 'price_url')), 'список не отдаёт устаревшее поле');
+  const check = await call(`/api/competitors/${comp.id}/check`, {
+    method: 'POST', body: JSON.stringify({ sources: ['rusprofile'] }),
+  });
+  assert.ok(!check.body.results.some(result => result.source === 'prices'), 'проверка конкурента не подтягивает таблицу по URL');
+  assert.equal(calls.filter(c => c.name === 'pricetable').length, sourceCallsBefore,
+    'повторная проверка тоже не обращается к сайту');
+
+  // Ссылка для собственного каталога — отдельный разрешённый сценарий:
+  // сотрудник импортирует свой публичный CSV/Google Sheets, а не сайт конкурента.
+  const own = await call('/api/prices/ours', {
+    method: 'POST', body: JSON.stringify({ url: addr }),
+  });
+  assert.equal(own.status, 201, 'ссылка на свой прайс поддерживается');
+  assert.equal(own.body.imported, 2);
+  assert.ok(own.body.rows.some(row => row.item === 'Каталог по ссылке' && row.price === 4300000));
+  assert.equal(calls.filter(c => c.name === 'pricetable').length, sourceCallsBefore + 1,
+    'публичная CSV-ссылка скачивается только для собственного каталога');
 });
 
 test('убранные адреса не отвечают, а мёртвая настройка не отдаётся', async () => {
@@ -499,8 +552,8 @@ test('ручная находка записывается, попадает в 
   assert.equal(created.status, 201);
   const comp = { id: created.body.id };
 
-  // Банк данных ФССП и «Связи» Rusprofile автоматически не отдаются: API закрыт,
-  // сайт закрыт от роботов. Без записи такая проверка испарялась вместе с вкладкой.
+  // Банк данных ФССП и «Связи» Rusprofile автоматически не собираются: API закрыт,
+  // а внутренние страницы Rusprofile не разбираются. Без записи проверка испаряется.
   const empty = await call(`/api/competitors/${comp.id}/findings`, { method: 'POST', body: JSON.stringify({ kind: 'долги' }) });
   assert.equal(empty.status, 400, 'пустая находка не принимается');
 
@@ -564,19 +617,9 @@ test('сбой источника 5xx повторяется один раз и 
   assert.ok(r2.body.report, 'отчёт собран, несмотря на сбой одного источника');
 });
 
-test('ссылка на прайс проверяется: javascript: не проходит, адрес без схемы дополняется', async () => {
-  const bad = await call('/api/competitors', { method: 'POST', body: JSON.stringify({ name: 'ООО «Опасная ссылка»', price_url: 'javascript:alert(document.cookie)' }) });
-  assert.equal(bad.status, 400, 'схема javascript: отклоняется уже при создании');
-  const ok = await call('/api/competitors', { method: 'POST', body: JSON.stringify({ name: 'ООО «Таблица без схемы»', price_url: 'docs.google.com/spreadsheets/d/ABC123/edit' }) });
-  assert.equal(ok.status, 201, 'обычная ссылка принимается');
-  const comp = (await call('/api/competitors')).body.find(c => c.name === 'ООО «Таблица без схемы»');
-  assert.equal(comp.price_url, 'https://docs.google.com/spreadsheets/d/ABC123/edit', 'адрес без схемы дополнен до https');
-  const badPatch = await call(`/api/competitors/${comp.id}`, { method: 'PATCH', body: JSON.stringify({ price_url: 'javascript:alert(1)' }) });
-  assert.equal(badPatch.status, 400, 'та же проверка при сохранении карточки');
-});
 
 test('выгрузка прайса конкурента гасит формулы Excel', async () => {
-  const comp = (await call('/api/competitors')).body.find(c => c.name === 'ООО «Таблица без схемы»');
+  const comp = (await call('/api/competitors')).body.find(c => c.inn === INN);
   const imp = await call(`/api/competitors/${comp.id}/prices`, { method: 'POST', body: JSON.stringify({ csv: 'Наименование;Цена\n=1+1;100\n-2;200\nОбычная позиция;300' }) });
   assert.equal(imp.status, 201, 'таблица импортирована');
   const res = await fetch(base + `/api/prices/export?scope=competitor&competitor=${comp.id}`, { headers: h });

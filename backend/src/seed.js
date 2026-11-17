@@ -146,19 +146,19 @@ export function seedDemo(db, adminId, adminName) {
   qa.run('Сделка «Баня 4×6 для посёлка» → этап «Неразобранное»', 'deals', d3, adminName, '-2 hours');
 
   // ── конкуренты: карточки, проверки, отчёт, отзывы, прайсы ──
-  const qk = 'INSERT INTO competitors(name,inn,ogrn,city,website,phone,notes,price_url,demo) VALUES(?,?,?,?,?,?,?,?,?)';
-  const k1 = db.prepare(qk).run('ООО «БрусДом»', '7709876545', '1147746234567', 'Москва', 'brusdom.ru', '+7 495 123-45-67', 'Сильные отзывы, но цена выше нашей на 8%', '', demo).lastInsertRowid;
-  const k2 = db.prepare(qk).run('ИП «СтройУют»', '500111223302', '314500000123456', 'Подольск', 'stroystroy.ru', '', 'Мелкий игрок, работает без договора', '', demo).lastInsertRowid;
+  const qk = 'INSERT INTO competitors(name,inn,ogrn,city,website,phone,notes,demo) VALUES(?,?,?,?,?,?,?,?)';
+  const k1 = db.prepare(qk).run('ООО «БрусДом»', '7709876545', '1147746234567', 'Москва', 'brusdom.ru', '+7 495 123-45-67', 'Сильные отзывы, но цена выше нашей на 8%', demo).lastInsertRowid;
+  const k2 = db.prepare(qk).run('ИП «СтройУют»', '500111223302', '314500000123456', 'Подольск', 'stroystroy.ru', '', 'Мелкий игрок, работает без договора', demo).lastInsertRowid;
 
   // проверки и отчёты каскадно удаляются с карточкой конкурента
   const qch = 'INSERT INTO competitor_checks(competitor_id,source,status,summary,payload) VALUES(?,?,?,?,?)';
   const ich = db.prepare(qch);
-  ich.run(k1, 'rusprofile', 'ok', 'Найдено: ООО «БрусДом» · действующая', JSON.stringify({ source: 'rusprofile', title: 'Rusprofile', status: 'ok', summary: 'Найдено: ООО «БрусДом» · действующая', data: { card: { name: 'ООО «БрусДом»', inn: '7709876545', ogrn: '1147746234567', status: 'действующая', address: 'г Москва, ул Строителей, 12' } }, links: [] }));
+  ich.run(k1, 'rusprofile', 'skipped', 'Страницы не проверяются автоматически — откройте ссылку для ручного поиска', JSON.stringify({ source: 'rusprofile', title: 'Rusprofile', status: 'skipped', summary: 'Страницы не проверяются автоматически — откройте ссылку для ручного поиска', data: { manual: true }, links: [] }));
   // официального API ФССП нет с марта 2022 года — источник работает как ссылка
   ich.run(k1, 'fssp', 'skipped', 'Официальный API ФССП закрыт с марта 2022 года — суммы долгов смотрите по ссылке «ФССП: банк исполнительных производств»', JSON.stringify({ source: 'fssp', title: 'ФССП (долги)', status: 'skipped', summary: 'Официальный API ФССП закрыт с марта 2022 года', data: { productions: [], total: null, manual: true }, links: [] }));
   ich.run(k1, 'kad', 'ok', 'Найдено дел: 2', JSON.stringify({ source: 'kad', title: 'Арбитражные суды', status: 'ok', summary: 'Найдено дел: 2', data: { cases: [{ number: 'А40-123456/2025', date: '2025-11-04', type: 'А', court: 'АС города Москвы', judge: 'Соколова Е.П.', url: '', role: 'ответчик' }, { number: 'А40-789012/2024', date: '2024-06-18', type: 'А', court: 'АС Московской области', judge: 'Павлов И.Н.', url: '', role: 'истец' }], total: 2 }, links: [] }));
   ich.run(k1, 'google', 'ok', 'Рейтинг 4.2 · 37 отзывов · г Москва', JSON.stringify({ source: 'google', title: 'Google Карты', status: 'ok', summary: 'Рейтинг 4.2 · 37 отзывов', data: { card: { name: 'БрусДом', address: 'г Москва', phone: '+7 495 123-45-67', rating: 4.2, count: 37 }, reviews: [{ author: 'Кирилл М.', rating: 5, text: 'Дом построили за 5 месяцев, бригада вежливая', url: '' }, { author: 'Анна С.', rating: 3, text: 'Смета выросла на 15% в процессе, но дом качественный', url: '' }] }, links: [] }));
-  ich.run(k2, 'rusprofile', 'ok', 'Найдено: ИП «СтройУют» · действующая', JSON.stringify({ source: 'rusprofile', title: 'Rusprofile', status: 'ok', summary: 'Найдено: ИП «СтройУют»', data: { card: { name: 'ИП СтройУют', inn: '500111223302', status: 'действующая' } }, links: [] }));
+  ich.run(k2, 'rusprofile', 'skipped', 'Страницы не проверяются автоматически — откройте ссылку для ручного поиска', JSON.stringify({ source: 'rusprofile', title: 'Rusprofile', status: 'skipped', summary: 'Страницы не проверяются автоматически — откройте ссылку для ручного поиска', data: { manual: true }, links: [] }));
 
   const qr = 'INSERT INTO competitor_reports(competitor_id,risk,level,verdict,payload) VALUES(?,?,?,?,?)';
   db.prepare(qr).run(k1, 42, 'умеренный',

@@ -23,6 +23,9 @@ jobs:
         with:
           node-version: '22.22'
 
+      - name: Установка закреплённых тестовых зависимостей
+        run: npm ci --ignore-scripts --no-audit --no-fund
+
       - name: Проверка синтаксиса
         run: |
           node --check backend/src/server.js
@@ -44,13 +47,14 @@ jobs:
           node --check tests/routes.test.mjs
           node --check tests/notifications.test.mjs
           node --check tests/db-hygiene.test.mjs
+          node --check tests/ssrf.test.mjs
           node --check tests/backup-s3.test.mjs
           node --check tests/seed.test.mjs
           node --check tests/docker-smoke.mjs
           for sh in install.sh run-local.sh run-tests.sh scripts/update.sh scripts/move.sh scripts/pack.sh deploy/start-caddy.sh; do bash -n "$sh"; done
 
-      - name: Интеграционные тесты (API и конкуренты)
-        run: node --experimental-sqlite --test tests/api.test.js tests/competitors.test.js
+      - name: Интеграционные тесты (API, конкуренты и SSRF)
+        run: node --experimental-sqlite --test tests/api.test.js tests/competitors.test.js tests/ssrf.test.mjs
 
       # Жизненный цикл пароля отдельным шагом и на своём порту: проверки
       # намеренно доводят вход до блокировки подбора, а счётчики нужно гасить
@@ -104,18 +108,8 @@ jobs:
           node --experimental-sqlite tests/migrate.test.mjs
           node --experimental-sqlite tests/seed.test.mjs
 
-      # Установка отделена от самого теста намеренно: раньше они были одним шагом,
-      # и сбой npm выглядел в отчёте как «интерфейс сломался».
-      - name: Установка jsdom для smoke-теста
-        run: |
-          for i in 1 2 3; do
-            npm i --prefix /tmp/jsdomtest jsdom && break
-            echo "Попытка $i не удалась — повторяю"; sleep 5
-          done
-          test -f /tmp/jsdomtest/node_modules/jsdom/lib/api.js
-
-      - name: Smoke-тест интерфейса (jsdom)
-        run: JSDOM_PATH=/tmp/jsdomtest/node_modules/jsdom/lib/api.js node --experimental-sqlite tests/ui.smoke.mjs
+      - name: Smoke-тест интерфейса (jsdom 26.1.0 из lock-файла)
+        run: node --experimental-sqlite tests/ui.smoke.mjs
 
   docker:
     name: Docker без .env и проверка TLS-конфигурации
