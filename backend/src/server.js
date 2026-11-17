@@ -2663,14 +2663,20 @@ const managerCompanyScopeSql = a => `(${a}.responsible_id=? OR EXISTS(
 const managerCompanyParams = user => [Number(user.id), ...managerContactParams(user), ...managerDealParams(user)];
 const managerConversationScopeSql = (cv='cv', c='c') => `(${managerContactScopeSql(c)} OR (${c}.responsible_id IS NULL AND ${cv}.assigned_id=?))`;
 const managerConversationParams = user => [...managerContactParams(user), Number(user.id)];
-const managerUnlinkedMessageSql=(m='m',cv='cv',c='c')=>`(${m}.deal_id IS NULL AND (${cv}.assigned_id=? OR ${c}.responsible_id=?)
+const managerUnlinkedMessageContextSql=(cv='cv',c='c')=>`((${cv}.assigned_id=? OR ${c}.responsible_id=?)
   AND NOT EXISTS(SELECT 1 FROM deals unlinked_other WHERE unlinked_other.contact_id=${cv}.contact_id
     AND unlinked_other.responsible_id IS NOT NULL AND unlinked_other.responsible_id<>?))`;
+const managerUnlinkedMessageSql=(m='m',cv='cv',c='c')=>`(${m}.deal_id IS NULL AND ${managerUnlinkedMessageContextSql(cv,c)})`;
 const managerUnlinkedMessageParams=user=>[Number(user.id),Number(user.id),Number(user.id)];
 function managerCanReadUnlinkedMessages(user,conversationId){
-  const cv=db.prepare('SELECT cv.assigned_id,cv.contact_id,c.responsible_id FROM conversations cv JOIN contacts c ON c.id=cv.contact_id WHERE cv.id=?').get(Number(conversationId));
-  if(!cv||!(Number(cv.assigned_id)===Number(user.id)||Number(cv.responsible_id)===Number(user.id)))return false;
-  return !db.prepare(`SELECT 1 x FROM deals d WHERE d.contact_id=? AND d.responsible_id IS NOT NULL AND d.responsible_id<>? LIMIT 1`).get(cv.contact_id,Number(user.id));
+  const userId=Number(user?.id),id=Number(conversationId);
+  if(user?.role!=='manager'||!Number.isSafeInteger(userId)||userId<1||!Number.isSafeInteger(id)||id<1)return false;
+  // Use the same predicate as list/unread queries. LEFT JOIN is intentional:
+  // older/imported chats can have no contact row; their assigned manager still
+  // owns the unlinked messages, while a deal owned by someone else stays private.
+  return !!db.prepare(`SELECT 1 x FROM conversations cv LEFT JOIN contacts c ON c.id=cv.contact_id
+    WHERE cv.id=? AND ${managerUnlinkedMessageContextSql('cv','c')}`)
+    .get(id,...managerUnlinkedMessageParams({id:userId}));
 }
 const managerTaskScopeSql = a => {
   const ownedDeals = `SELECT md.id FROM deals md WHERE ${managerDealScopeSql('md')}`;
@@ -2691,7 +2697,7 @@ export function managerOwns(user, table, id) {
     const n = db.prepare('SELECT entity_type,entity_id FROM notes WHERE id=?').get(tid);
     return !!n && managerOwns(user, n.entity_type, n.entity_id);
   }
-  if (table === 'conversations') return !!db.prepare(`SELECT 1 x FROM conversations cv JOIN contacts c ON c.id=cv.contact_id WHERE cv.id=? AND ${managerConversationScopeSql('cv','c')}`).get(tid, ...managerConversationParams(user));
+  if (table === 'conversations') return !!db.prepare(`SELECT 1 x FROM conversations cv LEFT JOIN contacts c ON c.id=cv.contact_id WHERE cv.id=? AND ${managerConversationScopeSql('cv','c')}`).get(tid, ...managerConversationParams(user));
   return false;
 }
 // Удаление родительской карточки меняет и связи её дочерних записей. Менеджер

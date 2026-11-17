@@ -761,10 +761,18 @@ test('изоляция менеджеров действует в карточк
   const taskA=(await call('/api/tasks',{method:'POST',body:JSON.stringify({title:`ScopeAlphaTask${suffix}`,contact_id:contactA.id,deal_id:dealA.id,responsible_id:a.id})})).body;
   const taskB=(await call('/api/tasks',{method:'POST',body:JSON.stringify({title:`ScopeBetaTask${suffix}`,contact_id:contactB.id,deal_id:dealB.id,responsible_id:b.id})})).body;
   const convA=(await call('/api/conversations',{method:'POST',body:JSON.stringify({contact_id:contactA.id,chat_type:'whatsapp'})})).body;
+  // Legacy/imported chats can have no contact record. Explicit assignment still
+  // grants that manager access to its unlinked messages, and nobody else.
+  const orphanConvId=Number(db.prepare("INSERT INTO conversations(title,channels,chat_type,assigned_id) VALUES(?,?,?,?)")
+    .run(`Чат без карточки ${suffix}`,'whatsapp','whatsapp',a.id).lastInsertRowid);
+  const orphanMessageId=Number(db.prepare("INSERT INTO messages(conversation_id,deal_id,channel,direction,body,status,author) VALUES(?,NULL,'whatsapp','in',?,'inbound','Клиент')")
+    .run(orphanConvId,`Сообщение без карточки ${suffix}`).lastInsertRowid);
   const managerStream={userId:a.id,role:'manager'};
   assert.equal(partnerSeesEvent(managerStream,'message',{conversation_id:convA.id,deal_id:dealA.id,preview:'своё'}),true,'SSE менеджеру разрешает обновление по его сделке');
   assert.equal(partnerSeesEvent(managerStream,'message',{conversation_id:convA.id,deal_id:adminDealSameContact.id,preview:'внутреннее'}),false,'SSE не раскрывает менеджеру сообщение по офисной сделке того же клиента');
   assert.equal(partnerSeesEvent(managerStream,'message',{conversation_id:convA.id,deal_id:null,preview:'без контекста'}),false,'непривязанное сообщение скрыто при конфликтующих сделках');
+  assert.equal(partnerSeesEvent(managerStream,'message',{conversation_id:orphanConvId,deal_id:null,preview:'чат без карточки'}),true,'SSE доставляет назначенному менеджеру непривязанное сообщение чата без контакта');
+  assert.equal(partnerSeesEvent({userId:b.id,role:'manager'},'message',{conversation_id:orphanConvId,deal_id:null}),false,'SSE не раскрывает назначенный чат без карточки другому менеджеру');
   assert.equal(partnerSeesEvent(managerStream,'message',{conversation_id:convA.id,preview:'нет ACL-контекста'}),false,'событие без контекста сделки закрыто по умолчанию');
   const convB=(await call('/api/conversations',{method:'POST',body:JSON.stringify({contact_id:contactB.id,chat_type:'whatsapp'})})).body;
   const bulkTask=(await call('/api/tasks',{method:'POST',body:JSON.stringify({title:`ScopeBulkTask${suffix}`,responsible_id:a.id})})).body;
@@ -779,11 +787,25 @@ test('изоляция менеджеров действует в карточк
   const ownFile=await call(`/api/conversations/${convA.id}/upload`,{method:'POST',body:JSON.stringify({filename:'manager-own.png',contentType:'image/png',dataBase64:png})});
   assert.equal(ownFile.status,201);
   await call(`/api/conversations/${convA.id}/messages`,{method:'POST',body:JSON.stringify({deal_id:dealA.id,body:'',contentUri:ownFile.body.url,contentName:ownFile.body.name,contentType:ownFile.body.contentType})});
+  // Без deal_id неоднозначное сообщение скрывается, когда у клиента есть
+  // сделка другого сотрудника; его нельзя раскрыть ни в истории, ни в превью.
+  const hiddenUnlinkedId=Number(db.prepare("INSERT INTO messages(conversation_id,deal_id,channel,direction,body,content_uri,status,author) VALUES(?,NULL,'whatsapp','in',?,?,'inbound','Клиент')")
+    .run(convA.id,`Непривязанное чужое сообщение ${suffix}`,officeOnlyFile.body.url).lastInsertRowid);
   // Более новое сообщение по сделке офиса не должно менять видимое превью менеджера.
   db.prepare("INSERT INTO messages(conversation_id,deal_id,channel,direction,body,content_uri,status,author) VALUES(?,?,'whatsapp','in','Внутреннее сообщение другой сделки',?,'inbound','Клиент')").run(convA.id,adminDealSameContact.id,officeOnlyFile.body.url);
   const productB=await call(`/api/deals/${dealB.id}/products`,{method:'POST',body:JSON.stringify({name:'Чужая позиция',price:100,qty:1})});
   assert.equal(productB.status,201);
   const asA=(path,opt={})=>call(path,{...opt,headers:{...(opt.headers||{}),...a.headers}});
+  const asB=(path,opt={})=>call(path,{...opt,headers:{...(opt.headers||{}),...b.headers}});
+  const orphanSummary=(await asA('/api/conversations')).body.find(c=>Number(c.id)===orphanConvId);
+  assert.ok(orphanSummary,'назначенный менеджер видит чат без карточки клиента');
+  assert.equal(orphanSummary.last_body,`Сообщение без карточки ${suffix}`,'превью использует ту же ACL-проверку, что и история');
+  assert.equal(orphanSummary.unread,1,'непрочитанное непривязанное сообщение без карточки учитывается менеджеру');
+  const orphanHistory=await asA(`/api/conversations/${orphanConvId}/messages`);
+  assert.equal(orphanHistory.status,200,'назначенный менеджер открывает историю чата без контакта');
+  assert.deepEqual(orphanHistory.body.map(m=>Number(m.id)),[orphanMessageId],'в истории показано только его непривязанное сообщение');
+  assert.equal(Number(db.prepare('SELECT last_msg_id FROM read_marks WHERE user_id=? AND conversation_id=?').get(a.id,orphanConvId)?.last_msg_id),orphanMessageId,'прочтение обновляет отметку только для разрешённого непривязанного сообщения');
+  assert.equal((await asB(`/api/conversations/${orphanConvId}/messages`)).status,403,'другой менеджер не открывает назначенный чат без карточки');
   const bulkContact=await asA('/api/bulk',{method:'POST',body:JSON.stringify({table:'contacts',action:'update',ids:[contactA.id],patch:{tags:`bulk-${suffix}`}})});
   assert.equal(bulkContact.status,200,'менеджер может массово изменить свой контакт');
   assert.equal(db.prepare('SELECT tags FROM contacts WHERE id=?').get(contactA.id).tags,`bulk-${suffix}`,'пакетное изменение сохранено');
@@ -814,6 +836,9 @@ test('изоляция менеджеров действует в карточк
   assert.equal(ownHistory.body.length,2,'история содержит текст и вложение своей сделки, но не переписку другой сделки');
   assert.ok(ownHistory.body.some(m=>/Сообщение по своей сделке/.test(m.body)),'собственное текстовое сообщение не потеряно');
   assert.ok(ownHistory.body.every(m=>Number(m.deal_id)===Number(dealA.id)),'каждое сообщение истории относится к доступной сделке');
+  assert.ok(!ownHistory.body.some(m=>Number(m.id)===hiddenUnlinkedId),'непривязанное сообщение скрыто, если у клиента есть чужая сделка');
+  assert.equal((await fetch(`${base}/api/messages/${hiddenUnlinkedId}/file`,{headers:a.headers})).status,403,'вложение скрытого непривязанного сообщения тоже закрыто');
+  assert.equal(db.prepare('SELECT last_msg_id FROM read_marks WHERE user_id=? AND conversation_id=?').get(a.id,convA.id),undefined,'скрытое непривязанное сообщение не помечается прочитанным');
   assert.equal((await asA('/api/dashboard')).body.unread,0,'чтение своей переписки обновляет только свою отметку прочтения');
   const ownCard=await asA('/api/deals/'+dealA.id);
   assert.equal(ownCard.body.messages.length,2,'карточка показывает текст и вложение своей сделки');
