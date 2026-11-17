@@ -8,6 +8,7 @@ command -v node >/dev/null || { echo "Node.js не найден (нужен 22.5
 echo "[1/4] Проверка синтаксиса"
 node --check backend/src/server.js
 node --check backend/src/competitors.js
+node --check tests/ssrf.test.mjs
 node --check backend/src/smtp.js
 node --check frontend/public/app.js
 node --check tests/routes.test.mjs
@@ -29,8 +30,8 @@ node --check scripts/db-check.mjs
 node --check scripts/upload-backup.mjs
 node --check scripts/s3-sign.mjs
 
-echo "[2/4] Интеграционные тесты (API, пароли, конкуренты, уведомления, гигиена базы, контракт Wazzup, почта, маршруты, часовой пояс, установщик, обновление, миграции, S3)"
-node --experimental-sqlite --test tests/api.test.js tests/competitors.test.js tests/notifications.test.mjs tests/db-hygiene.test.mjs
+echo "[2/4] Интеграционные тесты (API, конкуренты и SSRF, уведомления, гигиена базы, контракт Wazzup, почта, маршруты, часовой пояс, установщик, обновление, миграции, S3)"
+node --experimental-sqlite --test tests/api.test.js tests/competitors.test.js tests/ssrf.test.mjs tests/notifications.test.mjs tests/db-hygiene.test.mjs
 # Жизненный цикл пароля отдельным прогоном и на своём порту: проверки намеренно
 # доводят вход до блокировки перебора, а после них счётчики нужно гасить.
 node --experimental-sqlite --test tests/password.test.js

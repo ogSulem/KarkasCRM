@@ -66,11 +66,13 @@ const { server, db, queueTick } = await import('../backend/src/server.js');
 const base = 'http://127.0.0.1:18098';
 let admin;
 
+const DEAL_TEST_DEFAULTS={amount:0,deal_object:'Объект для теста',land_status:'unknown',construction_date:'unknown',payment_type:'unknown',lead_source:'Тест'};
 const call = async (path, { method = 'GET', body, token } = {}) => {
+  const payload=path==='/api/deals'&&method==='POST'&&body?{...DEAL_TEST_DEFAULTS,...body}:body;
   const r = await fetch(base + path, {
     method,
     headers: { 'Content-Type': 'application/json', ...(token ? { Authorization: 'Bearer ' + token } : {}) },
-    body: body === undefined ? undefined : JSON.stringify(body),
+    body: payload === undefined ? undefined : JSON.stringify(payload),
   });
   const text = await r.text();
   let data; try { data = JSON.parse(text) } catch { data = text }
@@ -136,11 +138,32 @@ test('адрес длиннее 200 символов не отправляетс
   assert.equal(seen.longUrlRejected, 0, 'заведомо отказной запрос к вендору не уходил');
 });
 
+test('время Wazzup хранится как абсолютный момент; сомнительные отметки остаются неизвестными', async () => {
+  const phone='79000000021';
+  const r=await hook({messages:[
+    {messageId:'wz-time-z',channelId:WA_CHANNEL,chatType:'whatsapp',chatId:phone,type:'text',status:'inbound',text:'Время по UTC',dateTime:'2026-10-23T12:30:00.123Z',contact:{name:'Время UTC',phone}},
+    {messageId:'wz-time-offset',channelId:WA_CHANNEL,chatType:'whatsapp',chatId:phone,type:'text',status:'inbound',text:'Время со смещением',dateTime:'2026-10-23T15:30:00.123+03:00',contact:{name:'Время UTC',phone}},
+    {messageId:'wz-time-missing',channelId:WA_CHANNEL,chatType:'whatsapp',chatId:phone,type:'text',status:'inbound',text:'Время отсутствует',contact:{name:'Время UTC',phone}},
+    {messageId:'wz-time-naive',channelId:WA_CHANNEL,chatType:'whatsapp',chatId:phone,type:'text',status:'inbound',text:'Время без зоны',dateTime:'2026-10-23T12:30:00.123',contact:{name:'Время UTC',phone}},
+    {messageId:'wz-time-invalid',channelId:WA_CHANNEL,chatType:'whatsapp',chatId:phone,type:'text',status:'inbound',text:'Некорректное время',dateTime:'2026-02-30T12:30:00Z',contact:{name:'Время UTC',phone}},
+  ]});
+  assert.equal(r.status,200,'вебхук с некорректным временем не роняет приём сообщения');
+  const rows=db.prepare("SELECT external_id,event_at,event_time_source FROM messages WHERE external_id LIKE 'wz-time-%'").all();
+  const byId=new Map(rows.map(x=>[x.external_id,x]));
+  assert.equal(byId.get('wz-time-z')?.event_at,'2026-10-23 12:30:00.123','Z остаётся точным временем UTC');
+  assert.equal(byId.get('wz-time-offset')?.event_at,'2026-10-23 12:30:00.123','явное смещение преобразовано в тот же UTC-момент');
+  assert.equal(byId.get('wz-time-z')?.event_time_source,'provider');
+  for(const id of ['wz-time-missing','wz-time-naive','wz-time-invalid']){
+    assert.equal(byId.get(id)?.event_at,null,`${id}: невалидное/неполное время не подменяется UTC-догадкой`);
+    assert.equal(byId.get(id)?.event_time_source,'',`${id}: источник времени остаётся неизвестным`);
+  }
+});
+
 test('входящее из группового чата сохраняет telegroup и не подменяет его', async () => {
   const r = await hook({
     messages: [{
       messageId: 'wz-in-group-1', channelId: TG_CHANNEL, chatType: 'telegroup', chatId: GROUP_CHAT,
-      dateTime: '2026-10-23T12:00:00.000', type: 'text', isEcho: false, status: 'inbound',
+      dateTime: '2026-10-23T12:00:00.000Z', type: 'text', isEcho: false, status: 'inbound',
       text: 'Нужен дом 8 на 10', contact: { name: 'Стройбригада' },
     }],
   });
@@ -158,7 +181,7 @@ test('вложение из вебхука с опасной схемой не �
   const r = await hook({
     messages: [{
       messageId: 'wz-in-badscheme-1', channelId: WA_CHANNEL, chatType: 'whatsapp', chatId: WA_PHONE,
-      dateTime: '2026-10-23T12:05:00.000', type: 'text', isEcho: false, status: 'inbound',
+      dateTime: '2026-10-23T12:05:00.000Z', type: 'text', isEcho: false, status: 'inbound',
       text: 'Смотрите файл', contentUri: 'javascript:alert(1)', contact: { name: 'Проверка схемы', phone: WA_PHONE },
     }],
   });
@@ -238,7 +261,7 @@ test('события без текста не теряются: пропущен
   const grp = convs.find(c => String(c.external_chat_id || '') === GROUP_CHAT);
   const cases = [['missing_call', '[пропущенный звонок]'], ['vcard', '[визитка контакта]'], ['geo', '[геометка]']];
   for (const [type, expected] of cases) {
-    const r = await hook({ messages: [{ messageId: 'wz-' + type, channelId: TG_CHANNEL, chatType: 'telegroup', chatId: GROUP_CHAT, type, isEcho: false, status: 'inbound', dateTime: '2026-10-23T12:10:00.000' }] });
+    const r = await hook({ messages: [{ messageId: 'wz-' + type, channelId: TG_CHANNEL, chatType: 'telegroup', chatId: GROUP_CHAT, type, isEcho: false, status: 'inbound', dateTime: '2026-10-23T12:10:00.000Z' }] });
     assert.equal(r.status, 200, `вебхук с ${type} принят`);
     const m = db.prepare('SELECT body FROM messages WHERE external_id=?').get('wz-' + type);
     assert.ok(m, `событие ${type} сохранено в истории`);
@@ -250,7 +273,7 @@ test('события без текста не теряются: пропущен
 test('входящее из канала без типа чата сохраняет свой канал и не становится «сайтом»', async () => {
   // у Циана вендор не публикует тип чата: отправить туда нельзя, но обращение
   // должно остаться в своём канале, а не превратиться в обезличенное «сайт»
-  const r = await hook({ messages: [{ messageId: 'wz-cian-1', channelId: 'dddddddd-4444-4444-8444-444444444444', chatType: 'cian', chatId: 'cian-99887', type: 'text', isEcho: false, status: 'inbound', text: 'Квартира в новостройке, нужен подрядчик', dateTime: '2026-10-23T12:20:00.000', contact: { name: 'Клиент с Циана' } }] });
+  const r = await hook({ messages: [{ messageId: 'wz-cian-1', channelId: 'dddddddd-4444-4444-8444-444444444444', chatType: 'cian', chatId: 'cian-99887', type: 'text', isEcho: false, status: 'inbound', text: 'Квартира в новостройке, нужен подрядчик', dateTime: '2026-10-23T12:20:00.000Z', contact: { name: 'Клиент с Циана' } }] });
   assert.equal(r.status, 200);
   const m = db.prepare('SELECT channel FROM messages WHERE external_id=?').get('wz-cian-1');
   assert.ok(m, 'обращение сохранено');
@@ -266,7 +289,7 @@ test('аккаунт отправки соответствует выбранн�
   // Клиент написал на WhatsApp одного сотрудника. Каналов у заказчика несколько,
   // поэтому пара «тип чата + канал» обязана быть согласованной: тип чата telegram
   // с каналом от WhatsApp вендор отклоняет.
-  const r = await hook({ messages: [{ messageId: 'wz-wa-1', channelId: WA_CHANNEL, chatType: 'whatsapp', chatId: WA_PHONE, dateTime: '2026-10-23T12:30:00.000', type: 'text', isEcho: false, status: 'inbound', text: 'Сколько стоит дом 6 на 8?', contact: { name: 'Клиент WhatsApp' } }] });
+  const r = await hook({ messages: [{ messageId: 'wz-wa-1', channelId: WA_CHANNEL, chatType: 'whatsapp', chatId: WA_PHONE, dateTime: '2026-10-23T12:30:00.000Z', type: 'text', isEcho: false, status: 'inbound', text: 'Сколько стоит дом 6 на 8?', contact: { name: 'Клиент WhatsApp' } }] });
   assert.equal(r.status, 200);
   const conv = db.prepare('SELECT * FROM conversations WHERE external_chat_id=?').get(WA_PHONE);
   assert.ok(conv, 'беседа создана');
@@ -361,11 +384,34 @@ test('привязка аккаунта к сотруднику сохраняе
   assert.equal(denied.status, 403, 'сотрудник не перепривязывает каналы сам себе');
 });
 
-test('обращение на привязанный аккаунт назначается его владельцу, а не по очереди', async () => {
-  // распределение по загруженности выбрало бы сотрудника с меньшим id: у обоих
-  // сделок в работе нет. Проверяем, что привязка оказывается важнее очереди.
+test('обращение на привязанный аккаунт назначается его владельцу среди активных смен', async t => {
+  const previousAutoAssign=db.prepare("SELECT value FROM settings WHERE key='AUTO_ASSIGN'").get()?.value ?? '0';
+  const previousBacklogLimit=db.prepare("SELECT value FROM settings WHERE key='SHIFT_BACKLOG_LIMIT'").get()?.value;
+  const shiftUsers=[];
+  t.after(async()=>{
+    for(const token of shiftUsers){
+      const ended=await call('/api/shifts/end',{method:'POST',token,body:{reason:'Проверка маршрутизации Wazzup завершена'}});
+      assert.ok([200,409].includes(ended.status),'тестовая смена корректно закрыта');
+    }
+    const restored=await call('/api/settings',{method:'PUT',token:admin,body:{AUTO_ASSIGN:previousAutoAssign,SHIFT_BACKLOG_LIMIT:previousBacklogLimit??5}});
+    assert.equal(restored.status,200,'настройки распределения восстановлены');
+    if(previousBacklogLimit===undefined)db.prepare("DELETE FROM settings WHERE key='SHIFT_BACKLOG_LIMIT'").run();
+  });
+  const routing=await call('/api/settings',{method:'PUT',token:admin,body:{AUTO_ASSIGN:'1',SHIFT_BACKLOG_LIMIT:0}});
+  assert.equal(routing.status,200,'автоназначение явно включено только для проверки');
+  const competitor=db.prepare("SELECT id FROM users WHERE email='chan-mgr@example.com' AND role='manager' AND active=1").get();
+  assert.ok(competitor&&Number(competitor.id)<Number(irinaId),'есть менеджер с меньшим id для проверки приоритета канала');
+  const competitorLogin=await call('/api/auth/login',{method:'POST',body:{email:'chan-mgr@example.com',password:'PersonalPass-2026!'}});
+  assert.ok(competitorLogin.data.token,'второй менеджер вошёл');
+  for(const token of [competitorLogin.data.token,irina.token]){
+    const started=await call('/api/shifts/start',{method:'POST',token,body:{}});
+    assert.equal(started.status,200,'обе смены запущены через API');
+    shiftUsers.push(token);
+  }
+  // Нагрузка у менеджеров одинакова, поэтому очередь выбрала бы меньший id;
+  // владелец привязанного аккаунта имеет приоритет среди подходящих на смене.
   const phone = '79005554433';
-  const r = await hook({ messages: [{ messageId: 'wz-bind-1', channelId: WA2_CHANNEL, chatType: 'whatsapp', chatId: phone, type: 'text', isEcho: false, status: 'inbound', text: 'Нужен подрядчик на дом', dateTime: '2026-10-23T13:00:00.000', contact: { name: 'Клиент Ирины', phone } }] });
+  const r = await hook({ messages: [{ messageId: 'wz-bind-1', channelId: WA2_CHANNEL, chatType: 'whatsapp', chatId: phone, type: 'text', isEcho: false, status: 'inbound', text: 'Нужен подрядчик на дом', dateTime: '2026-10-23T13:00:00.000Z', contact: { name: 'Клиент Ирины', phone } }] });
   assert.equal(r.status, 200);
 
   const contact = db.prepare('SELECT * FROM contacts WHERE phone_norm=?').get(phone);
@@ -381,8 +427,12 @@ test('обращение на привязанный аккаунт назнач
   assert.equal(Number(conv.assigned_id), irinaId, 'беседа закреплена за владельцем аккаунта');
   assert.equal(conv.channel_id, WA2_CHANNEL, 'аккаунт обращения запомнен');
 
-  const act = db.prepare("SELECT text FROM activities WHERE entity_type='contacts' AND entity_id=? ORDER BY id DESC").get(contact.id);
-  assert.ok(act && act.text.includes(IRINA.name), 'в истории видно, кому назначено: ' + (act || {}).text);
+  const act = db.prepare("SELECT text FROM activities WHERE entity_type='deals' AND entity_id=? ORDER BY id DESC").get(deal.id);
+  assert.ok(act && act.text.includes(IRINA.name), 'в истории сделки видно, кому назначено: ' + (act || {}).text);
+  const audit = db.prepare("SELECT * FROM lead_assignment_events WHERE deal_id=? AND event_type='assigned' ORDER BY id DESC").get(deal.id);
+  assert.equal(Number(audit.to_user_id),irinaId,'журнал распределения хранит нового ответственного');
+  assert.equal(Number(audit.from_user_id)||null,null,'для первого назначения прежнего ответственного не было');
+  assert.ok(audit.actor_name&&audit.source&&audit.reason&&audit.created_at,'в журнале есть исполнитель, источник, причина и время');
 
   // ответ на это обращение уходит с аккаунта Ирины, а не с канала по умолчанию
   const reply = await call(`/api/conversations/${conv.id}/messages`, { method: 'POST', token: admin, body: { body: 'Здравствуйте!', chat_type: 'whatsapp' } });
@@ -393,6 +443,8 @@ test('обращение на привязанный аккаунт назнач
 test('исходящее первым уходит с аккаунта того сотрудника, который пишет', async () => {
   const contact = db.prepare("INSERT INTO contacts(name,phone,phone_norm,source) VALUES('Новосёл Олег','+7 900 777-66-55','79007776655','manual')").run();
   const cid = Number(contact.lastInsertRowid);
+  const assigned=await call('/api/contacts/'+cid,{method:'PATCH',token:admin,body:{responsible_id:irinaId}});
+  assert.equal(assigned.status,200,'контакт назначен менеджеру до проверки отправки');
 
   // беседу заводят до первого сообщения клиента: адреса ещё нет, берём из телефона
   const noAddr = await call('/api/conversations', { method: 'POST', token: admin, body: { contact_id: cid, chat_type: 'telegram' } });
@@ -423,7 +475,7 @@ test('правило отвечает клиенту в его канал и п�
   assert.ok(rule.data.id, 'правило создано: ' + JSON.stringify(rule.data));
   const phone = '79008887766';
   const before = seen.messages.length;
-  const r = await hook({ messages: [{ messageId: 'wz-auto-1', channelId: WA_CHANNEL, chatType: 'whatsapp', chatId: phone, type: 'text', isEcho: false, status: 'inbound', text: 'Пришлите смету на дом', dateTime: '2026-10-23T14:00:00.000', contact: { name: 'Сметчик Пётр', phone } }] });
+  const r = await hook({ messages: [{ messageId: 'wz-auto-1', channelId: WA_CHANNEL, chatType: 'whatsapp', chatId: phone, type: 'text', isEcho: false, status: 'inbound', text: 'Пришлите смету на дом', dateTime: '2026-10-23T14:00:00.000Z', contact: { name: 'Сметчик Пётр', phone } }] });
   assert.equal(r.status, 200);
   assert.equal(seen.messages.length, before + 1, 'правило отправило ровно одно сообщение');
   const sent = seen.messages[seen.messages.length - 1];
@@ -438,7 +490,7 @@ test('правило отвечает клиенту в его канал и п�
   assert.equal(out[0].author, 'Автоматизация', 'в чате видно, что написал не человек');
 
   // правило со словом-условием не должно срабатывать на другие сообщения
-  const other = await hook({ messages: [{ messageId: 'wz-auto-2', channelId: WA_CHANNEL, chatType: 'whatsapp', chatId: phone, type: 'text', isEcho: false, status: 'inbound', text: 'Спасибо', dateTime: '2026-10-23T14:05:00.000', contact: { name: 'Сметчик Пётр', phone } }] });
+  const other = await hook({ messages: [{ messageId: 'wz-auto-2', channelId: WA_CHANNEL, chatType: 'whatsapp', chatId: phone, type: 'text', isEcho: false, status: 'inbound', text: 'Спасибо', dateTime: '2026-10-23T14:05:00.000Z', contact: { name: 'Сметчик Пётр', phone } }] });
   assert.equal(other.status, 200);
   assert.equal(seen.messages.length, before + 1, 'на сообщение без ключевого слова правило молчит');
 });

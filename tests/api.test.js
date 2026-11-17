@@ -1,5 +1,6 @@
 import { test, before, after } from 'node:test';
 import assert from 'node:assert';
+import http from 'node:http';
 import { readFileSync, statSync } from 'node:fs';
 
 // Версия берётся из файла VERSION, а не вписывается в тест: иначе каждое её
@@ -11,7 +12,17 @@ process.env.SEED_MODE = 'off'; // детерминированная чиста�
 const { server, db, partnerSeesEvent, clearLoginAttempts } = await import('../backend/src/server.js');
 const base = 'http://127.0.0.1:18099';
 let h;
-const call = (p, opt = {}) => fetch(base + p, { ...opt, headers: { 'Content-Type': 'application/json', ...(h || {}), ...(opt.headers || {}) } }).then(async r => ({ status: r.status, body: (r.headers.get('content-type') || '').includes('json') ? await r.json() : await r.text() }));
+const rawCall = (p, opt = {}) => fetch(base + p, { ...opt, headers: { 'Content-Type': 'application/json', ...(h || {}), ...(opt.headers || {}) } }).then(async r => ({ status: r.status, body: (r.headers.get('content-type') || '').includes('json') ? await r.json() : await r.text() }));
+// Сценарии, не проверяющие форму сделки, используют явное «не выяснено» для
+// новых обязательных полей. Отдельная проверка вызывает rawCall и проверяет отказ API.
+const DEAL_TEST_DEFAULTS = { amount: 0, deal_object: 'Объект для теста', land_status: 'unknown', construction_date: 'unknown', payment_type: 'unknown', lead_source: 'Тест' };
+const call = (p, opt = {}) => {
+  if (p === '/api/deals' && String(opt.method || 'GET').toUpperCase() === 'POST' && typeof opt.body === 'string') {
+    const body = JSON.parse(opt.body);
+    opt = { ...opt, body: JSON.stringify({ ...DEAL_TEST_DEFAULTS, ...body }) };
+  }
+  return rawCall(p, opt);
+};
 // Existing business scenarios run after the explicit first-login password change.
 async function readyLogin(path, opt) {
   const result = await call(path, opt);
@@ -37,12 +48,16 @@ test('health и вход', async () => {
   h = { Authorization: 'Bearer ' + l.body.token };
   assert.equal((await fetch(base + '/api/contacts')).status, 401, 'без токена — 401');
   assert.equal((await fetch(base + '/api/contacts', { headers: { Authorization: 'Bearer broken.token' } })).status, 401, 'битый токен — 401');
-  assert.equal((await fetch(base + '/api/contacts?token=' + encodeURIComponent(h.Authorization.split(' ')[1]), { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}' })).status, 401, 'токен в адресной строке не даёт менять данные');
+  const queryToken = encodeURIComponent(h.Authorization.split(' ')[1]);
+  assert.equal((await fetch(base + '/api/contacts?token=' + queryToken)).status, 401, 'токен из адресной строки не авторизует даже GET-запрос');
+  const publicHealthWithQueryToken = await fetch(base + '/api/health?token=' + queryToken).then(r => r.json());
+  assert.equal(publicHealthWithQueryToken.counts, undefined, 'токен из адресной строки не раскрывает служебные счётчики health');
+  assert.equal((await fetch(base + '/api/contacts?token=' + queryToken, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}' })).status, 401, 'токен в адресной строке не даёт менять данные');
 });
 
 test('файлы вложений отдаются с правильным способом открытия', async () => {
   // svg из вложения вебхука может содержать скрипт — открывать его страницей нельзя
-  const { mkdirSync, writeFileSync } = await import('node:fs');
+  const { mkdirSync, writeFileSync, symlinkSync, unlinkSync } = await import('node:fs');
   const dir = process.env.DATA_DIR + '/uploads';
   mkdirSync(dir, { recursive: true });
   writeFileSync(dir + '/20260101-abcdef-test.svg', '<svg xmlns="http://www.w3.org/2000/svg"><script>alert(1)</script></svg>');
@@ -54,6 +69,8 @@ test('файлы вложений отдаются с правильным сп�
   assert.equal(svg.headers.get('content-type'), 'image/svg+xml');
   const png = await fetch(base + '/uploads/20260101-abcdef-test.png', { headers: h });
   assert.match(png.headers.get('content-disposition') || '', /inline/, 'обычная картинка показывается на месте');
+  const queryOnlyFile = await fetch(base + '/uploads/20260101-abcdef-test.png?token=' + encodeURIComponent(h.Authorization.split(' ')[1]));
+  assert.equal(queryOnlyFile.status, 401, 'токен из URL не открывает вложение без cookie или Authorization');
   const audio = await fetch(base + '/uploads/20260101-abcdef-test.mp3', { headers: { ...h, Range: 'bytes=2-5' } });
   assert.equal(audio.status, 206, 'браузер может запрашивать фрагменты записи звонка');
   assert.equal(audio.headers.get('content-type'), 'audio/mpeg', 'голосовое получает тип, который понимает проигрыватель');
@@ -61,6 +78,18 @@ test('файлы вложений отдаются с правильным сп�
   assert.equal(await audio.text(), '2345', 'отдан только запрошенный диапазон');
   const badRange = await fetch(base + '/uploads/20260101-abcdef-test.mp3', { headers: { ...h, Range: 'bytes=99-100' } });
   assert.equal(badRange.status, 416, 'невозможный диапазон не отдаёт неверный файл');
+
+  const outside = process.env.DATA_DIR + '/outside-upload-secret.txt';
+  const link = dir + '/20260101-abcdef-symlink.png';
+  writeFileSync(outside, 'не выдавать через симлинк');
+  symlinkSync(outside, link);
+  try {
+    const symlinkResponse = await fetch(base + '/uploads/20260101-abcdef-symlink.png', { headers: h });
+    assert.equal(symlinkResponse.status, 404, 'симлинк из uploads не позволяет читать файл вне каталога вложений');
+  } finally {
+    unlinkSync(link);
+    unlinkSync(outside);
+  }
 });
 
 test('поля записей обрезаются до пределов, а свои поля принимаются объектом', async () => {
@@ -155,6 +184,25 @@ test('групповой чат: одна история, участники с 
   assert.equal(spec[0].direction, 'out', 'своё сообщение стоит на нашей стороне');
 });
 
+test('сырой HTTP-путь с .. не читает файлы рядом с каталогом интерфейса', async () => {
+  const rawGet = path => new Promise((resolve, reject) => {
+    const req = http.request({ hostname: '127.0.0.1', port: server.address().port, method: 'GET', path }, res => {
+      const chunks = [];
+      res.on('data', chunk => chunks.push(chunk));
+      res.on('end', () => resolve({ status: res.statusCode, type: res.headers['content-type'] || '', body: Buffer.concat(chunks).toString('utf8') }));
+    });
+    req.on('error', reject);
+    req.end();
+  });
+  for (const path of ['/../package.json', '/%2e%2e/package.json', '/..%2f..%2fpackage.json']) {
+    const response = await rawGet(path);
+    assert.equal(response.status, 200, `SPA-маршрут обработан штатно: ${path}`);
+    assert.match(response.type, /text\/html/, 'путь вне статики не меняет тип ответа на файл');
+    assert.match(response.body, /КаркасCRM|KarkasCRM/i, 'вне корня отдаётся приложение, не соседний файл');
+    assert.doesNotMatch(response.body, /\"name\"\s*:\s*\"karkascrm\"/i, 'содержимое package.json не утекло');
+  }
+});
+
 test('фирменный лист: вектор отдаётся без входа и кэшируется по ETag', async () => {
   const first = await fetch(base + '/favicon.svg');
   const text = await first.text(); // тело обязательно читаем: иначе сокет держит процесс
@@ -187,20 +235,40 @@ test('сделки, товары и пересчёт суммы', async () => {
   assert.equal((await call('/api/deals/' + c.id)).body.deal.amount, 0, 'после удаления позиции сумма = 0');
 });
 
+test('сервер требует все шесть основных полей сделки и принимает явное «не выяснено»', async () => {
+  const valid={title:'Сделка с подтверждённой формой',...DEAL_TEST_DEFAULTS};
+  const created=await rawCall('/api/deals',{method:'POST',body:JSON.stringify(valid)});
+  assert.equal(created.status,201,'явное состояние неизвестного значения не считается пустым');
+  const missing=[
+    ['amount','бюджет'],['deal_object','объект'],['land_status','наличие земли'],
+    ['construction_date','дата строительства'],['payment_type','тип оплаты'],['lead_source','источник лида'],
+  ];
+  for(const [field,label] of missing){
+    const body={...valid,title:`Проверка ${field}`};delete body[field];
+    const response=await rawCall('/api/deals',{method:'POST',body:JSON.stringify(body)});
+    assert.equal(response.status,400,`${field} обязателен на сервере`);
+    assert.match(String(response.body.error),new RegExp(label,'i'),`ошибка называет поле ${field}`);
+  }
+  for(const [field,value] of [['deal_object','   '],['land_status',''],['construction_date','2026-02-30'],['payment_type',''],['lead_source','']]){
+    const response=await rawCall('/api/deals',{method:'POST',body:JSON.stringify({...valid,title:`Некорректно ${field}`,[field]:value})});
+    assert.equal(response.status,400,`${field}: пустое или неверное значение отклоняется`);
+  }
+});
+
 test('история сделки: смену суммы, ответственного и названия видно в карточке', async () => {
   const staff = (await call('/api/users', { method: 'POST', body: JSON.stringify({ name: 'Историк Олег', email: 'history-oleg@example.com', role: 'manager', active: 1, password: 'HistoryPass-2026!' }) })).body;
   assert.ok(staff.id, 'сотрудник создан');
   const d = (await call('/api/deals', { method: 'POST', body: JSON.stringify({ title: 'Дом для журнала', amount: 100000, stage: 'new', contact_id: 1 }) })).body;
   await call('/api/deals/' + d.id, { method: 'PATCH', body: JSON.stringify({ amount: 250000, title: 'Дом для журнала (уточнён)', responsible_id: staff.id, deadline: '2026-11-30' }) });
   const texts = (await call('/api/deals/' + d.id)).body.history.map(x => x.text);
-  assert.ok(texts.some(t => t.includes('сумма: 100 000 ₽ → 250 000 ₽')), 'смена суммы записана: ' + texts.join(' | '));
+  assert.ok(texts.some(t => t.includes('бюджет: 100 000 ₽ → 250 000 ₽')), 'смена бюджета записана: ' + texts.join(' | '));
   assert.ok(texts.some(t => t.includes('ответственный:') && t.includes('Историк Олег')), 'смена ответственного записана');
   assert.ok(texts.some(t => t.includes('название:')), 'смена названия записана');
   assert.ok(texts.some(t => t.includes('срок:') && t.includes('30.11.2026')), 'срок в привычном виде дд.мм.гггг: ' + texts.join(' | '));
   // повторное сохранение того же значения не должно раздувать журнал
   await call('/api/deals/' + d.id, { method: 'PATCH', body: JSON.stringify({ amount: 250000 }) });
   const after = (await call('/api/deals/' + d.id)).body.history;
-  assert.equal(after.filter(x => x.text.includes('сумма:')).length, 1, 'та же сумма второй раз не пишется');
+  assert.equal(after.filter(x => x.text.includes('бюджет:')).length, 1, 'тот же бюджет второй раз не пишется');
   assert.ok(after.some(x => x.user_name), 'в истории видно, кто менял');
 });
 
@@ -233,7 +301,17 @@ test('защита данных: этапы с делами, удаление с
   assert.equal((await call('/api/deals', { method: 'POST', body: JSON.stringify({ amount: 500 }) })).status, 400, 'сделка без названия не создаётся');
 
   const pl = (await call('/api/pipelines')).body.find(p => p.id === 1);
+  const deferred=pl.stages.find(s=>s.code==='deferred');
+  assert.ok(deferred,'в существующей воронке есть системный этап «Отложенный спрос»');
+  assert.equal(deferred.name,'Отложенный спрос');
+  assert.equal(deferred.kind,'open');
   const stages = pl.stages.map(s => ({ code: s.code, name: s.name, color: s.color, kind: s.kind }));
+  const noDeferred=await call('/api/pipelines/1',{method:'PUT',body:JSON.stringify({name:pl.name,stages:stages.filter(s=>s.code!=='deferred')})});
+  assert.equal(noDeferred.status,400,'API не позволяет удалить обязательный этап');
+  const altered=await call('/api/pipelines/1',{method:'PUT',body:JSON.stringify({name:pl.name,stages:stages.map(s=>s.code==='deferred'?{...s,name:'Подмена',color:'#ff0000',kind:'won'}:s)})});
+  assert.equal(altered.status,200,'остальные этапы можно сохранить рядом с системным');
+  const fixed=(await call('/api/pipelines')).body.find(p=>p.id===1).stages.find(s=>s.code==='deferred');
+  assert.deepEqual([fixed.name,fixed.color,fixed.kind],['Отложенный спрос','#0284c7','open'],'сервер фиксирует имя, цвет и тип этапа');
   const broken = await call('/api/pipelines/1', { method: 'PUT', body: JSON.stringify({ name: pl.name, stages: stages.filter(s => s.code !== 'new') }) });
   assert.equal(broken.status, 400, 'этап со сделками удалить нельзя');
   assert.match(String(broken.body.error), /сделк/i, 'подсказка объясняет причину');
@@ -300,10 +378,11 @@ test('резервные копии базы: создать, скачать, з
 
 test('настройка воронки и этапов из интерфейса', async () => {
   const pipe = (await call('/api/pipelines', { method: 'POST', body: JSON.stringify({ name: 'Воронка сервиса' }) })).body;
-  await call('/api/pipelines/' + pipe.id, { method: 'PUT', body: JSON.stringify({ name: 'Сервис и монтаж', stages: [{ code: 'in', name: 'Заявка', color: '#f97316' }, { code: 'work', name: 'В работе', color: '#16a34a' }, { code: 'won', name: 'Готово', color: '#15803d', kind: 'won' }, { code: 'lost', name: 'Не сделали', color: '#78716c', kind: 'lost' }] }) });
+  const saved=await call('/api/pipelines/' + pipe.id, { method: 'PUT', body: JSON.stringify({ name: 'Сервис и монтаж', stages: [{ code: 'in', name: 'Заявка', color: '#f97316' }, { code: 'work', name: 'В работе', color: '#16a34a' }, { code: 'deferred', name: 'Отложенный спрос', color: '#0284c7', kind: 'open' }, { code: 'won', name: 'Готово', color: '#15803d', kind: 'won' }, { code: 'lost', name: 'Не сделали', color: '#78716c', kind: 'lost' }] }) });
+  assert.equal(saved.status,200,'воронка с системным этапом сохраняется');
   const pl = (await call('/api/pipelines')).body.find(p => p.id === pipe.id);
   assert.equal(pl.name, 'Сервис и монтаж');
-  assert.deepEqual(pl.stages.map(s => s.name), ['Заявка', 'В работе', 'Готово', 'Не сделали']);
+  assert.deepEqual(pl.stages.map(s => s.name), ['Заявка', 'В работе', 'Отложенный спрос', 'Готово', 'Не сделали']);
   // без этапа успеха и этапа отказа воронка не сохраняется: по этим кодам
   // система считает выручку и закрывает сделки кнопками на доске
   const bad = await call('/api/pipelines/' + pipe.id, { method: 'PUT', body: JSON.stringify({ name: 'Без успеха', stages: [{ code: 'a', name: 'А' }, { code: 'b', name: 'Б' }] }) });
@@ -367,6 +446,8 @@ test('автоматизации, шаблоны, интеграции, кома
   assert.ok(mgrToken && vwToken);
   const adminH = h; h = { Authorization: 'Bearer ' + mgrToken };
   assert.equal((await call('/api/settings', { method: 'PUT', body: JSON.stringify({ COMPANY_NAME: 'x' }) })).status, 403, 'менеджер не меняет настройки');
+  assert.equal((await call('/api/settings')).status,403,'секреты интеграций и настройки доступны только администратору');
+  assert.equal((await call('/api/backups')).status,403,'список копий и метаданные хранилища доступны только администратору');
   assert.equal((await call('/api/contacts')).status, 200, 'менеджер видит данные');
   h = { Authorization: 'Bearer ' + vwToken };
   assert.equal((await call('/api/contacts', { method: 'POST', body: JSON.stringify({ name: 'Nope' }) })).status, 403, 'наблюдатель только читает');
@@ -660,6 +741,115 @@ test('права: менеджер ведёт клиентов, но не мен
   h = admin; // дальше снова работаем администратором
 });
 
+test('изоляция менеджеров действует в карточках, поиске, задачах, чатах, аналитике и выгрузках', async () => {
+  const admin=h, suffix=String(Date.now());
+  const makeManager=async(label)=>{
+    const email=`scope-${label}-${suffix}@example.com`,password=`scope-${label}-password`;
+    const user=(await call('/api/users',{method:'POST',body:JSON.stringify({name:`Менеджер ${label}`,email,password,role:'manager'})})).body;
+    const login=await readyLogin('/api/auth/login',{method:'POST',body:JSON.stringify({email,password})});
+    assert.ok(user.id&&login.body.token,`создан и вошёл менеджер ${label}`);
+    return{...user,name:`Менеджер ${label}`,headers:{Authorization:'Bearer '+login.body.token}};
+  };
+  const a=await makeManager('А'), b=await makeManager('Б');
+  const contactA=(await call('/api/contacts',{method:'POST',body:JSON.stringify({name:`ScopeAlpha${suffix}`,phone:`7900${suffix.slice(-7)}1`,source:`scope-a-${suffix}`,responsible_id:a.id})})).body;
+  const contactB=(await call('/api/contacts',{method:'POST',body:JSON.stringify({name:`ScopeBeta${suffix}`,phone:`7900${suffix.slice(-7)}2`,source:`scope-b-${suffix}`,responsible_id:b.id})})).body;
+  const dealA=(await call('/api/deals',{method:'POST',body:JSON.stringify({title:`ScopeAlphaDeal${suffix}`,contact_id:contactA.id,responsible_id:a.id})})).body;
+  const dealB=(await call('/api/deals',{method:'POST',body:JSON.stringify({title:`ScopeBetaDeal${suffix}`,contact_id:contactB.id,responsible_id:b.id})})).body;
+  const adminId=db.prepare("SELECT id FROM users WHERE role='admin' ORDER BY id LIMIT 1").get().id;
+  const adminDealSameContact=(await call('/api/deals',{method:'POST',body:JSON.stringify({title:`OfficePrivateDeal${suffix}`,contact_id:contactA.id,responsible_id:adminId})})).body;
+  assert.ok(dealA.id&&dealB.id&&adminDealSameContact.id,'созданы независимые сделки');
+  const taskA=(await call('/api/tasks',{method:'POST',body:JSON.stringify({title:`ScopeAlphaTask${suffix}`,contact_id:contactA.id,deal_id:dealA.id,responsible_id:a.id})})).body;
+  const taskB=(await call('/api/tasks',{method:'POST',body:JSON.stringify({title:`ScopeBetaTask${suffix}`,contact_id:contactB.id,deal_id:dealB.id,responsible_id:b.id})})).body;
+  const convA=(await call('/api/conversations',{method:'POST',body:JSON.stringify({contact_id:contactA.id,chat_type:'whatsapp'})})).body;
+  const managerStream={userId:a.id,role:'manager'};
+  assert.equal(partnerSeesEvent(managerStream,'message',{conversation_id:convA.id,deal_id:dealA.id,preview:'своё'}),true,'SSE менеджеру разрешает обновление по его сделке');
+  assert.equal(partnerSeesEvent(managerStream,'message',{conversation_id:convA.id,deal_id:adminDealSameContact.id,preview:'внутреннее'}),false,'SSE не раскрывает менеджеру сообщение по офисной сделке того же клиента');
+  assert.equal(partnerSeesEvent(managerStream,'message',{conversation_id:convA.id,deal_id:null,preview:'без контекста'}),false,'непривязанное сообщение скрыто при конфликтующих сделках');
+  assert.equal(partnerSeesEvent(managerStream,'message',{conversation_id:convA.id,preview:'нет ACL-контекста'}),false,'событие без контекста сделки закрыто по умолчанию');
+  const convB=(await call('/api/conversations',{method:'POST',body:JSON.stringify({contact_id:contactB.id,chat_type:'whatsapp'})})).body;
+  const bulkTask=(await call('/api/tasks',{method:'POST',body:JSON.stringify({title:`ScopeBulkTask${suffix}`,responsible_id:a.id})})).body;
+  const bulkCompany=(await call('/api/companies',{method:'POST',body:JSON.stringify({name:`ScopeBulkCompany${suffix}`,responsible_id:a.id})})).body;
+  db.prepare("INSERT INTO messages(conversation_id,deal_id,channel,direction,body,status,author) VALUES(?,?,'whatsapp','in',?,'inbound','Клиент')").run(convA.id,dealA.id,`Сообщение по своей сделке ${suffix}`);
+  const png=Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==','base64').toString('base64');
+  const officeOnlyFile=await call(`/api/conversations/${convA.id}/upload`,{method:'POST',body:JSON.stringify({filename:'office-only.png',contentType:'image/png',dataBase64:png})});
+  assert.equal(officeOnlyFile.status,201);
+  const foreignFile=await call(`/api/conversations/${convB.id}/upload`,{method:'POST',body:JSON.stringify({filename:'manager-foreign.png',contentType:'image/png',dataBase64:png})});
+  assert.equal(foreignFile.status,201,'чужое вложение создано для проверки доступа');
+  await call(`/api/conversations/${convB.id}/messages`,{method:'POST',body:JSON.stringify({body:'',contentUri:foreignFile.body.url,contentName:foreignFile.body.name,contentType:foreignFile.body.contentType})});
+  const ownFile=await call(`/api/conversations/${convA.id}/upload`,{method:'POST',body:JSON.stringify({filename:'manager-own.png',contentType:'image/png',dataBase64:png})});
+  assert.equal(ownFile.status,201);
+  await call(`/api/conversations/${convA.id}/messages`,{method:'POST',body:JSON.stringify({deal_id:dealA.id,body:'',contentUri:ownFile.body.url,contentName:ownFile.body.name,contentType:ownFile.body.contentType})});
+  // Более новое сообщение по сделке офиса не должно менять видимое превью менеджера.
+  db.prepare("INSERT INTO messages(conversation_id,deal_id,channel,direction,body,content_uri,status,author) VALUES(?,?,'whatsapp','in','Внутреннее сообщение другой сделки',?,'inbound','Клиент')").run(convA.id,adminDealSameContact.id,officeOnlyFile.body.url);
+  const productB=await call(`/api/deals/${dealB.id}/products`,{method:'POST',body:JSON.stringify({name:'Чужая позиция',price:100,qty:1})});
+  assert.equal(productB.status,201);
+  const asA=(path,opt={})=>call(path,{...opt,headers:{...(opt.headers||{}),...a.headers}});
+  const bulkContact=await asA('/api/bulk',{method:'POST',body:JSON.stringify({table:'contacts',action:'update',ids:[contactA.id],patch:{tags:`bulk-${suffix}`}})});
+  assert.equal(bulkContact.status,200,'менеджер может массово изменить свой контакт');
+  assert.equal(db.prepare('SELECT tags FROM contacts WHERE id=?').get(contactA.id).tags,`bulk-${suffix}`,'пакетное изменение сохранено');
+  const beforeDealAmount=Number(db.prepare('SELECT amount FROM deals WHERE id=?').get(dealA.id).amount);
+  const bulkDeal=await asA('/api/bulk',{method:'POST',body:JSON.stringify({table:'deals',action:'update',ids:[dealA.id],patch:{priority:'high'}})});
+  assert.equal(bulkDeal.status,200,'менеджер может массово изменить свою сделку');
+  const mixedBulk=await asA('/api/bulk',{method:'POST',body:JSON.stringify({table:'deals',action:'update',ids:[dealA.id,dealB.id],patch:{amount:beforeDealAmount+1}})});
+  assert.equal(mixedBulk.status,403,'пачка со сделкой другого менеджера отклоняется целиком');
+  assert.equal(Number(db.prepare('SELECT amount FROM deals WHERE id=?').get(dealA.id).amount),beforeDealAmount,'отказ на смешанной пачке не оставляет частичного изменения');
+  assert.equal((await asA('/api/bulk',{method:'POST',body:JSON.stringify({table:'contacts',action:'update',ids:[contactB.id],patch:{tags:'чужой контакт'}})})).status,403,'менеджер не меняет пачкой чужой контакт');
+  assert.equal((await asA('/api/bulk',{method:'POST',body:JSON.stringify({table:'contacts',action:'delete',ids:[contactA.id]})})).status,403,'нельзя удалить контакт, за которым остаётся сделка офиса');
+  const bulkTaskDelete=await asA('/api/bulk',{method:'POST',body:JSON.stringify({table:'tasks',action:'delete',ids:[bulkTask.id]})});
+  assert.equal(bulkTaskDelete.status,200,'менеджер может массово удалить свою задачу');
+  const bulkCompanyDelete=await asA('/api/bulk',{method:'POST',body:JSON.stringify({table:'companies',action:'delete',ids:[bulkCompany.id]})});
+  assert.equal(bulkCompanyDelete.status,200,'менеджер может массово удалить свою компанию без связанных карточек');
+  const contacts=await asA('/api/contacts');
+  assert.ok(contacts.body.some(c=>c.id===contactA.id)&&!contacts.body.some(c=>c.id===contactB.id),'список клиентов ограничен владельцем');
+  const deals=await asA('/api/deals');
+  assert.ok(deals.body.deals.some(d=>d.id===dealA.id)&&!deals.body.deals.some(d=>d.id===dealB.id),'воронка не содержит чужую сделку');
+  const tasks=await asA('/api/tasks');
+  assert.ok(tasks.body.some(t=>t.id===taskA.id)&&!tasks.body.some(t=>t.id===taskB.id),'список задач не пересекает контуры');
+  const chats=await asA('/api/conversations');
+  assert.ok(chats.body.some(c=>c.id===convA.id)&&!chats.body.some(c=>c.id===convB.id),'список чатов ограничен своими клиентами');
+  const ownSummary=chats.body.find(c=>c.id===convA.id);
+  assert.equal(ownSummary.last_body,'Файл: manager-own.png','превью берётся из последнего доступного сообщения, а не из более нового сообщения другой сделки');
+  assert.equal((await asA('/api/dashboard')).body.unread,1,'непрочитанным считается только сообщение своей сделки');
+  const ownHistory=await asA(`/api/conversations/${convA.id}/messages`);
+  assert.equal(ownHistory.body.length,2,'история содержит текст и вложение своей сделки, но не переписку другой сделки');
+  assert.ok(ownHistory.body.some(m=>/Сообщение по своей сделке/.test(m.body)),'собственное текстовое сообщение не потеряно');
+  assert.ok(ownHistory.body.every(m=>Number(m.deal_id)===Number(dealA.id)),'каждое сообщение истории относится к доступной сделке');
+  assert.equal((await asA('/api/dashboard')).body.unread,0,'чтение своей переписки обновляет только свою отметку прочтения');
+  const ownCard=await asA('/api/deals/'+dealA.id);
+  assert.equal(ownCard.body.messages.length,2,'карточка показывает текст и вложение своей сделки');
+  assert.ok(ownCard.body.messages.every(m=>Number(m.deal_id)===Number(dealA.id)),'карточка сделки скрывает сообщения другой сделки клиента');
+  assert.equal((await fetch(base+officeOnlyFile.body.url,{headers:a.headers})).status,403,'файл другой сделки не открывается через общий чат');
+  assert.equal((await asA('/api/contacts/'+contactB.id)).status,403,'чужая карточка закрыта и по прямому ID');
+  assert.equal((await asA('/api/deals/'+dealB.id)).status,403,'чужая сделка закрыта и по прямому ID');
+  const foreignPatch=await asA('/api/deals/'+dealB.id,{method:'PATCH',body:JSON.stringify({title:`Попытка изменить чужую сделку ${suffix}`})});
+  assert.equal(foreignPatch.status,403,'менеджер не может изменить чужую сделку PATCH-запросом');
+  assert.equal(db.prepare('SELECT title FROM deals WHERE id=?').get(dealB.id).title,dealB.title,'отказ не меняет заголовок чужой сделки');
+  assert.equal((await asA('/api/conversations/'+convB.id+'/messages')).status,403,'история чужого чата закрыта');
+  assert.equal((await asA('/api/deal_products/'+productB.body.id)).status,403,'состав чужой сделки закрыт отдельным маршрутом');
+  assert.equal((await fetch(base+foreignFile.body.url,{headers:a.headers})).status,403,'вложение чужого чата нельзя скачать по прямому адресу');
+  assert.equal((await fetch(base+ownFile.body.url,{headers:a.headers})).status,200,'вложение своей переписки доступно');
+  const searchContacts=await asA('/api/search?q='+encodeURIComponent(`ScopeBeta${suffix}`)+'&only=contacts');
+  const searchDeals=await asA('/api/search?q='+encodeURIComponent(`ScopeBetaDeal${suffix}`)+'&only=deals');
+  assert.equal(searchContacts.body.contacts.length,0,'поиск не выдаёт чужого клиента');
+  assert.equal(searchDeals.body.deals.length,0,'поиск не выдаёт чужую сделку');
+  const dash=(await asA('/api/dashboard')).body;
+  assert.ok(dash.recentDeals.some(d=>d.id===dealA.id)&&!dash.recentDeals.some(d=>d.id===dealB.id),'рабочий стол не раскрывает чужие сделки');
+  const analytics=(await asA('/api/analytics')).body;
+  assert.ok(analytics.byManager.some(m=>m.name===a.name)&&!analytics.byManager.some(m=>m.name===b.name),'аналитика агрегирует только карточки текущего менеджера: '+JSON.stringify({a:a.name,b:b.name,byManager:analytics.byManager}));
+  const exportContacts=await asA('/api/export/contacts'),exportDeals=await asA('/api/export/deals');
+  assert.equal(exportContacts.status,403,'менеджеру запрещена выгрузка контактов отдельным серверным правом');
+  assert.equal(exportDeals.status,403,'менеджеру запрещена выгрузка сделок отдельным серверным правом');
+  const adminExport=await call('/api/export/deals');
+  assert.ok(adminExport.body.includes(`ScopeAlphaDeal${suffix}`)&&adminExport.body.includes(`ScopeBetaDeal${suffix}`),'администратор выгружает данные с полным обзором');
+  const importPhone=`7901${suffix.slice(-7)}3`;
+  const imported=await asA('/api/import/contacts',{method:'POST',body:JSON.stringify({csv:`Имя;Телефон;Почта;Компания\nИмпорт ${suffix};${importPhone};;`})});
+  assert.equal(imported.status,200,'менеджер может импортировать клиентов');
+  const importedRow=db.prepare('SELECT responsible_id FROM contacts WHERE phone_norm=?').get(importPhone);
+  assert.equal(Number(importedRow?.responsible_id),Number(a.id),'импортированный контакт назначается импортировавшему менеджеру');
+  assert.equal((await asA('/api/contacts')).body.some(c=>c.phone_norm===importPhone),true,'импорт сразу виден автору');
+  h=admin;
+});
+
 test('каталог и наш прайс-лист — один список', async () => {
   const p = (await call('/api/products', { method: 'POST', body: JSON.stringify({ name: 'Дом для прайса 8×8', sku: 'DOM-88', price: 2100000, unit: 'шт', note: '  срок 8 недель  ' }) })).body;
   assert.equal(p.note, 'срок 8 недель', 'примечание позиции сохранено без лишних пробелов');
@@ -675,6 +865,48 @@ test('каталог и наш прайс-лист — один список', a
   assert.ok(!(await call('/api/prices?scope=ours')).body.rows.some(r => r.product_id === p.id), 'архивная позиция не в прайсе');
   assert.ok((await call('/api/prices?scope=ours&all=1')).body.rows.some(r => r.product_id === p.id), 'архив виден, если смотреть все позиции');
   await call('/api/products/' + p.id, { method: 'DELETE' });
+});
+
+test('экспорт и удаление общего справочника конкурентов требуют отдельного права администратора', async () => {
+  const adminHeaders=h,suffix=String(Date.now());
+  try {
+    const first=await call('/api/competitors',{method:'POST',body:JSON.stringify({name:`Общий конкурент А ${suffix}`})});
+    const second=await call('/api/competitors',{method:'POST',body:JSON.stringify({name:`Общий конкурент Б ${suffix}`})});
+    assert.equal(first.status,201);assert.equal(second.status,201);
+    const password=`Manager-Comp-${suffix}-Pwd!`,email=`manager-comp-${suffix}@example.com`;
+    const created=await call('/api/users',{method:'POST',body:JSON.stringify({name:'Менеджер конкурентов',email,password,role:'manager'})});
+    assert.equal(created.status,201);
+    const login=await readyLogin('/api/auth/login',{method:'POST',body:JSON.stringify({email,password})});
+    const managerHeaders={Authorization:'Bearer '+login.body.token};
+    h=managerHeaders;
+    assert.equal((await call('/api/competitors')).status,200,'менеджер может читать общий список конкурентов');
+    assert.equal((await call('/api/competitors/'+first.body.id,{method:'DELETE'})).status,403,'менеджер не удаляет общую карточку по прямому запросу');
+    assert.equal((await call('/api/competitors/bulk-delete',{method:'POST',body:JSON.stringify({ids:[first.body.id]})})).status,403,'пакетное удаление общего справочника — только администратору');
+    assert.equal((await call('/api/prices/export?scope=ours')).status,403,'право читать прайс не даёт право выгружать его');
+    assert.ok(db.prepare('SELECT id FROM competitors WHERE id=?').get(first.body.id),'отказ не удалил выбранную карточку');
+
+    const viewerEmail=`viewer-comp-${suffix}@example.com`,viewerPassword=`Viewer-Comp-${suffix}-Pwd!`;
+    const viewer=await call('/api/users',{method:'POST',headers:adminHeaders,body:JSON.stringify({name:'Наблюдатель конкурентов',email:viewerEmail,password:viewerPassword,role:'viewer'})});
+    assert.equal(viewer.status,201);
+    const viewerLogin=await readyLogin('/api/auth/login',{method:'POST',body:JSON.stringify({email:viewerEmail,password:viewerPassword})});
+    h={Authorization:'Bearer '+viewerLogin.body.token};
+    assert.equal((await call('/api/competitors')).status,200,'наблюдатель видит карточки для чтения');
+    assert.equal((await call('/api/prices/export?scope=ours')).status,403,'наблюдатель не обходит отдельное право выгрузки');
+    assert.equal((await call('/api/competitors/bulk-delete',{method:'POST',body:JSON.stringify({ids:[second.body.id]})})).status,403,'наблюдатель не удаляет карточки');
+
+    h=adminHeaders;
+    assert.equal((await call('/api/competitors/bulk-delete',{method:'POST',body:JSON.stringify({ids:{}})})).status,400,'не-массив ID отклонён без ошибки сервера');
+    assert.equal((await call('/api/competitors/bulk-delete',{method:'POST',body:JSON.stringify({ids:[first.body.id,'bad']})})).status,400,'неверный ID отклоняет пачку целиком');
+    assert.equal((await call('/api/competitors/bulk-delete',{method:'POST',body:JSON.stringify({ids:[999999999]})})).status,404,'устаревший выбор не даёт ложного результата');
+    assert.ok(db.prepare('SELECT id FROM competitors WHERE id=?').get(first.body.id),'некорректная пачка не изменила базу');
+    const exported=await call('/api/prices/export?scope=ours');
+    assert.equal(exported.status,200,'администратор может выгрузить прайс');
+    const removed=await call('/api/competitors/bulk-delete',{method:'POST',body:JSON.stringify({ids:[first.body.id,second.body.id,first.body.id]})});
+    assert.equal(removed.status,200);assert.equal(removed.body.deleted,2,'повторяющиеся ID схлопнуты без двойного удаления');
+    assert.equal(db.prepare('SELECT COUNT(*) n FROM competitors WHERE id IN (?,?)').get(first.body.id,second.body.id).n,0,'обе карточки удалены атомарно');
+    const audit=db.prepare("SELECT action FROM access_log WHERE user_id=? AND action IN ('export_prices','competitor_bulk_delete') ORDER BY id").all(db.prepare("SELECT id FROM users WHERE role='admin' ORDER BY id LIMIT 1").get().id).map(x=>x.action);
+    assert.ok(audit.includes('export_prices')&&audit.includes('competitor_bulk_delete'),'выгрузка и массовое удаление остаются в журнале доступа');
+  } finally { h=adminHeaders; }
 });
 
 test('карточка сделки показывает переписку клиента', async () => {
@@ -735,18 +967,56 @@ test('автосоздание сделки: новое обращение кл�
   assert.equal((await call('/api/deals')).body.deals.filter(d => d.contact_name === 'Обращение с сайта').length, 2, 'вернувшийся клиент получил новую сделку');
 });
 
-test('автоназначение: новые обращения распределяются между менеджерами', async () => {
-  await call('/api/users', { method: 'POST', body: JSON.stringify({ name: 'Менеджер Анна', email: 'anna@example.com', password: 'menedzher456', role: 'manager' }) });
-  await call('/api/settings', { method: 'PUT', body: JSON.stringify({ AUTO_ASSIGN: '1', AUTO_DEAL: '1' }) });
-  for (const phone of ['79110008811', '79110008822']) await call('/webhooks/generic', { method: 'POST', body: JSON.stringify({ channel: 'site', phone, name: 'Лид ' + phone.slice(-4), body: 'Нужен расчёт' }) });
-  const deals = (await call('/api/deals')).body.deals.filter(d => /Лид/.test(d.contact_name || ''));
-  assert.equal(deals.length, 2, 'оба обращения превратились в сделки');
-  const owners = deals.map(d => d.responsible_id);
-  assert.ok(owners.every(Boolean), 'у новых сделок есть ответственный');
-  assert.notEqual(owners[0], owners[1], 'лиды распределились между менеджерами поровну, а не одному');
-  const contacts = (await call('/api/contacts')).body.filter(c => /^Лид /.test(c.name));
-  assert.ok(contacts.every(c => c.responsible_id), 'ответственный виден и в карточке клиента');
-  await call('/api/settings', { method: 'PUT', body: JSON.stringify({ AUTO_ASSIGN: '0' }) });
+test('смены и очередь: без смены лиды ждут, ночная очередь выдаётся по пять, повтор не создаёт дубль', async () => {
+  const suffix=String(Date.now());
+  const made=[];
+  for(const [i,name] of ['Анна','Борис'].entries()){
+    const email=`shift-${i}-${suffix}@example.com`,password=`Shift-manager-${i}-2026!`;
+    const user=await call('/api/users',{method:'POST',body:JSON.stringify({name:`Менеджер ${name}`,email,password,role:'manager'})});
+    assert.equal(user.status,201);
+    const login=await readyLogin('/api/auth/login',{method:'POST',body:JSON.stringify({email,password})});
+    made.push({id:user.body.id,headers:{Authorization:'Bearer '+login.body.token}});
+  }
+  const adminUser=db.prepare("SELECT id,name FROM users WHERE role='admin' AND active=1 ORDER BY id LIMIT 1").get();
+  db.prepare(`UPDATE deals SET responsible_id=?,responsible=? WHERE id IN (SELECT deal_id FROM lead_routing WHERE queue_status='queued')`).run(adminUser.id,adminUser.name);
+  await call('/api/settings',{method:'PUT',body:JSON.stringify({AUTO_ASSIGN:'1',AUTO_DEAL:'1',SHIFT_BACKLOG_LIMIT:5})});
+  for(let i=0;i<12;i++)await call('/webhooks/generic',{method:'POST',body:JSON.stringify({channel:'site',phone:`79110008${String(i).padStart(4,'0')}`,name:`Очередь ${suffix}-${i}`,body:`Нужен расчёт ${i}`,external_id:`queue-${suffix}-${i}`})});
+  let queued=(await call('/api/routing/queue')).body;
+  assert.equal(queued.count,12,'без открытой смены все 12 обращений остаются в очереди');
+  let deals=(await call('/api/deals')).body.deals.filter(d=>(d.contact_name||'').includes(`Очередь ${suffix}`));
+  assert.equal(deals.length,12);assert.ok(deals.every(d=>!d.responsible_id),'автоматическое назначение вне смены не происходит');
+  const [startA,startB]=await Promise.all([
+    call('/api/shifts/start',{method:'POST',headers:made[0].headers,body:'{}'}),
+    call('/api/shifts/start',{method:'POST',headers:made[1].headers,body:'{}'}),
+  ]);
+  assert.equal(startA.status,200);assert.equal(startB.status,200);
+  assert.equal(startA.body.assigned.length,5,'первый менеджер получает не больше пяти лидов из очереди');
+  assert.equal(startB.body.assigned.length,5,'вторая смена получает свои пять лидов');
+  const repeatStart=await call('/api/shifts/start',{method:'POST',headers:made[0].headers,body:'{}'});
+  assert.equal(repeatStart.body.alreadyActive,true,'повторное включение смены идемпотентно');
+  assert.deepEqual(repeatStart.body.assigned,[],'повторное включение не выдаёт новую пачку');
+  queued=(await call('/api/routing/queue')).body;
+  assert.equal(queued.count,2,'после двух смен в очереди остаются ровно два лида');
+  deals=(await call('/api/deals')).body.deals.filter(d=>(d.contact_name||'').includes(`Очередь ${suffix}`));
+  assert.equal(deals.filter(d=>d.responsible_id===made[0].id).length,5);
+  assert.equal(deals.filter(d=>d.responsible_id===made[1].id).length,5);
+  const phone='79110008999';
+  await call('/webhooks/generic',{method:'POST',body:JSON.stringify({channel:'site',phone,name:`Живой лид ${suffix}`,body:'Хочу обсудить проект',external_id:`live-${suffix}`})});
+  await call('/webhooks/generic',{method:'POST',body:JSON.stringify({channel:'site',phone,name:`Живой лид ${suffix}`,body:'Хочу обсудить проект',external_id:`live-${suffix}`})});
+  const live=(await call('/api/deals')).body.deals.filter(d=>(d.contact_name||'').includes(`Живой лид ${suffix}`));
+  assert.equal(live.length,1,'повторная доставка не создаёт вторую сделку');
+  assert.ok([made[0].id,made[1].id].includes(live[0].responsible_id),'новое обращение назначается только активной смене');
+  const owner=live[0].responsible_id,assigned=deals.filter(d=>d.responsible_id===made[0].id).map(d=>d.id);
+  db.prepare("UPDATE lead_routing SET first_response_at=datetime('now'),first_response_user_id=? WHERE deal_id=?").run(made[0].id,assigned[0]);
+  const endedA=await call('/api/shifts/end',{method:'POST',headers:made[0].headers,body:JSON.stringify({reason:'Плановое завершение смены'})});
+  assert.equal(endedA.status,200);
+  assert.equal(endedA.body.retained.length,1,'сделка с начатой перепиской остаётся ответственному');
+  assert.equal(endedA.body.returned.length,5+(owner===made[0].id?1:0)-1,'неотвеченные сделки атомарно вернулись в очередь');
+  await call('/api/shifts/end',{method:'POST',headers:made[1].headers,body:JSON.stringify({reason:'Плановое завершение смены'})});
+  await call('/webhooks/generic',{method:'POST',body:JSON.stringify({channel:'site',phone:'79110008998',name:`Без смены ${suffix}`,body:'Новый запрос'})});
+  const withoutShift=(await call('/api/deals')).body.deals.find(d=>(d.contact_name||'').includes(`Без смены ${suffix}`));
+  assert.equal(withoutShift.responsible_id,null,'после завершения всех смен распределения нет');
+  await call('/api/settings',{method:'PUT',body:JSON.stringify({AUTO_ASSIGN:'0'})});
 });
 
 test('сделки и задачи: сервер проверяет этап, сумму и срок', async () => {
@@ -768,6 +1038,7 @@ test('массовые действия: одна операция на пачк
   for (let i = 0; i < 3; i++) ids.push((await call('/api/contacts', { method: 'POST', body: JSON.stringify({ name: `Пачка ${i}`, phone: `+7 900 000-00-0${i}` }) })).body.id);
   const upd = await call('/api/bulk', { method: 'POST', body: JSON.stringify({ table: 'contacts', ids, action: 'update', patch: { tags: 'пачка,тест' } }) });
   assert.equal(upd.status, 200); assert.equal(upd.body.count, 3);
+  assert.equal((await call('/api/bulk',{method:'POST',body:JSON.stringify({table:'contacts',ids,action:'upsert',patch:{tags:'не должно сохраниться'}})})).status,400,'неизвестное пакетное действие отклоняется явно');
   const all = (await call('/api/contacts')).body.filter(c => String(c.tags || '').includes('пачка'));
   assert.equal(all.length, 3, 'тег проставился всем выбранным');
   const bulkDash = (await call('/api/dashboard')).body;
@@ -907,7 +1178,7 @@ test('печать КП и счёта: реквизиты, позиции и с�
   assert.ok(deal.id, 'сделка для печати создана');
   await call(`/api/deals/${deal.id}/products`, { method: 'POST', body: JSON.stringify({ name: 'Каркасный дом 8×10', price: 3000000, qty: 1 }) });
   await call(`/api/deals/${deal.id}/products`, { method: 'POST', body: JSON.stringify({ name: 'Фундамент', price: 200000, qty: 2 }) });
-  const quote = await fetch(base + `/api/deals/${deal.id}/print?doc=quote&token=` + h.Authorization.split(' ')[1]);
+  const quote = await fetch(base + `/api/deals/${deal.id}/print?doc=quote`, { headers: h });
   assert.equal(quote.status, 200);
   assert.match(quote.headers.get('content-type'), /text\/html/);
   const html = await quote.text();
@@ -919,12 +1190,13 @@ test('печать КП и счёта: реквизиты, позиции и с�
   assert.match(html, /window\.print\(\)/, 'на странице есть кнопка печати');
   assert.match(html, /05\.11\.2026/, 'срок в документе — в формате дд.мм.гггг');
   assert.doesNotMatch(html, /2026-11-05/, 'сырой ISO-даты в документе нет');
-  const invoice = await (await fetch(base + `/api/deals/${deal.id}/print?doc=invoice&token=` + h.Authorization.split(' ')[1])).text();
+  const invoice = await (await fetch(base + `/api/deals/${deal.id}/print?doc=invoice`, { headers: h })).text();
   assert.match(invoice, /Счёт на оплату/);
   assert.match(invoice, /НДС 20%/);
   assert.match(invoice, /40702810100000012345/, 'банковские реквизиты в счёте');
   assert.equal((await fetch(base + `/api/deals/${deal.id}/print`)).status, 401, 'без токена документ не отдаётся');
-  assert.equal((await fetch(base + '/api/deals/999999/print?token=' + h.Authorization.split(' ')[1])).status, 404);
+  assert.equal((await fetch(base + `/api/deals/${deal.id}/print?doc=quote&token=` + encodeURIComponent(h.Authorization.split(' ')[1]))).status, 401, 'токен в URL не заменяет HttpOnly-cookie или Authorization');
+  assert.equal((await fetch(base + '/api/deals/999999/print', { headers: h })).status, 404);
 });
 
 test('повторяющиеся задачи: закрыл — появилась следующая', async () => {
@@ -983,6 +1255,13 @@ test('первый вход: серверная блокировка, смена
   const account = { name: 'Первый вход', email: 'first-login@example.com', password: 'TemporaryPass123', role: 'viewer' };
   const created = await call('/api/users', { method: 'POST', body: JSON.stringify(account) });
   assert.equal(created.status, 201);
+  const beforeEdit = db.prepare('SELECT pass,session_version,must_change_password FROM users WHERE id=?').get(created.body.id);
+  const edit = await call('/api/users/' + created.body.id, { method: 'PATCH', body: JSON.stringify({ role: 'viewer', active: 1 }) });
+  assert.equal(edit.status, 200, 'обычная правка роли не требует передавать пароль');
+  const afterEdit = db.prepare('SELECT pass,session_version,must_change_password FROM users WHERE id=?').get(created.body.id);
+  assert.equal(afterEdit.pass, beforeEdit.pass, 'правка сотрудника не меняет его пароль');
+  assert.equal(afterEdit.session_version, beforeEdit.session_version, 'правка сотрудника не отзывает парольную сессию');
+  assert.equal(afterEdit.must_change_password, 1, 'временный пароль остаётся действующим до личной смены');
   const login = await call('/api/auth/login', { method: 'POST', body: JSON.stringify(account) });
   assert.equal(login.body.user.must_change_password, 1);
   const headers = { Authorization: 'Bearer ' + login.body.token };
@@ -992,21 +1271,41 @@ test('первый вход: серверная блокировка, смена
     assert.equal(denied.status, 403); assert.equal(denied.body.code, 'PASSWORD_CHANGE_REQUIRED');
   }
   const change = (old_password, new_password) => call('/api/me/password', { method: 'POST', headers, body: JSON.stringify({ old_password, new_password }) });
-  assert.equal((await change('wrong', 'NewPersonalPass123')).status, 400);
+  const wrongTemp=await change('wrong','NewPersonalPass123');
+  assert.equal(wrongTemp.status,400);
+  assert.match(wrongTemp.body.error,/Временный пароль не совпал/i,'ошибка первого входа подсказывает проверить раскладку и пробелы');
   assert.equal((await change(account.password, 'short')).status, 400);
   assert.equal((await change(account.password, account.password)).status, 400);
   const changed = await change(account.password, 'NewPersonalPass123');
   assert.equal(changed.status, 200);
-  assert.equal((await call('/api/me', { headers })).status, 401, 'старый токен отозван');
+  const staleSession=await call('/api/me',{headers});
+  assert.equal(staleSession.status,401,'старый токен отозван');
+  assert.equal(staleSession.body.code,'SESSION_REVOKED','устаревшая сессия отличима от неверного пароля');
+  assert.match(staleSession.body.error,/сменили или сбросили/i,'сообщение не утверждает, что пароль менял именно администратор');
   const freshHeaders = { Authorization: 'Bearer ' + changed.body.token };
   assert.equal((await call('/api/me', { headers: freshHeaders })).body.user.must_change_password, 0);
   assert.equal((await call('/api/contacts', { headers: freshHeaders })).status, 200);
   assert.equal((await call('/api/contacts', { method: 'POST', headers: freshHeaders, body: '{"name":"blocked"}' })).status, 403);
+  const personalLogin=await call('/api/auth/login',{method:'POST',body:JSON.stringify({email:account.email,password:'NewPersonalPass123'})});
+  assert.equal(personalLogin.status,200,'личный пароль сохранён и работает при следующем входе');
+  assert.equal(personalLogin.body.user.must_change_password,0,'повторный вход не требует менять его ещё раз');
+  assert.equal((await call('/api/auth/login',{method:'POST',body:JSON.stringify({email:account.email,password:account.password})})).status,401,'одноразовый пароль больше не действует');
+  const employeeAudit=db.prepare("SELECT text,user_name FROM activities WHERE entity_type='users' AND entity_id=? ORDER BY id").all(created.body.id);
+  assert.ok(employeeAudit.some(x=>x.text==='Временный пароль заменён личным'&&x.user_name===account.name),'в журнале видно, что личный пароль задал сотрудник');
   const reset = await call('/api/users/' + created.body.id, { method: 'PATCH', body: JSON.stringify({ password: 'AnotherTempPass123' }) });
   assert.equal(reset.status, 200);
   assert.equal((await call('/api/me', { headers: freshHeaders })).status, 401, 'админский сброс отзывает сессии');
+  assert.equal((await call('/api/auth/login',{method:'POST',body:JSON.stringify({email:account.email,password:'NewPersonalPass123'})})).status,401,'сброс заменил прежний личный пароль');
   const second = await call('/api/auth/login', { method: 'POST', body: JSON.stringify({ email: account.email, password: 'AnotherTempPass123' }) });
-  assert.equal(second.body.user.must_change_password, 1);
+  assert.equal(second.status,200);assert.equal(second.body.user.must_change_password, 1,'после админского сброса временный пароль снова требует замены');
+  const secondChange = await call('/api/me/password', { method: 'POST', headers: { Authorization: 'Bearer ' + second.body.token }, body: JSON.stringify({ old_password: 'AnotherTempPass123', new_password: 'FinalPersonalPass123' }) });
+  assert.equal(secondChange.status,200,'сброшенный пароль можно заменить личным тем же потоком первого входа');
+  const finalLogin = await call('/api/auth/login',{method:'POST',body:JSON.stringify({email:account.email,password:'FinalPersonalPass123'})});
+  assert.equal(finalLogin.status,200,'после замены временного пароля вход работает снова');
+  assert.equal(finalLogin.body.user.must_change_password,0,'после повторного входа личный пароль не нужно менять ещё раз');
+  assert.equal((await call('/api/auth/login',{method:'POST',body:JSON.stringify({email:account.email,password:'AnotherTempPass123'})})).status,401,'после смены сброшенный временный пароль больше не действует');
+  const resetAudit=db.prepare("SELECT text,user_name FROM activities WHERE entity_type='users' AND entity_id=? ORDER BY id").all(created.body.id);
+  assert.ok(resetAudit.some(x=>/сброшен пароль/.test(x.text)&&x.user_name==='Администратор'),'журнал отличает административный сброс от смены сотрудником');
 });
 
 test('демо-данные: счётчики и очистка только администратору', async () => {
@@ -1223,7 +1522,9 @@ test('очередь отложенных действий видна, отме�
   assert.ok(created.status === 200 || created.status === 201, 'менеджер создан');
   const mgrLogin = await readyLogin('/api/auth/login', { method: 'POST', body: JSON.stringify({ email: 'queue-mgr@example.com', password: 'ochered12345' }) });
   const mgrH = { Authorization: 'Bearer ' + mgrLogin.body.token };
-  assert.equal((await call('/api/automation-queue', { headers: mgrH })).status, 200, 'менеджер видит, что запланировано');
+  const managerQueue=await call('/api/automation-queue',{headers:mgrH});
+  assert.equal(managerQueue.status,200,'очередь доступна менеджеру в ограниченном виде');
+  assert.ok(!managerQueue.body.some(x=>Number(x.id)===Number(mine[0].id)),'чужое запланированное действие не раскрывает сделку и клиента');
   assert.equal((await call(`/api/automation-queue/${mine[0].id}`, { method: 'DELETE', headers: mgrH })).status, 403, 'отменяет только администратор');
 
   const cancel = await call(`/api/automation-queue/${mine[0].id}`, { method: 'DELETE' });
@@ -1481,7 +1782,7 @@ test('голосовые и видео можно прикрепить, прои
 
 test('непрочитанные личные: чтение одного сотрудника не стирает метку другого', async () => {
   // отдельный сотрудник: у созданных ранее в сюите пароли уже менялись принудительно
-  await call('/api/users', { method: 'POST', body: JSON.stringify({ name: 'Чтец Меток', email: 'readmark@example.com', password: 'readmark12345', role: 'manager' }) });
+  const created=await call('/api/users', { method: 'POST', body: JSON.stringify({ name: 'Чтец Меток', email: 'readmark@example.com', password: 'readmark12345', role: 'manager' }) });
   const mgrLogin = await readyLogin('/api/auth/login', { method: 'POST', body: JSON.stringify({ email: 'readmark@example.com', password: 'readmark12345' }) });
   const mh = { Authorization: 'Bearer ' + mgrLogin.body.token };
   const hook = body => fetch(base + '/webhooks/wazzup?secret=hook-secret-1', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) }).then(r => r.status);
@@ -1490,24 +1791,29 @@ test('непрочитанные личные: чтение одного сот�
   const d0m = (await call('/api/dashboard', { headers: mh })).body.unread;
   assert.equal(await hook({ messages: [{ messageId: 'wz-read-1', channelId: 'ch-r', chatType: 'whatsapp', chatId: '79000000004', type: 'text', text: 'Проверка личных счётчиков' }] }), 200);
   assert.equal((await call('/api/dashboard')).body.unread, d0a + 1, 'входящее добавило единицу администратору');
-  assert.equal((await call('/api/dashboard', { headers: mh })).body.unread, d0m + 1, 'и менеджеру: прочитанность у каждого своя с нуля');
+  assert.equal((await call('/api/dashboard', { headers: mh })).body.unread, d0m, 'неразобранная карточка не попадает в контур менеджера');
   const find = (list) => list.find(c => c.external_chat_id === '79000000004');
   const adminConvs = (await call('/api/conversations')).body;
-  const mgrConvs = (await call('/api/conversations', { headers: mh })).body;
-  assert.equal(find(adminConvs).unread, 1, 'админ видит входящее непрочитанным');
-  assert.equal(find(mgrConvs).unread, 1, 'менеджер видит то же входящее непрочитанным');
-  const id = find(adminConvs).id;
+  const unassignedConv=find(adminConvs);
+  assert.ok(unassignedConv,'администратор видит новое неразобранное обращение');
+  assert.equal(find((await call('/api/conversations', { headers: mh })).body),undefined,'менеджер не получает чужой или неназначенный чат');
+  assert.equal((await call('/api/contacts/'+unassignedConv.contact_id,{method:'PATCH',body:JSON.stringify({responsible_id:created.body.id})})).status,200,'администратор назначил контакт менеджеру');
+  assert.equal((await call('/api/dashboard', { headers: mh })).body.unread,d0m+1,'после назначения менеджер видит своё непрочитанное обращение');
+  const mgrConvs=(await call('/api/conversations',{headers:mh})).body;
+  assert.equal(find(mgrConvs).unread,1,'менеджер видит своё входящее непрочитанным');
+  assert.equal(find(adminConvs).unread,1,'админ видит входящее непрочитанным');
+  const id = unassignedConv.id;
   await call(`/api/conversations/${id}/messages`);
-  assert.equal(find((await call('/api/conversations')).body).unread, 0, 'админ прочитал — у него ноль');
-  assert.equal(find((await call('/api/conversations', { headers: mh })).body).unread, 1, 'у менеджера метка осталась: чужое чтение не стирает');
-  assert.equal((await call('/api/dashboard')).body.unread, d0a, 'счётчик админа вернулся к базовому: чтение личное');
-  assert.equal((await call('/api/dashboard', { headers: mh })).body.unread, d0m + 1, 'у менеджера единица держится, пока он сам не откроет чат');
+  assert.equal(find((await call('/api/conversations')).body).unread,0,'админ прочитал — у него ноль');
+  assert.equal(find((await call('/api/conversations', { headers: mh })).body).unread,1,'у менеджера метка осталась: чужое чтение не стирает');
+  assert.equal((await call('/api/dashboard')).body.unread,d0a,'счётчик админа вернулся к базовому: чтение личное');
+  assert.equal((await call('/api/dashboard', { headers: mh })).body.unread,d0m+1,'у менеджера единица держится, пока он сам не откроет чат');
   await fetch(base + `/api/conversations/${id}/messages`, { headers: mh });
-  assert.equal(find((await call('/api/conversations', { headers: mh })).body).unread, 0, 'менеджер прочитал — у него ноль');
-  assert.equal((await call('/api/dashboard', { headers: mh })).body.unread, d0m, 'счётчик менеджера тоже вернулся к базовому');
+  assert.equal(find((await call('/api/conversations', { headers: mh })).body).unread,0,'менеджер прочитал — у него ноль');
+  assert.equal((await call('/api/dashboard', { headers: mh })).body.unread,d0m,'счётчик менеджера тоже вернулся к базовому');
 });
 
-test('счётчик непрочитанных чатов личный: чужая беседа не будит весь офис', async () => {
+test('счётчик непрочитанных чатов личный: неразобранное обращение недоступно менеджеру', async () => {
   // отдельный менеджер: у прежней учётки сюита пароль уже менялся принудительно
   await call('/api/users', { method: 'POST', body: JSON.stringify({ name: 'Счётчик Чатов', email: 'unreadmine@example.com', password: 'unreadmine12345', role: 'manager' }) });
   const mgrLogin = await readyLogin('/api/auth/login', { method: 'POST', body: JSON.stringify({ email: 'unreadmine@example.com', password: 'unreadmine12345' }) });
@@ -1517,20 +1823,21 @@ test('счётчик непрочитанных чатов личный: чуж�
   const m0a = (await call('/api/dashboard')).body.unreadMine;
   const m0m = (await call('/api/dashboard', { headers: mh })).body.unreadMine;
   const d0m = (await call('/api/dashboard', { headers: mh })).body.unread;
-  // новый клиент написал впервые: чат ничей, и он на счету у обоих
-  assert.equal(await hook({ messages: [{ messageId: 'wz-unread-mine-1', channelId: 'ch-um', chatType: 'whatsapp', chatId: '79000000006', type: 'text', text: 'Ничейное обращение', status: 'inbound', contact: { name: 'Ничей Клиент', phone: '79000000006' } }] }), 200);
-  assert.equal((await call('/api/dashboard')).body.unreadMine, m0a + 1, 'админу ничейный чат попал в личный счётчик');
-  assert.equal((await call('/api/dashboard', { headers: mh })).body.unreadMine, m0m + 1, 'менеджеру тоже: ничейные разбирают все');
-  assert.equal((await call('/api/dashboard', { headers: mh })).body.unread, d0m + 1, 'общий счётчик вырос у обоих');
-  // клиента забрал администратор: у менеджера чат уходит из личного счётчика,
-  // но общий счётчик непрочитанных от назначения не меняется
+  // новый клиент написал впервые: до назначения переписка доступна администратору
+  assert.equal(await hook({ messages: [{ messageId: 'wz-unread-mine-1', channelId: 'ch-um', chatType: 'whatsapp', chatId: '79000000006', type: 'text', text: 'Неразобранное обращение', status: 'inbound', contact: { name: 'Ничей Клиент', phone: '79000000006' } }] }), 200);
+  assert.equal((await call('/api/dashboard')).body.unreadMine, m0a + 1, 'админу неразобранное обращение попало в личный счётчик');
+  assert.equal((await call('/api/dashboard', { headers: mh })).body.unreadMine, m0m, 'неразобранная карточка не раскрывается менеджеру');
+  assert.equal((await call('/api/dashboard', { headers: mh })).body.unread, d0m, 'чужой чат не увеличивает счётчик менеджера');
   const conv = (await call('/api/conversations')).body.find(c => c.external_chat_id === '79000000006');
-  assert.ok(conv, 'беседа найдена');
+  assert.ok(conv, 'администратор видит неразобранную беседу');
+  assert.equal((await call('/api/conversations',{headers:mh})).body.some(c=>c.id===conv.id),false,'неназначенная беседа отсутствует в списке менеджера');
+  assert.equal((await call(`/api/conversations/${conv.id}/messages`,{headers:mh})).status,403,'история неназначенной беседы закрыта напрямую');
+  // клиента забрал администратор: у менеджера он не появляется ни в списке, ни в счётчике
   const r = await call('/api/bulk', { method: 'POST', body: JSON.stringify({ table: 'contacts', action: 'update', ids: [conv.contact_id], patch: { responsible_id: meAdmin.id } }) });
   assert.equal(r.body.count, 1, 'клиент закреплён за администратором');
-  assert.equal((await call('/api/dashboard')).body.unreadMine, m0a + 1, 'у администратора чат остался в личном счётчике');
-  assert.equal((await call('/api/dashboard', { headers: mh })).body.unreadMine, m0m, 'у менеджера чужой чат из личного счётчика исчез');
-  assert.equal((await call('/api/dashboard', { headers: mh })).body.unread, d0m + 1, 'общий счётчик назначение не меняет');
+  assert.equal((await call('/api/dashboard')).body.unreadMine,m0a+1,'у администратора чат остался непрочитанным');
+  assert.equal((await call('/api/dashboard',{headers:mh})).body.unreadMine,m0m,'менеджеру не раскрывается лид администратора');
+  assert.equal((await call('/api/dashboard',{headers:mh})).body.unread,d0m,'счётчик менеджера остаётся без чужой беседы');
 });
 
 test('исходящие из другой CRM видны в чате, эхо своих не дублируется, отметка «прочитано» пачкой', async () => {
@@ -1826,14 +2133,19 @@ test('операционные показатели не выдают ложну
   h = savedH;
 });
 
-test('ОКК: ручная оценка с доказательствами, охватом и отдельным статусом «контакта не было»', async () => {
+test('ОКК: ручная оценка с доказательствами, временем, метриками и отдельным статусом «контакта не было»', async () => {
   const contact = await call('/api/contacts', { method: 'POST', body: JSON.stringify({ name: 'Клиент для ОКК', phone: '79000000088', responsible_id: 1, source: 'site' }) });
   assert.equal(contact.status, 201);
   const deal = await call('/api/deals', { method: 'POST', body: JSON.stringify({ title: 'Проверка ОКК ДОМ 45', contact_id: contact.body.id, responsible_id: 1 }) });
   assert.equal(deal.status, 201);
   const conv = await call('/api/conversations', { method: 'POST', body: JSON.stringify({ contact_id: contact.body.id, chat_type: 'whatsapp' }) });
   assert.equal(conv.status, 201);
-  const msg = db.prepare("INSERT INTO messages(conversation_id,channel,direction,body,author) VALUES(?,'whatsapp','in','Сколько стоит дом и можно ли построить в Уфе?','Клиент')").run(conv.body.id);
+  const localDay = d => `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}-${String(d.getDate()).padStart(2,'0')}`;
+  const utcStamp = d => d.toISOString().slice(0,23).replace('T',' ');
+  const inboundAt = new Date(Date.now()-8*60000), replyAt = new Date(Date.now()-6*60000);
+  const reviewDays = [localDay(inboundAt),localDay(replyAt)].sort();
+  const msg = db.prepare("INSERT INTO messages(conversation_id,channel,direction,body,author,event_at,event_time_source,status) VALUES(?,'whatsapp','in','Сколько стоит дом и можно ли построить в Уфе?','Клиент',?,'provider','inbound')").run(conv.body.id,utcStamp(inboundAt));
+  db.prepare("INSERT INTO messages(conversation_id,channel,direction,body,author,event_at,event_time_source,status) VALUES(?,'whatsapp','out','Здравствуйте, отвечу по вопросу и уточню детали.','Администратор',?,'crm','sent')").run(conv.body.id,utcStamp(replyAt));
   const searched = await call('/api/quality/deals?q=дом');
   assert.equal(searched.status, 200, 'руководитель ищет сделки без учёта регистра кириллицы');
   assert.ok(searched.body.rows.some(x => Number(x.id) === Number(deal.body.id)), 'найдена нужная сделка');
@@ -1842,8 +2154,15 @@ test('ОКК: ручная оценка с доказательствами, о�
   let detail = await call('/api/quality/reviews/' + created.body.id);
   assert.equal(detail.status, 200);
   assert.equal(detail.body.criteria.length, 18, 'чек-лист соответствует листу «Чек-лист ОКК»');
-  assert.equal(detail.body.messages.length, 1, 'к проверке приложен ограниченный список сообщений сделки');
-  assert.equal(detail.body.messages[0].id, Number(msg.lastInsertRowid));
+  assert.equal(detail.body.growthCriteria.length, 10, 'развивающий контур не смешан с 18-балльным чек-листом');
+  assert.equal(detail.body.messages.length, 2, 'история включает клиентское сообщение и ответ сотрудника');
+  assert.equal(detail.body.messages.find(x=>Number(x.id)===Number(msg.lastInsertRowid)).event_time_source,'provider');
+  assert.equal(detail.body.firstReply.available,true,'подсказка по SLA доступна только с сохранёнными отметками события');
+  assert.equal(detail.body.firstReply.pending,false);
+  assert.equal(detail.body.firstReply.thresholdMinutes,5);
+  assert.equal(detail.body.firstReply.onTime,true);
+  assert.equal(detail.body.firstReply.timingBasis,'Отметки канала и CRM');
+  assert.equal(detail.body.firstReply.firstReplyAuthor,'Администратор');
   const items = detail.body.criteria.map((c, i) => ({
     key: c.key,
     status: i < 13 ? 'yes' : i < 15 ? 'no' : i < 17 ? 'na' : 'unknown',
@@ -1851,23 +2170,38 @@ test('ОКК: ручная оценка с доказательствами, о�
     message_id: i === 15 ? null : Number(msg.lastInsertRowid),
     evidence_text: i < 13 ? 'Подтверждено сообщением клиента и ответом сотрудника.'
       : i < 15 ? 'В доступной переписке факт не подтверждён, приведена причина.'
-        : i < 17 ? 'В этом случае критерий неприменим, причина указана.' : 'Не хватает записи звонка, нужен ручной просмотр.'
+        : i < 17 ? 'В этом случае критерий неприменим, причина указана.' : 'Не хватает записи звонка, нужен ручной просмотр.',
+    evidence_confidence: i === 17 ? 'needs_review' : 'verified'
   }));
+  const growthItems = detail.body.growthCriteria.map(c => ({
+    key:c.key,
+    status:c.key==='materials_followup'?'no':c.key==='region_coverage'?'yes':'unknown',
+    evidence_source:'message',message_id:Number(msg.lastInsertRowid),
+    evidence_text:'Проверен конкретный фрагмент переписки или указана причина ограничения данных.',
+    evidence_confidence:c.key==='materials_followup'||c.key==='region_coverage'?'verified':'needs_review'
+  }));
+  const facts = Object.fromEntries(['object_area','city','land','timeline','budget','payment'].map(key=>[
+    key,{heard_status:'yes',crm_status:'yes'}
+  ]));
   const otherContact = await call('/api/contacts', { method: 'POST', body: JSON.stringify({ name: 'Чужой контакт для ОКК', phone: '79000000089' }) });
   const otherConv = await call('/api/conversations', { method: 'POST', body: JSON.stringify({ contact_id: otherContact.body.id, chat_type: 'whatsapp' }) });
   const foreignMessage = db.prepare("INSERT INTO messages(conversation_id,channel,direction,body) VALUES(?,'whatsapp','in','Чужая переписка')").run(otherConv.body.id);
   const reviewBody = {
-    status: 'complete', data_status: 'partial', interaction_type: 'chat', period_start: '2026-11-01', period_end: '2026-11-13',
+    status: 'complete', data_status: 'partial', interaction_type: 'chat', period_start: reviewDays[0], period_end: reviewDays[1],
     data_notes: 'Проверена доступная переписка; записи звонков нет.', summary: 'Сотрудник уточнил параметры объекта.',
     issues: ['На первый вопрос не дан точный ответ.'], next_steps: ['Подготовить расчёт и согласовать время разговора.'],
-    crm_observation: 'Поля бюджета и срока не заполнены, уточнить их у клиента.', items
+    crm_observation: 'Поля бюджета и срока не заполнены, уточнить их у клиента.', sample_rule:'manager_choice',
+    facts,items,growth_items:growthItems
   };
   const foreignItems = items.map((x,i)=>i===0?{...x,message_id:Number(foreignMessage.lastInsertRowid)}:x);
   const crossed = await call('/api/quality/reviews/' + created.body.id, { method: 'PUT', body: JSON.stringify({ ...reviewBody, items: foreignItems }) });
   assert.equal(crossed.status, 400, 'источник из чужой сделки нельзя прикрепить как доказательство');
   const saved = await call('/api/quality/reviews/' + created.body.id, { method: 'PUT', body: JSON.stringify(reviewBody) });
   assert.equal(saved.status, 200, 'полная проверка сохранена');
-  assert.deepEqual(saved.body.review.score, { confirmed: 13, applicable: 15, criticalFailures: 1, notApplicable: 2, insufficient: 1, unreviewed: 0, percent: 87, coverage: 83, total: 18 });
+  assert.deepEqual(saved.body.review.score, {
+    confirmed:13,applicable:15,criticalMarkedNo:['next_step'],notApplicable:2,insufficient:1,unreviewed:0,
+    percent:86.7,coverage:83.3,total:18,abandonedCard:false
+  });
   assert.equal(saved.body.review.status, 'complete');
   const edited = await call('/api/quality/reviews/' + created.body.id, { method: 'PUT', body: JSON.stringify({ status: 'draft', items }) });
   assert.equal(edited.status, 409, 'завершённый разбор нельзя незаметно переписать');
@@ -1876,21 +2210,51 @@ test('ОКК: ручная оценка с доказательствами, о�
   assert.equal(list.status, 200);
   assert.equal(list.body.summary.complete, 1);
   assert.equal(list.body.criteria.length, 18);
+  assert.equal(list.body.growthCriteria.length,10);
   assert.equal(list.body.criteria.find(x => x.key === 'greeting').percent, 100);
   assert.equal(list.body.criteria.find(x => x.key === 'materials').applicable, 0, 'неприменимые критерии не попадают в знаменатель');
+  assert.deepEqual(list.body.metrics.qualification,{numerator:1,denominator:1,excluded:0,percent:100,target:75},'неопределённые факторы не подменяют долю 4 из 6');
+  assert.deepEqual(list.body.metrics.cityLandCrm,{numerator:1,denominator:1,excluded:0,percent:100,target:90});
+  assert.deepEqual(list.body.metrics.nextStep,{numerator:0,denominator:1,excluded:0,percent:0,target:85});
+  assert.deepEqual(list.body.metrics.materials,{numerator:0,denominator:1,excluded:0,percent:0,target:90});
+  assert.deepEqual(list.body.metrics.geography,{numerator:1,denominator:1,excluded:0,percent:100,target:100});
+  const managerMetrics=list.body.metricsByManager.find(x=>Number(x.id)===1);
+  assert.ok(managerMetrics && managerMetrics.metrics.qualification.denominator===1,'метрики сгруппированы по ответственному на момент проверки');
+  const addMetricSample=async(name,heardStatuses)=>{
+    const c=await call('/api/contacts',{method:'POST',body:JSON.stringify({name,phone:`79${String(Math.floor(Math.random()*1e9)).padStart(9,'0')}`,responsible_id:1,source:'site'})});
+    const d=await call('/api/deals',{method:'POST',body:JSON.stringify({title:`Метрика ${name}`,contact_id:c.body.id,responsible_id:1})});
+    const draft=await call('/api/quality/reviews',{method:'POST',body:JSON.stringify({deal_id:d.body.id})});
+    const qd=(await call('/api/quality/reviews/'+draft.body.id)).body;
+    const blankEvidence=criteria=>criteria.map(x=>({key:x.key,status:'unknown',evidence_source:'crm',message_id:null,evidence_text:'Данных для уверенного вывода недостаточно.',evidence_confidence:'needs_review'}));
+    const sampleFacts=Object.fromEntries(['object_area','city','land','timeline','budget','payment'].map((key,i)=>[
+      key,{heard_status:heardStatuses[i],crm_status:'unknown'}
+    ]));
+    const result=await call('/api/quality/reviews/'+draft.body.id,{method:'PUT',body:JSON.stringify({
+      status:'complete',data_status:'partial',interaction_type:'other',period_start:reviewDays[0],period_end:reviewDays[1],
+      sample_rule:'manager_choice',facts:sampleFacts,items:blankEvidence(qd.criteria),growth_items:blankEvidence(qd.growthCriteria)
+    })});
+    assert.equal(result.status,200,`тестовая проверка «${name}» сохранена: ${JSON.stringify(result.body)}`);
+  };
+  await addMetricSample('Неопределённая квалификация',['yes','yes','yes','no','unknown','unknown']);
+  await addMetricSample('Определённый недобор',['yes','yes','no','no','no','no']);
+  await addMetricSample('Не применимый фактор',['yes','yes','yes','no','no','na']);
+  const metricCases=await call('/api/quality/reviews?days=30');
+  assert.deepEqual(metricCases.body.metrics.qualification,{numerator:1,denominator:3,excluded:1,percent:33.3,target:75},
+    'неоднозначная выборка и не применимый фактор не превращаются в штраф, определённые случаи остаются в знаменателе');
 
   const blank = await call('/api/quality/reviews', { method: 'POST', body: JSON.stringify({ deal_id: deal.body.id }) });
   const blankItems = (await call('/api/quality/reviews/' + blank.body.id)).body.items.map(x => ({ key: x.criterion_key, status: '', evidence_source: '', message_id: null, evidence_text: '' }));
   const noContact = await call('/api/quality/reviews/' + blank.body.id, { method: 'PUT', body: JSON.stringify({
-    status: 'no_contact', data_notes: 'Менеджер ещё не связался с клиентом; оценивать нечего.', items: blankItems
+    status: 'no_contact', data_notes: 'Менеджер ещё не связался с клиентом; оценивать нечего.',
+    period_start:reviewDays[0],period_end:reviewDays[1],sample_rule:'manager_choice',items:blankItems
   }) });
-  assert.equal(noContact.status, 200, 'отсутствие разговора сохраняется отдельным статусом');
+  assert.equal(noContact.status, 200, 'отсутствие разговора сохраняется отдельно с периодом и основанием выборки');
   assert.equal(noContact.body.review.score, null, 'отсутствие разговора не превращается в ноль баллов');
   assert.equal((await call('/api/quality/reviews?days=30')).body.summary.no_contact, 1);
 
   const draft = await call('/api/quality/reviews', { method: 'POST', body: JSON.stringify({ deal_id: deal.body.id }) });
-  const bad = await call('/api/quality/reviews/' + draft.body.id, { method: 'PUT', body: JSON.stringify({ status: 'complete', data_status: 'complete', period_start: '2026-11-01', period_end: '2026-11-13', items: [] }) });
-  assert.equal(bad.status, 400, 'нельзя завершить разбор без 18 статусов и доказательств');
+  const bad = await call('/api/quality/reviews/' + draft.body.id, { method: 'PUT', body: JSON.stringify({ status: 'complete', data_status: 'complete', period_start: reviewDays[0], period_end: reviewDays[1], items: [] }) });
+  assert.equal(bad.status, 400, 'нельзя завершить разбор без всех статусов и подтверждений');
   assert.equal((await call('/api/quality/reviews/' + draft.body.id, { method: 'DELETE' })).status, 200, 'черновик можно удалить');
 });
 
@@ -1963,131 +2327,166 @@ test('рассылка: сегмент, расписание и отмена; к
   const savedH = h;
   h = { Authorization: 'Bearer ' + lmm.body.token };
   assert.equal((await call('/api/campaigns')).status, 200, 'менеджер видит список рассылок');
-  assert.equal((await call('/api/campaigns/' + c.body.id, { method: 'DELETE' })).status, 403, 'удаление только у админа');
-  assert.equal((await call('/api/campaigns/' + utcCamp.body.id + '/cancel', { method: 'POST', body: '{}' })).status, 403, 'чужую рассылку менеджер не отменяет');
-  assert.equal((await call('/api/campaigns/' + utcCamp.body.id + '/start', { method: 'POST', body: '{}' })).status, 403, 'чужую рассылку менеджер не запускает');
+  assert.equal((await call('/api/campaigns/' + c.body.id, { method: 'DELETE' })).status, 404, 'история чужой рассылки скрыта, чтобы не раскрывать её наличие');
+  assert.equal((await call('/api/campaigns/' + utcCamp.body.id + '/cancel', { method: 'POST', body: '{}' })).status, 404, 'чужая рассылка скрыта от менеджера при попытке отмены');
+  assert.equal((await call('/api/campaigns/' + utcCamp.body.id + '/start', { method: 'POST', body: '{}' })).status, 404, 'чужая рассылка скрыта от менеджера при попытке запуска');
+  const managerContact=await call('/api/contacts',{method:'POST',body:JSON.stringify({name:'Получатель менеджера',phone:'79005550022',email:'private-recipient@example.com'})});
+  assert.equal(managerContact.status,201);
+  const managerCampaign=await call('/api/campaigns',{method:'POST',body:JSON.stringify({name:'Личная рассылка',channel:'email',message:'Текст',scheduled_at:'2030-01-01T10:00',audience:{ids:[managerContact.body.id]}})});
+  assert.equal(managerCampaign.status,201,'менеджер создаёт рассылку по своей аудитории');
   h = savedH;
+  const transferredTo=await call('/api/users',{method:'POST',body:JSON.stringify({name:'Новый владелец получателя',email:'campaign-owner@example.com',password:'campaign-owner-123',role:'manager'})});
+  assert.equal(transferredTo.status,201);
+  assert.equal((await call('/api/contacts/'+managerContact.body.id,{method:'PATCH',body:JSON.stringify({responsible_id:transferredTo.body.id})})).status,200,'администратор передал контакт');
+  h={Authorization:'Bearer '+lmm.body.token};
+  const privateCampaign=await call('/api/campaigns/'+managerCampaign.body.id);
+  assert.equal(privateCampaign.status,200,'автор видит свою историю рассылки');
+  assert.equal(privateCampaign.body.items[0].contact_id,null,'после передачи контакта ID получателя скрыт');
+  assert.equal(privateCampaign.body.items[0].contact_name,'Карточка недоступна');
+  assert.equal(privateCampaign.body.items[0].address,'','номер или e-mail переданного контакта не раскрывается');
+  assert.equal((await call('/api/campaigns/'+managerCampaign.body.id,{method:'DELETE'})).status,403,'менеджер не удаляет даже собственную историю рассылки');
+  h = savedH;
+  assert.equal((await call('/api/campaigns/'+managerCampaign.body.id,{method:'DELETE'})).status,200,'администратор удаляет тестовую рассылку');
   assert.equal((await call('/api/campaigns/' + c.body.id, { method: 'DELETE' })).status, 200);
   assert.equal((await call('/api/campaigns/' + utcCamp.body.id, { method: 'DELETE' })).status, 200);
   await call('/api/settings', { method: 'PUT', body: JSON.stringify({ SMTP_HOST: '' }) });
   await new Promise(r => setTimeout(r, 500)); // копия настроек в файле гасится вместе с ключами
 });
 
-test('партнёр: отдельный вход, только свои лиды', async () => {
-  const u = await call('/api/users', { method: 'POST', body: JSON.stringify({ name: 'Партнёр Север', email: 'partner@example.com', password: 'partnerpassword1', role: 'partner' }) });
-  assert.equal(u.status, 201);
-  const badRole = await call('/api/users', { method: 'POST', body: JSON.stringify({ name: 'Хакер', email: 'hacker@example.com', password: 'hackerpassword1', role: 'hacker' }) });
-  assert.equal(badRole.status, 400, 'неизвестная роль отклонена');
-  // чужая сделка создаётся до входа партнёра — на неё он не должен видеть ничего
-  const fd = await call('/api/deals', { method: 'POST', body: JSON.stringify({ title: 'Чужой лид', amount: 10 }) });
-  assert.equal(fd.status, 201);
-  // чужая переписка с вложением: этот файл партнёру не должен достаться
-  const PNG_B64 = Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==', 'base64').toString('base64');
-  const fContact = await call('/api/contacts', { method: 'POST', body: JSON.stringify({ name: 'Чужой клиент с файлом', phone: '+79000000009' }) });
-  assert.equal(fContact.status, 201);
-  const fConv = await call('/api/conversations', { method: 'POST', body: JSON.stringify({ contact_id: fContact.body.id, chat_type: 'whatsapp' }) });
-  assert.equal(fConv.status, 201, 'переписка чужого клиента создана');
-  const alienFile = await call(`/api/conversations/${fConv.body.id}/upload`, { method: 'POST', body: JSON.stringify({ filename: 'dogovor.png', contentType: 'image/png', dataBase64: PNG_B64 }) });
-  assert.equal(alienFile.status, 201, 'файл в чужой переписке загружен');
-  await call(`/api/conversations/${fConv.body.id}/messages`, { method: 'POST', body: JSON.stringify({ body: '', contentUri: alienFile.body.url, contentName: alienFile.body.name, contentType: alienFile.body.contentType }) });
-  // справочник компаний партнёру нужен для его же карточек, но только в объёме
-  // его лидов: вторая компания к его клиентам и сделкам не привязана
-  const fcOwn = await call('/api/companies', { method: 'POST', body: JSON.stringify({ name: 'Компания его клиента' }) });
-  assert.equal(fcOwn.status, 201);
-  const fcOther = await call('/api/companies', { method: 'POST', body: JSON.stringify({ name: 'Чужая компания' }) });
-  assert.equal(fcOther.status, 201);
-  const fcContact = await call('/api/contacts', { method: 'POST', body: JSON.stringify({ name: 'Клиент партнёра от офиса', phone: '+79000000011', responsible_id: u.body.id, company_id: fcOwn.body.id }) });
-  assert.equal(fcContact.status, 201, 'офис передал партнёру клиента');
-  const lp = await readyLogin('/api/auth/login', { method: 'POST', body: JSON.stringify({ email: 'partner@example.com', password: 'partnerpassword1' }) });
-  const savedH = h;
-  h = { Authorization: 'Bearer ' + lp.body.token };
-  for (const path of ['/api/analytics', '/api/settings', '/api/quality', '/api/campaigns', '/api/competitors', '/api/search']) {
-    const r = await call(path);
-    assert.ok(r.status === 403, path + ' закрыт для партнёра, получен ' + r.status);
-  }
-  // компании: форма клиента и карточка сделки без справочника не работали, поэтому
-  // чтение открыто, но только по его собственным карточкам, а правка закрыта
-  const comps = await call('/api/companies');
-  assert.equal(comps.status, 200, 'справочник компаний для его карточек доступен');
-  assert.deepEqual(comps.body.map(x => x.id), [fcOwn.body.id], 'видна только компания его клиента');
-  assert.equal((await call('/api/companies', { method: 'POST', body: JSON.stringify({ name: 'Своя компания' }) })).status, 403, 'создавать компании партнёр не может');
-  assert.equal((await call('/api/companies/' + fcOther.body.id, { method: 'PATCH', body: JSON.stringify({ name: 'Переименовать' }) })).status, 403, 'править компании партнёр не может');
-  assert.equal((await call('/api/deals')).body.deals.length, 0, 'чужих сделок не видно');
-  const d = await call('/api/deals', { method: 'POST', body: JSON.stringify({ title: 'Лид партнёра', amount: 100000 }) });
-  assert.equal(d.status, 201, 'партнёр создаёт себе лид');
-  const board = await call('/api/deals');
-  assert.equal(board.body.deals.length, 1, 'на доске только своя сделка');
-  assert.equal(board.body.deals[0].responsible_id, u.body.id, 'ответственный — сам партнёр');
-  assert.equal((await call('/api/deals/' + fd.body.id)).status, 403, 'чужая сделка закрыта');
-  const c = await call('/api/contacts', { method: 'POST', body: JSON.stringify({ name: 'Клиент партнёра', phone: '+79000000001' }) });
-  assert.equal(c.status, 201);
-  const contacts = await call('/api/contacts');
-  assert.equal(contacts.body.length, 2, 'в клиентах только свои');
-  assert.ok(contacts.body.every(x => [c.body.id, fcContact.body.id].includes(x.id)), 'чужих клиентов в списке нет');
-  // рабочий стол партнёра: счётчики для меню считаются по его данным, а сводка
-  // по компании (выручка, потери, лента, чужие сделки) ему не отдаётся
-  const dash = await call('/api/dashboard');
-  assert.equal(dash.status, 200, 'счётчики в меню партнёру доступны');
-  assert.equal(dash.body.dealsTotal, 1, 'считаются только его сделки');
-  assert.equal(dash.body.activeDealsSum, 100000, 'сумма только его сделок');
-  assert.equal(dash.body.contacts, 2, 'считаются только его клиенты');
-  assert.equal(dash.body.revenue, 0, 'выручка компании партнёру не отдаётся');
-  assert.equal(dash.body.lostSum, 0, 'потери компании партнёру не отдаются');
-  assert.equal(dash.body.companies, 0, 'число компаний партнёру не отдаётся');
-  assert.deepEqual(dash.body.activities, [], 'лента действий компании пустая');
-  assert.deepEqual(dash.body.recentDeals, [], 'чужих сделок в подборке нет');
-  assert.deepEqual(dash.body.stages, [], 'распределение по этапам компании не отдаётся');
-  assert.equal((await call('/api/contacts/' + c.body.id, { method: 'PATCH', body: JSON.stringify({ responsible_id: 1 }) })).status, 400, 'передать клиента другому нельзя');
-  const users = await call('/api/users');
-  assert.equal(users.body.length, 1, 'список сотрудников — только он сам');
-  assert.equal(users.body[0].id, u.body.id);
-  assert.equal((await call('/api/notes', { method: 'POST', body: JSON.stringify({ entity_type: 'deals', entity_id: d.body.id, body: 'Звонок состоялся' }) })).status, 201, 'заметка к своей сделке');
-  assert.equal((await call('/api/notes', { method: 'POST', body: JSON.stringify({ entity_type: 'deals', entity_id: fd.body.id, body: 'чужое' }) })).status, 403, 'заметка к чужой сделке закрыта');
-  // состав сделки: партнёр собирает свой лид из позиций, чужую сделку не трогает
-  assert.equal((await call('/api/deals/' + d.body.id + '/products')).status, 200, 'состав своей сделки виден');
-  assert.equal((await call('/api/deals/' + fd.body.id + '/products')).status, 403, 'состав чужой сделки закрыт');
-  const pos = await call('/api/deals/' + d.body.id + '/products', { method: 'POST', body: JSON.stringify({ name: 'Дом 6 на 8', price: 700000, qty: 1 }) });
-  assert.equal(pos.status, 201, 'позицию в свою сделку добавил');
-  assert.equal((await call('/api/deals/' + fd.body.id + '/products', { method: 'POST', body: JSON.stringify({ name: 'чужое', price: 1, qty: 1 }) })).status, 403, 'в чужую сделку позиция не добавляется');
-  assert.equal((await call('/api/deal_products/' + pos.body.id, { method: 'PATCH', body: JSON.stringify({ qty: 2 }) })).status, 200, 'свою позицию правит');
-  assert.equal((await call('/api/deals/' + d.body.id)).body.deal.amount, 1400000, 'сумма сделки пересчитана по позициям');
-  // документы по своей сделке: печать и отправка доступны, чужая сделка закрыта
-  assert.equal((await call('/api/deals/' + d.body.id + '/print?doc=quote')).status, 200, 'КП своей сделки печатается');
-  assert.equal((await call('/api/deals/' + d.body.id + '/print?doc=invoice')).status, 200, 'счёт своей сделки печатается');
-  assert.equal((await call('/api/deals/' + fd.body.id + '/print?doc=quote')).status, 403, 'чужое КП закрыто');
-  assert.equal((await call('/api/deals/' + fd.body.id + '/send-doc', { method: 'POST', body: JSON.stringify({ doc: 'quote' }) })).status, 403, 'отправка по чужой сделке закрыта');
-  assert.equal((await call('/api/deal_products/' + pos.body.id, { method: 'DELETE' })).status, 200, 'свою позицию удаляет');
-  assert.equal((await call('/api/me/pref', { method: 'PATCH', body: JSON.stringify({ view: 'pipe' }) })).status, 200, 'любимый раздел сохраняется');
-  // переписка со своим клиентом: партнёр отвечает сам, чужой чат закрыт
-  const conv = await call('/api/conversations', { method: 'POST', body: JSON.stringify({ contact_id: c.body.id, chat_type: 'whatsapp' }) });
-  assert.equal(conv.status, 201, 'партнёр начинает переписку со своим клиентом');
-  const foreignConv = await call('/api/conversations', { method: 'POST', body: JSON.stringify({ contact_id: fd.body.id, chat_type: 'whatsapp' }) });
-  assert.ok(foreignConv.status === 403 || foreignConv.status === 404, 'чужому клиенту партнёр написать не может, статус ' + foreignConv.status);
-  const sent = await call('/api/conversations/' + conv.body.id + '/messages', { method: 'POST', body: JSON.stringify({ body: 'Здравствуйте', channel: 'whatsapp' }) });
-  assert.ok(sent.status !== 403, 'отправка в своём чате не закрыта, статус ' + sent.status);
-  assert.equal((await call('/api/templates')).status, 200, 'шаблоны ответов доступны');
-  // вложения чужих переписок партнёру закрыты: адрес файла не секрет, он уходит
-  // в уведомления и выгрузки, а чужой договор внешнему человеку видеть нельзя
-  const ownFile = await call(`/api/conversations/${conv.body.id}/upload`, { method: 'POST', body: JSON.stringify({ filename: 'smeta.png', contentType: 'image/png', dataBase64: PNG_B64 }) });
-  assert.equal(ownFile.status, 201, 'партнёр прикладывает файл к своему чату');
-  await call(`/api/conversations/${conv.body.id}/messages`, { method: 'POST', body: JSON.stringify({ body: '', contentUri: ownFile.body.url, contentName: ownFile.body.name, contentType: ownFile.body.contentType }) });
-  assert.equal((await fetch(base + ownFile.body.url, { headers: h })).status, 200, 'свой файл партнёр открывает');
-  assert.equal((await fetch(base + alienFile.body.url, { headers: h })).status, 403, 'чужой файл партнёру не отдаётся');
-  assert.equal((await fetch(base + alienFile.body.url, { headers: savedH })).status, 200, 'сотрудник офиса видит все вложения');
-  assert.equal((await fetch(base + alienFile.body.url)).status, 401, 'без входа файл не отдаётся никому');
-  const convList = await call('/api/conversations');
-  assert.ok(Array.isArray(convList.body) && convList.body.every(x => x.contact_id === c.body.id), 'в списке только свои переписки');
-  assert.equal((await call('/api/dashboard')).body.unreadMine, 0, 'своё отправленное сообщение не даёт непрочитанных');
-  h = savedH;
-  // общий поток событий не отдаёт партнёру чужие переписки и закрытые разделы
-  const partnerSock = { role: 'partner', userId: u.body.id };
-  const managerSock = { role: 'manager', userId: 1 };
-  assert.equal(partnerSeesEvent(partnerSock, 'message', { conversation_id: conv.body.id, title: 'Клиент партнёра', preview: 'текст', direction: 'in' }), true, 'своё сообщение приходит');
-  assert.equal(partnerSeesEvent(partnerSock, 'message', { conversation_id: 999999, title: 'Чужой клиент', preview: 'чужой текст', direction: 'in' }), false, 'чужое сообщение партнёру не уходит');
-  assert.equal(partnerSeesEvent(partnerSock, 'change', { table: 'deals' }), true, 'обновление своего раздела приходит');
-  assert.equal(partnerSeesEvent(partnerSock, 'change', { table: 'campaigns' }), false, 'чужой раздел не дёргает клиент партнёра');
-  assert.equal(partnerSeesEvent(managerSock, 'message', { conversation_id: 999999, title: 'Клиент', preview: 'текст', direction: 'in' }), true, 'сотрудникам офиса поток не урезается');
-  h = savedH;
+test('партнёр: доступ только по активной передаче и немедленно закрывается после отзыва', async () => {
+  const adminHeaders=h;
+  try {
+    const u = await call('/api/users', { method: 'POST', body: JSON.stringify({ name: 'Партнёр Север', email: 'partner@example.com', password: 'partnerpassword1', role: 'partner' }) });
+    assert.equal(u.status, 201);
+    const badRole = await call('/api/users', { method: 'POST', body: JSON.stringify({ name: 'Хакер', email: 'hacker@example.com', password: 'hackerpassword1', role: 'hacker' }) });
+    assert.equal(badRole.status, 400, 'неизвестная роль отклонена');
+    const fd = await call('/api/deals', { method: 'POST', body: JSON.stringify({ title: 'Чужой лид без передачи', amount: 10 }) });
+    assert.equal(fd.status, 201);
+    const PNG_B64 = Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==', 'base64').toString('base64');
+    const foreignContact = await call('/api/contacts', { method: 'POST', body: JSON.stringify({ name: 'Чужой клиент с файлом', phone: '+79000000009' }) });
+    assert.equal(foreignContact.status, 201);
+    const foreignConv = await call('/api/conversations', { method: 'POST', body: JSON.stringify({ contact_id: foreignContact.body.id, chat_type: 'whatsapp' }) });
+    assert.equal(foreignConv.status, 201);
+    const alienFile = await call(`/api/conversations/${foreignConv.body.id}/upload`, { method: 'POST', body: JSON.stringify({ filename: 'dogovor.png', contentType: 'image/png', dataBase64: PNG_B64 }) });
+    assert.equal(alienFile.status, 201);
+    await call(`/api/conversations/${foreignConv.body.id}/messages`, { method: 'POST', body: JSON.stringify({ body: '', contentUri: alienFile.body.url, contentName: alienFile.body.name, contentType: alienFile.body.contentType }) });
+
+    const fcOwn = await call('/api/companies', { method: 'POST', body: JSON.stringify({ name: 'Компания переданного клиента' }) });
+    const fcOther = await call('/api/companies', { method: 'POST', body: JSON.stringify({ name: 'Чужая компания' }) });
+    assert.equal(fcOwn.status, 201); assert.equal(fcOther.status, 201);
+    const fcContact = await call('/api/contacts', { method: 'POST', body: JSON.stringify({ name: 'Клиент партнёра от офиса', phone: '+79000000011', email: 'partner-customer@example.com', responsible_id: u.body.id, company_id: fcOwn.body.id }) });
+    assert.equal(fcContact.status, 201);
+    const adminId=db.prepare("SELECT id FROM users WHERE role='admin' ORDER BY id LIMIT 1").get().id;
+    const deal=await call('/api/deals',{method:'POST',body:JSON.stringify({title:'Сделка для передачи',amount:100000,stage:'new',pipeline_id:1,contact_id:fcContact.body.id,company_id:fcOwn.body.id,responsible_id:adminId})});
+    assert.equal(deal.status,201);
+    const otherDeal=await call('/api/deals',{method:'POST',body:JSON.stringify({title:'Другая сделка того же клиента',amount:50000,stage:'new',pipeline_id:1,contact_id:fcContact.body.id,responsible_id:adminId})});
+    assert.equal(otherDeal.status,201);
+    assert.equal((await call('/api/settings',{method:'PUT',body:JSON.stringify({PARTNER_TRANSFER_PIPELINE_ID:1,PARTNER_TRANSFER_ALLOWED_STAGES:'new'})})).status,200,'доступ включён только после явной настройки воронки и этапа');
+
+    const lp = await readyLogin('/api/auth/login', { method: 'POST', body: JSON.stringify({ email: 'partner@example.com', password: 'partnerpassword1' }) });
+    const partnerHeaders={Authorization:'Bearer '+lp.body.token};
+    h=partnerHeaders;
+    assert.equal((await call('/api/bulk',{method:'POST',body:JSON.stringify({table:'deals',action:'update',ids:[deal.body.id],patch:{priority:'high'}})})).status,403,'партнёр не выполняет массовые действия даже по переданной сделке');
+    for (const path of ['/api/analytics', '/api/settings', '/api/quality', '/api/campaigns', '/api/competitors']) {
+      assert.equal((await call(path)).status,403,path+' закрыт для партнёра');
+    }
+    assert.equal((await call('/api/deals')).body.deals.length,0,'одного ответственного недостаточно без активной передачи');
+    assert.equal((await call('/api/deals/'+deal.body.id)).status,403,'старая ссылка закрыта до передачи');
+    assert.equal((await call('/api/contacts')).body.length,0,'контакт без активной передачи не виден');
+    assert.equal((await call('/api/companies')).body.length,0,'компания без активной передачи не видна');
+    assert.equal((await call('/api/conversations')).body.length,0,'чат без активной передачи не виден');
+    assert.equal((await call('/api/search?q='+encodeURIComponent('Сделка для передачи'))).body.deals.length,0,'поиск до передачи пуст');
+    assert.equal((await call('/api/deals',{method:'POST',body:JSON.stringify({title:'Самостоятельная сделка',amount:1})})).status,403,'партнёр не создаёт неподтверждённые сделки');
+    assert.equal((await call('/api/contacts',{method:'POST',body:JSON.stringify({name:'Самостоятельный контакт'})})).status,403,'партнёр не заводит клиентов вне передачи');
+    assert.equal((await call('/api/deals/'+deal.body.id+'/print?doc=quote')).status,403,'печать закрыта до передачи');
+    assert.equal((await fetch(base+alienFile.body.url,{headers:h})).status,403,'старое вложение чужого чата закрыто');
+
+    h=adminHeaders;
+    const granted=await call('/api/partner-transfers',{method:'POST',body:JSON.stringify({deal_id:deal.body.id,partner_id:u.body.id,reason:'Согласована передача клиенту'})});
+    assert.equal(granted.status,201,'руководитель передал подходящую сделку партнёру');
+    h=partnerHeaders;
+    for (const path of ['/api/analytics', '/api/settings', '/api/quality', '/api/campaigns', '/api/competitors']) assert.equal((await call(path)).status,403,path+' остаётся закрытым');
+    const board=await call('/api/deals');
+    assert.equal(board.body.deals.length,1,'партнёр видит одну переданную сделку');
+    assert.deepEqual(board.body.pipelines.map(x=>x.id),[1],'партнёру отдана только разрешённая воронка');
+    assert.deepEqual(board.body.stages.map(x=>x.code),['new'],'этапы ограничены разрешённым списком');
+    assert.equal(board.body.deals[0].id,deal.body.id);
+    assert.equal((await call('/api/deals/'+fd.body.id)).status,403,'другая сделка закрыта');
+    const card=await call('/api/deals/'+deal.body.id);
+    assert.equal(card.status,200);
+    assert.equal(card.body.deal.amount,100000);
+    assert.equal(card.body.deal.responsible_id,undefined,'внутренний ответственный не раскрывается партнёру');
+    assert.equal(card.body.deal.custom,undefined,'неразрешённые пользовательские поля не раскрываются партнёру');
+    assert.equal((await call('/api/contacts')).body.map(x=>x.id).join(','),String(fcContact.body.id),'партнёру виден только клиент сделки');
+    const contacts=await call('/api/contacts/'+fcContact.body.id);
+    assert.equal(contacts.status,200);
+    assert.equal(contacts.body.responsible_id,undefined,'ответственный офиса не раскрывается');
+    assert.deepEqual((await call('/api/companies')).body.map(x=>x.id),[fcOwn.body.id],'справочник ограничен переданной сделкой');
+    assert.equal((await call('/api/companies/'+fcOther.body.id)).status,403,'чужая компания закрыта');
+    const search=await call('/api/search?q='+encodeURIComponent('Сделка для передачи'));
+    assert.equal(search.status,200);assert.equal(search.body.deals.length,1,'поиск находит переданную сделку');
+    assert.equal((await call('/api/search?q='+encodeURIComponent('Чужая компания'))).body.companies.length,0,'поиск не раскрывает чужие компании');
+    const dash = await call('/api/dashboard');
+    assert.equal(dash.body.dealsTotal,1);assert.equal(dash.body.activeDealsSum,100000);assert.equal(dash.body.contacts,1);
+    assert.equal(dash.body.revenue,0);assert.equal(dash.body.lostSum,0);assert.equal(dash.body.companies,0);
+    assert.deepEqual(dash.body.activities,[]);assert.deepEqual(dash.body.recentDeals,[]);assert.deepEqual(dash.body.stages,[]);
+    const users=await call('/api/users');assert.equal(users.body.length,1);assert.equal(users.body[0].id,u.body.id);
+    assert.equal((await call('/api/users')).body[0].email,undefined,'список сотрудников партнёру не раскрывает служебные сведения');
+    const task=await call('/api/tasks',{method:'POST',body:JSON.stringify({title:'Задача переданной сделки',deal_id:deal.body.id,contact_id:fcContact.body.id})});
+    assert.equal(task.status,201,'партнёр создаёт задачу только к переданной сделке');
+    assert.equal((await call('/api/tasks')).body.some(x=>x.id===task.body.id),true);
+    assert.equal((await call('/api/tasks',{method:'POST',body:JSON.stringify({title:'Чужая задача',deal_id:fd.body.id})})).status,403);
+    assert.equal((await call('/api/tasks/'+task.body.id,{method:'PATCH',body:JSON.stringify({title:'Обновлённая задача'})})).status,200);
+    assert.equal((await call('/api/deals/'+deal.body.id+'/products')).status,200,'состав своей сделки читается');
+    assert.equal((await call('/api/deals/'+deal.body.id+'/products',{method:'POST',body:JSON.stringify({name:'Позиция вне разрешения',price:700000,qty:1})})).status,403,'партнёр не меняет сумму через состав сделки');
+    assert.equal((await call('/api/deals/'+deal.body.id,{method:'PATCH',body:JSON.stringify({amount:1})})).status,403,'сумма — закрытое для изменения поле');
+    assert.equal((await call('/api/deals/'+deal.body.id,{method:'PATCH',body:JSON.stringify({stage:'deferred'})})).status,403,'переход вне разрешённых этапов закрыт');
+    assert.equal((await call('/api/deals/'+deal.body.id+'/print?doc=quote')).status,200,'по переданной сделке печать разрешена');
+    assert.equal((await call('/api/deals/'+deal.body.id+'/send-doc',{method:'POST',body:JSON.stringify({doc:'quote'})})).status!==403,true,'отправка документа по переданной сделке разрешена');
+    const conv=await call('/api/conversations',{method:'POST',body:JSON.stringify({contact_id:fcContact.body.id,chat_type:'whatsapp'})});
+    assert.equal(conv.status,201,'партнёр начинает чат только для переданного клиента');
+    const partnerStream={userId:u.body.id,role:'partner'};
+    assert.equal(partnerSeesEvent(partnerStream,'message',{conversation_id:conv.body.id,deal_id:deal.body.id,preview:'своё обращение'}),true,'SSE разрешает партнёру событие собственной переданной сделки');
+    assert.equal(partnerSeesEvent(partnerStream,'message',{conversation_id:conv.body.id,deal_id:otherDeal.body.id,preview:'внутренняя переписка'}),false,'SSE скрывает от партнёра сообщение офисной сделки в том же чате');
+    assert.equal(partnerSeesEvent(partnerStream,'message',{conversation_id:conv.body.id,deal_id:null,preview:'без привязки'}),false,'партнёр не получает сообщения без однозначной переданной сделки');
+    assert.equal(partnerSeesEvent(partnerStream,'message',{conversation_id:conv.body.id,preview:'нет ACL-контекста'}),false,'событие партнёра без контекста сделки закрыто по умолчанию');
+    db.prepare("INSERT INTO messages(conversation_id,deal_id,channel,direction,body,status,author) VALUES(?,?,'whatsapp','in','Вопрос по переданной сделке','inbound','Клиент')").run(conv.body.id,deal.body.id);
+    db.prepare("INSERT INTO messages(conversation_id,deal_id,channel,direction,body,status,author) VALUES(?,?,'whatsapp','in','Переписка по офисной сделке','inbound','Клиент')").run(conv.body.id,otherDeal.body.id);
+    const partnerChatList=await call('/api/conversations');
+    assert.equal(partnerChatList.body[0].unread,1,'непрочитанность считается по переданной сделке, не по другим сделкам клиента');
+    const partnerHistory=await call('/api/conversations/'+conv.body.id+'/messages');
+    assert.equal(partnerHistory.body.length,1,'партнёр получает переписку только своей переданной сделки');
+    assert.match(partnerHistory.body[0].body,/переданной сделке/);
+    assert.equal((await call('/api/dashboard')).body.unreadMine,0,'прочтение обновляет отметку отдельной сделки');
+    const sent=await call('/api/conversations/'+conv.body.id+'/messages',{method:'POST',body:JSON.stringify({body:'Здравствуйте',channel:'whatsapp'})});
+    assert.equal(sent.status,201);assert.equal(sent.body.message.deal_id,deal.body.id,'сообщение привязано к конкретной переданной сделке');
+    const remoteAttachment=db.prepare("INSERT INTO messages(conversation_id,deal_id,channel,direction,body,content_uri,status,author) VALUES(?,?,'whatsapp','in','Внешнее вложение','https://files.example.invalid/temporary.png','inbound','Клиент')").run(conv.body.id,deal.body.id);
+    const proxied=(await call('/api/conversations/'+conv.body.id+'/messages')).body.find(m=>Number(m.id)===Number(remoteAttachment.lastInsertRowid));
+    assert.equal(proxied.content_uri,`/api/messages/${remoteAttachment.lastInsertRowid}/file`,'партнёру не раскрывается временная внешняя ссылка на файл');
+    assert.equal((await call('/api/conversations/'+foreignConv.body.id+'/messages')).status,403,'чужая история закрыта');
+    assert.equal((await call('/api/templates')).status,200,'разрешённые шаблоны ответа доступны');
+    const ownFile=await call(`/api/conversations/${conv.body.id}/upload`,{method:'POST',body:JSON.stringify({filename:'smeta.png',contentType:'image/png',dataBase64:PNG_B64})});
+    assert.equal(ownFile.status,201);
+    await call(`/api/conversations/${conv.body.id}/messages`,{method:'POST',body:JSON.stringify({body:'',contentUri:ownFile.body.url,contentName:ownFile.body.name,contentType:ownFile.body.contentType})});
+    assert.equal((await fetch(base+ownFile.body.url,{headers:h})).status,200,'вложение переданной сделки доступно');
+    assert.equal((await fetch(base+alienFile.body.url,{headers:h})).status,403,'чужое вложение закрыто');
+    const convList=await call('/api/conversations');assert.ok(convList.body.length===1&&convList.body[0].contact_id===fcContact.body.id);
+    assert.equal((await call('/api/dashboard')).body.unreadMine,0);
+
+    h=adminHeaders;
+    assert.equal((await call('/api/partner-transfers/'+granted.body.id,{method:'DELETE',body:JSON.stringify({reason:'Доступ отозван офисом'})})).status,200,'передача отозвана с причиной');
+    h=partnerHeaders;
+    assert.equal((await call('/api/deals')).body.deals.length,0,'список закрывается сразу после отзыва');
+    assert.equal((await call('/api/deals/'+deal.body.id)).status,403,'старая ссылка на карточку закрывается сразу');
+    assert.equal((await call('/api/contacts/'+fcContact.body.id)).status,403,'старая ссылка на контакт закрывается сразу');
+    assert.equal((await call('/api/search?q='+encodeURIComponent('Сделка для передачи'))).body.deals.length,0,'поиск перестаёт находить сделку после отзыва');
+    assert.equal((await call('/api/conversations')).body.length,0,'чат пропадает после отзыва');
+    assert.equal((await call('/api/conversations/'+conv.body.id+'/messages')).status,403,'история и старые ссылки на сообщения закрываются');
+    assert.equal((await call(`/api/messages/${remoteAttachment.lastInsertRowid}/file`)).status,403,'прокси-адрес внешнего файла закрывается после отзыва');
+    assert.equal((await call('/api/conversations/'+conv.body.id+'/messages',{method:'POST',body:JSON.stringify({body:'Пишу после отзыва'})})).status,403,'отправка блокируется после отзыва');
+    assert.equal((await fetch(base+ownFile.body.url,{headers:h})).status,403,'старый URL вложения закрывается после отзыва');
+    assert.equal((await call('/api/deals/'+deal.body.id+'/print?doc=quote')).status,403,'печать закрывается после отзыва');
+  } finally { h=adminHeaders; }
 });
 
 test('карточка получает только свои записи, нагрузка сотрудников считается на сервере', async () => {
@@ -2167,4 +2566,204 @@ test('карточка получает только свои записи, на
   assert.ok(!('deals_total' in pPipes.body[0]), 'счётчики чужих воронок партнёру не отдаются');
   const pDeals = await call(`/api/deals?contact_id=${c1.body.id}`, { headers: ph });
   assert.ok(pDeals.body.deals.length === 0, 'чужие сделки партнёру не отдаются и с фильтром');
+});
+
+test('РОП и классификатор: команда, очередь, назначение, ограниченные поля и отчёты', async () => {
+  const adminHeaders=h,suffix=String(Date.now());
+  const made=[];
+  try {
+    const teamA=await call('/api/teams',{method:'POST',body:JSON.stringify({name:`Команда A ${suffix}`})});
+    const teamB=await call('/api/teams',{method:'POST',body:JSON.stringify({name:`Команда B ${suffix}`})});
+    assert.equal(teamA.status,201);assert.equal(teamB.status,201);
+    const noTeam=await call('/api/users',{method:'POST',body:JSON.stringify({name:'РОП без команды',email:`rop-no-team-${suffix}@example.com`,password:`RopNoTeam-${suffix}-Pwd!`,role:'rop'})});
+    assert.equal(noTeam.status,400,'руководителю нельзя выдать доступ без команды');
+    let n=0;
+    const createUser=async(role,teamId=null)=>{
+      const password=`RolePass-${role}-${suffix}-${++n}!`,email=`${role}-${suffix}-${n}@example.com`;
+      const created=await call('/api/users',{method:'POST',body:JSON.stringify({name:`${role} ${n} ${suffix}`,email,password,role,...(teamId?{team_id:teamId}:{})})});
+      assert.equal(created.status,201,`учётная запись ${role} создана: ${JSON.stringify(created.body)}`);
+      const login=await readyLogin('/api/auth/login',{method:'POST',body:JSON.stringify({email,password})});
+      const value={id:created.body.id,role,headers:{Authorization:'Bearer '+login.body.token},name:created.body.name};made.push(value);return value;
+    };
+    const rop=await createUser('rop',teamA.body.id);
+    const classifier=await createUser('classifier',teamA.body.id);
+    const classifierOther=await createUser('classifier',teamB.body.id);
+    const managerA=await createUser('manager',teamA.body.id);
+    const managerB=await createUser('manager',teamA.body.id);
+    const managerOff=await createUser('manager',teamA.body.id);
+    const managerOther=await createUser('manager',teamB.body.id);
+    for(const manager of [managerA,managerB,managerOther]){
+      const started=await call('/api/shifts/start',{method:'POST',headers:manager.headers,body:'{}'});
+      assert.equal(started.status,200,'смену начинает сам менеджер');
+    }
+    h=adminHeaders;
+    const createLead=async(title,source=`Тест ${suffix}`,contactId=null)=>{
+      const created=await call('/api/deals',{method:'POST',body:JSON.stringify({title,stage:'new',lead_source:source,contact_id:contactId})});
+      assert.equal(created.status,201,`сделка создана: ${JSON.stringify(created.body)}`);return created.body;
+    };
+    const older=await createLead(`Старая очередь ${suffix}`),newer=await createLead(`Новая очередь ${suffix}`),urgent=await createLead(`Срочный лид ${suffix}`);
+    const classificationContact=await call('/api/contacts',{method:'POST',body:JSON.stringify({name:`Контакт классификации ${suffix}`,phone:`+7900${suffix.slice(-7)}`})});
+    assert.equal(classificationContact.status,201);
+    const classLead=await createLead(`Разбор ${suffix}`,`Классификация ${suffix}`,classificationContact.body.id);
+    const offShiftLead=await createLead(`Без смены ${suffix}`);
+    const outsideLead=await createLead(`Вне команды ${suffix}`);
+    const qOld='2020-01-01 00:00:00',qMid='2025-01-01 00:00:00',qNew='2026-01-01 00:00:00';
+    for(const [deal,team,priority,queued] of [[older,teamA.body.id,'normal',qOld],[newer,teamA.body.id,'normal',qMid],[urgent,teamA.body.id,'urgent',qNew],[classLead,teamA.body.id,'normal',qNew],[offShiftLead,teamA.body.id,'normal',qNew],[outsideLead,teamB.body.id,'normal',qOld]])
+      db.prepare('UPDATE lead_routing SET queue_team_id=?,priority=?,queued_at=? WHERE deal_id=?').run(team,priority,queued,deal.id);
+
+    h=rop.headers;
+    const managers=(await call('/api/routing/managers')).body;
+    assert.ok(managers.some(m=>m.id===managerA.id)&&managers.some(m=>m.id===managerB.id),'список руководителя содержит менеджеров своей команды');
+    assert.ok(!managers.some(m=>m.id===managerOther.id),'чужая команда не попадает в список');
+    const availableClassifiers=await call('/api/classification/classifiers');
+    assert.equal(availableClassifiers.status,200);
+    assert.ok(availableClassifiers.body.some(c=>c.id===classifier.id)&&!availableClassifiers.body.some(c=>c.id===classifierOther.id),'классификаторы также ограничены командой');
+    const queue=(await call('/api/routing/queue')).body;
+    assert.ok(queue.queue.some(d=>d.id===classLead.id)&&!queue.queue.some(d=>d.id===outsideLead.id),'очередь ограничена командой');
+    const sortedIds=queue.queue.filter(d=>[older.id,newer.id,urgent.id].includes(d.id)).map(d=>d.id);
+    assert.deepEqual(sortedIds,[urgent.id,older.id,newer.id],'сначала срочные, затем обычные от старых к новым');
+    const forbiddenRop=[
+      ['/api/dashboard','GET'],['/api/deals','GET'],['/api/search?q=test','GET'],['/api/analytics','GET'],
+      ['/api/export/deals','GET'],['/api/settings','GET'],['/api/teams','GET'],['/api/conversations','GET'],
+      ['/api/bulk','POST']
+    ];
+    for(const [path,method] of forbiddenRop)assert.equal((await call(path,{method,...(method==='GET'?{}:{body:'{}'})})).status,403,`РОПу закрыт ${method} ${path}`);
+    assert.equal((await call('/api/reports/team?team_id='+teamB.body.id)).status,403,'руководитель не читает сводку другой команды');
+
+    const offShift=await call('/api/routing/assign',{method:'POST',body:JSON.stringify({deal_id:offShiftLead.id,manager_id:managerOff.id,reason:'Ручное назначение'})});
+    assert.equal(offShift.status,409,'ручное назначение не обходит требование активной смены');
+    const foreignAssign=await call('/api/routing/assign',{method:'POST',body:JSON.stringify({deal_id:outsideLead.id,manager_id:managerOther.id,reason:'Чужая команда'})});
+    assert.equal(foreignAssign.status,403,'руководитель не назначает сделки другой команды');
+    const assigned=await call('/api/routing/assign',{method:'POST',body:JSON.stringify({deal_id:older.id,manager_id:managerA.id,reason:'Менеджер на смене'})});
+    assert.equal(assigned.status,200,'руководитель может назначить подходящего менеджера на смене');
+    let assignedList=(await call('/api/routing/assigned')).body.assigned;
+    assert.ok(assignedList.some(d=>d.id===older.id)&&!assignedList.some(d=>d.id===outsideLead.id),'назначенные лиды ограничены командой');
+    const originalFirst=db.prepare('SELECT first_assigned_at,first_assigned_user_id FROM lead_routing WHERE deal_id=?').get(older.id);
+    assert.ok(originalFirst.first_assigned_at&&Number(originalFirst.first_assigned_user_id)===managerA.id,'первая передача хранится отдельно от текущей');
+    const originalStamp='2025-02-03 04:05:06';
+    db.prepare('UPDATE lead_routing SET first_assigned_at=?,first_assigned_user_id=? WHERE deal_id=?').run(originalStamp,managerA.id,older.id);
+    const returned=await call('/api/routing/return',{method:'POST',body:JSON.stringify({deal_id:older.id,reason:'Перераспределить нагрузку'})});
+    assert.equal(returned.status,200);
+    assert.equal((await call('/api/routing/assign',{method:'POST',body:JSON.stringify({deal_id:older.id,manager_id:managerB.id,reason:'Передача внутри команды'})})).status,200);
+    const afterReassign=db.prepare('SELECT first_assigned_at,first_assigned_user_id FROM lead_routing WHERE deal_id=?').get(older.id);
+    assert.equal(afterReassign.first_assigned_at,originalStamp,'возврат и переназначение не сбрасывают исходное время');
+    assert.equal(Number(afterReassign.first_assigned_user_id),managerA.id,'сохраняется первый ответственный');
+
+    h=adminHeaders;
+    const conversation=await call('/api/conversations',{method:'POST',body:JSON.stringify({contact_id:classificationContact.body.id,chat_type:'whatsapp'})});
+    assert.equal(conversation.status,201);
+    h=rop.headers;
+    db.prepare("INSERT INTO messages(conversation_id,deal_id,channel,direction,body,status,author) VALUES(?,?,'whatsapp','in','Нужен дом для постоянного проживания','inbound','Клиент')").run(conversation.body.id,classLead.id);
+    db.prepare("INSERT INTO messages(conversation_id,deal_id,channel,direction,body,status,author) VALUES(?,?,'whatsapp','out','Здравствуйте, мы получили обращение','sent','Автоответ')").run(conversation.body.id,classLead.id);
+    const classAssigned=await call('/api/classification/assign',{method:'POST',body:JSON.stringify({deal_id:classLead.id,classifier_id:classifier.id,reason:'Новая заявка на разбор'})});
+    assert.equal(classAssigned.status,200);
+    const classQueue=(await call('/api/classification/queue')).body;
+    assert.ok(classQueue.items.some(d=>d.id===classLead.id),'руководитель видит назначенный разбор');
+    assert.ok(classQueue.unassigned.some(d=>d.id===offShiftLead.id),'руководитель видит очередь без назначенного классификатора');
+
+    h=classifier.headers;
+    const ownQueue=await call('/api/classification/queue');
+    assert.equal(ownQueue.status,200);
+    assert.deepEqual(ownQueue.body.items.map(d=>d.id),[classLead.id],'классификатор видит только адресованные ему обращения');
+    const detail=await call('/api/classification/deals/'+classLead.id);
+    assert.equal(detail.status,200);
+    assert.equal(detail.body.deal.amount,undefined,'сумма не отправляется классификатору');
+    assert.equal(detail.body.deal.responsible_id,undefined,'ответственный не раскрывается классификатору');
+    assert.equal(detail.body.deal.suggested_manager_id,undefined,'внутренняя рекомендация менеджера не раскрывается классификатору');
+    assert.equal(detail.body.messages.length,1,'классификатор получает только входящие сообщения, не автоответ');
+    assert.match(detail.body.messages[0].body,/постоянного проживания/);
+    for(const path of ['/api/deals','/api/analytics','/api/export/deals','/api/search?q=разбор','/api/conversations','/api/classification/classifiers'])
+      assert.equal((await call(path)).status,403,`классификатору закрыт ${path}`);
+    assert.equal((await call('/api/deals/'+classLead.id,{method:'PATCH',body:JSON.stringify({amount:999999})})).status,403,'классификатор не меняет сумму сделки');
+    assert.equal((await call('/api/bulk',{method:'POST',body:JSON.stringify({table:'deals',ids:[classLead.id],action:'delete'})})).status,403,'массовые операции классификатору закрыты');
+    assert.equal((await call('/api/classification/deals/'+offShiftLead.id)).status,404,'чужая классификация скрыта по ID');
+    const classified=await call('/api/classification/deals/'+classLead.id,{method:'PATCH',body:JSON.stringify({topic:'Постоянное проживание',region:'Рига',direction:'Каркасный дом',classification_note:'Уточнить бюджет',status:'complete',suggested_manager_id:managerA.id,amount:777})});
+    assert.equal(classified.status,200,'классификатор изменяет только поля разметки');
+    assert.equal(classified.body.deal.suggested_manager_id,undefined,'ответ классификатора не раскрывает внутреннюю рекомендацию');
+    assert.equal(db.prepare('SELECT amount FROM deals WHERE id=?').get(classLead.id).amount,0,'присланная сумма проигнорирована');
+    assert.equal(db.prepare('SELECT responsible_id FROM deals WHERE id=?').get(classLead.id).responsible_id,null,'готовая разметка сама не запускает несогласованное назначение');
+    assert.equal(db.prepare('SELECT suggested_manager_id FROM lead_classifications WHERE deal_id=?').get(classLead.id).suggested_manager_id,null,'классификатор не может записать внутреннюю рекомендацию менеджера');
+
+    h=adminHeaders;
+    const slaSource=`SLA ${suffix}`;
+    const slaDeal=await createLead(`SLA с переназначением ${suffix}`,slaSource);
+    db.prepare('UPDATE lead_routing SET queue_team_id=?,queued_at=datetime(\'now\') WHERE deal_id=?').run(teamA.body.id,slaDeal.id);
+    h=rop.headers;
+    assert.equal((await call('/api/routing/assign',{method:'POST',body:JSON.stringify({deal_id:slaDeal.id,manager_id:managerA.id,reason:'Первая передача для SLA'})})).status,200);
+    const time=s=>new Date(Date.now()+s*1000).toISOString().slice(0,19).replace('T',' ');
+    const received=time(-20*60),firstAssigned=time(-10*60),currentAssigned=time(-2*60),firstResponse=time(-60);
+    db.prepare('UPDATE lead_routing SET received_at=?,received_time_source=\'provider\',first_assigned_at=?,first_assigned_user_id=?,assigned_at=?,first_response_at=?,first_response_user_id=? WHERE deal_id=?')
+      .run(received,firstAssigned,managerA.id,currentAssigned,firstResponse,managerA.id,slaDeal.id);
+    const adminSettings=adminHeaders;
+    h=adminSettings;
+    assert.equal((await call('/api/settings',{method:'PUT',body:JSON.stringify({SLA_ASSIGN_MINUTES:5,SLA_FIRST_RESPONSE_MINUTES:5})})).status,200);
+    h=rop.headers;
+    const from=new Date(Date.now()-86400000).toISOString().slice(0,10),to=new Date().toISOString().slice(0,10);
+    const query=new URLSearchParams({from,to,team_id:String(teamA.body.id),manager_id:String(managerA.id),source:slaSource});
+    const report=await call('/api/reports/team?'+query);
+    assert.equal(report.status,200);
+    assert.equal(report.body.totals.leads,1,'источник, менеджер и период фильтруют отчёт на сервере');
+    assert.equal(report.body.assignment.median_minutes,10,'время назначения идёт от первой передачи, не от переназначения');
+    assert.equal(report.body.first_response.median_minutes,9,'первый ответ считается от исходного назначения живому сотруднику');
+    assert.equal(report.body.assignment.violations,1,'нарушение порога назначения видно руководителю');
+    assert.equal(report.body.first_response.violations,1,'нарушение порога ответа видно руководителю');
+    const records=await call('/api/reports/team/records?'+new URLSearchParams({...Object.fromEntries(query),metric:'first_response'}));
+    assert.equal(records.status,200);assert.equal(records.body.records.length,1);
+    assert.equal(records.body.records[0].first_assigned_user_id,managerA.id,'в расшифровке виден первый ответственный, но не поля закрытой сделки');
+    assert.equal(records.body.records[0].assignment_minutes,10);
+    assert.equal(records.body.records[0].first_response_minutes,9);
+    const noCalls=await call('/api/reports/team/records?'+new URLSearchParams({from,to,metric:'calls'}));
+    assert.equal(noCalls.body.status,'нет данных','звонки без источника не выдумываются');
+    assert.equal((await call('/api/reports/team?from=bad&to=bad')).status,400,'неверный период отклонён');
+    h=managerA.headers;
+    assert.equal((await call('/api/reports/team')).status,403,'менеджер не открывает сводку РОПа');
+    const forbiddenManagerExport=await call('/api/export/deals');
+    assert.equal(forbiddenManagerExport.status,403,'менеджеру запрещён экспорт сделок на сервере');
+  } finally {
+    h=adminHeaders;
+    for(const user of made.filter(x=>x.role==='manager'))
+      await call('/api/shifts/end',{method:'POST',headers:user.headers,body:JSON.stringify({reason:'Завершение тестовой смены'})}).catch(()=>{});
+    await call('/api/settings',{method:'PUT',body:JSON.stringify({SLA_ASSIGN_MINUTES:'',SLA_FIRST_RESPONSE_MINUTES:''})}).catch(()=>{});
+  }
+});
+
+test('автоответ и ответ живого сотрудника имеют разный учёт в SLA', async () => {
+  const adminHeaders=h,suffix=String(Date.now());
+  const manager=await call('/api/users',{method:'POST',body:JSON.stringify({name:`SLA менеджер ${suffix}`,email:`sla-human-${suffix}@example.com`,password:`SlaHuman-${suffix}-Pwd!`,role:'manager'})});
+  assert.equal(manager.status,201);
+  const login=await readyLogin('/api/auth/login',{method:'POST',body:JSON.stringify({email:`sla-human-${suffix}@example.com`,password:`SlaHuman-${suffix}-Pwd!`})});
+  const managerHeaders={Authorization:'Bearer '+login.body.token};
+  const contact=await call('/api/contacts',{method:'POST',body:JSON.stringify({name:`Клиент автоответа ${suffix}`,phone:`+7901${suffix.slice(-7)}`,responsible_id:manager.body.id})});
+  assert.equal(contact.status,201);
+  const deal=await call('/api/deals',{method:'POST',body:JSON.stringify({title:`Проверка первого ответа ${suffix}`,stage:'new',contact_id:contact.body.id,responsible_id:manager.body.id})});
+  assert.equal(deal.status,201);
+  const conversation=await call('/api/conversations',{method:'POST',body:JSON.stringify({contact_id:contact.body.id,chat_type:'whatsapp'})});
+  assert.equal(conversation.status,201);
+  const rule=await call('/api/automations',{method:'POST',body:JSON.stringify({name:`SLA автоответ ${suffix}`,trigger_type:'message_in',trigger_value:'проверка sla',action_type:'send_message',action_value:'Получили ваше обращение',active:1})});
+  assert.equal(rule.status,201);
+  const mock=(await import('node:http')).createServer(async(req,res)=>{
+    for await(const _ of req){}
+    if(req.url==='/message'&&req.method==='POST'){res.writeHead(200,{'Content-Type':'application/json'});return res.end(JSON.stringify({messageId:`sla-mock-${Date.now()}`}));}
+    res.writeHead(404);res.end('{}');
+  });
+  await new Promise(resolve=>mock.listen(0,'127.0.0.1',resolve));
+  try{
+    h=adminHeaders;
+    await call('/api/settings',{method:'PUT',body:JSON.stringify({WAZZUP_API_KEY:'sla-test-key',WAZZUP_CHANNEL_ID:'sla-test-channel',WAZZUP_API_URL:`http://127.0.0.1:${mock.address().port}`})});
+    await call('/webhooks/generic',{method:'POST',body:JSON.stringify({channel:'whatsapp',chatType:'whatsapp',phone:contact.body.phone||`+7901${suffix.slice(-7)}`,name:contact.body.name,body:'Проверка SLA: нужен расчёт',external_id:`sla-in-${suffix}`})});
+    const auto=db.prepare('SELECT id,status,author FROM messages WHERE conversation_id=? AND automation_id=? ORDER BY id DESC LIMIT 1').get(conversation.body.id,rule.body.id);
+    assert.ok(auto&&auto.status==='sent'&&auto.author==='Автоматизация','проверенный автоответ реально отправлен через подставной Wazzup');
+    assert.equal(db.prepare('SELECT first_response_at FROM lead_routing WHERE deal_id=?').get(deal.body.id).first_response_at,null,'даже доставленный автоответ не закрывает SLA первого ответа');
+    h=managerHeaders;
+    const human=await call(`/api/conversations/${conversation.body.id}/messages`,{method:'POST',body:JSON.stringify({body:'Сотрудник ответил клиенту',chat_type:'whatsapp',deal_id:deal.body.id})});
+    assert.equal(human.status,201);
+    assert.equal(human.body.message.author,login.body.user.name,'ответ записан от имени живого сотрудника');
+    const response=db.prepare('SELECT first_response_at,first_response_user_id FROM lead_routing WHERE deal_id=?').get(deal.body.id);
+    assert.ok(response.first_response_at,'после живого ответа отметка SLA заполняется');
+    assert.equal(Number(response.first_response_user_id),manager.body.id,'для SLA сохраняется автор первого ответа');
+  }finally{
+    h=adminHeaders;mock.close();
+    await call('/api/automations/'+rule.body.id,{method:'DELETE'}).catch(()=>{});
+    await call('/api/settings',{method:'PUT',body:JSON.stringify({WAZZUP_API_KEY:'',WAZZUP_CHANNEL_ID:'',WAZZUP_API_URL:'https://api.wazzup24.com/v3'})}).catch(()=>{});
+  }
 });

@@ -4,6 +4,9 @@
 // Для любого источника всегда формируются прямые ссылки ручной проверки — они работают без API.
 import zlib from 'node:zlib';
 import dns from 'node:dns';
+import http from 'node:http';
+import https from 'node:https';
+import { isIP } from 'node:net';
 
 const digits = s => String(s || '').replace(/\D/g, '');
 // Контрольная цифра ИНН (10 знаков у юрлица, 12 у ИП). Опечатка в номере раньше
@@ -32,6 +35,203 @@ const LEVELS = [[25, 'низкий', '#16a34a'], [50, 'умеренный', '#ea
 const levelOf = score => LEVELS.find(([max]) => score < max)[1];
 const levelColor = score => LEVELS.find(([max]) => score < max)[2];
 const norm = s => String(s || '').toLowerCase().replace(/[«»"'`]/g, '').replace(/[^a-zа-я0-9]+/gi, ' ').trim();
+
+// SSRF-защита должна считать небезопасными не только RFC1918, но и все
+// специальные, локальные, тестовые, multicast и зарезервированные диапазоны.
+// Иначе, например, адреса CGNAT (100.64/10) или IPv4-mapped IPv6 обходят
+// неполный список «частных» сетей.
+const ipv4BigInt = value => {
+  if (isIP(String(value)) !== 4) return null;
+  return String(value).split('.').reduce((out, part) => (out << 8n) | BigInt(Number(part)), 0n);
+};
+function ipv6BigInt(value) {
+  let text = String(value || '').trim().toLowerCase();
+  if (text.startsWith('[') && text.endsWith(']')) text = text.slice(1, -1);
+  if (text.includes('%') || isIP(text) !== 6) return null;
+  const lastColon = text.lastIndexOf(':');
+  const dotted = text.slice(lastColon + 1);
+  if (dotted.includes('.')) {
+    const v4 = ipv4BigInt(dotted);
+    if (v4 === null) return null;
+    const high = Number((v4 >> 16n) & 0xffffn).toString(16);
+    const low = Number(v4 & 0xffffn).toString(16);
+    text = text.slice(0, lastColon + 1) + high + ':' + low;
+  }
+  const compression = text.indexOf('::');
+  let groups;
+  if (compression >= 0) {
+    if (text.indexOf('::', compression + 2) >= 0) return null;
+    const left = text.slice(0, compression).split(':').filter(Boolean);
+    const right = text.slice(compression + 2).split(':').filter(Boolean);
+    const zeroes = 8 - left.length - right.length;
+    if (zeroes < 1) return null;
+    groups = [...left, ...Array(zeroes).fill('0'), ...right];
+  } else {
+    groups = text.split(':');
+  }
+  if (groups.length !== 8 || groups.some(x => !/^[0-9a-f]{1,4}$/.test(x))) return null;
+  return groups.reduce((out, group) => (out << 16n) | BigInt(parseInt(group, 16)), 0n);
+}
+const inCidr = (address, network, prefix, bits) => {
+  const shift = BigInt(bits - prefix);
+  return (address >> shift) === (network >> shift);
+};
+const IPV4_BLOCKED = [
+  ['0.0.0.0',8], ['10.0.0.0',8], ['100.64.0.0',10], ['127.0.0.0',8],
+  ['169.254.0.0',16], ['172.16.0.0',12], ['192.0.0.0',24], ['192.0.2.0',24],
+  ['192.88.99.0',24], ['192.168.0.0',16], ['198.18.0.0',15], ['198.51.100.0',24],
+  ['203.0.113.0',24], ['224.0.0.0',4], ['240.0.0.0',4],
+].map(([network, prefix]) => [ipv4BigInt(network), prefix]);
+const IPV6_BLOCKED = [
+  // IETF protocol assignments, documentation, 6to4, NAT64 and discard-only space.
+  ['2000::',16], ['2001::',23], ['2001:db8::',32], ['2002::',16],
+  ['3fff::',20], ['64:ff9b::',96], ['64:ff9b:1::',48], ['100::',64],
+].map(([network, prefix]) => [ipv6BigInt(network), prefix]);
+const IPV6_GLOBAL_UNICAST = ipv6BigInt('2000::');
+export function isPrivateIp(ip) {
+  const value = String(ip || '').trim().replace(/^\[|\]$/g, '');
+  const family = isIP(value);
+  if (family === 4) {
+    const address = ipv4BigInt(value);
+    return address === null || IPV4_BLOCKED.some(([network, prefix]) => inCidr(address, network, prefix, 32));
+  }
+  if (family === 6) {
+    const address = ipv6BigInt(value);
+    if (address === null || !inCidr(address, IPV6_GLOBAL_UNICAST, 3, 128)) return true;
+    // Mapped/compatible addresses, unique-local, loopback, link-local and
+    // multicast are outside the global-unicast prefix; spell out mapped IPv4
+    // as blocked too, to avoid future prefix changes weakening this invariant.
+    if ((address >> 32n) === 0xffffn || (address >> 32n) === 0n) return true;
+    return IPV6_BLOCKED.some(([network, prefix]) => inCidr(address, network, prefix, 128));
+  }
+  return true;
+}
+const ALLOW_PRIVATE_FETCH = process.env.ALLOW_PRIVATE_FETCH === '1';
+const FETCH_MAX_BYTES = 8 * 1024 * 1024;
+
+function pinnedLookup(expectedHost, addresses) {
+  const expected = String(expectedHost || '').toLowerCase().replace(/\.$/, '');
+  return (hostname, options, callback) => {
+    if (typeof options === 'function') { callback = options; options = {}; }
+    const actual = String(hostname || '').toLowerCase().replace(/^\[|\]$/g, '').replace(/\.$/, '');
+    const done = (...args) => process.nextTick(() => callback(...args));
+    if (actual !== expected) return done(new Error('Запрошено неожиданное DNS-имя'));
+    const family = Number(options?.family) || 0;
+    const candidates = family ? addresses.filter(info => info.family === family) : addresses;
+    if (!candidates.length) return done(new Error('Для адреса нет проверенного DNS-результата'));
+    if (options?.all) return done(null, candidates.map(info => ({ ...info })));
+    return done(null, candidates[0].address, candidates[0].family);
+  };
+}
+
+function nodeRequest(url, options, body) {
+  const transport = url.protocol === 'https:' ? https : http;
+  return new Promise((resolve, reject) => {
+    let request;
+    try { request = transport.request(url, options, resolve); }
+    catch (error) { reject(error); return; }
+    request.once('error', reject);
+    if (body === undefined || body === null) { request.end(); return; }
+    if (typeof body === 'string' || Buffer.isBuffer(body) || ArrayBuffer.isView(body)) {
+      request.end(body);
+      return;
+    }
+    if (body instanceof ArrayBuffer) { request.end(Buffer.from(body)); return; }
+    request.destroy(new Error('Неподдерживаемый тип тела запроса'));
+  });
+}
+
+// Запрос привязывается к уже проверенному IP через http(s).request lookup.
+// Один dns.lookup перед соединением и повторный системный DNS-поиск в fetch()
+// создавали окно DNS-rebinding: между проверкой и подключением домен мог
+// разрешиться во внутренний адрес.
+export async function safeFetch(url, opt = {}, ms = 12000, hooks = {}) {
+  let u;
+  try { u = new URL(url); } catch { throw new Error('Некорректная ссылка'); }
+  if (!['http:', 'https:'].includes(u.protocol)) throw new Error('Только ссылки http/https');
+  if (u.username || u.password) throw new Error('Ссылка с логином и паролем запрещена');
+  const hostname = u.hostname.replace(/^\[|\]$/g, '');
+  const literalFamily = isIP(hostname);
+  let infos = [];
+  try {
+    infos = literalFamily
+      ? [{ address: hostname, family: literalFamily }]
+      : await (hooks.lookup || ((host, options) => dns.promises.lookup(host, options)))(hostname, { all: true, verbatim: true });
+  } catch { throw new Error('Не удалось узнать адрес сервера'); }
+  infos = (Array.isArray(infos) ? infos : []).map(info => ({
+    address: String(info?.address || ''), family: Number(info?.family) || isIP(info?.address || ''),
+  }));
+  if (!ALLOW_PRIVATE_FETCH && (!infos.length || infos.some(info => isPrivateIp(info.address))))
+    throw new Error('Ссылка ведёт на внутренний или специальный адрес — это запрещено политикой безопасности');
+  if (!infos.length) throw new Error('Не удалось узнать адрес сервера');
+
+  const headers = {};
+  const suppliedHeaders = opt.headers && typeof opt.headers.entries === 'function'
+    ? Object.fromEntries(opt.headers.entries()) : (opt.headers || {});
+  for (const [name, value] of Object.entries({
+    'User-Agent': 'Mozilla/5.0 (compatible; KarkasCRM)', Accept: '*/*',
+    'Accept-Encoding': 'gzip, deflate, br', ...suppliedHeaders,
+  })) {
+    const previous = Object.keys(headers).find(key => key.toLowerCase() === name.toLowerCase());
+    if (previous) delete headers[previous];
+    headers[name] = value;
+  }
+  const body = opt.body;
+  if (body !== undefined && body !== null && !Object.keys(headers).some(key => key.toLowerCase() === 'content-length')) {
+    const length = Buffer.isBuffer(body) ? body.length
+      : typeof body === 'string' ? Buffer.byteLength(body)
+        : ArrayBuffer.isView(body) ? body.byteLength : body instanceof ArrayBuffer ? body.byteLength : null;
+    if (length !== null) headers['Content-Length'] = length;
+  }
+  const timeoutMs = Number.isFinite(Number(ms)) ? Math.min(120000, Math.max(1, Math.trunc(Number(ms)))) : 12000;
+  const response = await (hooks.request || nodeRequest)(u, {
+    method: String(opt.method || 'GET').toUpperCase(), headers,
+    signal: AbortSignal.timeout(timeoutMs), lookup: pinnedLookup(hostname, infos),
+    autoSelectFamily: true, agent: false,
+  }, body);
+  const status = Number(response.statusCode) || 0;
+  if ([301, 302, 303, 307, 308].includes(status)) {
+    const loc = response.headers?.location;
+    response.destroy?.();
+    if (!loc) throw new Error('Пустое перенаправление');
+    const hops = Number(hooks.hops) || 0;
+    if (hops >= 5) throw new Error('Слишком много перенаправлений');
+    const next = new URL(String(loc), u).toString();
+    return safeFetch(next, opt, ms, { ...hooks, hops: hops + 1 });
+  }
+
+  const declared = Number(response.headers?.['content-length']);
+  if (Number.isFinite(declared) && declared > FETCH_MAX_BYTES) {
+    response.destroy?.();
+    throw new Error('Ответ слишком большой (более 8 МБ)');
+  }
+  const chunks = []; let total = 0;
+  try {
+    for await (const chunk of response) {
+      total += chunk.length;
+      if (total > FETCH_MAX_BYTES) {
+        response.destroy?.();
+        throw new Error('Ответ слишком большой (более 8 МБ)');
+      }
+      chunks.push(Buffer.from(chunk));
+    }
+  } catch (error) {
+    response.destroy?.();
+    throw error;
+  }
+  let result = Buffer.concat(chunks);
+  const encodings = String(response.headers?.['content-encoding'] || '').split(',').map(x => x.trim().toLowerCase()).filter(x => x && x !== 'identity').reverse();
+  for (const encoding of encodings) {
+    try {
+      if (encoding === 'gzip' || encoding === 'x-gzip') result = zlib.gunzipSync(result, { maxOutputLength: FETCH_MAX_BYTES });
+      else if (encoding === 'deflate') result = zlib.inflateSync(result, { maxOutputLength: FETCH_MAX_BYTES });
+      else if (encoding === 'br') result = zlib.brotliDecompressSync(result, { maxOutputLength: FETCH_MAX_BYTES });
+      else throw new Error('Неизвестный формат сжатия');
+    } catch { throw new Error('Ответ слишком большой, повреждён или использует неподдерживаемое сжатие'); }
+    if (result.length > FETCH_MAX_BYTES) throw new Error('Ответ слишком большой (более 8 МБ)');
+  }
+  return { ok: status >= 200 && status < 300, status, text: result.toString('utf8') };
+}
 
 // Насколько похожи названия позиций (0..1): сравнение цен и загрузка прайса
 // ищут «свою» позицию по названию, если нет артикула. Точное совпадение — 1.
@@ -174,7 +374,7 @@ export function migrateOurPricesToCatalog(db) {
 }
 
 export function createCompetitors(ctx) {
-  const { db, json, readBody, log, broadcast, getSetting, setSetting, rateLimit } = ctx;
+  const { db, json, readBody, log, logAccess, broadcast, getSetting, setSetting, rateLimit } = ctx;
   // проверки идут во внешние платные сервисы (ФНС, карты, отзывы): серия частых
   // запусков одним сотрудником не должна сжигать квоту заказчика
   const checkLimit = (res, user) => {
@@ -203,48 +403,6 @@ export function createCompetitors(ctx) {
   const URL_OF = { rusprofile: 'RUSPROFILE_URL', fns: 'FNS_API_URL', fedresurs: 'FEDRESURS_API_URL', kad: 'KAD_API_URL', google: 'GOOGLE_API_URL', '2gis': 'TWOGIS_API_URL', yandex: 'YANDEX_API_URL' };
 
   // ─────────────────────────── helpers ───────────────────────────
-  // SSRF-защита: пользовательские ссылки (прайс конкурента, « наша таблица по URL»)
-  // не должны тянуть данные из внутренней сети. Только http/https, только
-  // публичные IP, редиректы проверяются заново, размер ответа ограничен.
-  const isPrivateIp = ip => {
-    if (!ip) return true;
-    if (ip.includes('::ffff:')) ip = ip.split('::ffff:').pop(); // IPv4-mapped IPv6
-    const v6 = ip.includes(':');
-    if (v6) return ip === '::1' || ip.startsWith('fc') || ip.startsWith('fd') || ip.startsWith('fe80') || ip.startsWith('fe00');
-    const o = ip.split('.').map(Number);
-    if (o.length !== 4 || o.some(x => !Number.isFinite(x) || x < 0 || x > 255)) return true;
-    if (o[0] === 127 || o[0] === 10 || o[0] === 0) return true;
-    if (o[0] === 169 && o[1] === 254) return true;
-    if (o[0] === 192 && o[1] === 168) return true;
-    if (o[0] === 172 && o[1] >= 16 && o[1] <= 31) return true;
-    return false;
-  };
-  // ALLOW_PRIVATE_FETCH=1 — только для тестов и самохостинговых шлюзов в локальной сети
-  const ALLOW_PRIVATE = process.env.ALLOW_PRIVATE_FETCH === '1';
-  async function safeFetch(url, opt = {}, ms = 12000, hops = 0) {
-    let u;
-    try { u = new URL(url); } catch { throw new Error('Некорректная ссылка'); }
-    if (!['http:', 'https:'].includes(u.protocol)) throw new Error('Только ссылки http/https');
-    let infos = [];
-    try { infos = await dns.promises.lookup(u.hostname, { all: true }); } catch { throw new Error('Не удалось узнать адрес сервера'); }
-    if (!ALLOW_PRIVATE && (!infos.length || infos.some(i => isPrivateIp(i.address)))) throw new Error('Ссылка ведёт на внутренний адрес — это запрещено политикой безопасности');
-    const res = await fetch(url, { ...opt, redirect: 'manual', signal: AbortSignal.timeout(ms), headers: { 'User-Agent': 'Mozilla/5.0 (compatible; KarkasCRM)', Accept: '*/*', ...(opt.headers || {}) } });
-    if ([301, 302, 303, 307, 308].includes(res.status)) {
-      const loc = res.headers.get('location');
-      if (!loc) throw new Error('Пустое перенаправление');
-      if (hops >= 5) throw new Error('Слишком много перенаправлений');
-      return safeFetch(new URL(loc, url).toString(), opt, ms, hops + 1);
-    }
-    // ограничиваем размер ответа: читаем поток с потолком 8 МБ
-    const MAX = 8 * 1024 * 1024;
-    const chunks = []; let total = 0;
-    for await (const chunk of res.body ?? []) {
-      total += chunk.length;
-      if (total > MAX) { res.body?.cancel?.(); throw new Error('Ответ слишком большой (более 8 МБ)'); }
-      chunks.push(chunk);
-    }
-    return { ok: res.ok, status: res.status, text: Buffer.concat(chunks).toString('utf8') };
-  }
   const httpOnce = async (url, opt, ms) => {
     try {
       const res = await safeFetch(url, opt, ms);
@@ -894,6 +1052,10 @@ export function createCompetitors(ctx) {
   };
 
   async function handle(req, res, { p, u, user }) {
+    const readers = ['admin','manager','viewer'];
+    const writers = ['admin','manager'];
+    if (!readers.includes(user?.role)) return json(res, 403, { error: 'Раздел конкурентов доступен администратору, менеджеру и наблюдателю.' });
+    if (!['GET','HEAD'].includes(req.method) && !writers.includes(user.role)) return json(res, 403, { error: 'Менять данные конкурентов может только администратор или менеджер.' });
     const admin = async () => { if (user.role !== 'admin') { json(res, 403, { error: 'Только для администратора' }); return false } return true };
     // список источников и их статус
     if (p === '/api/competitor-sources') {
@@ -982,8 +1144,12 @@ export function createCompetitors(ctx) {
         return json(res, 201, { findings: list() });
       }
       if (req.method === 'DELETE' && mFind[2]) {
-        const r = db.prepare('DELETE FROM competitor_findings WHERE id=? AND competitor_id=?').run(Number(mFind[2]), id);
+        if (!await admin()) return;
+        const findingId=Number(mFind[2]);
+        const r = db.prepare('DELETE FROM competitor_findings WHERE id=? AND competitor_id=?').run(findingId, id);
         if (!r.changes) return json(res, 404, { error: 'Находка не найдена' });
+        logAccess?.(user,'competitor_finding_delete','competitor_findings',findingId,'DELETE');
+        log(`Удалена находка проверки конкурента ${id}`,'competitors',id,user.name);
         return json(res, 200, { deleted: true, findings: list() });
       }
       return json(res, 405, { error: 'Метод не поддерживается' });
@@ -991,20 +1157,31 @@ export function createCompetitors(ctx) {
     // Массовое удаление карточек конкурентов. Прайс-строки в price_rows
     // не имеют внешнего ключа, поэтому чистим их явно и одной транзакцией.
     if (p === '/api/competitors/bulk-delete' && req.method === 'POST') {
+      if (!await admin()) return;
       const b = await readBody(req);
-      const ids = [...new Set((b.ids || []).map(Number).filter(n => Number.isInteger(n) && n > 0))].slice(0, 200);
-      if (!ids.length) return json(res, 400, { error: 'Не выбрано ни одной карточки конкурента' });
-      let removed = 0;
+      const input=Array.isArray(b?.ids)?b.ids:null;
+      if(!input?.length)return json(res,400,{error:'Не выбрано ни одной карточки конкурента'});
+      if(input.length>200)return json(res,400,{error:'За один раз можно удалить не более 200 карточек'});
+      const parsed=input.map(value=>typeof value==='number'&&Number.isSafeInteger(value)?value
+        :typeof value==='string'&&/^\d+$/.test(value)?Number(value):NaN);
+      if(parsed.some(id=>!Number.isSafeInteger(id)||id<1))return json(res,400,{error:'Список карточек содержит некорректный номер'});
+      const ids=[...new Set(parsed)];
+      let removed=0;
       db.exec('BEGIN IMMEDIATE');
       try {
-        for (const id of ids) {
+        const marks=ids.map(()=>'?').join(',');
+        const rows=db.prepare(`SELECT id,name FROM competitors WHERE id IN (${marks})`).all(...ids);
+        if(rows.length!==ids.length){db.exec('ROLLBACK');return json(res,404,{error:'Одна или несколько карточек уже удалены. Обновите список и повторите.'});}
+        for(const id of ids){
           db.prepare("DELETE FROM price_rows WHERE scope='competitor' AND competitor_id=?").run(id);
-          removed += db.prepare('DELETE FROM competitors WHERE id=?').run(id).changes;
+          removed+=db.prepare('DELETE FROM competitors WHERE id=?').run(id).changes;
         }
         db.exec('COMMIT');
-      } catch (e) { try { db.exec('ROLLBACK') } catch {} throw e }
-      log(`Массовое удаление конкурентов: ${removed} карточек`, 'competitors', null, user.name);
-      return json(res, 200, { deleted: removed });
+      }catch(e){try{db.exec('ROLLBACK')}catch{}throw e;}
+      for (const id of ids) logAccess?.(user,'competitor_delete','competitors',id,'DELETE');
+      logAccess?.(user,'competitor_bulk_delete','competitors',ids.length,'POST');
+      log(`Массовое удаление конкурентов: ${removed} карточек`,'competitors',null,user.name);
+      return json(res,200,{deleted:removed});
     }
     const mId = p.match(/^\/api\/competitors\/(\d+)(?:\/(check|reviews|prices|report))?$/);
     if (mId) {
@@ -1025,10 +1202,22 @@ export function createCompetitors(ctx) {
         }
         const f = ['name', 'inn', 'ogrn', 'city', 'website', 'phone', 'notes', 'price_url']; const ks = Object.keys(b).filter(k => f.includes(k)); if (ks.length) db.prepare(`UPDATE competitors SET ${ks.map(k => k + '=?')} WHERE id=?`).run(...ks.map(k => b[k]), id); return json(res, 200, competitorFull(id)); }
       if (!action && req.method === 'DELETE') {
-        // у price_rows нет внешнего ключа на competitors: строки прайса
-        // конкурента удаляем явно, иначе они навсегда останутся в базе
-        db.prepare("DELETE FROM price_rows WHERE scope='competitor' AND competitor_id=?").run(id);
-        db.prepare('DELETE FROM competitors WHERE id=?').run(id);
+        if (!await admin()) return;
+        let name=comp.name||'';
+        db.exec('BEGIN IMMEDIATE');
+        try {
+          const current=db.prepare('SELECT name FROM competitors WHERE id=?').get(id);
+          if(!current){db.exec('ROLLBACK');return json(res,404,{error:'Конкурент не найден'});}
+          name=current.name||name;
+          // у price_rows нет внешнего ключа на competitors: строки прайса
+          // конкурента удаляем в той же транзакции, что и карточку
+          db.prepare("DELETE FROM price_rows WHERE scope='competitor' AND competitor_id=?").run(id);
+          const deleted=db.prepare('DELETE FROM competitors WHERE id=?').run(id);
+          if(!deleted.changes){db.exec('ROLLBACK');return json(res,404,{error:'Конкурент не найден'});}
+          db.exec('COMMIT');
+        } catch(e) { try{db.exec('ROLLBACK')}catch{} throw e; }
+        logAccess?.(user,'competitor_delete','competitors',id,'DELETE');
+        log(`Удалён конкурент «${name}»`,'competitors',id,user.name);
         return json(res, 200, { deleted: true });
       }
       if (action === 'report' && req.method === 'GET') return json(res, 200, competitorFull(id));
@@ -1049,7 +1238,14 @@ export function createCompetitors(ctx) {
     }
     if (p === '/api/reviews' && req.method === 'POST') { const b = await readBody(req); if (!b.competitor_id) return json(res, 400, { error: 'Не указан конкурент' }); const r = db.prepare('INSERT INTO reviews(competitor_id,source,rating,text,author,url) VALUES(?,?,?,?,?,?)').run(b.competitor_id, b.source || 'вручную', b.rating ?? null, b.text || '', b.author || user.name, b.url || ''); return json(res, 201, { id: r.lastInsertRowid }); }
     const mRev = p.match(/^\/api\/reviews\/(\d+)$/);
-    if (mRev && req.method === 'DELETE') { db.prepare('DELETE FROM reviews WHERE id=?').run(mRev[1]); return json(res, 200, { deleted: true }); }
+    if (mRev && req.method === 'DELETE') {
+      if (!await admin()) return;
+      const id=Number(mRev[1]),r=db.prepare('DELETE FROM reviews WHERE id=?').run(id);
+      if(!r.changes)return json(res,404,{error:'Отзыв не найден'});
+      logAccess?.(user,'competitor_review_delete','reviews',id,'DELETE');
+      log('Удалён отзыв конкурента','competitors',null,user.name);
+      return json(res,200,{deleted:true});
+    }
     if ((p === '/api/prices' || p === '/api/prices/ours') && req.method === 'POST') {
       const b = await readBody(req);
       if (p === '/api/prices/ours') b.scope = 'ours';
@@ -1062,10 +1258,13 @@ export function createCompetitors(ctx) {
       return json(res, 201, finishImport(out, null, user));
     }
     if (p === '/api/prices/export' && req.method === 'GET') {
+      // Выгрузка — отдельное право, не наследуется от просмотра прайса.
+      if (!await admin()) return;
       // «сгрузить» прайс обратно в таблицу: колонки те же, что при загрузке,
       // поэтому файл можно поправить в Excel и загрузить снова
       const scope = u.searchParams.get('scope') === 'competitor' ? 'competitor' : 'ours';
       const compId = scope === 'competitor' ? Number(u.searchParams.get('competitor') || 0) : null;
+      logAccess?.(user,'export_prices',scope==='ours'?'catalog':'competitor_prices',compId||'','GET');
       const rows = scope === 'ours'
         ? catalogPrices(db)
         : db.prepare('SELECT item,price,unit,sku,note FROM price_rows WHERE scope=? AND competitor_id=? ORDER BY item').all(scope, compId);

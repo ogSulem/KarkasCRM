@@ -58,7 +58,7 @@ test('первый администратор обязан заменить вр
   assert.equal((await call('/api/me/password', { method: 'POST', body: JSON.stringify({ old_password: ADMIN_TMP, new_password: 'короткий' }) }, first.body.token)).status, 400, 'личный пароль короче 12 символов не принимается');
   const wrong = await call('/api/me/password', { method: 'POST', body: JSON.stringify({ old_password: 'ЧужойПароль2026', new_password: ADMIN_PASS }) }, first.body.token);
   assert.equal(wrong.status, 400);
-  assert.match(wrong.body.error, /Старый пароль неверен/);
+  assert.match(wrong.body.error, /Временный пароль не совпал/);
 
   admin = await adminToken();
   assert.ok(admin, 'личный пароль задан, выдан новый токен');
@@ -114,7 +114,7 @@ test('сотрудник с временным паролем не видит д
   const oldToken = await call('/api/contacts', {}, token);
   assert.equal(oldToken.status, 401);
   assert.equal(oldToken.body.code, 'SESSION_REVOKED', 'старый токен отклоняется с понятной причиной, а не общим 401');
-  assert.match(oldToken.body.error, /Войдите заново/, 'сообщение объясняет, что делать дальше');
+  assert.match(oldToken.body.error, /Войдите снова/, 'сообщение объясняет, что делать дальше');
 
   assert.equal((await login(manager.email, manager.temp)).status, 401, 'выданный администратором пароль перестал действовать');
   assert.equal((await login(manager.email, manager.personal)).status, 200, 'работает личный пароль сотрудника');
@@ -134,7 +134,7 @@ test('сброс пароля администратором закрывает 
   const kicked = await call('/api/me', {}, live);
   assert.equal(kicked.status, 401, 'открытая вкладка сотрудника закрывается сразу');
   assert.equal(kicked.body.code, 'SESSION_REVOKED');
-  assert.match(kicked.body.error, /пароль сброшен|изменён администратором/i, 'человеку названа причина');
+  assert.match(kicked.body.error, /сменили или сбросили/i, 'человеку названа причина без неверного утверждения, кто именно сменил пароль');
 
   assert.ok(has('сброшен пароль, прежние сеансы закрыты'), 'сброс пароля виден в журнале');
   const line = journal().find(a => a.text.includes('сброшен пароль'));

@@ -11,7 +11,7 @@
   "scripts": {
     "start": "node --experimental-sqlite backend/src/server.js",
     "dev": "DATA_DIR=./data node --experimental-sqlite backend/src/server.js",
-    "test": "node --experimental-sqlite --test tests/api.test.js tests/competitors.test.js tests/notifications.test.mjs tests/db-hygiene.test.mjs",
+    "test": "node --experimental-sqlite --test tests/api.test.js tests/competitors.test.js tests/ssrf.test.mjs tests/notifications.test.mjs tests/db-hygiene.test.mjs",
     "test:tz": "TZ=Europe/Moscow node --experimental-sqlite --test tests/timezone.test.js",
     "test:install": "node --test tests/install-args.test.mjs",
     "test:update": "node --test tests/update-mode.test.mjs",
