@@ -1924,6 +1924,10 @@ try {
     window.__state.me.role = savedRole;
     check('партнёру разрешены воронка, переписка и задачи, а база клиентов и аналитика закрыты',
       partnerViews.pipe === true && partnerViews.inbox === true && partnerViews.tasks === true && partnerViews.contacts === false && partnerViews.analytics === false, JSON.stringify(partnerViews));
+    check('партнёру не предлагаются создание сделки и фильтр «Мои»',
+      appJsRaw.includes("canEdit() && !isPartner() ? `<button type=\"button\" class=\"btn-col-add\"")
+      && appJsRaw.includes("${isPartner() ? '' : `<button class=\"btn sm\" onclick=\"quickDeal(${cur.contact_id})\">+ Сделка</button>`}")
+      && appJsRaw.includes("${isPartner() ? '' : `<button class=\"${state.dealScope === 'mine' ? 'active' : ''}\" onclick=\"setDealScope('mine')\">Мои"), 'кнопки создания сделки и фильтр «Мои» скрыты для партнёра');
     check('пакетные действия видят администратор и менеджер, но не партнёр', partnerBulk === false && managerBulk === true && adminBulk === true);
     check('выгрузка и удаление общего справочника доступны только администратору',
       !managerExport && !managerCompetitorDelete && !viewerExport && !viewerCompetitorDelete && adminExport && adminCompetitorDelete

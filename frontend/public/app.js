@@ -1429,7 +1429,7 @@ async function pipe(v) {
 function pipeDraw(v, d) {
   $('#navDeals').textContent = d.deals.filter(x => !['won', 'lost'].includes(x.stage)).length;
   const q = (state.dealQuery || '').toLowerCase();
-  let baseDeals = state.dealScope === 'mine' ? d.deals.filter(x => x.responsible_id === meId())
+  let baseDeals = state.dealScope === 'mine' && !isPartner() ? d.deals.filter(x => x.responsible_id === meId())
     : state.dealScope === 'notask' ? d.deals.filter(x => !x.tasks_open && !['won', 'lost'].includes(x.stage))
     : state.dealScope === 'overdue' ? d.deals.filter(x => x.tasks_open > 0 && taskDueMeta(x.next_task_due).overdue && !['won', 'lost'].includes(x.stage))
     : d.deals;
@@ -1439,7 +1439,7 @@ function pipeDraw(v, d) {
 
   v.innerHTML = `${viewerNote()}<div class="card toolbar">
     <b>Воронка:</b><select style="width:auto" onchange="setPipeline(this.value)">${d.pipelines.map(p => `<option value="${p.id}" ${p.id === state.pipeline ? 'selected' : ''}>${esc(p.name)}</option>`).join('')}</select>
-    <span class="tabs" style="margin:0"><button class="${state.dealScope !== 'mine' && state.dealScope !== 'notask' && state.dealScope !== 'overdue' ? 'active' : ''}" onclick="setDealScope('all')">Все сделки</button><button class="${state.dealScope === 'mine' ? 'active' : ''}" onclick="setDealScope('mine')">Мои (${d.deals.filter(x => x.responsible_id === meId()).length})</button><button class="${state.dealScope === 'notask' ? 'active' : ''}" onclick="setDealScope('notask')">Без задач (${noTaskCount})</button><button class="${state.dealScope === 'overdue' ? 'active' : ''}" onclick="setDealScope('overdue')">Просрочено (${overdueCount})</button></span>
+    <span class="tabs" style="margin:0"><button class="${state.dealScope !== 'mine' && state.dealScope !== 'notask' && state.dealScope !== 'overdue' ? 'active' : ''}" onclick="setDealScope('all')">Все сделки</button>${isPartner() ? '' : `<button class="${state.dealScope === 'mine' ? 'active' : ''}" onclick="setDealScope('mine')">Мои (${d.deals.filter(x => x.responsible_id === meId()).length})</button>`}<button class="${state.dealScope === 'notask' ? 'active' : ''}" onclick="setDealScope('notask')">Без задач (${noTaskCount})</button><button class="${state.dealScope === 'overdue' ? 'active' : ''}" onclick="setDealScope('overdue')">Просрочено (${overdueCount})</button></span>
     <span class="tag" title="Сделок в текущем фильтре">Показано: ${shown.length}${shown.length !== shown.filter(x => !['won', 'lost'].includes(x.stage)).length ? ` · в работе: ${shown.filter(x => !['won', 'lost'].includes(x.stage)).length}` : ''}</span><span class="tag orange" title="Сумма активных сделок в фильтре">В работе на ${fmt(shown.filter(x => !['won', 'lost'].includes(x.stage)).reduce((a, x) => a + x.amount, 0))}</span>
     ${canExport() ? `<button class="btn sm" style="margin-left:auto" onclick="download('/api/export/deals','deals.csv')" title="Выгрузить сделки в CSV">${icon('download', 13)} Экспорт</button>` : ''}
     <input id="dealSearch" class="searchfield searchfield-sm" placeholder="Поиск по сделкам и клиентам" value="${esc(state.dealQuery || '')}" oninput="liveSearch('deals',()=>setDealQuery(this.value))">
@@ -1449,7 +1449,7 @@ function pipeDraw(v, d) {
     const colDeals = shown.filter(x => x.stage === s.code);
     const colSum = colDeals.reduce((a, x) => a + x.amount, 0);
     return `<div class="col" ${canEdit() ? `ondragover="dragOver(event,this)" ondragleave="this.classList.remove('drag-over')" ondrop="dropDeal(event,'${s.code}',this)"` : ''}>
-   <h3><span style="color:${esc(s.color)}">● ${esc(s.name)}</span><span style="display:inline-flex;align-items:center;gap:6px"><small style="font-weight:normal;color:var(--muted)">${fmt(colSum)}</small><span>${colDeals.length}</span>${canEdit() ? `<button type="button" class="btn-col-add" onclick="openDeal(null,'${s.code}')" title="Добавить сделку в этап «${esc(s.name)}»">${icon('plus', 12)}</button>` : ''}</span></h3>
+   <h3><span style="color:${esc(s.color)}">● ${esc(s.name)}</span><span style="display:inline-flex;align-items:center;gap:6px"><small style="font-weight:normal;color:var(--muted)">${fmt(colSum)}</small><span>${colDeals.length}</span>${canEdit() && !isPartner() ? `<button type="button" class="btn-col-add" onclick="openDeal(null,'${s.code}')" title="Добавить сделку в этап «${esc(s.name)}»">${icon('plus', 12)}</button>` : ''}</span></h3>
    <div class="deals">${dealColHtml(colDeals, s)}</div></div>`;
   }).join('')}</div>
   <div id="dropCloseBar" class="drop-close-bar hidden">
@@ -2181,7 +2181,7 @@ async function inbox(v) {
        <button type="button" class="tmpl-settings" onclick="go('settings','templates')">${icon('settings', 12)} настроить шаблоны</button>
      </div>
      <p class="form-hint" id="sendAccountHint" style="margin:-2px 0 0"></p></form>` : `<div class="composer"><p class="form-hint" style="margin:0">${icon('eye', 14)} Режим просмотра: переписка доступна для чтения, отвечает менеджер или администратор.</p></div>`}` : '<div class="empty">Выберите диалог</div>'}</div>
-   <div class="profile">${cur ? `<h3>Клиент</h3><p><b>${esc(displayTitle(cur.title))}</b>${cur.position ? `<br><small>${esc(cur.position)}</small>` : ''}</p><p>${icon('phone', 13)} ${esc(cur.phone ? prettyPhone(cur.phone) : '—')}<br>${icon('email', 13)} ${esc(cur.email || '—')}${cur.company ? `<br>${icon('company', 13)} ${esc(cur.company)}` : ''}${cur.source ? `<br>${icon('tag', 13)} Источник: ${esc(sourceLabel(cur.source))}` : ''}${cur.contact_responsible_name ? `<br>${icon('contact', 13)} Ответственный: ${esc(cur.contact_responsible_name)}` : ''}</p><p>Каналы: ${chan(cur.channels)}${(cur.channels || '').includes('email') ? ' <span class="tag grey">почта подключена</span>' : ''}</p><p><button class="btn sm" onclick="attachContact(${cur.contact_id})">Открыть карточку клиента</button></p><hr><div class="profile-actions">${cur.phone ? `<a class="btn sm" href="tel:${esc(String(cur.phone).replace(/[^+\d]/g, ''))}">${icon('phone', 13)} Позвонить</a>` : ''}${canEdit() ? `<button class="btn sm" onclick="openTask(null,{contact_id:${cur.contact_id}})">+ Задача</button><button class="btn sm" onclick="quickDeal(${cur.contact_id})">+ Сделка</button><button class="btn sm" onclick="quickNote(${cur.contact_id})">+ Заметка</button>` : ''}</div>` : '<div class="empty">Выберите чат</div>'}</div></div>`;
+   <div class="profile">${cur ? `<h3>Клиент</h3><p><b>${esc(displayTitle(cur.title))}</b>${cur.position ? `<br><small>${esc(cur.position)}</small>` : ''}</p><p>${icon('phone', 13)} ${esc(cur.phone ? prettyPhone(cur.phone) : '—')}<br>${icon('email', 13)} ${esc(cur.email || '—')}${cur.company ? `<br>${icon('company', 13)} ${esc(cur.company)}` : ''}${cur.source ? `<br>${icon('tag', 13)} Источник: ${esc(sourceLabel(cur.source))}` : ''}${cur.contact_responsible_name ? `<br>${icon('contact', 13)} Ответственный: ${esc(cur.contact_responsible_name)}` : ''}</p><p>Каналы: ${chan(cur.channels)}${(cur.channels || '').includes('email') ? ' <span class="tag grey">почта подключена</span>' : ''}</p><p><button class="btn sm" onclick="attachContact(${cur.contact_id})">Открыть карточку клиента</button></p><hr><div class="profile-actions">${cur.phone ? `<a class="btn sm" href="tel:${esc(String(cur.phone).replace(/[^+\d]/g, ''))}">${icon('phone', 13)} Позвонить</a>` : ''}${canEdit() ? `<button class="btn sm" onclick="openTask(null,{contact_id:${cur.contact_id}})">+ Задача</button>${isPartner() ? '' : `<button class="btn sm" onclick="quickDeal(${cur.contact_id})">+ Сделка</button>`}<button class="btn sm" onclick="quickNote(${cur.contact_id})">+ Заметка</button>` : ''}</div>` : '<div class="empty">Выберите чат</div>'}</div></div>`;
   if (cur && canEdit()) { refreshSendAccount(cur.id); const t = $('#msgText'); if (t) { t.value = state.drafts[cur.id] || ''; autoGrow(t); } }
   const mDiv = $('#chatMsgs');
   if (mDiv) mDiv.scrollTop = mDiv.scrollHeight;
@@ -3218,9 +3218,9 @@ async function saveProduct(e, id) {
 
 /* ---------- analytics ---------- */
 // Вкладки аналитики: «Продажи» — цифры компании, «Команда» — качество работы
-// менеджеров, прежде отдельный раздел контроля качества. Вкладку «Команда» видит
-// администратор: разбор сотрудников не предназначен менеджеру и наблюдателю, и
-// сервер отвечает на /api/quality только администратору.
+// менеджеров, прежде отдельный раздел контроля качества. Вкладку «Команда» видят
+// администратор и РОП своей команды: разбор сотрудников не предназначен
+// менеджеру и наблюдателю, сервер отдаёт /api/quality только этим ролям.
 function analyticsTabs(tab, right = '') {
   if (state.me?.role === 'rop') {
     return `<div class="card toolbar"><div class="tabs" style="margin:0">

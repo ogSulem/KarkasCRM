@@ -2287,7 +2287,8 @@ test('обучения больше нет: маршрут закрыт, таб�
   assert.equal((await call('/api/training')).status, 404, 'маршрута обучения нет');
   assert.equal((await call('/api/training', { method: 'POST', body: JSON.stringify({ title: 'Как мы продаём', kind: 'text', body: 'текст' }) })).status, 404, 'материалы не создаются');
   assert.equal((await call('/api/training/1', { method: 'DELETE' })).status, 404, 'удалять нечего');
-  assert.equal((await call('/api/me/pref', { method: 'PATCH', body: JSON.stringify({ view: 'training' }) })).status, 400, 'обучение не сохраняется любимым разделом');
+  assert.equal((await call('/api/me/pref', { method: 'PATCH', body: JSON.stringify({ view: 'training' }) })).status, 200, 'обучающий портал партнёров сохраняется любимым разделом');
+  assert.equal((await call('/api/me/pref', { method: 'PATCH', body: JSON.stringify({ view: 'no-such-view' }) })).status, 400, 'неизвестный раздел отклоняется');
   assert.equal(db.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='training_items'").get(), undefined, 'таблица материалов удалена');
 });
 
@@ -2462,6 +2463,11 @@ test('партнёр: доступ только по активной перед
     assert.equal((await call('/api/tasks')).body.some(x=>x.id===task.body.id),true);
     assert.equal((await call('/api/tasks',{method:'POST',body:JSON.stringify({title:'Чужая задача',deal_id:fd.body.id})})).status,403);
     assert.equal((await call('/api/tasks/'+task.body.id,{method:'PATCH',body:JSON.stringify({title:'Обновлённая задача'})})).status,200);
+    const note = await call('/api/notes', { method: 'POST', body: JSON.stringify({ entity_type: 'deals', entity_id: deal.body.id, body: 'Заметка партнёра' }) });
+    assert.equal(note.status, 201, 'партнёр добавляет заметку к переданной сделке');
+    assert.equal((await call('/api/notes/' + note.body.id, { method: 'PATCH', body: JSON.stringify({ body: 'Исправленная заметка' }) })).status, 200, 'партнёр правит свою заметку');
+    assert.equal((await call('/api/notes/' + note.body.id, { method: 'PATCH', body: JSON.stringify({ entity_type: 'deals', entity_id: fd.body.id }) })).status, 403, 'партнёр не переносит заметку на чужую сделку');
+    assert.equal((await call('/api/notes/' + note.body.id, { method: 'DELETE' })).status, 200, 'партнёр удаляет свою заметку');
     assert.equal((await call('/api/deals/'+deal.body.id+'/products')).status,200,'состав своей сделки читается');
     assert.equal((await call('/api/deals/'+deal.body.id+'/products',{method:'POST',body:JSON.stringify({name:'Позиция вне разрешения',price:700000,qty:1})})).status,403,'партнёр не меняет сумму через состав сделки');
     assert.equal((await call('/api/deals/'+deal.body.id,{method:'PATCH',body:JSON.stringify({amount:1})})).status,403,'сумма — закрытое для изменения поле');
@@ -2470,6 +2476,7 @@ test('партнёр: доступ только по активной перед
     assert.equal((await call('/api/deals/'+deal.body.id,{method:'PATCH',body:JSON.stringify({stage:'new'})})).status,200,'партнёр двигает лид по согласованному этапу');
     assert.equal((await call('/api/deals/'+deal.body.id,{method:'PATCH',body:JSON.stringify({custom:{x:1}})})).status,403,'свои поля партнёру закрыты');
     // обучающий портал: партнёр читает, менеджер и РОП — нет, создаёт только администратор
+    assert.equal((await call('/api/me/pref', { method: 'PATCH', body: JSON.stringify({ view: 'training' }) })).status, 200, 'партнёр сохраняет «Обучение» любимым разделом');
     assert.equal((await call('/api/partner-training')).status,200,'партнёр читает обучающий портал');
     assert.equal((await call('/api/partner-training',{method:'POST',body:JSON.stringify({title:'Попытка партнёра'})})).status,403,'партнёр не ведёт материалы обучения');
     assert.equal((await call('/api/deals/'+deal.body.id+'/print?doc=quote')).status,200,'по переданной сделке печать разрешена');
@@ -2564,6 +2571,14 @@ test('рассылки: отписка исключает из сегмента 
     const empty = await call('/api/campaigns', { method: 'POST', body: JSON.stringify({ name: 'Всем отписавшимся', channel: 'email', message: 'текст', audience: { ids: [ok.body.id, out.body.id] } }) });
     assert.equal(empty.status, 400, 'рассылка только отписавшимся не создаётся');
     assert.match(empty.body.error, /не заполнен e-mail|не подходит/, 'ошибка объясняет причину');
+    // слово «стоп» внутри другого слова отпиской не считается
+    const stack = await call('/api/contacts', { method: 'POST', body: JSON.stringify({ name: 'Клиент Стопка', email: 'stack@example.com' }) });
+    await call('/webhooks/email', { method: 'POST', body: JSON.stringify({ from: 'stack@example.com', name: 'Клиент Стопка', subject: 'Re: Рассылка', text: 'Привезите стопку досок, пожалуйста' }) });
+    assert.equal(Number((await call('/api/contacts/' + stack.body.id)).body.email_opt_out), 0, '«стопка» не является отпиской');
+    // отдельное слово «Стоп» — отписка
+    const stop = await call('/api/contacts', { method: 'POST', body: JSON.stringify({ name: 'Клиент Стоп', email: 'stop@example.com' }) });
+    await call('/webhooks/email', { method: 'POST', body: JSON.stringify({ from: 'stop@example.com', name: 'Клиент Стоп', subject: 'Re: Рассылка', text: 'Стоп' }) });
+    assert.equal(Number((await call('/api/contacts/' + stop.body.id)).body.email_opt_out), 1, 'отдельное «Стоп» отмечает отписку');
   } finally { h = adminHeaders; }
 });
 

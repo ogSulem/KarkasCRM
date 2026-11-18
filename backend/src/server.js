@@ -1603,7 +1603,7 @@ export async function upsertIncoming({ channel = 'whatsapp', chatType = '', phon
   // Отписка от рассылок: клиент отвечает «Отписка» (или жмёт List-Unsubscribe
   // в письме). Отмечаем канал и больше не включаем его в рассылки. Само
   // сообщение сохраняется в переписке как обычное входящее.
-  if (direction !== 'out' && /отписк|unsubscribe|не\s+писать|стоп/i.test(String(body || '') + ' ' + String(subject || ''))) {
+  if (direction !== 'out' && /отписк|unsubscribe|не\s+писать|(^|[^а-яёa-z])стоп([^а-яёa-z]|$)/i.test(String(body || '') + ' ' + String(subject || ''))) {
     const col = channel === 'email' ? 'email_opt_out' : 'whatsapp_opt_out';
     if (Number(contact[col]) !== 1) {
       db.prepare(`UPDATE contacts SET ${col}=1 WHERE id=?`).run(contact.id);
@@ -3459,7 +3459,7 @@ export const server = http.createServer(async (req, res) => {
     if (p === '/api/me/pref' && req.method === 'PATCH') {
       const b = await readBody(req);
       const v = String(b.view || '');
-      if (!['dashboard', 'pipe', 'inbox', 'contacts', 'companies', 'tasks', 'products', 'competitors', 'analytics', 'settings', 'routing', 'classification'].includes(v)) return json(res, 400, { error: 'Неизвестный раздел' });
+      if (!['dashboard', 'pipe', 'inbox', 'contacts', 'companies', 'tasks', 'products', 'competitors', 'analytics', 'settings', 'routing', 'classification', 'training'].includes(v)) return json(res, 400, { error: 'Неизвестный раздел' });
       db.prepare('UPDATE users SET pref_view=? WHERE id=?').run(v, user.id);
       return json(res, 200, { ok: true });
     }
@@ -3483,7 +3483,7 @@ export const server = http.createServer(async (req, res) => {
     // дополнительно фильтруются по владельцу.
     if (user && user.role === 'partner' && p.startsWith('/api/')) {
       const PARTNER_GET = [/^\/api\/me$/, /^\/api\/meta$/, /^\/api\/events$/, /^\/api\/dashboard$/, /^\/api\/pipelines$/, /^\/api\/users$/, /^\/api\/search$/, /^\/api\/deals(\/\d+)?$/, /^\/api\/contacts(\/\d+)?$/, /^\/api\/tasks(\/\d+)?$/, /^\/api\/notes(\/\d+)?$/, /^\/api\/conversations$/, /^\/api\/conversations\/\d+\/messages$/, /^\/api\/messages\/\d+\/file$/, /^\/api\/templates$/, /^\/api\/custom-fields$/, /^\/api\/companies$/, /^\/api\/deals\/\d+\/(print|products)$/, /^\/api\/partner-training$/];
-      const PARTNER_WRITE = [/^\/api\/me\/(password|theme|pref)$/, /^\/api\/deals\/\d+$/, /^\/api\/tasks$/, /^\/api\/tasks\/\d+$/, /^\/api\/notes$/, /^\/api\/conversations$/, /^\/api\/conversations\/read$/, /^\/api\/conversations\/\d+\/(messages|upload|email)$/, /^\/api\/messages\/\d+\/refetch$/, /^\/api\/deals\/\d+\/send-doc$/];
+      const PARTNER_WRITE = [/^\/api\/me\/(password|theme|pref)$/, /^\/api\/deals\/\d+$/, /^\/api\/tasks$/, /^\/api\/tasks\/\d+$/, /^\/api\/notes$/, /^\/api\/notes\/\d+$/, /^\/api\/conversations$/, /^\/api\/conversations\/read$/, /^\/api\/conversations\/\d+\/(messages|upload|email)$/, /^\/api\/messages\/\d+\/refetch$/, /^\/api\/deals\/\d+\/send-doc$/];
       if (!(req.method === 'GET' || req.method === 'HEAD' ? PARTNER_GET : PARTNER_WRITE).some(re => re.test(p)))
         return json(res, 403, { error: 'Партнёру доступны его сделки, клиенты и задачи' });
       if (!partnerOwnsPath(user, p)) return json(res, 403, { error: 'Это чужая карточка: партнёр видит только свои лиды' });
@@ -4407,6 +4407,12 @@ export const server = http.createServer(async (req, res) => {
           if (b.responsible_id !== undefined && Number(b.responsible_id) !== Number(user.id)) return json(res, 400, { error: 'Партнёр отвечает только за свои карточки' });
           if (b.deal_id && !partnerOwns(user, 'deals', b.deal_id)) return json(res, 403, { error: 'Это чужая сделка' });
           if (b.contact_id && !partnerOwns(user, 'contacts', b.contact_id)) return json(res, 403, { error: 'Это чужой клиент' });
+          if (table === 'notes' && (b.entity_type !== undefined || b.entity_id !== undefined)) {
+            const cur=db.prepare('SELECT entity_type,entity_id FROM notes WHERE id=?').get(id);
+            const entityType=b.entity_type===undefined?cur?.entity_type:String(b.entity_type);
+            const entityId=b.entity_id===undefined?Number(cur?.entity_id):Number(b.entity_id);
+            if(!partnerOwns(user,entityType,entityId))return json(res,403,{error:'Заметку можно связать только с вашей переданной сделкой.'});
+          }
         } else if (user.role === 'manager') {
           if (b.responsible_id !== undefined && Number(b.responsible_id) !== Number(user.id)) return json(res,403,{error:'Менеджер может назначать ответственного только на себя.'});
           if (table === 'tasks' && b.deal_id && !managerOwns(user,'deals',Number(b.deal_id))) return json(res,403,{error:'Задачу можно связать только с вашей сделкой.'});
