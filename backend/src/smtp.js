@@ -41,7 +41,7 @@ const mimeTypes = /^(application|audio|image|message|model|text|video|multipart|
 
 // Письмо целиком, от заголовков до последней границы. Вынесено из sendMail,
 // чтобы структуру multipart можно было проверить без настоящего SMTP-сервера.
-export function buildMailMessage({ from, fromName, to, toName, subject, text, messageId, attachments = [] }) {
+export function buildMailMessage({ from, fromName, to, toName, subject, text, messageId, attachments = [], listUnsubscribe = '' }) {
   const files = (attachments || []).filter(f => f && f.content != null);
   const head = [
     `From: ${fromName ? `=?UTF-8?B?${b64(fromName)}?= ` : ''}<${from}>`,
@@ -52,6 +52,7 @@ export function buildMailMessage({ from, fromName, to, toName, subject, text, me
     'MIME-Version: 1.0',
     'X-Mailer: KarkasCRM',
   ];
+  if (listUnsubscribe) head.push(`List-Unsubscribe: ${listUnsubscribe}`);
   // Всё содержимое кодируется base64, поэтому ни одна строка не начинается с
   // точки и дополнительная защита от «точечного» завершения DATA не нужна.
   const textPart = ['Content-Type: text/plain; charset=utf-8', 'Content-Transfer-Encoding: base64', '', chunk76(b64(text || ''))].join('\r\n');
@@ -93,7 +94,7 @@ export function checkAttachments(attachments = []) {
   return list;
 }
 
-export async function sendMail({ host, port = 587, secure, starttls, user, pass, from, fromName, to, toName, subject, text, timeout = 20000, allowInsecure = true, attachments = [] }) {
+export async function sendMail({ host, port = 587, secure, starttls, user, pass, from, fromName, to, toName, subject, text, timeout = 20000, allowInsecure = true, attachments = [], listUnsubscribe = '' }) {
   if (!host) throw new Error('Не задан SMTP-сервер (Настройки → Интеграции → Почта)');
   // адрес обязан быть одним и без переводов строк: значение из запроса попало бы
   // в команды MAIL FROM / RCPT TO как есть, и «a@b.ru\r\nRCPT TO:<кто угодно>»
@@ -186,7 +187,7 @@ export async function sendMail({ host, port = 587, secure, starttls, user, pass,
     await send(`MAIL FROM:<${fromAddr}>`, ['250']);
     await send(`RCPT TO:<${to}>`, ['250', '251']);
     await send('DATA', ['354']);
-    socket.write(buildMailMessage({ from: fromAddr, fromName, to, toName, subject, text, messageId, attachments: files }) + '.\r\n');
+    socket.write(buildMailMessage({ from: fromAddr, fromName, to, toName, subject, text, messageId, attachments: files, listUnsubscribe }) + '.\r\n');
     log.push(files.length ? `> [письмо с вложениями: ${files.length}]` : '> [письмо]');
     await readCode(['250']);
     await send('QUIT', ['221']).catch(() => {});

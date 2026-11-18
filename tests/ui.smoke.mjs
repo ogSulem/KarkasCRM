@@ -1175,8 +1175,8 @@ try {
     // панели (например, справочник встроенных полей), их кнопки сюда не относятся.
     const settingsTabsBar = $('#view .tabs');
     const settingsTabs = settingsTabsBar ? Array.from(settingsTabsBar.querySelectorAll('button')).map(b => b.textContent.trim()) : [];
-    check('вкладки настроек идут по пути настройки: каналы → воронка → правила → поля → сообщения → разведка → люди → данные → профиль',
-      settingsTabs.join(' → ') === 'Интеграции и каналы → Воронки и этапы → Автоматизации → Поля карточек → Шаблоны сообщений → Конкуренты и источники → Команда → Данные и компания → Профиль',
+    check('вкладки настроек идут по пути настройки: каналы → воронка → правила → поля → сообщения → разведка → люди → обучение → данные → профиль',
+      settingsTabs.join(' → ') === 'Интеграции и каналы → Воронки и этапы → Автоматизации → Поля карточек → Шаблоны сообщений → Конкуренты и источники → Команда → Обучение партнёров → Данные и компания → Профиль',
       settingsTabs.join(' → '));
     $$('.tabs button').find(b => /^Команда$/.test(b.textContent.trim())).click(); await wait(500);
     check('вкладка настроек переключается кликом', window.__state.settingsTab === 'team' && /Права ролей/.test($('#view').textContent));
@@ -1887,22 +1887,22 @@ try {
   {
     const cssFlat = cssText.replace(/\s+/g, '');
     const navViews = $$('#nav button').map(b => b.dataset.view);
-    check('обучения, качества и рассылок в меню нет: качество в аналитике, рассылки в контактах',
-      ['campaigns', 'quality', 'training'].every(x => !$(`#nav button[data-view="${x}"]`))
-      && ['routing','classification'].every(x => navViews.includes(x)) && navViews.length === 12,
+    check('качества и рассылок в меню нет: качество в аналитике, рассылки в контактах; обучение — только партнёрам',
+      ['campaigns', 'quality'].every(x => !$(`#nav button[data-view="${x}"]`))
+      && ['routing','classification','training'].every(x => navViews.includes(x)) && navViews.length === 13,
       navViews.join(','));
-    check('партнёру остаются «Сделки», «Чаты» и «Задачи»', cssFlat.includes('body.role-partnernavbutton:not([data-view="pipe"]):not([data-view="inbox"]):not([data-view="tasks"]){display:none}'));
+    check('партнёру остаются «Сделки», «Чаты», «Задачи» и «Обучение»', cssFlat.includes('body.role-partnernavbutton:not([data-view="pipe"]):not([data-view="inbox"]):not([data-view="tasks"]):not([data-view="training"]){display:none}'));
     // офис назначает партнёру задачи, и новый лид сам создаёт ему задачу позвонить:
     // без раздела он нашёл бы их только внутри карточки сделки
-    check('раздел задач партнёру открыт', appJsRaw.includes("const PARTNER_VIEWS = ['pipe', 'inbox', 'tasks', 'settings']"));
+    check('разделы задач и обучения партнёру открыты', appJsRaw.includes("const PARTNER_VIEWS = ['pipe', 'inbox', 'tasks', 'training', 'settings']"));
     check('массовые действия используют отдельное разрешение, совпадающее с матрицей API',
       appJsRaw.includes("const canBulk = () => ['admin','manager'].includes(state.me?.role);")
       && serverJsRaw.includes("if (!['admin','manager'].includes(user.role))")
       && serverJsRaw.includes("!['contacts','companies','tasks','deals'].includes(table)"));
     check('вкладку «Рассылки» и массовую отправку видят менеджер и администратор',
       appJsRaw.includes("function canCampaign() { return ['admin', 'manager'].includes(state.me?.role); }") && appJsRaw.includes("if (!canCampaign()) return '';"));
-    check('вкладку «Команда» с оценкой качества видит только администратор',
-      appJsRaw.includes("if (state.me?.role !== 'admin') return '';") && serverJsRaw.includes("if (p === '/api/quality') {\n      if (!requireAdmin(user, res)) return;"));
+    check('вкладку «Команда» с оценкой качества видят администратор и РОП своей команды',
+      appJsRaw.includes("if (state.me?.role === 'rop')") && serverJsRaw.includes("if (!['admin', 'rop'].includes(user.role)) return json(res, 403, { error: 'Показатели качества видят руководитель и администратор' })"));
     check('партнёр начинает со своих сделок, а не с рабочего стола',
       appJsRaw.includes("if (role === 'partner') return 'pipe';")
       && appJsRaw.includes('defaultViewForRole(me.user.role, me.user.pref_view || state.view)')
@@ -1928,13 +1928,12 @@ try {
     check('выгрузка и удаление общего справочника доступны только администратору',
       !managerExport && !managerCompetitorDelete && !viewerExport && !viewerCompetitorDelete && adminExport && adminCompetitorDelete
       && !/Выгрузить в CSV/.test(managerContactMenu));
-    // обучение убрано из всех слоёв: ни меню, ни маршрута, ни таблицы в базе
+    // общее обучение убрано; обучающий портал — только для партнёров
     const indexRaw = readFileSync(join(ROOT, 'frontend/public/index.html'), 'utf8');
-    // на сервере остаётся только одноразовая уборка старой таблицы: маршрута и
-    // создания таблицы быть не должно
-    check('обучения нет ни в клиенте, ни в разметке, ни в маршрутах сервера',
-      !appJsRaw.includes('training') && !indexRaw.includes('training')
-      && !serverJsRaw.includes('/api/training') && !serverJsRaw.includes('CREATE TABLE IF NOT EXISTS training_items'));
+    check('обучающий портал только для партнёров: общий маршрут /api/training отсутствует',
+      appJsRaw.includes('trainingView') && indexRaw.includes('data-view="training"')
+      && !serverJsRaw.includes('/api/training') && !serverJsRaw.includes('CREATE TABLE IF NOT EXISTS training_items')
+      && serverJsRaw.includes('/api/partner-training'));
     check('старая таблица материалов убирается при запуске', serverJsRaw.includes("DROP TABLE training_items"));
     const savedMgrRole = window.__state.me.role;
     window.__state.me.role = 'manager';
@@ -1949,8 +1948,8 @@ try {
     const partnerCmds = window.paletteCommands().flatMap(g => g.items.map(i => i.title));
     window.__state.me.role = savedPaletteRole;
     check('партнёру палитра не предлагает чужие разделы и закрытые действия',
-      !partnerCmds.some(t => ['Рабочий стол', 'Компании', 'Конкуренты', 'Новая компания', 'Проверить конкурента', 'Импорт контактов из CSV'].includes(t))
-      && partnerCmds.includes('Сделки') && partnerCmds.includes('Новый контакт') && !partnerCmds.includes('Новая рассылка'), partnerCmds.join(' / '));
+      !partnerCmds.some(t => ['Рабочий стол', 'Компании', 'Конкуренты', 'Новая сделка', 'Новый контакт', 'Новая компания', 'Проверить конкурента', 'Импорт контактов из CSV'].includes(t))
+      && partnerCmds.includes('Сделки') && partnerCmds.includes('Обучение') && partnerCmds.includes('Новая задача') && !partnerCmds.includes('Новая рассылка'), partnerCmds.join(' / '));
     const officeCmds = window.paletteCommands().flatMap(g => g.items.map(i => i.title));
     check('сотруднику офиса палитра предлагает все разделы и действия',
       ['Рабочий стол', 'Компании', 'Новая компания', 'Импорт контактов из CSV'].every(t => officeCmds.includes(t)), officeCmds.join(' / '));
@@ -2004,7 +2003,7 @@ try {
       $('#view').textContent.includes('Сделки по этапам воронки') && $('#view').textContent.includes('Результаты по менеджерам'));
     window.setAnalyticsTab('team'); await wait(700);
     check('вкладка «Команда» показывает проверяемые показатели, а не придуманный рейтинг',
-      $('#view').textContent.includes('Показатели по сотрудникам') && $('#view').textContent.includes('не рейтинг сотрудников') && !$('#view').textContent.includes('Старт — 100 баллов'));
+      $('#view').textContent.includes('Показатели по сотрудникам') && $('#view').textContent.includes('Автоматическая оценка по данным CRM') && !$('#view').textContent.includes('Старт — 100 баллов'));
     check('период показателей переключается рядом с вкладками', $('#view').textContent.includes('Период:') && $('#view').textContent.includes('Данные CRM'));
     window.setQualityDays(7); await wait(700);
     check('период качества переключается и пересчитывается', window.__state.qDays === 7 && $('#view').textContent.includes('Неделя'));

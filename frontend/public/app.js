@@ -702,6 +702,10 @@ const canBulk = () => ['admin','manager'].includes(state.me?.role);
 const canExport = () => amAdmin();
 const canDeleteCompetitors = () => amAdmin();
 const isPartner = () => (state.me && state.me.role) === 'partner';
+// Состав сделки и сумму меняет только офис: партнёр видит позиции и печатает
+// документы, но не меняет состав и сумму переданного лида.
+const canEditDealComposition = () => ['admin', 'manager'].includes(state.me?.role);
+const canDeleteDeal = () => ['admin', 'manager'].includes(state.me?.role);
 const viewerNote = () => state.me?.role !== 'viewer' ? '' : `<div class="notice info">${icon('eye', 15)} <b>Режим просмотра.</b> Все данные доступны для чтения. Изменения вносят сотрудники с ролью «Менеджер» или «Администратор»; выгрузки доступны только администратору.</div>`;
 function userOptions(selId) {
   // Сотрудник с закрытым доступом не предлагается для новых назначений:
@@ -977,7 +981,7 @@ function hydrateNavIcons() {
   const map = {
     dashboard: 'dashboard', pipe: 'pipe', inbox: 'inbox', contacts: 'contacts',
     companies: 'companies', tasks: 'tasks', products: 'products', competitors: 'competitors',
-    analytics: 'analytics', settings: 'settings'
+    analytics: 'analytics', training: 'fileText', settings: 'settings'
   };
   // Переключение разделов задано встроенным onclick в разметке — здесь только иконки.
   $$('#nav button').forEach(b => {
@@ -1004,6 +1008,7 @@ const TITLES = {
   companies: ['Компании', 'Юридические лица и связанные с ними клиенты'],
   products: ['Каталог', 'Ваш прайс-лист: дома, бани и услуги — то, что продаёте, и по каким ценам'],
   analytics: ['Аналитика', 'Сколько продали, конверсия, план и результаты менеджеров, качество ответов'],
+  training: ['Обучение', 'Материалы для партнёров: как вести переданный лид'],
   routing: ['Очередь', 'Новые обращения, назначения, возвраты и передачи партнёрам'],
   classification: ['Классификация', 'Предварительная разметка новых обращений'],
   competitors: ['Конкуренты', 'Проверка по открытым источникам и сравнение цен'],
@@ -1017,6 +1022,7 @@ const SKELETONS = {
   contacts: () => `<div class="card"><div class="sk-line w60"></div><div class="sk-line"></div><div class="sk-line"></div><div class="sk-line w80"></div></div>`,
   tasks: () => `<div class="card"><div class="sk-line w40"></div>${'<div class="sk-line"></div>'.repeat(5)}</div>`,
   analytics: () => `<div class="sk-grid">${'<div class="skeleton sk-kpi"></div>'.repeat(4)}</div><div class="card"><div style="height:180px"></div></div>`,
+  training: () => `<div class="card"><div class="sk-line w40"></div>${'<div class="sk-line"></div>'.repeat(4)}</div>`,
   routing: () => `<div class="cols"><div class="card"><div class="sk-line w40"></div>${'<div class="sk-line"></div>'.repeat(4)}</div><div class="card"><div class="sk-line w40"></div>${'<div class="sk-line"></div>'.repeat(4)}</div></div>`,
   classification: () => `<div class="card"><div class="sk-line w40"></div>${'<div class="sk-line"></div>'.repeat(5)}</div>`,
   competitors: () => `<div class="sk-grid">${'<div class="skeleton sk-kpi"></div>'.repeat(3)}</div><div class="card">${'<div class="sk-line"></div>'.repeat(4)}</div>`,
@@ -1032,7 +1038,7 @@ const SKELETONS = {
 // оценка команды в аналитике) проверяются по роли отдельно. Проверка стоит перед
 // отрисовкой, поэтому переход по старой ссылке или из палитры не заканчивается
 // экраном ошибки.
-const PARTNER_VIEWS = ['pipe', 'inbox', 'tasks', 'settings'];
+const PARTNER_VIEWS = ['pipe', 'inbox', 'tasks', 'training', 'settings'];
 function viewAllowed(view) {
   const role = state.me && state.me.role;
   if (!role) return true;
@@ -1177,6 +1183,7 @@ async function renderNow() {
     if (state.view === 'products') return await products(v);
     if (state.view === 'competitors') return await competitorsView(v);
     if (state.view === 'analytics') return await analytics(v);
+    if (state.view === 'training') return await trainingView(v);
     if (state.view === 'routing') return await routingView(v);
     if (state.view === 'classification') return await classificationView(v);
     if (state.view === 'settings') return await settings(v);
@@ -1576,13 +1583,19 @@ async function quickDealStage(id, stage) {
 async function saveDeal(e, id) {
   e.preventDefault();
   const form = e.target;
-  const b = cfCollect(form);
+  let b = cfCollect(form);
   if (form.elements.construction_date_unknown?.checked) b.construction_date = 'unknown';
   delete b.construction_date_unknown;
+  // Партнёр отправляет только согласованные поля: сервер отклонит запрос
+  // с суммой, составом или сменой ответственного, поэтому форму не ломаем.
+  if (isPartner() && id) {
+    const allowed = ['title', 'stage', 'deal_object', 'land_status', 'construction_date', 'payment_type', 'lead_source', 'deadline'];
+    b = Object.fromEntries(Object.entries(b).filter(([k]) => allowed.includes(k)));
+  }
   // при редактировании воронку не меняем: сделка остаётся там, где она есть
   if (!id) b.pipeline_id = state.pipeline;
-  b.amount = num(b.amount);
-  b.contact_id = b.contact_id ? +b.contact_id : null;
+  if (b.amount !== undefined) b.amount = num(b.amount);
+  if (b.contact_id !== undefined) b.contact_id = b.contact_id ? +b.contact_id : null;
   if (b.responsible_id !== undefined) b.responsible_id = b.responsible_id ? +b.responsible_id : null;
   const user = __team.find(u => u.id === b.responsible_id);
   if (user) b.responsible = user.name;
@@ -1618,9 +1631,9 @@ async function openDealCard(id) {
      ${deal.contact_phone ? `<a class="btn sm" href="tel:${esc(String(deal.contact_phone).replace(/[^+\d]/g, ''))}">${icon('phone', 13)} Позвонить</a>` : ''}
      ${deal.contact_phone ? `<a class="btn sm" href="https://wa.me/${esc(String(deal.contact_phone).replace(/[^\d]/g, ''))}" target="_blank" rel="noopener">${icon('whatsapp', 13)} WhatsApp</a>` : ''}
      <button class="btn sm" onclick="openTask(null,{deal_id:${deal.id},contact_id:${deal.contact_id || 'null'}})">${icon('plus', 13)} Задача</button>
-     <button class="btn sm primary" onclick="setDealTab('products',${deal.id})">${icon('products', 13)} Добавить товар</button>
-     <button class="btn sm" style="margin-left:auto" onclick="quickDealStage(${deal.id},'${esc(kindStage('won'))}')">${icon('checkCircle', 13)} Выиграна</button>
-     <button class="btn sm danger" onclick="quickDealStage(${deal.id},'${esc(kindStage('lost'))}')">${icon('xCircle', 13)} Отказ</button>
+     ${canEditDealComposition() ? `<button class="btn sm primary" onclick="setDealTab('products',${deal.id})">${icon('products', 13)} Добавить товар</button>` : ''}
+     ${isPartner() ? '' : `<button class="btn sm" style="margin-left:auto" onclick="quickDealStage(${deal.id},'${esc(kindStage('won'))}')">${icon('checkCircle', 13)} Выиграна</button>
+     <button class="btn sm danger" onclick="quickDealStage(${deal.id},'${esc(kindStage('lost'))}')">${icon('xCircle', 13)} Отказ</button>`}
    </div>`}
    <div class="tabs" style="margin-bottom:12px">
      <button class="${state.dealTab === 'details' ? 'active' : ''}" onclick=\"setDealTab('details',${id})\">Детали</button>
@@ -1635,6 +1648,24 @@ async function openDealCard(id) {
 
 function dealTab(deal, d) {
   if (state.dealTab === 'details') {
+    if (isPartner()) {
+      // Партнёр ведёт только согласованные поля переданного лида: сумму,
+      // состав, клиента, компанию, ответственного и свои поля меняет офис.
+      const land = String(deal.land_status || '');
+      const payment = String(deal.payment_type || '');
+      return `<form onsubmit="return saveDeal(event,${deal.id})">
+       ${formLegend()}
+       ${fld('Название сделки', `<input name="title" required value="${esc(deal.title)}">`, true)}
+       ${grid2(`${fld('Объект сделки', `<input name="deal_object" required maxlength="160" value="${esc(deal.deal_object || '')}">`, true)}
+         ${fld('Источник лида', `<input name="lead_source" required maxlength="80" value="${esc(deal.lead_source || '')}">`, true)}`)}
+       ${grid2(`${fld('Наличие земли', `<select name="land_status" required><option value="">Выберите</option><option value="yes" ${land === 'yes' ? 'selected' : ''}>Есть</option><option value="no" ${land === 'no' ? 'selected' : ''}>Нет</option><option value="unknown" ${land === 'unknown' ? 'selected' : ''}>Пока не выяснено</option></select>`, true)}
+         ${dealDateField(deal.construction_date)}`)}
+       ${grid2(`${fld('Тип оплаты', `<select name="payment_type" required><option value="">Выберите</option><option value="cash" ${payment === 'cash' ? 'selected' : ''}>Свои средства</option><option value="mortgage" ${payment === 'mortgage' ? 'selected' : ''}>Ипотека или кредит</option><option value="installment" ${payment === 'installment' ? 'selected' : ''}>Рассрочка</option><option value="mixed" ${payment === 'mixed' ? 'selected' : ''}>Смешанная оплата</option><option value="unknown" ${payment === 'unknown' ? 'selected' : ''}>Пока не выяснено</option></select>`, true)}
+         ${fld('Этап', `<select name="stage">${selStages(deal.stage, state.cardStages)}</select>`)}`)}
+       ${fld('Дедлайн', `<input name="deadline" type="date" value="${esc((deal.deadline || '').slice(0, 10))}">`)}
+       <p class="form-hint">Сумма, состав сделки, клиент, компания и ответственный — за офисом. Партнёр двигает лид по согласованным этапам и ведёт задачи и переписку.</p>
+       <div style="display:flex;gap:8px;margin-top:12px"><button class="btn primary">Сохранить изменения</button></div></form>`;
+    }
     return `<form onsubmit="return saveDeal(event,${deal.id})">
      ${formLegend()}
      ${fld('Название сделки', `<input name="title" required value="${esc(deal.title)}">`, true)}
@@ -1648,7 +1679,7 @@ function dealTab(deal, d) {
        ${fld('Приоритет', `<select name="priority"><option value="normal" ${deal.priority === 'normal' ? 'selected' : ''}>Обычный</option><option value="high" ${deal.priority === 'high' ? 'selected' : ''}>Высокий</option><option value="low" ${deal.priority === 'low' ? 'selected' : ''}>Низкий</option></select>`)}`)}
      ${fld('Причина отказа (если сделка проиграна)', `<input name="loss_reason" value="${esc(deal.loss_reason || '')}" placeholder="Дорого, выбрали другого подрядчика…">`)}
      ${cfInputs('deals', deal, 2, 'optional')}
-     <div style="display:flex;gap:8px;margin-top:12px"><button class="btn primary">Сохранить изменения</button><button class="btn danger" type="button" onclick="del('deals',${deal.id})">Удалить</button></div></form>`;
+     <div style="display:flex;gap:8px;margin-top:12px"><button class="btn primary">Сохранить изменения</button>${canDeleteDeal() ? `<button class="btn danger" type="button" onclick="del('deals',${deal.id})">Удалить</button>` : ''}</div></form>`;
   }
   if (state.dealTab === 'chat') {
     if (!d.conversation) return '<div class="empty">У этой сделки нет контакта или переписки</div>';
@@ -1659,8 +1690,8 @@ function dealTab(deal, d) {
     // строка и итог считаются по тому же правилу, что документ и сумма сделки
     const lineSum = p => Math.round((Number(p.price) || 0) * (Number(p.qty) || 0));
     const total = d.products.reduce((a, p) => a + lineSum(p), 0);
-    return `<table><tr><th>Товар / проект</th><th>Цена</th><th>Кол-во</th><th>Сумма</th><th></th></tr>${d.products.map(p => `<tr><td>${esc(p.name)}</td><td>${fmt(p.price)}</td><td>${p.qty}</td><td><b>${fmt(lineSum(p))}</b></td><td>${canEdit() ? `<button class="btn sm danger" onclick="delRow('deal_products',${p.id},${deal.id})">${icon('close', 13)}</button>` : ''}</td></tr>`).join('') || '<tr><td colspan="5"><small>Позиций нет — добавьте проект дома или доп. опцию</small></td></tr>'}${d.products.length ? `<tr><td colspan="3" style="text-align:right"><b>Итого по позициям:</b></td><td><b>${fmt(total)}</b></td><td></td></tr>${Math.abs(total - deal.amount) >= 1 && canEdit() ? `<tr><td colspan="5"><small>Сумма сделки — ${fmt(deal.amount)}. <button class="btn sm" onclick="syncDealAmount(${deal.id},${total})">Подставить ${fmt(total)} в сделку</button></small></td></tr>` : ''}` : ''}</table>
-     ${canEdit() ? `<hr><button class="btn sm primary" onclick="addDealProduct(${deal.id})">+ Добавить товар / услугу</button>` : ''}`;
+    return `<table><tr><th>Товар / проект</th><th>Цена</th><th>Кол-во</th><th>Сумма</th><th></th></tr>${d.products.map(p => `<tr><td>${esc(p.name)}</td><td>${fmt(p.price)}</td><td>${p.qty}</td><td><b>${fmt(lineSum(p))}</b></td><td>${canEditDealComposition() ? `<button class="btn sm danger" onclick="delRow('deal_products',${p.id},${deal.id})">${icon('close', 13)}</button>` : ''}</td></tr>`).join('') || '<tr><td colspan="5"><small>Позиций нет — добавьте проект дома или доп. опцию</small></td></tr>'}${d.products.length ? `<tr><td colspan="3" style="text-align:right"><b>Итого по позициям:</b></td><td><b>${fmt(total)}</b></td><td></td></tr>${Math.abs(total - deal.amount) >= 1 && canEditDealComposition() ? `<tr><td colspan="5"><small>Сумма сделки — ${fmt(deal.amount)}. <button class="btn sm" onclick="syncDealAmount(${deal.id},${total})">Подставить ${fmt(total)} в сделку</button></small></td></tr>` : ''}` : ''}</table>
+     ${canEditDealComposition() ? `<hr><button class="btn sm primary" onclick="addDealProduct(${deal.id})">+ Добавить товар / услугу</button>` : ''}`;
   }
   if (state.dealTab === 'tasks') {
     return `<div class="list">${d.tasks.map(t => {
@@ -2738,8 +2769,8 @@ async function openContactCard(id) {
         ? `<button class="btn sm" onclick="closeModal();openConv(${conv.id})">${icon('chat', 13)} Чат</button>`
         : `${canEdit() ? `<button class="btn sm" onclick="startConv(${c.id})">${icon('chat', 13)} Написать</button>` : ''}`}
        ${canEdit() ? `<button class="btn sm" onclick="openTask(null,{contact_id:${c.id}})">+ Задача</button>
-       <button class="btn sm primary" onclick="openDeal(${c.id})">+ Сделка</button>
-       <button class="btn sm" onclick="openContact(${c.id})">Редактировать</button>` : ''}
+       ${isPartner() ? '' : `<button class="btn sm primary" onclick="openDeal(${c.id})">+ Сделка</button>
+       <button class="btn sm" onclick="openContact(${c.id})">Редактировать</button>`}` : ''}
      </div>
    </div>
    <hr>
@@ -2754,14 +2785,15 @@ async function openContactCard(id) {
            ${canEdit() ? `<span style="display:flex;gap:6px"><button class="btn sm mark" onclick="toggleTask(${t.id},1);openContactCard(${c.id})">${icon('check', 13)} Выполнить</button><button class="btn sm" onclick="openTask(${t.id})">${icon('edit', 13)}</button></span>` : ''}</div>`;
        }).join('') || '<small>Открытых задач нет — поставьте звонок или встречу, чтобы не потерять клиента.</small>'}</div>
        ${canEdit() ? `<button class="btn sm" style="margin-top:8px" onclick="openTask(null,{contact_id:${c.id}})">+ Задача клиенту</button>` : ''}
-       <h4 style="margin-top:16px">Заметки</h4>
+       ${isPartner() ? '' : `<h4 style="margin-top:16px">Заметки</h4>
        <form onsubmit="return addNote(event,'contacts',${c.id})"><textarea name="body" rows="2" required placeholder="Заметка о клиенте…"></textarea><button class="btn sm primary" style="margin-top:6px">Добавить заметку</button></form>
-       <div class="list" style="margin-top:10px">${notes.map(n => noteRow(n, 'contacts', c.id, `${n.id},${c.id}`)).join('') || '<small>Заметок нет</small>'}</div>
+       <div class="list" style="margin-top:10px">${notes.map(n => noteRow(n, 'contacts', c.id, `${n.id},${c.id}`)).join('') || '<small>Заметок нет</small>'}</div>`}
      </div>
      <div>
-       <div class="row" style="border:0;padding-bottom:2px"><h4 style="margin:0">Контактные данные</h4>${canEdit() ? `<button class="btn sm" onclick="openContact(${c.id})">${icon('edit', 13)} Изменить</button>` : ''}</div>
+       <div class="row" style="border:0;padding-bottom:2px"><h4 style="margin:0">Контактные данные</h4>${canEdit() && !isPartner() ? `<button class="btn sm" onclick="openContact(${c.id})">${icon('edit', 13)} Изменить</button>` : ''}</div>
        <p>Телефон: <b>${esc(c.phone || '—')}</b><br>E-mail: <b>${esc(c.email || '—')}</b><br>Компания: <b>${esc(c.company || '—')}</b><br>Ответственный: <b>${esc(__team.find(u => u.id === c.responsible_id)?.name || 'Не назначен')}</b></p>
        ${c.notes ? `<p><small><b>Заметка в карточке:</b> ${esc(c.notes)}</small></p>` : ''}
+       ${(Number(c.email_opt_out) === 1 || Number(c.whatsapp_opt_out) === 1) ? `<p><small>Отписка от рассылок: ${Number(c.email_opt_out) === 1 ? 'почта' : ''}${Number(c.email_opt_out) === 1 && Number(c.whatsapp_opt_out) === 1 ? ' и ' : ''}${Number(c.whatsapp_opt_out) === 1 ? 'мессенджеры' : ''}</small></p>` : ''}
        ${cfTable('contacts', c) ? `<h4>Свои поля</h4><table class="mini">${cfTable('contacts', c)}</table>` : ''}
        <p><small>Создан: ${esc(dt(c.created_at))}</small></p>
      </div>
@@ -2787,6 +2819,8 @@ async function openContact(id) {
    <p class="form-hint">${esc(responsibleHint())}</p>
    ${fld('Теги', `<input name="tags" value="${esc(c.tags || '')}" placeholder="VIP, каркас, участок">`)}
    ${fld('Заметки', `<textarea name="notes" rows="2" placeholder="Что важно помнить об этом клиенте">${esc(c.notes || '')}</textarea>`)}
+   <label class="check-line"><input type="checkbox" name="email_opt_out" style="width:auto" ${Number(c.email_opt_out) === 1 ? 'checked' : ''}><span>Не отправлять почтовые рассылки</span></label>
+   <label class="check-line"><input type="checkbox" name="whatsapp_opt_out" style="width:auto" ${Number(c.whatsapp_opt_out) === 1 ? 'checked' : ''}><span>Не отправлять рассылки в мессенджерах</span></label>
    ${cfInputs('contacts', c, 2, 'optional')}
    <button class="btn primary w">${id ? 'Сохранить' : 'Создать контакт'}</button></form>`);
 }
@@ -2796,6 +2830,8 @@ async function saveContact(e, id, allowDuplicate = false) {
   const b = cfCollect(e.target);
   b.company_id = b.company_id ? +b.company_id : null;
   b.responsible_id = b.responsible_id ? +b.responsible_id : null;
+  b.email_opt_out = b.email_opt_out ? 1 : 0;
+  b.whatsapp_opt_out = b.whatsapp_opt_out ? 1 : 0;
   const url = id ? '/api/contacts/' + id : '/api/contacts' + (allowDuplicate ? '' : '?check_duplicates=1');
   try {
     await api(url, { method: id ? 'PATCH' : 'POST', body: JSON.stringify(b) });
@@ -3186,6 +3222,12 @@ async function saveProduct(e, id) {
 // администратор: разбор сотрудников не предназначен менеджеру и наблюдателю, и
 // сервер отвечает на /api/quality только администратору.
 function analyticsTabs(tab, right = '') {
+  if (state.me?.role === 'rop') {
+    return `<div class="card toolbar"><div class="tabs" style="margin:0">
+      <button class="${tab === 'leader' ? 'active' : ''}" onclick="setAnalyticsTab('leader')">${icon('pipe', 14)} Очередь и SLA</button>
+      <button class="${tab === 'team' ? 'active' : ''}" onclick="setAnalyticsTab('team')">${icon('quality', 14)} ОКК и конверсия</button>
+    </div>${right}</div>`;
+  }
   if (state.me?.role !== 'admin') return '';
   return `<div class="card toolbar"><div class="tabs" style="margin:0">
     <button class="${tab === 'sales' ? 'active' : ''}" onclick="setAnalyticsTab('sales')">${icon('analytics', 14)} Продажи</button>
@@ -3195,7 +3237,15 @@ function analyticsTabs(tab, right = '') {
 }
 function setAnalyticsTab(t) { state.aTab = t; render(); }
 async function analytics(v) {
-  if (state.me?.role === 'rop') { v.innerHTML=await teamReportsBody(false); return; }
+  if (state.me?.role === 'rop') {
+    if (state.aTab === 'team') {
+      const right = state.qTab === 'metrics' ? qualityPeriod() : state.qTab === 'reviews' ? qualityReviewPeriod() : '';
+      v.innerHTML = analyticsTabs('team', right) + await qualityBody();
+      return;
+    }
+    v.innerHTML = analyticsTabs('leader') + await teamReportsBody(false);
+    return;
+  }
   if (state.me?.role === 'admin' && state.aTab === 'leader') { v.innerHTML=analyticsTabs('leader')+await teamReportsBody(true); return; }
   if (state.me?.role === 'admin' && state.aTab === 'team') {
     const right = state.qTab === 'metrics' ? qualityPeriod() : state.qTab === 'reviews' ? qualityReviewPeriod() : '';
@@ -3305,6 +3355,15 @@ async function teamReportsBody(isAdmin=false) {
    <div class="card"><h3>Менеджеры и смены</h3><div class="tbl-scroll"><table><tr><th>Менеджер</th><th>Лиды</th><th>Уникальные</th><th>Назначение</th><th>Первый ответ</th><th>Возвраты</th><th>В работе</th><th>Смена</th></tr>${managerRows.map(m=>`<tr><td><button class="btn sm" onclick="setTeamReportManager(${Number(m.id)})">${esc(m.name)}</button></td><td>${numFmt(m.leads)}</td><td>${numFmt(m.unique_leads)}</td><td>${esc(reportMinutes(m.median_assignment_minutes))}<br><small>${numFmt(m.assignment_samples)} измерений</small></td><td>${esc(reportMinutes(m.median_first_response_minutes))}<br><small>${numFmt(m.first_response_samples)} измерений</small></td><td>${numFmt(m.returns)}</td><td>${numFmt(m.open_load)}</td><td>${m.on_shift?'Активна':'Не начата'}</td></tr>`).join('')||'<tr><td colspan="8"><small>Нет данных по менеджерам за период</small></td></tr>'}</table></div></div></div>
   <div class="card"><h3>Смены за период</h3><div class="tbl-scroll"><table><tr><th>Менеджер</th><th>Смены начаты</th><th>Сейчас активны</th></tr>${(report.shifts||[]).map(s=>`<tr><td>${esc(s.manager_name)}</td><td>${numFmt(s.shifts||0)}</td><td>${numFmt(s.active_shifts||0)}</td></tr>`).join('')||'<tr><td colspan="3"><small>Нет данных о сменах за период</small></td></tr>'}</table></div></div>
   <div class="notice info"><b>Как читать показатели</b><ul>${(report.definitions||[]).map(x=>`<li>${esc(x)}</li>`).join('')}<li>${esc(response.definition||'Первый ответ учитывает сообщение живого сотрудника; автоматические ответы не входят.')}</li><li>Звонки и встречи показывают «нет данных», пока не появится подтверждённый источник и согласованные статусы.</li></ul></div>`;
+}
+async function trainingView(v) {
+  const items = await api('/api/partner-training');
+  v.innerHTML = `<div class="card"><div class="row"><div><h3>Обучение партнёров</h3><small>Материалы для работы с переданными лидами. Раздел доступен только партнёрам.</small></div></div>
+    ${items.length ? `<div class="grid">${items.map(t => `<div class="card"><h3>${esc(t.title)}</h3>
+      ${t.body ? `<p>${esc(t.body).replace(/\n/g, '<br>')}</p>` : ''}
+      ${t.url ? `<p><a href="${esc(t.url)}" target="_blank" rel="noopener">Открыть материал</a></p>` : ''}
+      <p><small>Обновлено: ${esc(dt(t.updated_at) || '')}</small></p></div>`).join('')}</div>`
+    : '<div class="empty">Материалов пока нет. Администратор добавит их в Настройки → Обучение партнёров.</div>'}</div>`;
 }
 async function classificationView(v) {
   const response=await api('/api/classification/queue'),isSupervisor=['admin','rop'].includes(state.me?.role);
@@ -3589,9 +3648,9 @@ async function openCampaign(picked) {
       <label id="campSubjectWrap" style="${channel === 'email' ? '' : 'display:none'}">Тема письма<input name="subject" maxlength="200" placeholder="Например: Предложение по вашему участку"></label>
     </div>
     <label>Текст сообщения <b>*</b><textarea name="message" rows="5" required maxlength="4000" placeholder="Здравствуйте, {имя}!"></textarea>
-      <small class="form-hint">{имя} заменится именем клиента. В WhatsApp получат только те, у кого заполнен телефон и кто уже переписывался с вами или дал номер; в почтовой рассылке — у кого указан e-mail.</small></label>
+      <small class="form-hint">{имя} заменится именем клиента. В WhatsApp получат только те, у кого заполнен телефон; в почтовой рассылке — у кого указан e-mail. Отписавшиеся от этого канала не получат сообщение.</small></label>
     ${ids.length ? `<p style="margin:14px 0 6px"><b>Кому отправить</b> <small class="form-hint">отмеченные клиенты — ${ids.length} шт.</small></p>
-    <p class="form-hint" style="margin:-6px 0 12px">Сообщение уйдёт только выбранным клиентам. В WhatsApp получат те, у кого заполнен телефон, в письме — у кого указан e-mail.</p>
+    <p class="form-hint" style="margin:-6px 0 12px">Сообщение уйдёт только выбранным клиентам. В WhatsApp получат те, у кого заполнен телефон, в письме — у кого указан e-mail. Отписавшиеся не получат.</p>
     <input type="hidden" name="ids" value="${ids.join(',')}">`
     : `<p style="margin:14px 0 6px"><b>Кому отправить</b> <small class="form-hint">фильтры сужают сегмент, пустые — значит «все клиенты»</small></p>
     <div class="form-grid2">
@@ -3650,11 +3709,24 @@ async function campaignSubmit(e) {
     if (when.getTime() < Date.now() - 60000) { toast('Это время уже прошло: выберите будущее или отправьте сразу', 'err'); return false; }
     body.scheduled_at = when.toISOString(); // момент в UTC, не зависит от пояса сервера
   }
-  await api('/api/campaigns', { method: 'POST', body: JSON.stringify(body) });
-  toast(body.scheduled_at ? 'Рассылка запланирована' : 'Рассылка создана и встанет в очередь');
-  // рассылка отмеченным клиентам: галочки снимаем и показываем очередь отправки
-  if (b.audience.ids) { clearSel('contacts'); state.cTab = 'campaigns'; }
-  closeModal(); render(); return false;
+  const doCreate = async () => {
+    await api('/api/campaigns', { method: 'POST', body: JSON.stringify(body) });
+    toast(body.scheduled_at ? 'Рассылка запланирована' : 'Рассылка создана и встанет в очередь');
+    // рассылка отмеченным клиентам: галочки снимаем и показываем очередь отправки
+    if (b.audience.ids) { clearSel('contacts'); state.cTab = 'campaigns'; }
+    closeModal(); render();
+  };
+  // Большая рассылка — необратимое действие: показываем точное число
+  // получателей и просим подтвердить, чтобы ошибочный сегмент не ушёл всей базе.
+  try {
+    const preview = await api('/api/campaigns/preview', { method: 'POST', body: JSON.stringify({ channel: b.channel, audience: b.audience }) });
+    if (preview.count > 500) {
+      askConfirm(`Рассылка уйдёт ${preview.count} клиентам. Проверьте канал и текст — отменить отправленные сообщения нельзя.`, doCreate, { okText: 'Создать рассылку' });
+      return false;
+    }
+  } catch { /* preview не обязателен: сервер всё равно проверит получателей */ }
+  await doCreate();
+  return false;
 }
 const CAMPAIGN_ITEM = { queued: 'В очереди', sent: 'Отправлено', failed: 'Ошибка', canceled: 'Отменено' };
 async function openCampaignCard(id) {
@@ -3723,7 +3795,7 @@ async function qualityMetricsBody() {
   const t=d.totals||{};
   const managers=d.managers||[];
   return `${qualityTabs('metrics')}
-  <div class="notice info quality-note">${icon('alertCircle',16)} <span><b>Это сигналы для проверки, не рейтинг сотрудников.</b> Содержание разговора оценивается отдельно во вкладке «Проверки ОКК» и только по подтверждённым данным. Показатели очереди частично отражают текущую нагрузку.</span></div>
+  <div class="notice info quality-note">${icon('alertCircle',16)} <span><b>Автоматическая оценка по данным CRM.</b> Ответ, заполненность карточки, задачи и конверсия считаются автоматически. Содержание разговора оценивается отдельно во вкладке «Проверки ОКК» и только по подтверждённым данным. Показатели очереди частично отражают текущую нагрузку.</span></div>
   <div class="grid">
     <div class="kpi"><i>${icon('inbox',20)}</i><span>Диалоги, где клиент ждёт ответа</span><b class="${t.unansweredDialogs?'red':'green'}">${t.unansweredDialogs??0}</b><small>за выбранный период; автоответ не засчитывается</small></div>
     <div class="kpi"><i>${icon('clock',20)}</i><span>Медиана ответа сотрудника</span><b>${t.medianResponseMin===null||t.medianResponseMin===undefined?'—':t.medianResponseMin+' мин'}</b><small>по ${numFmt(t.responseTimeSamples||0)} парам с достоверными отметками</small></div>
@@ -3733,13 +3805,15 @@ async function qualityMetricsBody() {
   <div class="card"><h3>Показатели по сотрудникам</h3>
     <p class="form-hint">Переписка считается за выбранный период; сделки и задачи — в текущем состоянии. Конверсия показана как выигранные среди закрытых, рядом видны число сделок и отказы.</p>
     <div class="tbl-scroll"><table>
-      <tr><th>Сотрудник</th><th>Сделок</th><th>Выиграно</th><th>Отказ</th><th>Конверсия закрытых</th><th>Диалогов без ответа</th><th>Ответ, мин</th><th>Без движения</th><th>Просрочено</th></tr>
+      <tr><th>Сотрудник</th><th>Сделок</th><th>Выиграно</th><th>Отказ</th><th>Конверсия закрытых</th><th>Карточка заполнена</th><th>С задачей</th><th>Диалогов без ответа</th><th>Ответ, мин</th><th>Без движения</th><th>Просрочено</th></tr>
       ${managers.map(m=>`<tr>
         <td><b>${esc(m.name)}</b></td><td>${numFmt(m.deals)}</td><td class="green">${numFmt(m.won)}</td><td>${numFmt(m.lost)}</td>
         <td>${m.conversion===null?'—':m.conversion+'%'}</td>
+        <td>${numFmt(m.qualified||0)}<br><small>из ${numFmt(m.deals)}</small></td>
+        <td>${numFmt(m.withOpenTask||0)}<br><small>из ${numFmt(m.deals)}</small></td>
         <td>${m.unansweredDialogs?`<b class="red">${numFmt(m.unansweredDialogs)}</b>`:'0'}</td>
         <td>${m.medianResponseMin===null?'—':`${numFmt(m.medianResponseMin)}<br><small>n=${numFmt(m.responseTimeSamples||0)}</small>`}</td><td>${numFmt(m.stalled)}</td><td>${numFmt(m.overdueTasks)}</td>
-      </tr>`).join('')||'<tr><td colspan="9"><small>Активных сотрудников нет</small></td></tr>'}
+      </tr>`).join('')||'<tr><td colspan="11"><small>Активных сотрудников нет</small></td></tr>'}
     </table></div>
   </div>
   <div class="card quality-definitions"><h3>Как читать показатели</h3>
@@ -3868,7 +3942,7 @@ async function qualityReviewsBody() {
     </div>
     <div class="notice warn quality-policy-note"><b>Пороговые категории не включены.</b> Лист «Правила оценки» и исторические категории требуют отдельного согласования знаменателя, минимального охвата, округления и последствий критических пометок. Пока показываются исходные счётчики «да / нет», доля среди применимых критериев и охват; нормированный балл и автоматические действия не рассчитываются.</div>
     ${qualityConversionPanel(conversion)}
-    <div class="card quality-review-list"><div class="toolbar"><h3>Проверки (${numFmt(d.total||0)})</h3><button class="btn primary" onclick="qualityNewReview()">${icon('plus',14)} Новая проверка</button></div>
+    <div class="card quality-review-list"><div class="toolbar"><h3>Проверки (${numFmt(d.total||0)})</h3>${state.me?.role === 'admin' ? `<button class="btn primary" onclick="qualityNewReview()">${icon('plus',14)} Новая проверка</button>` : '<small>Проверки ведёт администратор; РОП видит результаты своей команды.</small>'}</div>
       <div class="tbl-scroll"><table><tr><th>Сделка и выборка</th><th>Период разговора</th><th>Менеджер</th><th>Результат</th><th>Рецензент</th><th>Завершена</th><th></th></tr>
       ${rows.map(r=>`<tr>
         <td><b>${esc(r.deal_title)}</b><br><small>${esc(r.contact_name||'Контакт не указан')} · ${esc(r.pipeline_name||'воронка не указана')} · ${esc(r.stage_name||r.stage||'этап не указан')}</small><br><small>${esc(sourceLabel(r.source)||r.source||'Источник не указан')} · ${esc(qualitySampleRuleLabel(r.sample_rule))}</small></td>
@@ -4834,10 +4908,11 @@ async function settings(v) {
     templates: 'Шаблоны сообщений',
     competitors: 'Конкуренты и источники',
     team: 'Команда',
+    training: 'Обучение партнёров',
     data: 'Данные и компания',
     profile: 'Профиль'
   };
-  const adminOnly = ['integrations', 'competitors', 'fields', 'pipelines', 'automations', 'team', 'data'];
+  const adminOnly = ['integrations', 'competitors', 'fields', 'pipelines', 'automations', 'team', 'training', 'data'];
   // Ограниченным ролям доступен только личный профиль. Справочники и настройки
   // организации не становятся доступны из-за прямого перехода в этот раздел.
   const isRestricted=['viewer','partner','rop','classifier'].includes(state.me?.role);
@@ -5171,6 +5246,22 @@ async function settings(v) {
       <div id="s3status">${s3line(s.s3)}</div>
      </div>
     </div></div>`;
+  } else if (state.settingsTab === 'training') {
+    const items = await api('/api/partner-training').catch(() => []);
+    body = `<div class="settings-cols"><div>
+     <div class="card"><h3>Обучение партнёров</h3><p><small>Материалы видит только партнёр в разделе «Обучение». Сотрудникам офиса раздел не показывается.</small></p>
+      <form onsubmit="return saveTrainingItem(event)">
+        <label>Название <b>*</b><input name="title" required maxlength="200" placeholder="Как вести переданный лид"></label>
+        <label>Текст<textarea name="body" rows="4" maxlength="20000" placeholder="Краткая инструкция"></textarea></label>
+        <label>Ссылка<input name="url" type="url" maxlength="2000" placeholder="https://… (необязательно)"></label>
+        <label>Порядок<input name="sort" type="number" min="0" max="10000" value="0"></label>
+        <button class="btn primary">Добавить материал</button>
+      </form></div>
+     <div class="card"><h3>Материалы (${items.length})</h3>
+      ${items.map(t => `<div class="row"><span><b>${esc(t.title)}</b><br><small>${t.active ? 'виден партнёрам' : 'скрыт'} · порядок ${esc(t.sort)}</small></span>
+        <span style="display:flex;gap:6px"><button class="btn sm" onclick="toggleTrainingItem(${t.id},${t.active ? 0 : 1})">${t.active ? 'Скрыть' : 'Показать'}</button>
+        <button class="btn sm danger" onclick="deleteTrainingItem(${t.id})">Удалить</button></span></div>`).join('') || '<div class="empty">Материалов пока нет.</div>'}
+     </div></div></div>`;
   } else if (state.settingsTab === 'profile') {
     const me = state.me || {};
     body = `<div class="settings-cols"><div>
@@ -5403,6 +5494,23 @@ async function probeSources(btn) {
 async function saveCompetitorKeys(e) { e.preventDefault(); const b = {}; for (const [k, v] of new FormData(e.target)) if (v && !String(v).includes('•')) b[k] = v; await api('/api/competitor-sources', { method: 'PUT', body: JSON.stringify(b) }); toast('Ключи сохранены'); render(); return false; }
 async function saveCompetitorUrls(e) { e.preventDefault(); const b = {}; for (const [k, v] of new FormData(e.target)) if (v) b[k] = v; await api('/api/competitor-sources', { method: 'PUT', body: JSON.stringify(b) }); toast('Адреса сохранены'); render(); return false; }
 async function saveCompanySettings(e) { e.preventDefault(); await api('/api/settings', { method: 'PUT', body: JSON.stringify(Object.fromEntries(new FormData(e.target))) }); toast('Сохранено'); state.cache.settings = null; render(); return false; }
+async function saveTrainingItem(e) {
+  e.preventDefault();
+  const b = Object.fromEntries(new FormData(e.target));
+  b.sort = Number(b.sort) || 0;
+  await api('/api/partner-training', { method: 'POST', body: JSON.stringify(b) });
+  toast('Материал добавлен'); render(); return false;
+}
+async function toggleTrainingItem(id, active) {
+  await api('/api/partner-training/' + id, { method: 'PATCH', body: JSON.stringify({ active }) });
+  toast(active ? 'Материал виден партнёрам' : 'Материал скрыт'); render();
+}
+function deleteTrainingItem(id) {
+  askConfirm('Удалить материал обучения партнёров?', async () => {
+    await api('/api/partner-training/' + id, { method: 'DELETE' });
+    toast('Материал удалён'); render();
+  }, { okText: 'Удалить' });
+}
 function randomSecret() {
   const bytes = crypto.getRandomValues(new Uint8Array(24));
   return Array.from(bytes, b => ('0' + b.toString(16)).slice(-2)).join('');
@@ -5953,6 +6061,7 @@ const PALETTE_ACTIONS = [
     { ico: 'analytics', title: 'Аналитика', hint: 'воронка, план и качество ответов', view: 'analytics', run: () => go('analytics') },
     { ico: 'pipe', title: 'Очередь', hint: 'назначение лидов, смены и передачи партнёрам', roles: ['admin', 'rop'], view: 'routing', run: () => go('routing') },
     { ico: 'contacts', title: 'Классификация', hint: 'разбор входящих обращений', roles: ['admin', 'rop', 'classifier'], view: 'classification', run: () => go('classification') },
+    { ico: 'fileText', title: 'Обучение', hint: 'материалы для партнёров', view: 'training', run: () => go('training') },
     { ico: 'competitors', title: 'Конкуренты', hint: 'разведка и проверка', view: 'competitors', run: () => go('competitors') },
     { ico: 'settings', title: 'Настройки', hint: 'интеграции и права', view: 'settings', run: () => go('settings') }
   ]},
@@ -5961,8 +6070,8 @@ const PALETTE_ACTIONS = [
   // roles: действие доступно не всем, кто может менять данные (компанию и
   // проверку конкурента сервер партнёру не открывает)
   { group: 'Быстрое создание', edit: true, items: [
-    { ico: 'plus', title: 'Новая сделка', hint: 'открыть форму', run: () => openDeal() },
-    { ico: 'plus', title: 'Новый контакт', hint: 'добавить клиента', run: () => openContact() },
+    { ico: 'plus', title: 'Новая сделка', hint: 'открыть форму', roles: ['admin', 'manager'], run: () => openDeal() },
+    { ico: 'plus', title: 'Новый контакт', hint: 'добавить клиента', roles: ['admin', 'manager'], run: () => openContact() },
     { ico: 'plus', title: 'Новая задача', hint: 'поставить дело', run: () => openTask() },
     { ico: 'company', title: 'Новая компания', hint: 'добавить юрлицо', roles: ['admin', 'manager'], run: () => openCompany() },
     { ico: 'campaigns', title: 'Новая рассылка', hint: 'сообщение клиентам: WhatsApp или почта', roles: ['admin', 'manager'], run: () => openCampaign() },

@@ -762,8 +762,13 @@ body.role-viewer .head-create{display:none}
    на сервере, поэтому кнопки прячем, чтобы не предлагать запрещённое */
 /* партнёру остаются его воронка, переписка с его клиентами и его задачи:
    остальное скрыто, чтобы вход не показывал чужие разделы офиса */
-body.role-partner nav button:not([data-view="pipe"]):not([data-view="inbox"]):not([data-view="tasks"]){display:none}
+body.role-partner nav button:not([data-view="pipe"]):not([data-view="inbox"]):not([data-view="tasks"]):not([data-view="training"]){display:none}
 body.role-partner .searchbox,body.role-partner #bellBtn{display:none}
+body.role-partner .head-create-deal,body.role-partner .head-create-contact{display:none}
+/* обучающий портал — только для партнёров: остальным ролям пункт скрыт,
+   а сервер всё равно отвечает 403 на /api/partner-training */
+#nav button[data-view="training"]{display:none}
+body.role-partner #nav button[data-view="training"]{display:inline-flex}
 body.role-viewer .head-readonly{display:inline-block}
 .viewer-lock{margin:10px 0 0}
 /* тёмная тема: докрашиваем то, что осталось со светлыми цветами по умолчанию */

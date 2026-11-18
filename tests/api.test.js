@@ -2135,7 +2135,7 @@ test('операционные показатели не выдают ложну
   assert.ok(q.body.managers.every(m => typeof m.unansweredDialogs === 'number' && typeof m.stalled === 'number' && typeof m.overdueTasks === 'number'), 'отдаются измеримые рабочие показатели');
   assert.ok(q.body.managers.every(m => !('score' in m) && !('verdict' in m)), 'медиана ответа и просрочка не превращаются в оценку менеджера');
   assert.ok(q.body.totals && Array.isArray(q.body.definitions) && q.body.definitions.length >= 4, 'значение показателей объясняется');
-  assert.match(q.body.note, /не оценка качества менеджера/);
+  assert.match(q.body.note, /Автоматическая оценка — это объективные сигналы/);
   // вопрос клиента, на который ответил не человек, а правило или рассылка,
   // остаётся в отчёте: качество измеряется ответами сотрудника
   const qContact = await call('/api/contacts', { method: 'POST', body: JSON.stringify({ name: 'Клиент ОКК', phone: '+79007770011', responsible_id: 1 }) });
@@ -2466,6 +2466,12 @@ test('партнёр: доступ только по активной перед
     assert.equal((await call('/api/deals/'+deal.body.id+'/products',{method:'POST',body:JSON.stringify({name:'Позиция вне разрешения',price:700000,qty:1})})).status,403,'партнёр не меняет сумму через состав сделки');
     assert.equal((await call('/api/deals/'+deal.body.id,{method:'PATCH',body:JSON.stringify({amount:1})})).status,403,'сумма — закрытое для изменения поле');
     assert.equal((await call('/api/deals/'+deal.body.id,{method:'PATCH',body:JSON.stringify({stage:'deferred'})})).status,403,'переход вне разрешённых этапов закрыт');
+    assert.equal((await call('/api/deals/'+deal.body.id,{method:'PATCH',body:JSON.stringify({title:'Сделка для передачи (обновлено партнёром)'})})).status,200,'партнёр меняет согласованные поля переданного лида');
+    assert.equal((await call('/api/deals/'+deal.body.id,{method:'PATCH',body:JSON.stringify({stage:'new'})})).status,200,'партнёр двигает лид по согласованному этапу');
+    assert.equal((await call('/api/deals/'+deal.body.id,{method:'PATCH',body:JSON.stringify({custom:{x:1}})})).status,403,'свои поля партнёру закрыты');
+    // обучающий портал: партнёр читает, менеджер и РОП — нет, создаёт только администратор
+    assert.equal((await call('/api/partner-training')).status,200,'партнёр читает обучающий портал');
+    assert.equal((await call('/api/partner-training',{method:'POST',body:JSON.stringify({title:'Попытка партнёра'})})).status,403,'партнёр не ведёт материалы обучения');
     assert.equal((await call('/api/deals/'+deal.body.id+'/print?doc=quote')).status,200,'по переданной сделке печать разрешена');
     assert.equal((await call('/api/deals/'+deal.body.id+'/send-doc',{method:'POST',body:JSON.stringify({doc:'quote'})})).status!==403,true,'отправка документа по переданной сделке разрешена');
     const conv=await call('/api/conversations',{method:'POST',body:JSON.stringify({contact_id:fcContact.body.id,chat_type:'whatsapp'})});
@@ -2512,6 +2518,53 @@ test('партнёр: доступ только по активной перед
     assert.equal((await fetch(base+ownFile.body.url,{headers:h})).status,403,'старый URL вложения закрывается после отзыва');
     assert.equal((await call('/api/deals/'+deal.body.id+'/print?doc=quote')).status,403,'печать закрывается после отзыва');
   } finally { h=adminHeaders; }
+});
+
+test('обучающий портал партнёров: ведёт администратор, читает только партнёр', async () => {
+  const adminHeaders = h;
+  try {
+    const created = await call('/api/partner-training', { method: 'POST', body: JSON.stringify({ title: 'Как вести переданный лид', body: 'Отвечайте в тот же день и фиксируйте следующий шаг.', url: 'https://example.com/guide', sort: 1 }) });
+    assert.equal(created.status, 201, 'администратор добавляет материал');
+    assert.equal(created.body.title, 'Как вести переданный лид');
+    const badUrl = await call('/api/partner-training', { method: 'POST', body: JSON.stringify({ title: 'Плохая ссылка', url: 'javascript:alert(1)' }) });
+    assert.equal(badUrl.status, 400, 'ссылка без http(s) отклонена');
+    const mgr = await call('/api/users', { method: 'POST', body: JSON.stringify({ name: 'Менеджер Обучения', email: 'training-mgr@example.com', password: 'trainingpassword1', role: 'manager' }) });
+    assert.equal(mgr.status, 201);
+    const lmm = await readyLogin('/api/auth/login', { method: 'POST', body: JSON.stringify({ email: 'training-mgr@example.com', password: 'trainingpassword1' }) });
+    h = { Authorization: 'Bearer ' + lmm.body.token };
+    assert.equal((await call('/api/partner-training')).status, 403, 'менеджеру портал закрыт');
+    assert.equal((await call('/api/partner-training', { method: 'POST', body: JSON.stringify({ title: 'Попытка менеджера' }) })).status, 403, 'менеджер не ведёт материалы');
+    h = adminHeaders;
+    const hidden = await call('/api/partner-training/' + created.body.id, { method: 'PATCH', body: JSON.stringify({ active: 0 }) });
+    assert.equal(hidden.status, 200);
+    assert.equal(hidden.body.active, 0);
+    const shown = await call('/api/partner-training/' + created.body.id, { method: 'PATCH', body: JSON.stringify({ active: 1 }) });
+    assert.equal(shown.body.active, 1);
+    assert.equal((await call('/api/partner-training/' + created.body.id, { method: 'DELETE' })).status, 200, 'администратор удаляет материал');
+    assert.equal((await call('/api/partner-training')).body.length, 0, 'список пуст после удаления');
+  } finally { h = adminHeaders; }
+});
+
+test('рассылки: отписка исключает из сегмента и проверяется при отправке', async () => {
+  const adminHeaders = h;
+  try {
+    await call('/api/settings', { method: 'PUT', body: JSON.stringify({ SMTP_HOST: 'smtp.example.test' }) });
+    const ok = await call('/api/contacts', { method: 'POST', body: JSON.stringify({ name: 'Получатель Согласен', email: 'agree@example.com' }) });
+    const out = await call('/api/contacts', { method: 'POST', body: JSON.stringify({ name: 'Получатель Отписался', email: 'optout@example.com', email_opt_out: 1 }) });
+    assert.equal(ok.status, 201); assert.equal(out.status, 201);
+    assert.equal(Number(out.body.email_opt_out), 1, 'отписка сохраняется в карточке');
+    const pv = await call('/api/campaigns/preview', { method: 'POST', body: JSON.stringify({ channel: 'email', audience: { ids: [ok.body.id, out.body.id] } }) });
+    assert.equal(pv.body.count, 1, 'отписавшийся не попадает в предпросмотр');
+    // входящее «Отписка» по почте отмечает канал автоматически
+    await call('/webhooks/email', { method: 'POST', body: JSON.stringify({ from: 'agree@example.com', name: 'Получатель Согласен', subject: 'Re: Рассылка', text: 'Отписка' }) });
+    const after = await call('/api/contacts/' + ok.body.id);
+    assert.equal(Number(after.body.email_opt_out), 1, 'ответ «Отписка» отмечает отписку по почте');
+    const pv2 = await call('/api/campaigns/preview', { method: 'POST', body: JSON.stringify({ channel: 'email', audience: { ids: [ok.body.id] } }) });
+    assert.equal(pv2.body.count, 0, 'после отписки получателей нет');
+    const empty = await call('/api/campaigns', { method: 'POST', body: JSON.stringify({ name: 'Всем отписавшимся', channel: 'email', message: 'текст', audience: { ids: [ok.body.id, out.body.id] } }) });
+    assert.equal(empty.status, 400, 'рассылка только отписавшимся не создаётся');
+    assert.match(empty.body.error, /не заполнен e-mail|не подходит/, 'ошибка объясняет причину');
+  } finally { h = adminHeaders; }
 });
 
 test('карточка получает только свои записи, нагрузка сотрудников считается на сервере', async () => {
@@ -2654,6 +2707,21 @@ test('РОП и классификатор: команда, очередь, на
     ];
     for(const [path,method] of forbiddenRop)assert.equal((await call(path,{method,...(method==='GET'?{}:{body:'{}'})})).status,403,`РОПу закрыт ${method} ${path}`);
     assert.equal((await call('/api/reports/team?team_id='+teamB.body.id)).status,403,'руководитель не читает сводку другой команды');
+    // ОКК и конверсия: РОП видит результаты своей команды, чужая команда закрыта
+    const ropQuality = await call('/api/quality?days=30');
+    assert.equal(ropQuality.status, 200, 'РОП открывает автоматические показатели качества');
+    assert.ok(ropQuality.body.managers.some(m => m.id === managerA.id), 'в показателях есть менеджер своей команды');
+    assert.ok(!ropQuality.body.managers.some(m => m.id === managerOther.id), 'менеджер чужой команды в показателях отсутствует');
+    assert.ok(ropQuality.body.managers.every(m => typeof m.qualified === 'number' && typeof m.withOpenTask === 'number'), 'автоматическая оценка по CRM отдаётся');
+    assert.equal((await call('/api/quality/reviews?days=365')).status, 200, 'РОП читает проверки своей команды');
+    assert.equal((await call('/api/quality/reviews?manager_id=' + managerOther.id)).status, 403, 'РОП не читает проверки чужой команды');
+    const ropConv = await call('/api/quality/conversion?days=365');
+    assert.equal(ropConv.status, 200, 'РОП открывает конверсию');
+    assert.ok(Array.isArray(ropConv.body.byPipeline) && Array.isArray(ropConv.body.byStage) && Array.isArray(ropConv.body.bySource), 'конверсия с воронкой, этапами и источником отдаётся');
+    assert.ok(ropConv.body.definitions.some(d => /выигранные среди/.test(d)), 'числитель и знаменатель конверсии объяснены');
+    assert.equal((await call('/api/quality/conversion?manager_id=' + managerOther.id)).status, 403, 'конверсия чужой команды закрыта');
+    assert.equal((await call('/api/quality/reviews', { method: 'POST', body: JSON.stringify({ deal_id: older.id }) })).status, 403, 'РОП не создаёт проверки');
+    assert.equal((await call('/api/quality/deals')).status, 403, 'РОП не ищет сделки для новой проверки');
 
     const offShift=await call('/api/routing/assign',{method:'POST',body:JSON.stringify({deal_id:offShiftLead.id,manager_id:managerOff.id,reason:'Ручное назначение'})});
     assert.equal(offShift.status,409,'ручное назначение не обходит требование активной смены');

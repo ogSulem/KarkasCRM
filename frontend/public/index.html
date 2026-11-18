@@ -59,6 +59,7 @@
     <button type="button" data-view="companies" onclick="go('companies')"><span class="nav-ico" data-icon="companies"></span> Компании</button>
     <button type="button" data-view="products" onclick="go('products')"><span class="nav-ico" data-icon="products"></span> Каталог</button>
     <button type="button" data-view="analytics" onclick="go('analytics')"><span class="nav-ico" data-icon="analytics"></span> Аналитика</button>
+    <button type="button" data-view="training" onclick="go('training')"><span class="nav-ico" data-icon="fileText"></span> Обучение</button>
     <button type="button" data-view="competitors" onclick="go('competitors')"><span class="nav-ico" data-icon="competitors"></span> Конкуренты</button>
     <button type="button" data-view="settings" onclick="go('settings')"><span class="nav-ico" data-icon="settings"></span> Настройки</button>
   </nav>
@@ -81,9 +82,9 @@
     <div class="head-actions">
       <div class="searchbox"><span class="search-ico" id="searchIco"></span><input id="globalSearch" placeholder="Поиск: клиенты, сделки, компании, задачи" autocomplete="off" aria-label="Глобальный поиск по клиентам, сделкам, компаниям и задачам"><div id="searchResults" class="search-results hidden"></div></div>
       <span class="tag grey head-readonly" title="Ваша роль — «Наблюдатель»: доступны просмотр и выгрузки">Только просмотр</span>
-      <button class="btn orange head-create" onclick="openDeal()">+ Сделка</button>
-      <button class="btn primary head-create" onclick="openContact()">+ Контакт</button>
-      <button class="btn head-create" onclick="openTask()">+ Задача</button>
+      <button class="btn orange head-create head-create-deal" onclick="openDeal()">+ Сделка</button>
+      <button class="btn primary head-create head-create-contact" onclick="openContact()">+ Контакт</button>
+      <button class="btn head-create head-create-task" onclick="openTask()">+ Задача</button>
       <button class="btn icon-btn" id="themeBtn" title="Светлая / тёмная тема" onclick="toggleTheme()"></button>
       <button class="btn icon-btn" id="bellBtn" title="Уведомления" onclick="openNotifications()"><span id="bellIcon"></span><span class="pill orange" id="bellCount" style="margin-left:4px"></span></button>
     </div>

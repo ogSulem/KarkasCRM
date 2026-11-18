@@ -99,6 +99,12 @@ test('письмо без вложений остаётся простым те�
   assert.match(raw, /Content-Type: text\/plain; charset=utf-8/);
   assert.ok(!/multipart/.test(raw), 'без вложений multipart не нужен');
   assert.ok(raw.endsWith(Buffer.from('Привет').toString('base64') + '\r\n'), 'тело передано в base64');
+  assert.ok(!raw.includes('List-Unsubscribe'), 'обычное письмо без рассылки заголовка отписки не несёт');
+});
+
+test('рассылка несёт заголовок отписки', async () => {
+  const raw = buildMailMessage({ from: 'a@b.c', to: 'c@d.e', subject: 'Рассылка', text: 'Текст', messageId: '<m1b@karkascrm>', listUnsubscribe: '<mailto:a@b.c?subject=unsubscribe>' });
+  assert.match(raw, /List-Unsubscribe: <mailto:a@b\.c\?subject=unsubscribe>/, 'почтовик показывает кнопку отписки');
 });
 
 test('вложение собирается по MIME: границы, base64 и читаемое имя файла', async () => {

@@ -273,6 +273,7 @@ CREATE TABLE IF NOT EXISTS activities(id INTEGER PRIMARY KEY,text TEXT,entity_ty
 CREATE TABLE IF NOT EXISTS automation_queue(id INTEGER PRIMARY KEY,automation_id INTEGER,trigger_type TEXT,deal_id INTEGER,contact_id INTEGER,run_at TEXT,quiet INTEGER DEFAULT 0,created_at TEXT DEFAULT (datetime('now')));
 CREATE TABLE IF NOT EXISTS campaigns(id INTEGER PRIMARY KEY,name TEXT NOT NULL,channel TEXT NOT NULL DEFAULT 'whatsapp',subject TEXT DEFAULT '',message TEXT NOT NULL,audience TEXT DEFAULT '{}',status TEXT NOT NULL DEFAULT 'scheduled',scheduled_at TEXT,created_by TEXT DEFAULT '',created_by_id INTEGER,total INTEGER DEFAULT 0,sent INTEGER DEFAULT 0,failed INTEGER DEFAULT 0,created_at TEXT DEFAULT (datetime('now')));
 CREATE TABLE IF NOT EXISTS campaign_items(id INTEGER PRIMARY KEY,campaign_id INTEGER REFERENCES campaigns(id) ON DELETE CASCADE,contact_id INTEGER,address TEXT DEFAULT '',status TEXT NOT NULL DEFAULT 'queued',error TEXT DEFAULT '',sent_at TEXT);
+CREATE TABLE IF NOT EXISTS partner_training_items(id INTEGER PRIMARY KEY,title TEXT NOT NULL,body TEXT DEFAULT '',url TEXT DEFAULT '',sort INTEGER DEFAULT 0,active INTEGER DEFAULT 1,created_at TEXT DEFAULT (datetime('now')),updated_at TEXT DEFAULT (datetime('now')));
 `);
 // мягкие миграции: дополняем ранее созданные таблицы недостающими колонками
 const SCHEMA = [
@@ -336,6 +337,11 @@ const SCHEMA_COLUMNS = [...SCHEMA,
   ['quality_review_items', 'evidence_timestamp', "TEXT NOT NULL DEFAULT ''"],
   ['quality_review_items', 'evidence_speaker', "TEXT NOT NULL DEFAULT ''"],
   ['quality_review_items', 'evidence_confidence', "TEXT NOT NULL DEFAULT ''"],
+  // Отписка от рассылок по каналам: клиент, написавший «Отписка», больше не
+  // попадает в сегменты рассылок этого канала. Проверка делается и при
+  // создании рассылки, и в момент отправки каждого сообщения.
+  ['contacts', 'email_opt_out', 'INTEGER NOT NULL DEFAULT 0'],
+  ['contacts', 'whatsapp_opt_out', 'INTEGER NOT NULL DEFAULT 0'],
 ];
 
 // чего не хватает в этой базе: если она из старой версии — сначала копия, потом изменения
@@ -422,7 +428,9 @@ CREATE INDEX IF NOT EXISTS idx_conv_external ON conversations(external_chat_id);
 CREATE INDEX IF NOT EXISTS idx_msg_content_uri ON messages(content_uri);
 CREATE INDEX IF NOT EXISTS idx_messages_deal_conversation ON messages(deal_id,conversation_id,id);
 CREATE INDEX IF NOT EXISTS idx_camp_items ON campaign_items(campaign_id, status, id);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_camp_items_contact ON campaign_items(campaign_id, contact_id);
 CREATE INDEX IF NOT EXISTS idx_camp_queue ON campaigns(status, scheduled_at);
+CREATE INDEX IF NOT EXISTS idx_partner_training_active ON partner_training_items(active, sort, id);
 CREATE INDEX IF NOT EXISTS idx_quality_reviews_status_date ON quality_reviews(status, updated_at DESC, id DESC);
 CREATE INDEX IF NOT EXISTS idx_quality_reviews_deal_date ON quality_reviews(deal_id, completed_at DESC);
 CREATE INDEX IF NOT EXISTS idx_quality_reviews_report ON quality_reviews(status, completed_at DESC, pipeline_id, responsible_id, stage, source);
@@ -637,6 +645,7 @@ function clampTexts(b) {
   if (b.custom !== undefined && typeof b.custom !== 'string') {
     try { b.custom = JSON.stringify(b.custom ?? {}) } catch { b.custom = '{}' }
   }
+  for (const k of ['email_opt_out', 'whatsapp_opt_out']) if (b[k] !== undefined) b[k] = b[k] ? 1 : 0;
   for (const k of Object.keys(b)) {
     const lim = TEXT_LIMITS[k];
     if (lim && typeof b[k] === 'string' && b[k].length > lim) b[k] = b[k].slice(0, lim);
@@ -949,7 +958,7 @@ const staticGzip = new Map(); // кэш сжатых ассетов: gzip счи
 // клиента перечитать раздел, которого у партнёра нет. Партнёрским соединениям
 // уходят события о его собственных диалогах и обновления тех таблиц, которые он
 // действительно может перечитать.
-const PARTNER_SSE_TABLES = new Set(['deals', 'contacts', 'tasks', 'notes', 'conversations', 'pipelines', 'products', 'prices', 'custom_fields', 'partner-transfers', 'all']);
+const PARTNER_SSE_TABLES = new Set(['deals', 'contacts', 'tasks', 'notes', 'conversations', 'pipelines', 'products', 'prices', 'custom_fields', 'partner-transfers', 'partner-training', 'all']);
 export function partnerSeesEvent(r, ev, data) {
   if (!r) return true;
   const d = data && typeof data === 'object' ? data : {};
@@ -1120,6 +1129,9 @@ function campaignRecipients(aud, channel, scopeUser = null) {
     if (a.stage) params.push(String(a.stage).slice(0, 60));
   }
   if(scopeUser?.role==='manager') { where.push(managerContactScopeSql('c')); params.push(...managerContactParams(scopeUser)); }
+  // Отписавшийся клиент не попадает в рассылку этого канала — ни по сегменту,
+  // ни по отмеченным вручную id. Проверка дублируется в момент отправки.
+  where.push(channel === 'email' ? 'COALESCE(c.email_opt_out,0)=0' : 'COALESCE(c.whatsapp_opt_out,0)=0');
   const addr = channel === 'email' ? "NULLIF(TRIM(c.email),'')" : 'c.phone_norm';
   const sql = `SELECT c.id, c.name, ${addr} AS address FROM contacts c ${where.length ? 'WHERE ' + where.join(' AND ') : ''} ORDER BY c.id`;
   return db.prepare(sql).all(...params).filter(r => r.address);
@@ -1140,9 +1152,16 @@ async function campaignSendOne(camp, it) {
   try {
     if (!contact) throw new Error('Клиент удалён');
     if (!text) throw new Error('Пустой текст');
+    // Отписка могла прийти после создания рассылки: проверяем ещё раз перед
+    // отправкой, иначе запланированная рассылка ушла бы отписавшемуся.
+    if (camp.channel === 'email' && Number(contact.email_opt_out) === 1) throw new Error('Клиент отписался от почтовых рассылок');
+    if (camp.channel !== 'email' && Number(contact.whatsapp_opt_out) === 1) throw new Error('Клиент отписался от рассылок в мессенджерах');
     if (camp.channel === 'email') {
       if (!contact.email) throw new Error('У клиента нет e-mail');
-      await sendMail({ ...smtpSettings(), to: contact.email, toName: contact.name || undefined, subject: camp.subject || camp.name, text });
+      const settings = smtpSettings();
+      const mailText = text + '\n\n—\nЕсли не хотите получать рассылки, ответьте «Отписка».';
+      const listUnsubscribe = settings.from ? `<mailto:${settings.from}?subject=unsubscribe>` : '';
+      await sendMail({ ...settings, to: contact.email, toName: contact.name || undefined, subject: camp.subject || camp.name, text: mailText, listUnsubscribe });
       const conv = db.prepare('SELECT id FROM conversations WHERE contact_id=?').get(contact.id);
       if (conv) {
         const message = db.prepare("INSERT INTO messages(conversation_id,channel,direction,body,subject,status,author) VALUES(?,?,?,?,?,'sent','Рассылка')").run(conv.id, 'email', 'out', text, camp.subject || camp.name);
@@ -1581,6 +1600,17 @@ export async function upsertIncoming({ channel = 'whatsapp', chatType = '', phon
   // поправляем имя на карточке, чтобы клиент был подписан по-человечески.
   if (contact && name && /^[\d\s()+-]{7,}$/.test(String(contact.name || '').trim())) { db.prepare('UPDATE contacts SET name=? WHERE id=?').run(name, contact.id); contact.name = name; }
   if (!contact) { const r = db.prepare('INSERT INTO contacts(name,phone,email,source,phone_norm) VALUES(?,?,?,?,?)').run(String(name || fmtPhoneRu(ph) || ph || chatId || email || 'Новый клиент').slice(0, 120), String(ph || '').slice(0, 64), String(email || '').slice(0, 254), channel === 'email' ? 'email' : 'wazzup-' + (chatType || channel), phNorm || null); contact = db.prepare('SELECT * FROM contacts WHERE id=?').get(r.lastInsertRowid); logActivity(`Новый контакт (${channel === 'email' ? 'email' : chatType || channel}): ${contact.name}`, 'contacts', contact.id, '', 0); }
+  // Отписка от рассылок: клиент отвечает «Отписка» (или жмёт List-Unsubscribe
+  // в письме). Отмечаем канал и больше не включаем его в рассылки. Само
+  // сообщение сохраняется в переписке как обычное входящее.
+  if (direction !== 'out' && /отписк|unsubscribe|не\s+писать|стоп/i.test(String(body || '') + ' ' + String(subject || ''))) {
+    const col = channel === 'email' ? 'email_opt_out' : 'whatsapp_opt_out';
+    if (Number(contact[col]) !== 1) {
+      db.prepare(`UPDATE contacts SET ${col}=1 WHERE id=?`).run(contact.id);
+      contact[col] = 1;
+      logActivity(`Клиент «${contact.name || 'без имени'}» отписался от рассылок (${channel === 'email' ? 'почта' : 'мессенджеры'})`, 'contacts', contact.id, '', 0);
+    }
+  }
   // Привязанный к аккаунту сотрудник — предпочтительный кандидат, но канал не
   // заменяет правила смены и пригодности: если владелец не работает, лид остаётся
   // в очереди и назначается только по правилам активной смены.
@@ -2792,7 +2822,7 @@ function deleteImpact(table, ids) {
    он же решает, какие таблицы принимает универсальный маршрут, поэтому имена
    колонок не могут прийти снаружи. Объявлен один раз на модуль: прежде объект
    собирался заново на каждом запросе. */
-const CRUD = { contacts: ['name', 'phone', 'email', 'company', 'company_id', 'position', 'source', 'tags', 'notes', 'responsible_id', 'custom'], companies: ['name', 'inn', 'phone', 'email', 'site', 'notes', 'responsible_id'], tasks: ['title', 'type', 'due', 'priority', 'done', 'deal_id', 'contact_id', 'responsible_id', 'result', 'repeat'], deals: ['title', 'amount', 'stage', 'pipeline_id', 'contact_id', 'company_id', 'responsible', 'responsible_id', 'priority', 'loss_reason', 'deadline', 'custom'], products: ['name', 'sku', 'price', 'unit', 'active', 'note'], templates: ['name', 'body'], automations: ['name', 'trigger_type', 'trigger_value', 'action_type', 'action_value', 'active', 'delay_days'], notes: ['entity_type', 'entity_id', 'body', 'author'] };
+const CRUD = { contacts: ['name', 'phone', 'email', 'company', 'company_id', 'position', 'source', 'tags', 'notes', 'responsible_id', 'custom', 'email_opt_out', 'whatsapp_opt_out'], companies: ['name', 'inn', 'phone', 'email', 'site', 'notes', 'responsible_id'], tasks: ['title', 'type', 'due', 'priority', 'done', 'deal_id', 'contact_id', 'responsible_id', 'result', 'repeat'], deals: ['title', 'amount', 'stage', 'pipeline_id', 'contact_id', 'company_id', 'responsible', 'responsible_id', 'priority', 'loss_reason', 'deadline', 'custom'], products: ['name', 'sku', 'price', 'unit', 'active', 'note'], templates: ['name', 'body'], automations: ['name', 'trigger_type', 'trigger_value', 'action_type', 'action_value', 'active', 'delay_days'], notes: ['entity_type', 'entity_id', 'body', 'author'] };
 
 /* Связи, которые схема не рвёт каскадом: у задач нет внешнего ключа на клиента
    и на сделку, заметки привязаны парой «тип + идентификатор», позиции сделки
@@ -3452,7 +3482,7 @@ export const server = http.createServer(async (req, res) => {
     // настройки и чужие карточки закрыты здесь централизованно, а списки ниже
     // дополнительно фильтруются по владельцу.
     if (user && user.role === 'partner' && p.startsWith('/api/')) {
-      const PARTNER_GET = [/^\/api\/me$/, /^\/api\/meta$/, /^\/api\/events$/, /^\/api\/dashboard$/, /^\/api\/pipelines$/, /^\/api\/users$/, /^\/api\/search$/, /^\/api\/deals(\/\d+)?$/, /^\/api\/contacts(\/\d+)?$/, /^\/api\/tasks(\/\d+)?$/, /^\/api\/notes(\/\d+)?$/, /^\/api\/conversations$/, /^\/api\/conversations\/\d+\/messages$/, /^\/api\/messages\/\d+\/file$/, /^\/api\/templates$/, /^\/api\/custom-fields$/, /^\/api\/companies$/, /^\/api\/deals\/\d+\/(print|products)$/];
+      const PARTNER_GET = [/^\/api\/me$/, /^\/api\/meta$/, /^\/api\/events$/, /^\/api\/dashboard$/, /^\/api\/pipelines$/, /^\/api\/users$/, /^\/api\/search$/, /^\/api\/deals(\/\d+)?$/, /^\/api\/contacts(\/\d+)?$/, /^\/api\/tasks(\/\d+)?$/, /^\/api\/notes(\/\d+)?$/, /^\/api\/conversations$/, /^\/api\/conversations\/\d+\/messages$/, /^\/api\/messages\/\d+\/file$/, /^\/api\/templates$/, /^\/api\/custom-fields$/, /^\/api\/companies$/, /^\/api\/deals\/\d+\/(print|products)$/, /^\/api\/partner-training$/];
       const PARTNER_WRITE = [/^\/api\/me\/(password|theme|pref)$/, /^\/api\/deals\/\d+$/, /^\/api\/tasks$/, /^\/api\/tasks\/\d+$/, /^\/api\/notes$/, /^\/api\/conversations$/, /^\/api\/conversations\/read$/, /^\/api\/conversations\/\d+\/(messages|upload|email)$/, /^\/api\/messages\/\d+\/refetch$/, /^\/api\/deals\/\d+\/send-doc$/];
       if (!(req.method === 'GET' || req.method === 'HEAD' ? PARTNER_GET : PARTNER_WRITE).some(re => re.test(p)))
         return json(res, 403, { error: 'Партнёру доступны его сделки, клиенты и задачи' });
@@ -3462,7 +3492,7 @@ export const server = http.createServer(async (req, res) => {
     // права администратора. Запрет по умолчанию закрывает новые маршруты, пока
     // их явно не добавили в матрицу доступа.
     if (user && user.role === 'rop' && p.startsWith('/api/')) {
-      const read = [/^\/api\/(me|meta|events|shifts|routing\/queue|routing\/assigned|routing\/managers|classification\/queue|classification\/classifiers|classification\/deals\/\d+|reports\/team|reports\/team\/records|reports\/sla|reports\/sla\/records|partner-transfers|pipelines)$/];
+      const read = [/^\/api\/(me|meta|events|shifts|routing\/queue|routing\/assigned|routing\/managers|classification\/queue|classification\/classifiers|classification\/deals\/\d+|reports\/team|reports\/team\/records|reports\/sla|reports\/sla\/records|partner-transfers|pipelines|quality|quality\/reviews|quality\/reviews\/\d+|quality\/conversion)$/];
       const write = [/^\/api\/me\/(password|theme|pref)$/, /^\/api\/routing\/(assign|return|priority)$/, /^\/api\/classification\/(assign|deals\/\d+)$/, /^\/api\/partner-transfers(?:\/\d+)?$/];
       const allowed = (req.method === 'GET' || req.method === 'HEAD') ? read.some(re => re.test(p)) : write.some(re => re.test(p));
       if (!allowed) return json(res,403,{error:'Эта операция руководителю отдела продаж недоступна.'});
@@ -4477,6 +4507,57 @@ export const server = http.createServer(async (req, res) => {
       }
     }
     // ===== pipelines & stages (configurable) =====
+    // ===== Обучающий портал партнёров: только партнёры читают, только администратор ведёт =====
+    if (p === '/api/partner-training' || /^\/api\/partner-training\/\d+$/.test(p)) {
+      if (!['admin', 'partner'].includes(user.role)) return json(res, 403, { error: 'Обучающий портал доступен только партнёрам' });
+      if (req.method === 'GET' && p === '/api/partner-training') {
+        const rows = user.role === 'admin'
+          ? db.prepare('SELECT * FROM partner_training_items ORDER BY sort,id').all()
+          : db.prepare('SELECT id,title,body,url,sort,created_at,updated_at FROM partner_training_items WHERE active=1 ORDER BY sort,id').all();
+        return json(res, 200, rows);
+      }
+      if (user.role !== 'admin') return json(res, 403, { error: 'Материалы ведёт администратор' });
+      if (req.method === 'POST' && p === '/api/partner-training') {
+        const b = await readBody(req);
+        const title = String(b.title || '').trim().slice(0, 200);
+        if (!title) return json(res, 400, { error: 'Укажите название материала' });
+        const body = String(b.body || '').slice(0, 20000);
+        const url = String(b.url || '').trim().slice(0, 2000);
+        if (url && !/^https?:\/\//i.test(url)) return json(res, 400, { error: 'Ссылка должна начинаться с http:// или https://' });
+        const sort = Math.max(0, Math.min(10000, Math.trunc(Number(b.sort) || 0)));
+        const r = db.prepare('INSERT INTO partner_training_items(title,body,url,sort,active) VALUES(?,?,?,?,1)').run(title, body, url, sort);
+        logActivity(`Материал обучения партнёров «${title}» добавлен`, 'partner_training_items', Number(r.lastInsertRowid), user.name);
+        broadcast('change', { table: 'partner-training' });
+        return json(res, 201, db.prepare('SELECT * FROM partner_training_items WHERE id=?').get(r.lastInsertRowid));
+      }
+      const mTrain = p.match(/^\/api\/partner-training\/(\d+)$/);
+      if (mTrain) {
+        const id = Number(mTrain[1]);
+        const row = db.prepare('SELECT * FROM partner_training_items WHERE id=?').get(id);
+        if (!row) return json(res, 404, { error: 'Материал не найден' });
+        if (req.method === 'PATCH') {
+          const b = await readBody(req);
+          const title = b.title === undefined ? row.title : String(b.title || '').trim().slice(0, 200);
+          if (!title) return json(res, 400, { error: 'Укажите название материала' });
+          const body = b.body === undefined ? row.body : String(b.body || '').slice(0, 20000);
+          const url = b.url === undefined ? row.url : String(b.url || '').trim().slice(0, 2000);
+          if (url && !/^https?:\/\//i.test(url)) return json(res, 400, { error: 'Ссылка должна начинаться с http:// или https://' });
+          const sort = b.sort === undefined ? row.sort : Math.max(0, Math.min(10000, Math.trunc(Number(b.sort) || 0)));
+          const active = b.active === undefined ? row.active : (b.active ? 1 : 0);
+          db.prepare('UPDATE partner_training_items SET title=?,body=?,url=?,sort=?,active=?,updated_at=datetime(\'now\') WHERE id=?').run(title, body, url, sort, active, id);
+          logActivity(`Материал обучения партнёров «${title}» обновлён`, 'partner_training_items', id, user.name);
+          broadcast('change', { table: 'partner-training' });
+          return json(res, 200, db.prepare('SELECT * FROM partner_training_items WHERE id=?').get(id));
+        }
+        if (req.method === 'DELETE') {
+          db.prepare('DELETE FROM partner_training_items WHERE id=?').run(id);
+          logActivity('Материал обучения партнёров удалён', 'partner_training_items', id, user.name);
+          broadcast('change', { table: 'partner-training' });
+          return json(res, 200, { deleted: true });
+        }
+      }
+      return json(res, 405, { error: 'Метод не поддерживается' });
+    }
     // ===== Рассылки: менеджер выбирает сегмент, канал и время, сервер отправляет очередью =====
     if (p === '/api/campaigns' || /^\/api\/campaigns\//.test(p)) {
       if (!['admin', 'manager'].includes(user.role)) return json(res, 403, { error: 'Рассылки доступны менеджеру и администратору' });
@@ -4624,13 +4705,26 @@ export const server = http.createServer(async (req, res) => {
         reviewer_name:r.reviewer_name,next_steps:qParseArray(r.next_steps),score:qStats(itemsBy.get(r.id)||[],r) })) });
     }
     if (p === '/api/quality/reviews' && req.method === 'GET') {
-      if (!requireAdmin(user, res)) return;
+      if (!['admin', 'rop'].includes(user.role)) return json(res, 403, { error: 'Проверки ОКК видят руководитель и администратор' });
+      if (user.role === 'rop' && !user.team_id) return json(res, 403, { error: 'Руководителю сначала назначают команду.' });
       const days = Math.min(365, Math.max(1, Math.trunc(Number(u.searchParams.get('days')) || 7)));
       const since = new Date(Date.now() - days * 864e5).toISOString().slice(0, 19).replace('T', ' ');
       const filters = qBuildReviewFilters(u.searchParams);
       if (filters.error) return json(res,400,{error:filters.error});
-      const extra = filters.clauses.length ? ' AND '+filters.clauses.join(' AND ') : '';
-      const args = [since,...filters.params];
+      const clauses = [...filters.clauses], params = [...filters.params];
+      // РОП видит только завершённые проверки своей команды: черновики
+      // руководителя и чужие команды ему не раскрываются.
+      if (user.role === 'rop') {
+        clauses.push("r.status<>'draft'");
+        clauses.push('r.responsible_id IN (SELECT id FROM users WHERE team_id=?)');
+        params.push(Number(user.team_id));
+        if (filters.selected.manager_id) {
+          const m = db.prepare('SELECT team_id FROM users WHERE id=?').get(filters.selected.manager_id);
+          if (!m || Number(m.team_id) !== Number(user.team_id)) return json(res, 403, { error: 'Можно смотреть только свою команду.' });
+        }
+      }
+      const extra = clauses.length ? ' AND '+clauses.join(' AND ') : '';
+      const args = [since,...params];
       const rows = db.prepare(`SELECT r.* FROM quality_reviews r
         WHERE (r.status='draft' OR r.completed_at>=?)${extra}
         ORDER BY CASE WHEN r.status='draft' THEN 0 ELSE 1 END,r.updated_at DESC,r.id DESC LIMIT 100`).all(...args);
@@ -4677,7 +4771,7 @@ export const server = http.createServer(async (req, res) => {
           (SELECT status FROM quality_review_items i WHERE i.review_id=r.id AND i.criterion_key='followup') repeat_status,
           (SELECT status FROM quality_review_growth_items g WHERE g.review_id=r.id AND g.criterion_key='materials_followup') materials_status,
           (SELECT status FROM quality_review_growth_items g WHERE g.review_id=r.id AND g.criterion_key='region_coverage') geography_status
-        FROM ranked r WHERE r.rn=1 ORDER BY r.completed_at DESC,r.id DESC`).all(since,...filters.params);
+        FROM ranked r WHERE r.rn=1 ORDER BY r.completed_at DESC,r.id DESC`).all(since,...params);
       const metricDefinitions=[
         {key:'qualification',title:'Полная квалификация',target:75,definition:'Доля проверенных разговоров, где подтверждено не менее 4 из 6 факторов: объект/площадь, город, участок, срок, бюджет и способ оплаты.'},
         {key:'cityLandCrm',title:'Город и участок в CRM',target:90,definition:'Среди разговоров, где город был известен и оба CRM-поля можно проверить: доля карточек с заполненными городом и участком/его статусом.'},
@@ -4714,7 +4808,9 @@ export const server = http.createServer(async (req, res) => {
         if(!metricsByManagerMap.has(id))metricsByManagerMap.set(id,{id:id||null,name:row.responsible_name||'Не назначен',rows:[]});
         metricsByManagerMap.get(id).rows.push(row);
       }
-      const activeManagers=db.prepare("SELECT id,name FROM users WHERE active=1 AND role IN ('admin','manager') ORDER BY name,id").all();
+      const activeManagers=user.role==='rop'
+        ? db.prepare("SELECT id,name FROM users WHERE active=1 AND role IN ('admin','manager') AND team_id=? ORDER BY name,id").all(Number(user.team_id))
+        : db.prepare("SELECT id,name FROM users WHERE active=1 AND role IN ('admin','manager') ORDER BY name,id").all();
       const metricsByManager=activeManagers.map(m=>{
         const group=metricsByManagerMap.get(Number(m.id)), values=metricsFor(group?.rows||[]);
         return{id:m.id,name:m.name,reviewedCalls:values.calls.denominator,callsWithAction:values.calls.numerator,
@@ -4746,7 +4842,10 @@ export const server = http.createServer(async (req, res) => {
       }
       const periodBreakdown=[...periodBreakdownMap.values()].map(x=>({...x,deals:x.deals.size})).sort((a,b)=>a.week_start.localeCompare(b.week_start));
       const optionsSince=new Date(Date.now()-365*864e5).toISOString().slice(0,19).replace('T',' ');
-      const savedOptions=db.prepare(`SELECT DISTINCT pipeline_id,pipeline_name,stage,stage_name,source,responsible_id,responsible_name
+      const savedOptions=user.role==='rop'
+        ? db.prepare(`SELECT DISTINCT pipeline_id,pipeline_name,stage,stage_name,source,responsible_id,responsible_name
+        FROM quality_reviews WHERE completed_at>=? AND responsible_id IN (SELECT id FROM users WHERE team_id=?) ORDER BY pipeline_name,stage_name,source,responsible_name`).all(optionsSince,Number(user.team_id))
+        : db.prepare(`SELECT DISTINCT pipeline_id,pipeline_name,stage,stage_name,source,responsible_id,responsible_name
         FROM quality_reviews WHERE completed_at>=? ORDER BY pipeline_name,stage_name,source,responsible_name`).all(optionsSince);
       const pipelineMap=new Map(db.prepare('SELECT id,name FROM pipelines ORDER BY name').all().map(x=>[Number(x.id),{id:Number(x.id),name:x.name}]));
       for(const x of savedOptions)if(x.pipeline_id&&!pipelineMap.has(Number(x.pipeline_id)))pipelineMap.set(Number(x.pipeline_id),{id:Number(x.pipeline_id),name:x.pipeline_name||`Воронка ${x.pipeline_id}`});
@@ -4760,19 +4859,21 @@ export const server = http.createServer(async (req, res) => {
       for(const x of savedOptions)addStage(x.stage,x.stage_name,x.pipeline_name);
       const stages=[...stageMap.values()].map(x=>({id:x.id,name:[...x.names].join(' / ')||x.id,...(x.pipelines.size>1?{pipelines:[...x.pipelines].join(', ')}:{})}));
       const sourceSet=new Set(db.prepare("SELECT DISTINCT source FROM contacts WHERE COALESCE(source,'')<>'' ORDER BY source").all().map(x=>String(x.source)));
-      const managerMap=new Map(db.prepare("SELECT id,name FROM users WHERE role IN ('admin','manager') ORDER BY name,id").all().map(x=>[Number(x.id),{id:Number(x.id),name:x.name}]));
+      const managerMap=new Map((user.role==='rop'
+        ? db.prepare("SELECT id,name FROM users WHERE role IN ('admin','manager') AND team_id=? ORDER BY name,id").all(Number(user.team_id))
+        : db.prepare("SELECT id,name FROM users WHERE role IN ('admin','manager') ORDER BY name,id").all()).map(x=>[Number(x.id),{id:Number(x.id),name:x.name}]));
       for(const x of savedOptions){if(x.source)sourceSet.add(String(x.source));if(x.responsible_id&&!managerMap.has(Number(x.responsible_id)))managerMap.set(Number(x.responsible_id),{id:Number(x.responsible_id),name:x.responsible_name||'Сотрудник'});}
       const filterOptions={pipelines:[...pipelineMap.values()],stages,sources:[...sourceSet],managers:[...managerMap.values()]};
       const grouped=db.prepare(`${ranked}
         SELECT i.criterion_key,i.status,COUNT(*) n FROM quality_review_items i JOIN ranked r ON r.id=i.review_id
-        WHERE r.rn=1 GROUP BY i.criterion_key,i.status`).all(since,...filters.params);
+        WHERE r.rn=1 GROUP BY i.criterion_key,i.status`).all(since,...params);
       const byCriterion=new Map();
       for(const row of grouped){if(!byCriterion.has(row.criterion_key))byCriterion.set(row.criterion_key,{yes:0,no:0,na:0,unknown:0,empty:0});if(Object.hasOwn(byCriterion.get(row.criterion_key),row.status))byCriterion.get(row.criterion_key)[row.status]=Number(row.n)||0;}
       const uniqueCount=metricRows.length;
       const criteria=QUALITY_CRITERIA.map(c=>{const n=byCriterion.get(c.key)||{yes:0,no:0,na:0,unknown:0,empty:0};const applicable=n.yes+n.no;return{...c,...n,applicable,percent:qPercent(n.yes,applicable),coverage:qPercent(applicable,uniqueCount)||0};});
       const groupedGrowth=db.prepare(`${ranked}
         SELECT g.criterion_key,g.status,COUNT(*) n FROM quality_review_growth_items g JOIN ranked r ON r.id=g.review_id
-        WHERE r.rn=1 GROUP BY g.criterion_key,g.status`).all(since,...filters.params);
+        WHERE r.rn=1 GROUP BY g.criterion_key,g.status`).all(since,...params);
       const growthStatusMap=new Map();for(const row of groupedGrowth){if(!growthStatusMap.has(row.criterion_key))growthStatusMap.set(row.criterion_key,{yes:0,no:0,na:0,unknown:0,empty:0});if(Object.hasOwn(growthStatusMap.get(row.criterion_key),row.status))growthStatusMap.get(row.criterion_key)[row.status]=Number(row.n)||0;}
       const growthCriteria=QUALITY_GROWTH_CRITERIA.map(c=>{const n=growthStatusMap.get(c.key)||{yes:0,no:0,na:0,unknown:0,empty:0};const applicable=n.yes+n.no;return{...c,...n,applicable,percent:qPercent(n.yes,applicable),coverage:qPercent(applicable,uniqueCount)||0};});
       return json(res,200,{days,total:Number(total)||0,summary,criteria,growthCriteria,metrics:metricValues,metricsByManager,
@@ -4782,7 +4883,8 @@ export const server = http.createServer(async (req, res) => {
         reviews,truncated:Number(total)>reviews.length});
     }
     if (p === '/api/quality/conversion' && req.method === 'GET') {
-      if(!requireAdmin(user,res))return;
+      if(!['admin','rop'].includes(user.role))return json(res,403,{error:'Конверсию видят руководитель и администратор'});
+      if(user.role==='rop'&&!user.team_id)return json(res,403,{error:'Руководителю сначала назначают команду.'});
       const days=Math.min(365,Math.max(1,Math.trunc(Number(u.searchParams.get('days'))||7)));
       const since=new Date(Date.now()-days*864e5).toISOString().slice(0,19).replace('T',' ');
       const parseId=(key,label)=>{
@@ -4794,9 +4896,14 @@ export const server = http.createServer(async (req, res) => {
       const pipe=parseId('pipeline_id','воронка'),owner=parseId('manager_id','ответственный');
       if(pipe.error||owner.error)return json(res,400,{error:pipe.error||owner.error});
       const pipelineId=pipe.value,managerId=owner.value;
+      if(user.role==='rop'&&managerId){
+        const m=db.prepare('SELECT team_id FROM users WHERE id=?').get(managerId);
+        if(!m||Number(m.team_id)!==Number(user.team_id))return json(res,403,{error:'Можно смотреть только свою команду.'});
+      }
       const source=String(u.searchParams.get('source')||'').trim().slice(0,60);
       const stage=String(u.searchParams.get('stage')||'').trim().slice(0,120);
       const cohortClauses=["h.event_type='created'",'h.entered_at>=?'],cohortParams=[since];
+      if(user.role==='rop'){cohortClauses.push('h.responsible_id IN (SELECT id FROM users WHERE team_id=?)');cohortParams.push(Number(user.team_id));}
       if(pipelineId){cohortClauses.push('h.pipeline_id=?');cohortParams.push(pipelineId);}
       if(managerId){cohortClauses.push('h.responsible_id=?');cohortParams.push(managerId);}
       if(source){cohortClauses.push("COALESCE(h.source,'')=?");cohortParams.push(source);}
@@ -4816,6 +4923,7 @@ export const server = http.createServer(async (req, res) => {
         WHERE ${cohortWhere} GROUP BY COALESCE(NULLIF(h.source,''),'Источник не указан') ORDER BY name`).all(...cohortParams)
         .map(r=>({...r,closed:r.won+r.lost,conversion:qPercent(r.won,r.won+r.lost)}));
       const stageClauses=["h.event_type IN ('created','entered')",'h.entered_at>=?'],stageParams=[since];
+      if(user.role==='rop'){stageClauses.push('h.responsible_id IN (SELECT id FROM users WHERE team_id=?)');stageParams.push(Number(user.team_id));}
       if(pipelineId){stageClauses.push('h.pipeline_id=?');stageParams.push(pipelineId);}
       if(managerId){stageClauses.push('h.responsible_id=?');stageParams.push(managerId);}
       if(source){stageClauses.push("COALESCE(h.source,'')=?");stageParams.push(source);}
@@ -4829,7 +4937,7 @@ export const server = http.createServer(async (req, res) => {
         ORDER BY p.name,h.stage_name`).all(...stageParams)
         .map(r=>({...r,closed:r.won+r.lost,conversion:qPercent(r.won,r.won+r.lost)}));
       const creationHistoryUnavailable=Number(db.prepare(`SELECT COUNT(DISTINCT d.id) n FROM deals d
-        WHERE d.created_at>=? AND NOT EXISTS(SELECT 1 FROM deal_stage_history h WHERE h.deal_id=d.id AND h.event_type='created')`).get(since).n)||0;
+        WHERE d.created_at>=? AND NOT EXISTS(SELECT 1 FROM deal_stage_history h WHERE h.deal_id=d.id AND h.event_type='created')${user.role==='rop'?' AND d.responsible_id IN (SELECT id FROM users WHERE team_id=?)':''}`).get(...(user.role==='rop'?[since,Number(user.team_id)]:[since])).n)||0;
       const historyAvailableSince=db.prepare('SELECT MIN(entered_at) value FROM deal_stage_history').get().value||'';
       return json(res,200,{days,from:since,byPipeline,byStage,bySource,creationHistoryUnavailable,historyAvailableSince,
         definitions:[
@@ -4883,7 +4991,9 @@ export const server = http.createServer(async (req, res) => {
       if(!review)return json(res,404,{error:'Проверка ОКК не найдена'});
       const isAdmin=user.role==='admin';
       const mayReadOwnReview=user.role==='manager'&&req.method==='GET'&&review.status==='complete'&&Number(review.responsible_id)===Number(user.id);
-      if(!isAdmin&&!mayReadOwnReview)return json(res,403,{error:'Доступны только ваши завершённые проверки'});
+      const mayReadTeamReview=user.role==='rop'&&req.method==='GET'&&review.status!=='draft'&&!!user.team_id
+        && !!db.prepare('SELECT 1 x FROM users WHERE id=? AND team_id=?').get(Number(review.responsible_id),Number(user.team_id));
+      if(!isAdmin&&!mayReadOwnReview&&!mayReadTeamReview)return json(res,403,{error:'Доступны только ваши завершённые проверки'});
       if(req.method==='GET'){
         const items=db.prepare('SELECT * FROM quality_review_items WHERE review_id=? ORDER BY id').all(id);
         const growthItems=db.prepare('SELECT * FROM quality_review_growth_items WHERE review_id=? ORDER BY id').all(id);
@@ -5046,12 +5156,15 @@ export const server = http.createServer(async (req, res) => {
       }
     }
     if (p === '/api/quality') {
-      if (!requireAdmin(user, res)) return;
+      if (!['admin', 'rop'].includes(user.role)) return json(res, 403, { error: 'Показатели качества видят руководитель и администратор' });
+      if (user.role === 'rop' && !user.team_id) return json(res, 403, { error: 'Руководителю сначала назначают команду.' });
       const days = Math.min(365, Math.max(1, Math.trunc(Number(u.searchParams.get('days')) || 30)));
       // История переписки — за выбранный период. Задачи и сделки без движения —
       // текущая очередь, поэтому не включаем их в искусственную оценку сотрудника.
       const since = new Date(Date.now() - days * 864e5).toISOString().slice(0, 19).replace('T', ' ');
-      const managers = db.prepare("SELECT id,name FROM users WHERE active=1 AND role IN ('admin','manager') ORDER BY id").all();
+      const managers = user.role === 'rop'
+        ? db.prepare("SELECT id,name FROM users WHERE active=1 AND role IN ('admin','manager') AND team_id=? ORDER BY id").all(Number(user.team_id))
+        : db.prepare("SELECT id,name FROM users WHERE active=1 AND role IN ('admin','manager') ORDER BY id").all();
       // Один запрос на сотрудника; автоматические исходящие (правила и рассылки)
       // не считаются ответом живого менеджера.
       const convMsgQ = db.prepare(`SELECT cv.id AS cid,m.id AS mid,m.direction,m.created_at,m.event_at,m.event_time_source,
@@ -5066,8 +5179,16 @@ export const server = http.createServer(async (req, res) => {
       const median = arr => { if (!arr.length) return null; const mid = Math.floor(arr.length / 2); return arr.length % 2 ? arr[mid] : Math.round((arr[mid - 1] + arr[mid]) / 2); };
       const allResponseTimes = new Map();
       const rows = managers.map(m => {
-        const deals = db.prepare('SELECT stage FROM deals WHERE responsible_id=?').all(m.id);
+        const deals = db.prepare('SELECT id,stage,deal_object,land_status,construction_date,payment_type,lead_source FROM deals WHERE responsible_id=?').all(m.id);
         const won = deals.filter(d => d.stage === 'won').length, lost = deals.filter(d => d.stage === 'lost').length;
+        // Автоматическая оценка по данным CRM: карточка заполнена по фактам
+        // (все шесть полей квалификации не «не выяснено») и у сделки есть
+        // открытая задача на следующий контакт. Содержание разговора
+        // автоматически не оценивается — для него остаётся ручная проверка.
+        const qualified = deals.filter(d => String(d.deal_object || '').trim() && String(d.deal_object) !== 'Не уточнён'
+          && !['', 'unknown'].includes(String(d.land_status || '')) && !['', 'unknown'].includes(String(d.construction_date || ''))
+          && !['', 'unknown'].includes(String(d.payment_type || '')) && String(d.lead_source || '').trim() && String(d.lead_source) !== 'unknown').length;
+        const withOpenTask = deals.filter(d => db.prepare('SELECT 1 x FROM tasks WHERE deal_id=? AND done=0 LIMIT 1').get(d.id)).length;
         let unansweredDialogs = 0; const responseTimes = [];
         let curCid = null, pendingIn = null;
         for (const msg of convMsgQ.all(since,m.id,m.id)) {
@@ -5092,13 +5213,14 @@ export const server = http.createServer(async (req, res) => {
         const overdueTasks = db.prepare("SELECT COUNT(*) n FROM tasks WHERE done=0 AND due IS NOT NULL AND due!='' AND (CASE WHEN length(due)=10 THEN due||' 23:59:59' ELSE due END)<datetime('now','localtime') AND (responsible_id=? OR EXISTS(SELECT 1 FROM deals d WHERE d.id=tasks.deal_id AND d.responsible_id=?))").get(m.id,m.id).n;
         const closed = won + lost;
         return { id:m.id,name:m.name,deals:deals.length,won,lost,conversion:closed?Math.round(won*100/closed):null,
-          unansweredDialogs,medianResponseMin,responseTimeSamples:responseTimes.length,stalled,overdueTasks };
+          unansweredDialogs,medianResponseMin,responseTimeSamples:responseTimes.length,stalled,overdueTasks,qualified,withOpenTask };
       });
       const medians = [...allResponseTimes.values()].map(x=>Math.round(x)).sort((a,b)=>a-b);
       return json(res,200,{
         days,
         totals:{managers:rows.length,unansweredDialogs:rows.reduce((a,r)=>a+r.unansweredDialogs,0),stalled:rows.reduce((a,r)=>a+r.stalled,0),
-          overdueTasks:rows.reduce((a,r)=>a+r.overdueTasks,0),medianResponseMin:median(medians),responseTimeSamples:medians.length},
+          overdueTasks:rows.reduce((a,r)=>a+r.overdueTasks,0),medianResponseMin:median(medians),responseTimeSamples:medians.length,
+          qualified:rows.reduce((a,r)=>a+Number(r.qualified||0),0),withOpenTask:rows.reduce((a,r)=>a+Number(r.withOpenTask||0),0)},
         managers:rows,
         definitions:[
           'Диалоги с вопросом клиента без следующего ответа живого сотрудника за выбранный период. Для фильтра периода используется время события, если оно сохранено, иначе время записи в CRM; автоответы и рассылки не закрывают ожидание.',
@@ -5106,8 +5228,9 @@ export const server = http.createServer(async (req, res) => {
           'Открытые сделки, у которых нет движения больше 14 дней (снимок текущей очереди).',
           'Открытые задачи, срок которых уже прошёл (снимок текущей очереди).',
           'Конверсия — выигранные среди закрытых сделок; числитель и знаменатель видны в строке сотрудника.',
+          'Автоматическая оценка считается только по данным CRM: заполненность карточки по шести полям квалификации и наличие открытой задачи. Содержание разговора автоматически не оценивается — для него остаётся ручная проверка ОКК с доказательствами.',
         ],
-        note:'Это рабочие показатели и сигналы для проверки, а не оценка качества менеджера. Содержание разговора оценивается отдельно в ручной проверке ОКК с подтверждениями.',
+        note:'Автоматическая оценка — это объективные сигналы из CRM (ответ, заполненность, задачи, конверсия). Содержание разговора оценивается отдельно в ручной проверке ОКК с подтверждениями; автоматический общий балл и санкции не применяются.',
       });
     }
     if (p === '/api/pipelines') {
