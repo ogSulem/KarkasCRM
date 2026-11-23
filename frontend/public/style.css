@@ -1057,7 +1057,7 @@ html[data-theme=dark] .routing-policy-form fieldset{border-color:var(--line)}
    На экране с клиентскими данными видно, кто смотрит карточку и когда.
    Знак рисуется отдельным слоем поверх содержимого, ничего не перехватывает
    и не выводится на экране входа: там сотрудника ещё не видно. */
-.watermark{position:fixed;inset:0;z-index:55;pointer-events:none;display:none;opacity:.5;
+.watermark{position:fixed;inset:0;z-index:55;pointer-events:none;display:none;opacity:.7;
   background-repeat:repeat;background-position:0 0}
 .watermark.on{display:block}
 @media print{.watermark{display:none!important}}
