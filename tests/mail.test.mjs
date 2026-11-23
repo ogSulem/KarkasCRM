@@ -58,11 +58,13 @@ let admin;
 // его нужно собрать и раскодировать
 const mailText = raw => Buffer.from(String(raw).split('\r\n\r\n').slice(1).join('\r\n\r\n').replace(/\r\n/g, ''), 'base64').toString('utf8');
 
+const DEAL_TEST_DEFAULTS={amount:0,deal_object:'Объект для теста',land_status:'unknown',construction_date:'unknown',payment_type:'unknown',lead_source:'Тест'};
 const call = async (path, { method = 'GET', body, token } = {}) => {
+  const payload=path==='/api/deals'&&method==='POST'&&body?{...DEAL_TEST_DEFAULTS,...body}:body;
   const r = await fetch(base + path, {
     method,
     headers: { 'Content-Type': 'application/json', ...(token ? { Authorization: 'Bearer ' + token } : {}) },
-    body: body === undefined ? undefined : JSON.stringify(body),
+    body: payload === undefined ? undefined : JSON.stringify(payload),
   });
   const text = await r.text();
   let data; try { data = JSON.parse(text) } catch { data = text }
@@ -97,6 +99,12 @@ test('письмо без вложений остаётся простым те�
   assert.match(raw, /Content-Type: text\/plain; charset=utf-8/);
   assert.ok(!/multipart/.test(raw), 'без вложений multipart не нужен');
   assert.ok(raw.endsWith(Buffer.from('Привет').toString('base64') + '\r\n'), 'тело передано в base64');
+  assert.ok(!raw.includes('List-Unsubscribe'), 'обычное письмо без рассылки заголовка отписки не несёт');
+});
+
+test('рассылка несёт заголовок отписки', async () => {
+  const raw = buildMailMessage({ from: 'a@b.c', to: 'c@d.e', subject: 'Рассылка', text: 'Текст', messageId: '<m1b@karkascrm>', listUnsubscribe: '<mailto:a@b.c?subject=unsubscribe>' });
+  assert.match(raw, /List-Unsubscribe: <mailto:a@b\.c\?subject=unsubscribe>/, 'почтовик показывает кнопку отписки');
 });
 
 test('вложение собирается по MIME: границы, base64 и читаемое имя файла', async () => {

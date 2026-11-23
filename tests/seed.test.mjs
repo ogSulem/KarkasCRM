@@ -41,6 +41,10 @@ ok('demo: каталог, шаблоны, правило, конкуренты',
 {
   const db = new DatabaseSync(join(r.dir, 'crm.db'));
   ok('demo: записи помечены demo=1', db.prepare('SELECT COUNT(*) n FROM contacts WHERE demo=1').get().n === 7);
+  const competitorCols = db.prepare('PRAGMA table_info(competitors)').all().map(row => row.name);
+  ok('новая база не содержит поля автоматического прайса конкурента', !competitorCols.includes('price_url'));
+  const rusChecks = db.prepare("SELECT status,payload FROM competitor_checks WHERE source='rusprofile'").all();
+  ok('демо не показывает Rusprofile как автоматически проверенный', rusChecks.length === 2 && rusChecks.every(row => row.status === 'skipped' && JSON.parse(row.payload).data?.manual === true));
   const msgs = db.prepare('SELECT COUNT(*) n FROM messages').get().n;
   ok('demo: история сообщений в чатах', msgs === 7, 'сообщений: ' + msgs);
   ok('demo: есть просроченная задача', db.prepare("SELECT COUNT(*) n FROM tasks WHERE due < datetime('now') AND done=0").get().n >= 1);

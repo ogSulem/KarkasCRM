@@ -2,7 +2,7 @@
   "name": "karkascrm",
   "version": "1.2.12",
   "private": true,
-  "description": "КаркасCRM — сделки и воронки, клиенты, задачи, единый инбокс мессенджеров, почта и разведка конкурентов. Без внешних зависимостей, один контейнер.",
+  "description": "КаркасCRM — сделки и воронки, клиенты, задачи, единый инбокс мессенджеров, почта и разведка конкурентов. Нет runtime-зависимостей; один контейнер.",
   "license": "UNLICENSED",
   "type": "module",
   "engines": {
@@ -11,7 +11,7 @@
   "scripts": {
     "start": "node --experimental-sqlite backend/src/server.js",
     "dev": "DATA_DIR=./data node --experimental-sqlite backend/src/server.js",
-    "test": "node --experimental-sqlite --test tests/api.test.js tests/competitors.test.js tests/notifications.test.mjs tests/db-hygiene.test.mjs",
+    "test": "node --experimental-sqlite --test tests/api.test.js tests/competitors.test.js tests/ssrf.test.mjs tests/notifications.test.mjs tests/db-hygiene.test.mjs",
     "test:tz": "TZ=Europe/Moscow node --experimental-sqlite --test tests/timezone.test.js",
     "test:install": "node --test tests/install-args.test.mjs",
     "test:update": "node --test tests/update-mode.test.mjs",
@@ -26,5 +26,8 @@
     "test:notify": "node --experimental-sqlite --test tests/notifications.test.mjs",
     "db:check": "node --experimental-sqlite scripts/db-check.mjs",
     "db:clean": "node --experimental-sqlite scripts/db-check.mjs --clean"
+  },
+  "devDependencies": {
+    "jsdom": "26.1.0"
   }
 }

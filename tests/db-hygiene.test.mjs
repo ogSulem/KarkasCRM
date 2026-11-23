@@ -17,12 +17,14 @@ const { auditDatabase, cleanupOrphans, cleanupUploads, trimActivities, trimCompe
 const base = 'http://127.0.0.1:18096';
 const DATA = process.env.DATA_DIR;
 let token;
+const DEAL_TEST_DEFAULTS={amount:0,deal_object:'Объект для теста',land_status:'unknown',construction_date:'unknown',payment_type:'unknown',lead_source:'Тест'};
 const call = async (path, { method = 'GET', body, raw, token: ownToken } = {}) => {
   const auth = ownToken || token;
+  const payload=path==='/api/deals'&&method==='POST'&&body&&!raw?{...DEAL_TEST_DEFAULTS,...body}:body;
   const r = await fetch(base + path, {
     method,
     headers: { 'Content-Type': 'application/json', ...(auth ? { Authorization: 'Bearer ' + auth } : {}) },
-    body: raw !== undefined ? raw : (body === undefined ? undefined : JSON.stringify(body)),
+    body: raw !== undefined ? raw : (payload === undefined ? undefined : JSON.stringify(payload)),
   });
   const text = await r.text();
   let data; try { data = JSON.parse(text); } catch { data = text; }
@@ -120,7 +122,7 @@ test('ошибочные ссылки отклоняются понятной о
 
 test('выгрузка CSV не даёт Excel выполнить данные клиента', async () => {
   await call('/api/contacts', { method: 'POST', body: { name: '=1+1', phone: '+7 999 111-22-33' } });
-  const r = await fetch(base + '/api/export/contacts?token=' + encodeURIComponent(token));
+  const r = await fetch(base + '/api/export/contacts', { headers: { Authorization: 'Bearer ' + token } });
   const text = await r.text();
   assert.ok(text.includes(`\"'=1+1\"`), 'формула экранирована апострофом');
 });

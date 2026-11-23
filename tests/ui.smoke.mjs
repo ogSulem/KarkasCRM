@@ -1,8 +1,8 @@
 // Smoke-тест интерфейса: реальный backend + SPA, отрисованная в jsdom.
-// Требует jsdom (в рантайме проекта его нет):
-//   npm i --prefix /tmp/jsdomtest jsdom
-//   JSDOM_PATH=/tmp/jsdomtest/node_modules/jsdom/lib/api.js node --experimental-sqlite tests/ui.smoke.mjs
-// Если jsdom не установлен — тест сообщает об этом и завершается успешно.
+// Тестовая зависимость jsdom закреплена в package.json/package-lock.json:
+//   npm ci
+//   npm run test:ui
+// Без jsdom тест завершается ошибкой, а не зелёным пропуском.
 import { spawn } from 'node:child_process';
 import { readFileSync, readdirSync, rmSync, accessSync, constants } from 'node:fs';
 import { fileURLToPath } from 'node:url';
@@ -21,9 +21,9 @@ try {
   if (process.env.JSDOM_PATH) { try { ({ JSDOM, VirtualConsole } = await import(process.env.JSDOM_PATH)) } catch {} }
 }
 if (!JSDOM) {
-  console.log('jsdom не установлен — тест интерфейса пропущен.');
-  console.log('   Установите и повторите:  npm i --prefix /tmp/jsdomtest jsdom');
-  process.exit(0);
+  console.error('ОШИБКА: jsdom не установлен — UI-проверки не выполнены.');
+  console.error('   Установите закреплённые зависимости и повторите: npm ci');
+  process.exit(1);
 }
 
 const PORT = 18079, BASE = `http://127.0.0.1:${PORT}`, DATA = '/tmp/karkas-ui-smoke';
@@ -61,7 +61,7 @@ Object.assign(window, {
   uploadChatFile, toggleDeadChannels, checkHealth,
   sourceLabel, channelLabel, roleLabel, askConfirm, askInput, translit, SOURCE_LABELS, CHANNEL_LABELS, ROLE_LABELS,
   isoDate, todayISO, fmtDayMonth, kindStage, fld, grid2, formLegend, pushToast, notify, captureFocus, restoreFocus, PALETTE_ACTIONS,
-  openMenu, closeMenu, contactsMoreMenu, openOurPrices, comparePrices, setBuiltinTab, BUILTIN_FIELDS, amAdmin, canEdit,
+  openMenu, closeMenu, contactsMoreMenu, openOurPrices, comparePrices, setBuiltinTab, BUILTIN_FIELDS, amAdmin, canEdit, canBulk, canExport, canDeleteCompetitors,
   ourPriceRows, filterOurPrices, toggleAutomation, openAutomation, autoWarn, noteRow, editNote, lockFormsForViewer, AUTO_TRIGGERS, AUTO_ACTIONS,
   busyButton, priceImportText, pickSlot, pickField, pickValue, pickReset, pickSearch, PICK,
   resetUserPassword, randomPassword, credentialsText, showCredentials,
@@ -76,7 +76,8 @@ Object.assign(window, {
   selectAllVisible, toggleConvSelect, markConvsRead, convRow, imgFail, listStamp,
   WZ_TRANSPORT_TO_CHAT, WZ_DEAD_STATES, WZ_CHAT_SET, WZ_TRANSPORTS, WZ_STATE_LABELS, wzTransportLabel,
   saveChannel, startConv, submitStartConv, scAddrHint, sendDoc, submitSendDoc,
-  saveS3, uploadS3, s3line, cancelQueued
+  saveS3, uploadS3, s3line, cancelQueued,
+  renderWatermark, startWatermark, stopWatermark, watermarkLabel
 });`;
 const pageErrors = [];
 const vConsole = new VirtualConsole();
@@ -109,6 +110,9 @@ window.EventSource = class { addEventListener() {} close() {} };
 window.confirm = () => { throw new Error('native confirm() не должен использоваться'); };
 window.prompt = () => { throw new Error('native prompt() не должен использоваться'); };
 const PNG_B64 = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==';
+// Сценарии smoke, проверяющие не форму создания, а последующие действия,
+// передают явные значения обязательных параметров сделки.
+const DEAL_REQUIRED_FIELDS={amount:0,deal_object:'Объект для теста',land_status:'unknown',construction_date:'unknown',payment_type:'unknown',lead_source:'Тест'};
 window.FileReader = class { readAsDataURL() { this.result = 'data:image/png;base64,' + PNG_B64; this.onload && this.onload() } };
 window.eval(appJs);
 
@@ -168,6 +172,7 @@ try {
   check('первый вход администратора показывает смену пароля, а не CRM', !$('#passwordChange').classList.contains('hidden') && $('#app').classList.contains('hidden'), $('#loginErr').textContent);
   const adminChange = $('#passwordChangeForm');
   check('временный пароль подставлен в первое поле — второй раз его набирать не нужно', adminChange.elements.old_password.value === ADMIN_TMP);
+  check('все поля первого входа можно проверить перед отправкой', $$('#passwordChangeForm .pw-eye').length === 3);
   adminChange.elements.new_password.value = 'СовсемДругойПароль2026';
   adminChange.elements.confirm_password.value = ADMIN_PASS;
   await adminChange.onsubmit({ preventDefault() {}, target: adminChange });
@@ -316,7 +321,7 @@ try {
 
     // Перенос карточки: новое место показывается сразу из локальных данных,
     // а сохранение на сервере не откатывает карточку назад
-    const mvDeal = await window.api('/api/deals', { method: 'POST', body: JSON.stringify({ title: 'Сделка переноса' }) });
+    const mvDeal = await window.api('/api/deals', { method: 'POST', body: JSON.stringify({ ...DEAL_REQUIRED_FIELDS,title: 'Сделка переноса' }) });
     await window.render(); await wait(500);
     const stageBefore = (window.__state.deals.find(x => x.id === mvDeal.id) || {}).stage;
     await window.moveDeal(mvDeal.id, 1); await wait(400);
@@ -553,7 +558,7 @@ try {
   check('сервер считает нагрузку группировкой и отдаёт её только администратору', serverJsRaw.includes('GROUP BY responsible_id') && serverJsRaw.includes("u.searchParams.get('stats') === '1' && user.role === 'admin'"));
   check('сделки компании видны и тогда, когда заведены на её сотрудника', serverJsRaw.includes('d.contact_id IN (SELECT id FROM contacts WHERE company_id=?)'));
   check('поиск по базе не обрезан последними записями', !/FROM (contacts|deals|tasks|companies|products) ORDER BY id DESC LIMIT/.test(serverJsRaw));
-  check('подбор просит сервер искать только свой вид записей', appJsRaw.includes('&only=${cfg.key}') && serverJsRaw.includes('const want = k => !only || only === k;'));
+  check('подбор просит сервер искать только свой вид записей', appJsRaw.includes('&only=${cfg.key}') && serverJsRaw.includes('const want = key => (!only || only === key)') && serverJsRaw.includes("!isPartner || ['contacts','deals','companies','tasks'].includes(key)"));
   check('условия списков подставляются параметрами, а не склейкой строки', !/responsible_id=\$\{Number\(user\.id\)\}/.test(serverJsRaw));
   // локальная дата не зависит от UTC
   check('isoDate возвращает локальную дату', window.isoDate(new Date(2026, 0, 1)) === '2026-01-01' && window.isoDate(new Date(2026, 11, 31)) === '2026-12-31');
@@ -787,7 +792,7 @@ try {
     check('в карточке сделки нет списков всех клиентов и компаний', $$('#modalBody option').length < 60, 'вариантов: ' + $$('#modalBody option').length);
     window.closeModal();
   }
-  const printed = await fetch(BASE + '/api/deals/' + dealId + '/print?doc=invoice&token=' + encodeURIComponent(window.__token || ''));
+  const printed = await fetch(BASE + '/api/deals/' + dealId + '/print?doc=invoice', { headers: { Authorization: 'Bearer ' + window.__token } });
   check('счёт на оплату отдаётся сервером с токеном', printed.status === 200 && /Счёт на оплату/.test(await printed.text()));
 
   // ── контакты: фильтры, карточка, массовые действия ───────────────────────
@@ -886,7 +891,7 @@ try {
     // источники уводим на недоступный локальный адрес. Иначе поиск ждёт настоящие
     // сайты до таймаута, и карточка не успевает открыться к проверке.
     await window.api('/api/competitor-sources', { method: 'PUT', body: JSON.stringify({
-      RUSPROFILE_URL: 'http://127.0.0.1:9', FEDRESURS_API_URL: 'http://127.0.0.1:9', KAD_API_URL: 'http://127.0.0.1:9',
+      FEDRESURS_API_URL: 'http://127.0.0.1:9', KAD_API_URL: 'http://127.0.0.1:9',
       FNS_API_URL: 'http://127.0.0.1:9', FNS_SEARCH_URL: 'http://127.0.0.1:9', GOOGLE_API_URL: 'http://127.0.0.1:9',
       TWOGIS_API_URL: 'http://127.0.0.1:9', YANDEX_API_URL: 'http://127.0.0.1:9', COMPETITOR_TIMEOUT_MS: '1500',
     }) }).catch(() => {});
@@ -972,9 +977,8 @@ try {
   }
   check('шапка контакта тоже не заходит под крестик', /padding-right:3[0-9]px/.test((cssText.match(/\.contact-head\{[^}]*\}/) || [''])[0]));
   check('первый текстовый ряд окна не налезает на крестик', cssText.includes('#modalBody>h3:first-child,#modalBody>p:first-child{padding-right:34px}'));
-  // Долги у приставов и «Связи» Rusprofile автоматически не отдаются: API ФССП
-  // закрыт, сайт Rusprofile закрыт от роботов. Поэтому то, что менеджер посмотрел
-  // сам, можно записать — иначе проверка испаряется вместе с закрытой вкладкой.
+  // Долги у приставов и «Связи» Rusprofile не собираются автоматически: API ФССП
+  // закрыт, а страницы Rusprofile не разбираются. Ручная находка сохраняет результат.
   {
     const html = window.findingsBlock({ id: 7, findings: [
       { id: 3, kind: 'долги', title: '3 исполнительных производства', amount: 450000, author: 'Администратор', created_at: '2026-10-01 10:00', source_url: 'https://fssp.gov.ru/iss/ip' },
@@ -990,11 +994,16 @@ try {
     check('без записей блок объясняет, что делать', /Записей пока нет/.test(emptyHtml) && /Запишите, что увидели в реестре/.test(emptyHtml));
   }
   window.closeModal();
-  // «Ссылка на прайс»: сервер умел подтягивать таблицу конкурента по адресу,
-  // но поля в форме не было — функция оставалась недостижимой из интерфейса.
+  // У сайтов конкурентов нет серверного парсера: прайс добавляется только файлом
+  // или вставкой строк, а не скрытой ссылкой, которая скачивается при проверке.
   await window.openCompetitor(); await wait(350);
-  check('в форме конкурента есть поле «Ссылка на прайс»', Boolean($('#modalBody [name="price_url"]')) && /Ссылка на прайс/.test($('#modalBody').textContent));
-  check('подсказка объясняет, зачем конкуренту ссылка на прайс', /сама подтянет|при каждой проверке/i.test($('#modalBody').textContent), $('#modalBody').textContent.replace(/\s+/g, ' ').slice(0, 120));
+  check('в карточке конкурента нет поля для автоматического сбора прайса', !$('#modalBody [name="price_url"]') && !/Ссылка на прайс/.test($('#modalBody').textContent));
+  window.closeModal(); await wait(150);
+  window.openPriceImport(id, 'theirs'); await wait(150);
+  check('для прайса конкурента доступны файл и вставка текста, не URL', /Вставить текст/.test($('#modalBody').textContent) && !$('#modalBody [name="url"]'));
+  const textTab = $$('#modalBody .tabs button').find(b => /Вставить текст/.test(b.textContent));
+  if (textTab) { textTab.click(); await wait(100); }
+  check('ручная вставка объясняет, что сайт конкурента не скачивается', /не скачиваем прайсы с сайтов конкурентов/i.test($('#modalBody').textContent) && !$('#modalBody [name="url"]'));
   window.closeModal(); await wait(150);
   // Ссылки для ручной проверки приходят с сервера (ФНС, ГИР БО, ФССП, Федресурс,
   // арбитраж, карты, отзывы, Авито, Госзакупки), а не зашиты в интерфейс парой штук.
@@ -1167,13 +1176,19 @@ try {
     // панели (например, справочник встроенных полей), их кнопки сюда не относятся.
     const settingsTabsBar = $('#view .tabs');
     const settingsTabs = settingsTabsBar ? Array.from(settingsTabsBar.querySelectorAll('button')).map(b => b.textContent.trim()) : [];
-    check('вкладки настроек идут по пути настройки: каналы → воронка → правила → поля → сообщения → разведка → люди → данные → профиль',
-      settingsTabs.join(' → ') === 'Интеграции и каналы → Воронки и этапы → Автоматизации → Поля карточек → Шаблоны сообщений → Конкуренты и источники → Команда → Данные и компания → Профиль',
+    check('вкладки настроек идут по пути настройки: каналы → воронка → правила → поля → сообщения → разведка → люди → обучение → данные → профиль',
+      settingsTabs.join(' → ') === 'Интеграции и каналы → Воронки и этапы → Автоматизации → Поля карточек → Шаблоны сообщений → Конкуренты и источники → Команда → Обучение партнёров → Данные и компания → Профиль',
       settingsTabs.join(' → '));
     $$('.tabs button').find(b => /^Команда$/.test(b.textContent.trim())).click(); await wait(500);
     check('вкладка настроек переключается кликом', window.__state.settingsTab === 'team' && /Права ролей/.test($('#view').textContent));
     $$('.tabs button').find(b => /^Профиль$/.test(b.textContent.trim())).click(); await wait(400);
-    check('в профиле есть тема и смена пароля', window.__state.settingsTab === 'profile' && /Тема оформления/.test($('#view').textContent) && Boolean($('#view form [name=new_password]')));
+    check('в профиле есть тема и смена пароля с повтором нового пароля', window.__state.settingsTab === 'profile' && /Тема оформления/.test($('#view').textContent) && Boolean($('#view form [name=new_password]')) && Boolean($('#view form [name=confirm_password]')));
+    check('поля пароля профиля можно проверить перед сохранением', $$('#view .pw-wrap .pw-eye').length >= 3);
+    // пределы входа: по учётной записи, по несуществующим адресам и общий потолок
+    $$('.tabs button').find(b => /^Данные и компания$/.test(b.textContent.trim())).click(); await wait(450);
+    const loginLimits = $$('#view form [name=LOGIN_RATE_LIMIT], #view form [name=LOGIN_SPRAY_LIMIT], #view form [name=LOGIN_FLOOD_LIMIT]');
+    check('администратор настраивает пределы входа: по учётной записи, по подбору адресов и общий потолок',
+      loginLimits.length === 3, loginLimits.map(x => x.name).join(', '));
 
     window.go('tasks'); await wait(450);
     $$('#view .tabs button').find(b => /Неделя/.test(b.textContent)).click(); await wait(450);
@@ -1279,7 +1294,7 @@ try {
 
     await window.api('/api/automations', { method: 'POST', body: JSON.stringify({ name: 'Отложить напоминание', trigger_type: 'stage_changed', trigger_value: 'offer', action_type: 'create_task', action_value: 'Позвонить позже', active: 1, delay_days: 3 }) });
     const cq = await window.api('/api/contacts', { method: 'POST', body: JSON.stringify({ name: 'Очередь Тест', phone: '+7 900 000-00-01' }) });
-    const dq = await window.api('/api/deals', { method: 'POST', body: JSON.stringify({ title: 'Сделка очереди', amount: 1000, stage: 'new', contact_id: cq.id }) });
+    const dq = await window.api('/api/deals', { method: 'POST', body: JSON.stringify({ ...DEAL_REQUIRED_FIELDS,title: 'Сделка очереди', amount: 1000, stage: 'new', contact_id: cq.id }) });
     await window.api('/api/deals/' + dq.id, { method: 'PATCH', body: JSON.stringify({ stage: 'offer' }) });
     window.__state.settingsTab = 'automations'; window.go('settings'); await wait(700);
     const txt1 = $('#view').textContent;
@@ -1311,6 +1326,8 @@ try {
     check('в настройках сказано, что официального API ФССП больше нет', /API ФССП закрыт/.test(st) && /банк исполнительных производств/.test(st));
     check('в настройках нет мёртвого поля токена ФССП', !/Токен ФССП/.test(st) && !/FSSP_TOKEN/.test($('#view').innerHTML));
     check('источники без рабочего API помечены как ручные', /данные по ссылке вручную/.test(st));
+    check('Rusprofile явно не скачивается и не разбирается автоматически', /не скачивается и не разбирается автоматически/.test(st));
+    check('для Rusprofile нет редактируемого сетевого адреса', !/name="RUSPROFILE_URL"/.test($('#view').innerHTML));
     check('для Google сохранена подсказка про действующий Places API (New)', /Places API \(New\)/.test(appJsRaw));
     check('есть проверка доступности источников', /Проверить доступность источников/.test(st));
   }
@@ -1496,7 +1513,9 @@ try {
   check('тосты не прячутся под системную полосу телефона', cssText.includes('bottom:calc(12px + env(safe-area-inset-bottom,0px))'));
   check('пункты меню видны при навигации с клавиатуры', cssText.includes('.dropdown-pop button:focus-visible,.user-menu-item:focus-visible'));
   check('пароль сотрудника — минимум 12 символов, как при смене', appJsRaw.includes('minlength="12"') && appJsRaw.includes('(мин. 12 символов)') && serverJsRaw.includes('b.password.length < 12'));
-  check('хеш пароля не отдаётся ни в списке сотрудников, ни в выгрузке данных', serverJsRaw.includes('SELECT id,name,email,role,active,last_login,must_change_password,pass_changed_at FROM users') && serverJsRaw.includes('out.users = out.users.map(({ pass, ...rest }) => rest)'));
+  check('хеш пароля не отдаётся ни в списке сотрудников, ни в выгрузке данных',
+    serverJsRaw.includes('SELECT id,name,role,active FROM users ORDER BY id')
+    && serverJsRaw.includes('out.users = out.users.map(({ pass, ...rest }) => rest)'));
   check('каждое действие с доступом сотрудника остаётся в журнале', serverJsRaw.includes('выдан временный пароль') && serverJsRaw.includes('сброшен пароль, прежние сеансы закрыты') && serverJsRaw.includes('Временный пароль заменён личным'));
   check('причина закрытого сеанса называется человеку', serverJsRaw.includes('SESSION_REVOKED') && serverJsRaw.includes('USER_DISABLED') && serverJsRaw.includes('USER_GONE') && appJsRaw.includes('endSession(d.error ||'));
   check('массовое «Выполнено» продлевает повторяющиеся задачи', serverJsRaw.includes("if (table === 'tasks' && Number(patch.done) === 1) for (const id of ids) extendRepeatingTask(id, user.name)"));
@@ -1521,7 +1540,7 @@ try {
   check('вчерашний чат подписан «Вчера»', window.listStamp(new Date(Date.now() - 864e5).toISOString().slice(0, 19).replace('T', ' ')) === 'Вчера');
   check('старый чат — короткая дата без века', window.listStamp('2023-05-14 10:00:00') === '14.05.23', window.listStamp('2023-05-14 10:00:00'));
   check('страница объявлена адаптивной', html.includes('width=device-width') && html.includes('viewport-fit=cover'));
-  check('скачивание вложений защищено от внутренних адресов и DNS-подмены', serverJsRaw.includes('safeRemoteUrl') && serverJsRaw.includes('isPublicIp') && serverJsRaw.includes('lookup:(_host,_options,cb)=>cb(null,address') && serverJsRaw.includes('[301,302,303,307,308]') && serverJsRaw.includes('maxBytes = 15 * 1024 * 1024'));
+  check('скачивание вложений защищено от внутренних адресов и DNS-подмены', serverJsRaw.includes('safeRemoteUrl') && serverJsRaw.includes('isPublicIp') && serverJsRaw.includes('lookup:pinnedDnsLookup(address)') && serverJsRaw.includes('options?.all ? [null, [result]]') && serverJsRaw.includes('[301,302,303,307,308]') && serverJsRaw.includes('maxBytes = 15 * 1024 * 1024'));
   check('регистрация вебхука Wazzup только для администратора', /wazzup\/webhook' && req\.method === 'POST'\) \{ if \(!requireAdmin/.test(serverJsRaw));
   check('вебхук регистрируется только с секретом', serverJsRaw.includes("if (!hookU.searchParams.has('secret')) hookU.searchParams.set('secret', hookSecret)"));
   check('эмодзи нет в competitors.js', !hasEmojis(competitorsJsRaw));
@@ -1873,34 +1892,58 @@ try {
   // ── вкладки разделов, рассылки и доступ партнёра ───────────────────
   {
     const cssFlat = cssText.replace(/\s+/g, '');
-    check('обучения, качества и рассылок в меню нет: качество в аналитике, рассылки в контактах',
-      ['campaigns', 'quality', 'training'].every(x => !$(`#nav button[data-view="${x}"]`)) && $$('#nav button').length === 10,
-      $$('#nav button').map(b => b.dataset.view).join(','));
-    check('партнёру остаются «Сделки», «Чаты» и «Задачи»', cssFlat.includes('body.role-partnernavbutton:not([data-view="pipe"]):not([data-view="inbox"]):not([data-view="tasks"]){display:none}'));
+    const navViews = $$('#nav button').map(b => b.dataset.view);
+    check('качества и рассылок в меню нет: качество в аналитике, рассылки в контактах; обучение — только партнёрам',
+      ['campaigns', 'quality'].every(x => !$(`#nav button[data-view="${x}"]`))
+      && ['routing','classification','training'].every(x => navViews.includes(x)) && navViews.length === 13,
+      navViews.join(','));
+    check('партнёру остаются «Сделки», «Чаты», «Задачи» и «Обучение»', cssFlat.includes('body.role-partnernavbutton:not([data-view="pipe"]):not([data-view="inbox"]):not([data-view="tasks"]):not([data-view="training"]){display:none}'));
     // офис назначает партнёру задачи, и новый лид сам создаёт ему задачу позвонить:
     // без раздела он нашёл бы их только внутри карточки сделки
-    check('раздел задач партнёру открыт', appJsRaw.includes("const PARTNER_VIEWS = ['pipe', 'inbox', 'tasks', 'settings']"));
-    check('массовые действия скрыты у того, кому сервер их запретил', (appJsRaw.match(/canEdit\(\) && !isPartner\(\) \? bulkSlot\(/g) || []).length === 2);
+    check('разделы задач и обучения партнёру открыты', appJsRaw.includes("const PARTNER_VIEWS = ['pipe', 'inbox', 'tasks', 'training', 'settings']"));
+    check('массовые действия используют отдельное разрешение, совпадающее с матрицей API',
+      appJsRaw.includes("const canBulk = () => ['admin','manager'].includes(state.me?.role);")
+      && serverJsRaw.includes("if (!['admin','manager'].includes(user.role))")
+      && serverJsRaw.includes("!['contacts','companies','tasks','deals'].includes(table)"));
     check('вкладку «Рассылки» и массовую отправку видят менеджер и администратор',
       appJsRaw.includes("function canCampaign() { return ['admin', 'manager'].includes(state.me?.role); }") && appJsRaw.includes("if (!canCampaign()) return '';"));
-    check('вкладку «Команда» с оценкой качества видит только администратор',
-      appJsRaw.includes("if (state.me?.role !== 'admin') return '';") && serverJsRaw.includes("if (p === '/api/quality') {\n      if (!requireAdmin(user, res)) return;"));
-    check('партнёр начинает со своих сделок, а не с рабочего стола', appJsRaw.includes("me.user.role === 'partner'") && appJsRaw.includes("PARTNER_VIEWS.includes(me.user.pref_view) ? me.user.pref_view : 'pipe'"));
+    check('вкладку «Команда» с оценкой качества видят администратор и РОП своей команды',
+      appJsRaw.includes("if (state.me?.role === 'rop')") && serverJsRaw.includes("if (!['admin', 'rop'].includes(user.role)) return json(res, 403, { error: 'Показатели качества видят руководитель и администратор' })"));
+    check('партнёр начинает со своих сделок, а не с рабочего стола',
+      appJsRaw.includes("if (role === 'partner') return 'pipe';")
+      && appJsRaw.includes('defaultViewForRole(me.user.role, me.user.pref_view || state.view)')
+      && window.defaultViewForRole('partner','dashboard') === 'pipe'
+      && window.defaultViewForRole('partner','inbox') === 'inbox');
     check('раздел чужой роли не открывается даже прямым переходом', appJsRaw.includes('function viewAllowed(view)') && appJsRaw.includes('if (!viewAllowed(view))'));
     // проверяем саму логику доступа: у партнёра свои разделы, у РОПа — качество
     const savedRole = window.__state.me.role;
     window.__state.me.role = 'partner';
     const partnerViews = { pipe: window.viewAllowed('pipe'), inbox: window.viewAllowed('inbox'), tasks: window.viewAllowed('tasks'), contacts: window.viewAllowed('contacts'), analytics: window.viewAllowed('analytics') };
+    const partnerBulk = window.canBulk();
+    window.__state.me.role = 'manager';
+    const managerBulk = window.canBulk(),managerExport=window.canExport(),managerCompetitorDelete=window.canDeleteCompetitors();
+    const managerContactMenu=window.contactsMoreMenu();
+    window.__state.me.role = 'viewer';
+    const viewerExport=window.canExport(),viewerCompetitorDelete=window.canDeleteCompetitors();
+    window.__state.me.role = 'admin';
+    const adminBulk = window.canBulk(),adminExport=window.canExport(),adminCompetitorDelete=window.canDeleteCompetitors();
     window.__state.me.role = savedRole;
     check('партнёру разрешены воронка, переписка и задачи, а база клиентов и аналитика закрыты',
       partnerViews.pipe === true && partnerViews.inbox === true && partnerViews.tasks === true && partnerViews.contacts === false && partnerViews.analytics === false, JSON.stringify(partnerViews));
-    // обучение убрано из всех слоёв: ни меню, ни маршрута, ни таблицы в базе
+    check('партнёру не предлагаются создание сделки и фильтр «Мои»',
+      appJsRaw.includes("canEdit() && !isPartner() ? `<button type=\"button\" class=\"btn-col-add\"")
+      && appJsRaw.includes("${isPartner() ? '' : `<button class=\"btn sm\" onclick=\"quickDeal(${cur.contact_id})\">+ Сделка</button>`}")
+      && appJsRaw.includes("${isPartner() ? '' : `<button class=\"${state.dealScope === 'mine' ? 'active' : ''}\" onclick=\"setDealScope('mine')\">Мои"), 'кнопки создания сделки и фильтр «Мои» скрыты для партнёра');
+    check('пакетные действия видят администратор и менеджер, но не партнёр', partnerBulk === false && managerBulk === true && adminBulk === true);
+    check('выгрузка и удаление общего справочника доступны только администратору',
+      !managerExport && !managerCompetitorDelete && !viewerExport && !viewerCompetitorDelete && adminExport && adminCompetitorDelete
+      && !/Выгрузить в CSV/.test(managerContactMenu));
+    // общее обучение убрано; обучающий портал — только для партнёров
     const indexRaw = readFileSync(join(ROOT, 'frontend/public/index.html'), 'utf8');
-    // на сервере остаётся только одноразовая уборка старой таблицы: маршрута и
-    // создания таблицы быть не должно
-    check('обучения нет ни в клиенте, ни в разметке, ни в маршрутах сервера',
-      !appJsRaw.includes('training') && !indexRaw.includes('training')
-      && !serverJsRaw.includes('/api/training') && !serverJsRaw.includes('CREATE TABLE IF NOT EXISTS training_items'));
+    check('обучающий портал только для партнёров: общий маршрут /api/training отсутствует',
+      appJsRaw.includes('trainingView') && indexRaw.includes('data-view="training"')
+      && !serverJsRaw.includes('/api/training') && !serverJsRaw.includes('CREATE TABLE IF NOT EXISTS training_items')
+      && serverJsRaw.includes('/api/partner-training'));
     check('старая таблица материалов убирается при запуске', serverJsRaw.includes("DROP TABLE training_items"));
     const savedMgrRole = window.__state.me.role;
     window.__state.me.role = 'manager';
@@ -1915,8 +1958,8 @@ try {
     const partnerCmds = window.paletteCommands().flatMap(g => g.items.map(i => i.title));
     window.__state.me.role = savedPaletteRole;
     check('партнёру палитра не предлагает чужие разделы и закрытые действия',
-      !partnerCmds.some(t => ['Рабочий стол', 'Компании', 'Конкуренты', 'Новая компания', 'Проверить конкурента', 'Импорт контактов из CSV'].includes(t))
-      && partnerCmds.includes('Сделки') && partnerCmds.includes('Новый контакт') && !partnerCmds.includes('Новая рассылка'), partnerCmds.join(' / '));
+      !partnerCmds.some(t => ['Рабочий стол', 'Компании', 'Конкуренты', 'Новая сделка', 'Новый контакт', 'Новая компания', 'Проверить конкурента', 'Импорт контактов из CSV'].includes(t))
+      && partnerCmds.includes('Сделки') && partnerCmds.includes('Обучение') && partnerCmds.includes('Новая задача') && !partnerCmds.includes('Новая рассылка'), partnerCmds.join(' / '));
     const officeCmds = window.paletteCommands().flatMap(g => g.items.map(i => i.title));
     check('сотруднику офиса палитра предлагает все разделы и действия',
       ['Рабочий стол', 'Компании', 'Новая компания', 'Импорт контактов из CSV'].every(t => officeCmds.includes(t)), officeCmds.join(' / '));
@@ -1936,12 +1979,20 @@ try {
       appJsRaw.includes("await api('/api/companies/' + c.company_id)")
       && !appJsRaw.includes("const comps = await api('/api/companies')"));
     check('справочник компаний партнёру отдаётся только по его карточкам', serverJsRaw.includes("table === 'companies' && isPartner"));
-    check('документы и состав сделки партнёр меняет только по своим лидам',
-      serverJsRaw.includes('партнёр печатает документы только по своим') && serverJsRaw.includes("partnerOwns(user, 'deals', Number(row.deal_id))"));
-    check('в настройках партнёру остаётся только «Профиль»', appJsRaw.includes('isPartner') && appJsRaw.includes('(isViewer || isPartner) ? k === \'profile\''));
+    check('документы и состав сделки партнёр меняет только по переданным лидам',
+      serverJsRaw.includes('партнёр печатает документы только по активной передаче')
+      && serverJsRaw.includes("partnerOwns(user, 'deals', Number(row.deal_id))")
+      && serverJsRaw.includes("partnerOwns(user, 'deals', Number(id))"));
+    check('в настройках партнёру остаётся только «Профиль»',
+      appJsRaw.includes("const isRestricted=['viewer','partner','rop','classifier'].includes(state.me?.role);")
+      && appJsRaw.includes("(isRestricted ? k === 'profile'"));
     check('рассылкой распоряжается автор или администратор', appJsRaw.includes('Number(c.created_by_id) === Number(state.me?.id)') && serverJsRaw.includes('Отменить рассылку может её автор или администратор'));
-    check('поток событий не отдаёт партнёру чужие переписки', serverJsRaw.includes('partnerSeesEvent') && serverJsRaw.includes("res.role = user.role"));
-    check('автоответы правил и рассылок не считаются ответом менеджера', serverJsRaw.includes("COALESCE(m.author,'')<>'Рассылка'"));
+    check('поток событий фильтрует переписку по точной сделке, а не только по общему чату',
+      serverJsRaw.includes('partnerSeesEvent') && serverJsRaw.includes('function broadcastMessage')
+      && serverJsRaw.includes("managerOwns({ id, role: 'manager' }, 'deals', dealId)")
+      && serverJsRaw.includes("partnerOwns(user, 'deals', dealId)")
+      && serverJsRaw.includes("res.role = user.role"));
+    check('автоответы правил и рассылок не считаются ответом менеджера', serverJsRaw.includes("lower(trim(COALESCE(m.author,''))) NOT IN ('рассылка','автоматизация')"));
     // момент отправки рассылки хранится в UTC и показывается в поясе сотрудника
     const p2 = n => String(n).padStart(2, '0');
     const local = new Date('2030-01-02T03:04:05.000Z');
@@ -1962,14 +2013,16 @@ try {
       $('#view').textContent.includes('Сделки по этапам воронки') && $('#view').textContent.includes('Результаты по менеджерам'));
     window.setAnalyticsTab('team'); await wait(700);
     check('вкладка «Команда» показывает проверяемые показатели, а не придуманный рейтинг',
-      $('#view').textContent.includes('Показатели по сотрудникам') && $('#view').textContent.includes('не рейтинг сотрудников') && !$('#view').textContent.includes('Старт — 100 баллов'));
+      $('#view').textContent.includes('Показатели по сотрудникам') && $('#view').textContent.includes('Автоматическая оценка по данным CRM') && !$('#view').textContent.includes('Старт — 100 баллов'));
     check('период показателей переключается рядом с вкладками', $('#view').textContent.includes('Период:') && $('#view').textContent.includes('Данные CRM'));
     window.setQualityDays(7); await wait(700);
     check('период качества переключается и пересчитывается', window.__state.qDays === 7 && $('#view').textContent.includes('Неделя'));
     window.setQualityTab('reviews'); await wait(600);
-    check('ОКК показывает отдельный список ручных проверок и ограничения порогов', $('#view').textContent.includes('Результаты по критериям') && $('#view').textContent.includes('Исторические пороги') && $('#view').textContent.includes('Новая проверка'));
+    const reviewText=$('#view').textContent;
+    const reviewSignals=['Рабочий чек-лист — 18 критериев','Пороговые категории не включены','Новая проверка'];
+    check('ОКК показывает ручной чек-лист и объясняет, почему пороговые категории выключены', !$('#view .card.err') && reviewSignals.every(x=>reviewText.includes(x)), reviewSignals.map(x=>reviewText.includes(x)).join('/'));
     const qContactUi = await window.api('/api/contacts', { method: 'POST', body: JSON.stringify({ name: 'Контакт для проверки ОКК', phone: '79990000117' }) });
-    const qDealUi = await window.api('/api/deals', { method: 'POST', body: JSON.stringify({ title: 'Сделка для проверки ОКК', contact_id: qContactUi.id }) });
+    const qDealUi = await window.api('/api/deals', { method: 'POST', body: JSON.stringify({ ...DEAL_REQUIRED_FIELDS,title: 'Сделка для проверки ОКК', contact_id: qContactUi.id }) });
     await window.render(); await wait(400);
     window.qualityNewReview(); await wait(400);
     check('новую проверку начинают с поиска реальной сделки CRM', Boolean($('#qualityDealSearch')) && $('#modal').classList.contains('hidden') === false);
@@ -1977,7 +2030,9 @@ try {
     const qOption = [...window.document.querySelectorAll('.quality-deal-option')].find(x => x.textContent.includes('Сделка для проверки ОКК'));
     check('сделка находится поиском без импорта таблицы с клиентскими данными', Boolean(qOption));
     qOption?.click(); await wait(700);
-    check('в черновике отображаются все 18 критериев из рабочей таблицы', window.document.querySelectorAll('.quality-criterion').length === 18);
+    const coreCriteria=window.document.querySelectorAll('.quality-criterion:not(.quality-growth-criterion)').length;
+    const growthCriteria=window.document.querySelectorAll('.quality-growth-criterion').length;
+    check('в черновике отдельно показаны 18 критериев таблицы и 10 дополнительных пунктов', coreCriteria===18&&growthCriteria===10, `основных=${coreCriteria}, развивающих=${growthCriteria}`);
     check('пустой черновик не выставляет баллы без решения руководителя', [...window.document.querySelectorAll('[data-q-status]')].length === 18 && [...window.document.querySelectorAll('[data-q-status]')].every(x => x.value === ''));
     check('источник сообщения можно приложить только к выбранному критерию', [...window.document.querySelectorAll('[data-q-status] option[value=""]')].length === 18 && Boolean($('#qualityEvidenceTarget')) && $('#qualityEvidenceTarget').value === '');
     window.qualitySave('draft'); await wait(700);
@@ -2032,6 +2087,7 @@ try {
   window.closeModal();
   check('временный пароль удалён из DOM после закрытия', !$('#createdCredentials'));
   await window.logout();
+  check('на экране входа водяного знака нет — сотрудник ещё не определён', !$('#watermark').classList.contains('on'));
   $('#loginForm [name=email]').value = 'onboard-ui@example.com';
   $('#loginForm [name=password]').value = temporary;
   $('#loginForm').dispatchEvent(new window.Event('submit', { bubbles: true, cancelable: true }));
@@ -2046,6 +2102,18 @@ try {
   changeForm.elements.confirm_password.value = 'PersonalPassword2026!';
   await changeForm.onsubmit({ preventDefault() {}, target: changeForm });
   check('после смены пароля CRM открывается', $('#passwordChange').classList.contains('hidden') && !$('#app').classList.contains('hidden'));
+  // водяной знак из ТЗ: на экране с клиентскими данными видно сотрудника и время
+  const wmStyle = $('#watermark').getAttribute('style') || '';
+  const wmSvg = decodeURIComponent(wmStyle);
+  const wmLabel = window.watermarkLabel();
+  check('на экране с клиентскими данными стоит водяной знак с сотрудником и временем',
+    $('#watermark').classList.contains('on') && wmLabel.includes('onboard-ui@example.com')
+    && /\d{1,2}:\d{2}/.test(wmLabel) && wmSvg.includes('onboard-ui@example.com'),
+    wmLabel);
+  check('в браузере хранится только признак сеанса, сам токен — в cookie и в памяти',
+    window.localStorage.getItem('karkas_seen') === '1' && !window.localStorage.getItem('karkas_token'));
+  check('водяной знак не перехватывает нажатия и не выводится на печать',
+    /\.watermark\{[^}]*pointer-events:none/.test(cssText) && /@media print\{\.watermark\{display:none!important\}\}/.test(cssText));
 
 } catch (e) { checks.push({ name: 'выполнение сценариев', ok: false, extra: e.message + '\n' + (e.stack || '') }) }
 

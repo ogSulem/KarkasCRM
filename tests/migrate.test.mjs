@@ -64,7 +64,7 @@ INSERT INTO settings(key,value) VALUES('COMPANY_NAME','Старая компан
 INSERT INTO training_items(title,kind,body) VALUES('Материал из старой базы','text','Первая строка материала');
 INSERT INTO activities(text,entity_type,entity_id,user_name) VALUES('Материал «Материал из старой базы» добавлен в обучение','training_items',1,'Ирина');
 INSERT INTO products(name,sku,price,unit,active) VALUES('Дом из старой базы','OLD-1',1000000,'шт',1);
-INSERT INTO competitors(id,name) VALUES(7,'Старый конкурент');
+INSERT INTO competitors(id,name,price_url) VALUES(7,'Старый конкурент','https://competitor.example/price.csv');
 INSERT INTO price_rows(competitor_id,scope,item,price,unit,sku,note,source_name) VALUES
   (NULL,'ours','Дом из старой базы',1200000,'шт','OLD-1','под ключ','наш прайс'),
   (NULL,'ours','Баня из старого прайса',890000,'шт','','','наш прайс'),
@@ -97,9 +97,9 @@ await new Promise(r => server.listening ? r() : server.once('listening', r));
 const cols = t => db.prepare(`PRAGMA table_info(${t})`).all().map(r => r.name);
 const expect = {
   contacts: ['demo', 'custom', 'responsible_id', 'position', 'company_id'],
-  deals: ['demo', 'custom', 'pipeline_id', 'priority', 'loss_reason', 'company_id'],
+  deals: ['demo', 'custom', 'pipeline_id', 'priority', 'loss_reason', 'company_id', 'deal_object', 'land_status', 'construction_date', 'payment_type', 'lead_source'],
   tasks: ['demo', 'notified_at', 'type', 'priority', 'responsible_id'],
-  messages: ['subject', 'content_uri', 'content_name', 'content_type', 'content_size', 'status'],
+  messages: ['subject', 'content_uri', 'content_name', 'content_type', 'content_size', 'status', 'event_at', 'event_time_source'],
   conversations: ['demo', 'channel_id', 'external_chat_id', 'chat_type'],
   activities: ['feed'],
   automation_queue: ['quiet'],
@@ -110,6 +110,12 @@ for (const [table, names] of Object.entries(expect)) {
   ok(`таблица ${table}: новые колонки добавлены`, missing.length === 0, missing.length ? 'нет: ' + missing.join(', ') : names.join(', '));
 }
 ok('разведка конкурентов: таблицы созданы', cols('competitors').includes('demo') && cols('price_rows').includes('demo'));
+ok('устаревшая ссылка автосбора прайса очищена при обновлении', db.prepare('SELECT price_url FROM competitors WHERE id=7').get()?.price_url === '');
+ok('история этапов создана без выдуманных старых переходов', cols('deal_stage_history').includes('event_type') && db.prepare("SELECT event_type FROM deal_stage_history WHERE deal_id=1").get()?.event_type === 'baseline');
+const migratedFields=db.prepare('SELECT deal_object,land_status,construction_date,payment_type,lead_source FROM deals WHERE id=1').get();
+ok('старые сделки получают явные значения новых обязательных полей', migratedFields.deal_object==='Не уточнён'&&migratedFields.land_status==='unknown'&&migratedFields.construction_date==='unknown'&&migratedFields.payment_type==='unknown'&&migratedFields.lead_source==='avito',JSON.stringify(migratedFields));
+const migratedDeferred=db.prepare("SELECT name,color,kind FROM stages WHERE pipeline_id=1 AND code='deferred'").get();
+ok('старая воронка мигрирует системный этап «Отложенный спрос»',migratedDeferred?.name==='Отложенный спрос'&&migratedDeferred.color==='#0284c7'&&migratedDeferred.kind==='open',JSON.stringify(migratedDeferred));
 // старая лента была залита строками из чатов: после обновления они уходят
 // из рабочего стола, но остаются в истории карточек; людские строки живут в ленте
 const feedOf = t => db.prepare('SELECT feed FROM activities WHERE text LIKE ?').get(t)?.feed;
@@ -138,6 +144,7 @@ ok('карточка клиента читается полностью', c.name
 ok('новые поля у старых записей заполнены значениями по умолчанию', c.demo === 0 && (c.custom === '{}' || c.custom === null), `demo=${c.demo}, custom=${c.custom}`);
 const m = db.prepare('SELECT * FROM messages WHERE id=1').get();
 ok('переписка из старой базы сохранена', m.body === 'Сообщение из старой базы');
+ok('старое время события не подменено временем записи', m.event_at === null && m.event_time_source === '');
 ok('настройки компании перенесены', db.prepare("SELECT value FROM settings WHERE key='COMPANY_NAME'").get().value === 'Старая компания');
 ok('settings.env дополняет базу недостающими ключами', db.prepare("SELECT value FROM settings WHERE key='CURRENCY'").get()?.value === '€',
   String(db.prepare("SELECT value FROM settings WHERE key='CURRENCY'").get()?.value));
@@ -146,7 +153,7 @@ ok('из settings.env берутся только допустимые ключ�
 
 // ── 4. API поверх мигрированной базы ─────────────────────────────────────────
 const healthPublic = await (await fetch(`http://127.0.0.1:${PORT}/api/health`)).json();
-ok('сервер отвечает /api/health', healthPublic.ok === true && healthPublic.schema >= 3, `схема ${healthPublic.schema}`);
+ok('сервер отвечает /api/health', healthPublic.ok === true && healthPublic.schema >= 15, `схема ${healthPublic.schema}`);
 ok('публичный health не раскрывает счётчики клиентов и имена копий', healthPublic.counts === undefined && healthPublic.backups === undefined, JSON.stringify(healthPublic));
 ok('без токена данные закрыты', (await fetch(`http://127.0.0.1:${PORT}/api/contacts`)).status === 401);
 
@@ -178,7 +185,7 @@ ok('клиент из старой базы виден через API', contacts
 const cleanStatus = (await fetch(`http://127.0.0.1:${PORT}/api/demo/clean`, { method: 'POST', headers: H })).status;
 ok('команда очистки примеров данных в продукте отключена', cleanStatus === 404, 'статус ' + cleanStatus);
 const deals = await (await fetch(`http://127.0.0.1:${PORT}/api/deals`, { headers: H })).json();
-ok('старая сделка читается со всеми новыми полями', deals.deals.length === 1 && deals.deals[0].amount === 777000 && deals.deals[0].pipeline_id === 1, JSON.stringify(deals.deals.map(d => [d.title, d.amount, d.pipeline_id])));
+ok('старая сделка читается со всеми новыми полями', deals.deals.length === 1 && deals.deals[0].amount === 777000 && deals.deals[0].pipeline_id === 1 && deals.deals[0].deal_object==='Не уточнён' && deals.deals[0].land_status==='unknown' && deals.deals[0].construction_date==='unknown' && deals.deals[0].payment_type==='unknown' && deals.deals[0].lead_source==='avito', JSON.stringify(deals.deals.map(d => [d.title, d.amount, d.pipeline_id, d.deal_object, d.land_status, d.construction_date, d.payment_type, d.lead_source])));
 const moneyRow = db.prepare("SELECT amount, typeof(amount) t FROM deals WHERE title='Старая сделка'").get();
 ok('дробная сумма из старой базы приведена к целым рублям', moneyRow.t === 'integer' && moneyRow.amount === 777000, JSON.stringify(moneyRow));
 const conv = await (await fetch(`http://127.0.0.1:${PORT}/api/conversations`, { headers: H })).json();

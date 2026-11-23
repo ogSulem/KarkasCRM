@@ -132,7 +132,7 @@ const WZ_STATE_LABELS = {
 };
 const wzState = s => WZ_STATE_LABELS[s] || (s ? [s, 'grey'] : ['состояние не указано', 'grey']);
 const SOURCE_LABELS = {
-  manual: 'Вручную', import: 'Импорт из CSV', site: 'Сайт', email: 'Почта',
+  manual: 'Вручную', import: 'Импорт из CSV', site: 'Сайт', email: 'Почта', unknown: 'Не определён',
   ...WZ_TRANSPORTS,
   ...Object.fromEntries(Object.entries(WZ_TRANSPORTS).map(([k, v]) => ['wazzup-' + k, v + ' (Wazzup)']))
 };
@@ -153,16 +153,43 @@ const wzTitle = c => (c.label ? String(c.label)
 // бейджи каналов клиента: «WhatsApp · Telegram» — одна строка для списков
 const chan = c => (c || 'whatsapp').split(',').map(x => x.trim()).filter(Boolean).map(x => `<span class="chan ${x}">${esc(channelLabel(x))}</span>`).join(' ');
 
-const ROLE_LABELS = { admin: 'Администратор', manager: 'Менеджер', viewer: 'Наблюдатель', partner: 'Партнёр' };
+const ROLE_LABELS = { admin: 'Администратор', rop: 'Руководитель отдела продаж', manager: 'Менеджер', classifier: 'Классификатор', viewer: 'Наблюдатель', partner: 'Партнёр' };
 const roleLabel = r => ROLE_LABELS[r] || r;
 // Класс роли на теле страницы назначается только здесь. Список ролей прежде был
-// продублирован в boot() и в syncMe(), причём во втором варианте не было
-// «партнёра»: после переподключения живого канала или правки сотрудников
-// партнёру возвращались чужие разделы меню, общий поиск и колокольчик.
+// продублирован в boot() и в syncMe(), из-за чего после смены роли меню оставалось старым.
 const ROLE_CLASSES = Object.keys(ROLE_LABELS).map(r => 'role-' + r);
+const ROLE_NAV_ITEMS = [
+  { view: 'routing', title: 'Очередь', icon: 'pipe', roles: ['admin', 'rop'] },
+  { view: 'classification', title: 'Классификация', icon: 'contacts', roles: ['admin', 'rop', 'classifier'] },
+];
+function syncRoleNavigation(role) {
+  const nav = $('#nav');
+  if (!nav) return;
+  nav.querySelectorAll('[data-role-nav]').forEach(button => button.remove());
+  let anchor = nav.querySelector('[data-view="analytics"]');
+  for (const item of ROLE_NAV_ITEMS) {
+    if (!item.roles.includes(role)) continue;
+    const button = document.createElement('button');
+    button.type = 'button'; button.dataset.view = item.view; button.dataset.roleNav = '1';
+    button.setAttribute('onclick', `go('${item.view}')`);
+    button.innerHTML = `<span class="nav-ico">${icon(item.icon, 16)}</span> ${item.title}`;
+    if (anchor) anchor.insertAdjacentElement('afterend', button); else nav.appendChild(button);
+    anchor = button;
+  }
+  const narrow = role === 'rop' || role === 'classifier';
+  const allowed = role === 'rop'
+    ? new Set(['analytics', 'settings'])
+    : role === 'classifier' ? new Set(['settings']) : null;
+  nav.querySelectorAll('button:not([data-role-nav])').forEach(button => {
+    button.hidden = !!allowed && !allowed.has(button.dataset.view);
+  });
+  document.body.classList.toggle('role-limited-tools', narrow);
+}
 function applyRoleClass(role) {
   document.body.classList.remove(...ROLE_CLASSES);
-  document.body.classList.add('role-' + (ROLE_LABELS[role] ? role : 'manager'));
+  const selected = ROLE_LABELS[role] ? role : 'manager';
+  document.body.classList.add('role-' + selected);
+  syncRoleNavigation(selected);
 }
 
 // Браузер хранит кириллический домен в машиночитаемом виде: вместо
@@ -332,12 +359,55 @@ function applyTheme(mode = currentThemeMode()) {
     btn.innerHTML = icon(res === 'dark' ? 'moon' : 'sun', 16);
     btn.title = `Тема: ${res === 'dark' ? 'тёмная' : 'светлая'} (режим: ${mode})`;
   }
+  if (state.me && (state.me.email || state.me.name)) renderWatermark();
 }
 function toggleTheme() {
   const cur = currentThemeMode();
   const next = cur === 'auto' ? (resolvedTheme('auto') === 'dark' ? 'light' : 'dark') : (cur === 'light' ? 'dark' : 'auto');
   applyTheme(next);
   toast({ light: 'Светлая тема', dark: 'Тёмная тема', auto: 'Как в системе' }[next]);
+}
+
+/* ── водяной знак ───────────────────────────────────────────────────────────
+   ТЗ требует на экранах с чувствительными данными водяной знак с
+   идентификатором пользователя и временем: снимок экрана или фотография
+   показывают, кто именно смотрел карточку и когда. Знак рисуется поверх
+   интерфейса отдельным слоем, ничего не перехватывает, а время обновляется
+   раз в минуту — картинка не перерисовывается при каждом движении мыши. */
+let watermarkTimer = 0;
+function watermarkLabel() {
+  // state.me — сам сотрудник (объект /api/me), а не обёртка с полем user
+  const u = state.me || {};
+  const who = [u.name, u.email].filter(Boolean).join(' · ');
+  if (!who) return '';
+  const time = new Date().toLocaleTimeString('ru-RU', { hour: '2-digit', minute: '2-digit' });
+  return `${who} · ${time}`;
+}
+function renderWatermark() {
+  const el = $('#watermark');
+  if (!el) return;
+  const label = watermarkLabel();
+  if (!label) { el.classList.remove('on'); el.style.backgroundImage = ''; return; }
+  const dark = document.documentElement.dataset.theme === 'dark';
+  const fill = dark ? 'rgba(226,232,240,.20)' : 'rgba(15,23,42,.09)';
+  const safe = label.replace(/[<>&"']/g, c => ({ '<': '&lt;', '>': '&gt;', '&': '&amp;', '"': '&quot;', "'": '&apos;' }[c]));
+  const svg = `<svg xmlns="http://www.w3.org/2000/svg" width="520" height="320"><text x="260" y="160" text-anchor="middle" dominant-baseline="middle" transform="rotate(-24 260 160)" fill="${fill}" font-family="system-ui,-apple-system,Segoe UI,Roboto,sans-serif" font-size="13" font-weight="600">${safe}</text></svg>`;
+  // адрес картинки кодируется строго: скобки и кавычки внутри url() ломают
+  // разбор стиля в некоторых браузерах, и знак просто не рисуется
+  const dataUri = encodeURIComponent(svg).replace(/[!'()*]/g, c => '%' + c.charCodeAt(0).toString(16).toUpperCase());
+  el.style.backgroundImage = `url("data:image/svg+xml,${dataUri}")`;
+  el.classList.add('on');
+}
+function startWatermark() {
+  renderWatermark();
+  clearInterval(watermarkTimer);
+  watermarkTimer = setInterval(renderWatermark, 60000);
+}
+function stopWatermark() {
+  clearInterval(watermarkTimer);
+  watermarkTimer = 0;
+  const el = $('#watermark');
+  if (el) { el.classList.remove('on'); el.style.backgroundImage = ''; }
 }
 if (window.matchMedia) {
   try {
@@ -352,8 +422,11 @@ const state = {
   deals: [], stages: [], pipelines: [], contacts: [], companies: [], channels: [],
   cache: {}, dealTab: 'details', meta: null, dupes: null, me: null, users: [], convScope: 'all', convSelect: false, drafts: {},
   taskScope: 'mine', taskFilter: '', dealScope: 'all', taskView: 'list', sel: {}, bulkActions: {},
-  qTab: 'metrics', qDays: 30, qReviewDays: 90, qReviewId: null, qReviewData: null,
-  qDealQuery: '', qDealSeq: 0
+  qTab: 'metrics', qDays: 30, qReviewDays: 7, qReviewId: null, qReviewData: null, qFilters: { manager_id: '', pipeline_id: '', stage: '', source: '' },
+  qDealQuery: '', qDealSeq: 0, routingTab: 'queue', classificationDealId: null,
+  reportFilters: null, reportSources: [], routingQueue: [], routingAssigned: [], routingManagers: [],
+  routingTransferData: null, routingEligibleDeals: [], routingSettings: null, routingTeams: [], routingPipelines: [], routingClassifiers: [],
+  classificationQueue: [], classificationUnassigned: [], classifiers: []
 };
 // первичное применение темы — после объявления state: синхронизация личной
 // темы сотрудника обращается к нему и не должна выполняться до инициализации
@@ -370,8 +443,8 @@ const dtFmt = d => d.toLocaleString('ru-RU', { day: '2-digit', month: '2-digit',
 const dt = s => {
   if (!s) return '';
   const raw = String(s).trim();
-  const m = raw.match(/^(\d{4})-(\d{2})-(\d{2})[ T](\d{2}):(\d{2})(?::(\d{2}))?$/);
-  const d = m ? new Date(`${m[1]}-${m[2]}-${m[3]}T${m[4]}:${m[5]}:${m[6] || '00'}Z`) : (/Z|[+-]\d{2}:?\d{2}$/.test(raw) ? new Date(raw) : null);
+  const m = raw.match(/^(\d{4})-(\d{2})-(\d{2})[ T](\d{2}):(\d{2})(?::(\d{2}))?(?:\.(\d{1,3}))?$/);
+  const d = m ? new Date(`${m[1]}-${m[2]}-${m[3]}T${m[4]}:${m[5]}:${m[6] || '00'}.${(m[7] || '0').padEnd(3,'0')}Z`) : (/Z|[+-]\d{2}:?\d{2}$/.test(raw) ? new Date(raw) : null);
   if (d && !isNaN(d)) return dtFmt(d);
   // Дата без времени (например «2023-08-01» из картотеки судов) — тоже дд.мм.гггг:
   // часы и минуты здесь смысла не имеют, а формат во всём интерфейсе один.
@@ -482,8 +555,9 @@ async function api(path, opt = {}) {
     const d = await r.json().catch(() => ({}));
     const err = new Error(d.error || 'Нужно войти в систему.');
     err.unauthorized = true;
-    // причину называет сервер: «сеанс закрыт, пароль сброшен администратором»
-    // понятнее общего «сеанс завершён» и снимает вопрос, куда делся пароль
+    err.data = d; // код причины (SESSION_EXPIRED, SESSION_REVOKED, USER_DISABLED) различает случаи
+    // сервер объясняет, что устарел именно сеанс: пароль мог сменить сам
+    // сотрудник или сбросить администратор; новый вход нужен во всех случаях
     if (!opt.noSessionEnd && path !== '/api/auth/login') endSession(d.error || 'Сеанс завершён. Войдите, пожалуйста, заново.');
     unlockBusyForms();
     throw err;
@@ -588,7 +662,7 @@ function openModal(html) {
 // Наблюдатель видит карточки и отчёты, но формы в окнах становятся только для
 // чтения: сервер изменения всё равно отклоняет, а человеку сразу понятно почему.
 function lockFormsForViewer(root) {
-  if (canEdit()) return;
+  if (state.me?.role !== 'viewer') return;
   lockForm(root, 'Режим просмотра: изменения вносит сотрудник с ролью «Менеджер» или «Администратор».');
 }
 // Форма открывается на просмотр: поля гаснут, а под ними — понятная причина.
@@ -665,9 +739,18 @@ function meId() { return (state.me && state.me.id) || null; }
 // Права в интерфейсе повторяют права на сервере: наблюдатель только читает,
 // менеджер ведёт клиентов и сделки, администратор меняет настройки и справочники.
 const amAdmin = () => (state.me && state.me.role) === 'admin';
-const canEdit = () => (state.me && state.me.role) !== 'viewer';
+const canEdit = () => !['viewer','rop','classifier'].includes(state.me?.role);
+// Пакетные изменения разрешены менеджеру только в его рабочем контуре.
+const canBulk = () => ['admin','manager'].includes(state.me?.role);
+// Выгрузка и удаление общих справочников — отдельные административные права.
+const canExport = () => amAdmin();
+const canDeleteCompetitors = () => amAdmin();
 const isPartner = () => (state.me && state.me.role) === 'partner';
-const viewerNote = () => canEdit() ? '' : `<div class="notice info">${icon('eye', 15)} <b>Режим просмотра.</b> Все данные и выгрузки доступны, а изменения вносят сотрудники с ролью «Менеджер» или «Администратор».</div>`;
+// Состав сделки и сумму меняет только офис: партнёр видит позиции и печатает
+// документы, но не меняет состав и сумму переданного лида.
+const canEditDealComposition = () => ['admin', 'manager'].includes(state.me?.role);
+const canDeleteDeal = () => ['admin', 'manager'].includes(state.me?.role);
+const viewerNote = () => state.me?.role !== 'viewer' ? '' : `<div class="notice info">${icon('eye', 15)} <b>Режим просмотра.</b> Все данные доступны для чтения. Изменения вносят сотрудники с ролью «Менеджер» или «Администратор»; выгрузки доступны только администратору.</div>`;
 function userOptions(selId) {
   // Сотрудник с закрытым доступом не предлагается для новых назначений:
   // обращения вставали бы за того, кто уже не работает. Текущий ответственный
@@ -683,7 +766,7 @@ function userOptions(selId) {
 // партнёра), поэтому вместо него показываем имя как есть. Поле недоступно для
 // ввода и в запрос не попадает.
 function ownerField(selId) {
-  if (!isPartner()) return fld('Ответственный', `<select name="responsible_id">${userOptions(selId)}</select>`);
+  if (!isPartner() && state.me?.role !== 'manager') return fld('Ответственный', `<select name="responsible_id">${userOptions(selId)}</select>`);
   const u = (__team || []).find(x => Number(x.id) === Number(selId)) || state.me || {};
   return `<label class="opt">Ответственный<input value="${esc(u.name || '— вы —')}" disabled></label>`;
 }
@@ -721,6 +804,30 @@ const fld = (label, inner, required = false) =>
   `<label class="${required ? 'req' : 'opt'}">${label}${required ? '<span class="star" aria-hidden="true">*</span>' : ''}${inner}</label>`;
 const grid2 = html => `<div class="form-grid2">${html}</div>`;
 const formLegend = () => `<p class="form-hint"><span class="star">*</span> — обязательные поля. Остальные можно заполнить позже.</p>`;
+function dealDateField(value = '') {
+  const raw = String(value || ''), unknown = !raw || raw === 'unknown';
+  const date = unknown ? '' : raw.slice(0, 10);
+  return `<div class="deal-date-field"><label class="req">Дата строительства<span class="star" aria-hidden="true">*</span><input name="construction_date" type="date" value="${esc(date)}" ${unknown ? 'disabled' : 'required'}></label><label class="check-line"><input type="checkbox" name="construction_date_unknown" style="width:auto" ${unknown ? 'checked' : ''} onchange="toggleDealDateUnknown(this)"><span>Пока не определена</span></label></div>`;
+}
+function toggleDealDateUnknown(box) {
+  const input = box.form?.elements?.namedItem('construction_date');
+  if (!input) return;
+  input.disabled = box.checked;
+  input.required = !box.checked;
+  if (box.checked) input.value = '';
+  else input.focus();
+}
+function dealQualificationFields(deal = {}, contactSource = '') {
+  const land = String(deal.land_status || '');
+  const payment = String(deal.payment_type || '');
+  const source = deal.lead_source !== undefined ? String(deal.lead_source || '') : String(contactSource || '');
+  return `${grid2(`${fld('Бюджет (' + CUR() + ')', `<input name="amount" type="number" min="0" step="1" value="${deal.amount === undefined ? '' : esc(deal.amount)}" placeholder="Укажите сумму" required>`, true)}
+       ${fld('Объект сделки', `<input name="deal_object" required maxlength="160" value="${esc(deal.deal_object || '')}" placeholder="Например, дом 8×10">`, true)}`)}
+    ${grid2(`${fld('Наличие земли', `<select name="land_status" required><option value="">Выберите</option><option value="yes" ${land === 'yes' ? 'selected' : ''}>Есть</option><option value="no" ${land === 'no' ? 'selected' : ''}>Нет</option><option value="unknown" ${land === 'unknown' ? 'selected' : ''}>Пока не выяснено</option></select>`, true)}
+       ${dealDateField(deal.construction_date)}`)}
+    ${grid2(`${fld('Тип оплаты', `<select name="payment_type" required><option value="">Выберите</option><option value="cash" ${payment === 'cash' ? 'selected' : ''}>Свои средства</option><option value="mortgage" ${payment === 'mortgage' ? 'selected' : ''}>Ипотека или кредит</option><option value="installment" ${payment === 'installment' ? 'selected' : ''}>Рассрочка</option><option value="mixed" ${payment === 'mixed' ? 'selected' : ''}>Смешанная оплата</option><option value="unknown" ${payment === 'unknown' ? 'selected' : ''}>Пока не выяснено</option></select>`, true)}
+       ${fld('Источник лида', `<input name="lead_source" required maxlength="80" value="${esc(source)}" placeholder="Сайт, рекомендация, Авито…">`, true)}`)}`;
+}
 
 // ── свои поля (custom fields) ─────────────────────────────────────────────
 function cfFor(entity) {
@@ -794,20 +901,32 @@ window.addEventListener('keydown', e => {
 function endSession(reason = '') {
   token = '';
   totalStop();
+  stopWatermark();
   __getCache.clear(); // следующий вход может быть другим сотрудником
   try { localStorage.removeItem('karkas_token'); } catch {}
   loginScreen(reason);
 }
 
+/* В браузере хранится только признак того, что в нём уже работали: сам
+   токен сессии — в HttpOnly-cookie и в памяти страницы, в localStorage его
+   нет. Признак нужен для одного: показать на экране входа, что сеанс
+   закончился, а не просто «введите пароль». Секретом он не является. */
+const sessionWasUsed = () => { try { return !!localStorage.getItem('karkas_seen'); } catch { return false; } };
+const markSessionUsed = () => { try { localStorage.setItem('karkas_seen', '1'); } catch {} };
+const forgetSessionUsed = () => { try { localStorage.removeItem('karkas_seen'); } catch {} };
+
 async function logout() {
   token = '';
   totalStop();
+  stopWatermark();
+  forgetSessionUsed();
   try { localStorage.removeItem('karkas_token'); } catch {}
   try { await fetch('/api/auth/logout', { method: 'POST' }); } catch {}
   loginScreen();
 }
 
 async function loginScreen(note = '') {
+  stopWatermark();
   $('#passwordChange').classList.add('hidden');
   $('#passwordChangeForm').reset();
   $('#app').classList.add('hidden');
@@ -871,13 +990,13 @@ async function boot() {
     $('#uEmail').textContent = me.user.email;
     $('#uAva').textContent = (me.user.name || 'A')[0].toUpperCase();
     state.me = me.user;
+    markSessionUsed();
     // открываем раздел, на котором сотрудник закончил в прошлый раз: ежедневная
     // работа начинается сразу со своих чатов или сделок, а не с пустого стола
-    if (me.user.role === 'partner') {
-      // партнёр начинает со своих сделок: рабочий стол с цифрами всей компании
-      // для него закрыт, из личных разделов доступны воронка, переписка с его
-      // клиентами и его задачи
-      if (!PARTNER_VIEWS.includes(state.view)) go(PARTNER_VIEWS.includes(me.user.pref_view) ? me.user.pref_view : 'pipe');
+    if (['partner','rop','classifier'].includes(me.user.role)) {
+      // Каждая ограниченная роль начинает с доступного рабочего раздела, а не
+      // с рабочего стола компании, который для неё закрыт на сервере.
+      state.view = defaultViewForRole(me.user.role, me.user.pref_view || state.view);
     } else if (me.user.pref_view && me.user.pref_view !== 'dashboard' && state.view === 'dashboard') go(me.user.pref_view);
     loadDrafts(); // черновики читаются заново: ключ зависит от сотрудника
     guardIdenticalHtml($('#view')); // одинаковый экран не перерисовывается
@@ -895,6 +1014,7 @@ async function boot() {
       return;
     }
     $('#passwordChange').classList.add('hidden');
+    startWatermark(); // знак с сотрудником и временем — на экранах с клиентскими данными
     state.meta = await api('/api/meta');
     // менеджеру не показываем карточку «Интеграции»: настройки всё равно только у администратора
     const sideInt = $('#sideIntegrations');
@@ -910,7 +1030,13 @@ async function boot() {
     initRealtime();
     await go(state.view);
   } catch (e) {
-    if (e.unauthorized) { await loginScreen(); return; }
+    if (e.unauthorized) {
+      // причина закрытого сеанса объясняется на экране входа: сотрудник должен
+      // понимать, что произошло, а не гадать, почему «снова не пускает»
+      const note = sessionWasUsed() ? 'Сеанс закончился — войдите заново.' : '';
+      await loginScreen(note);
+      return;
+    }
     endSession('Сеанс истёк или связь с сервером потерялась — войдите заново.');
   }
 }
@@ -919,7 +1045,7 @@ function hydrateNavIcons() {
   const map = {
     dashboard: 'dashboard', pipe: 'pipe', inbox: 'inbox', contacts: 'contacts',
     companies: 'companies', tasks: 'tasks', products: 'products', competitors: 'competitors',
-    analytics: 'analytics', settings: 'settings'
+    analytics: 'analytics', training: 'fileText', settings: 'settings'
   };
   // Переключение разделов задано встроенным onclick в разметке — здесь только иконки.
   $$('#nav button').forEach(b => {
@@ -946,6 +1072,9 @@ const TITLES = {
   companies: ['Компании', 'Юридические лица и связанные с ними клиенты'],
   products: ['Каталог', 'Ваш прайс-лист: дома, бани и услуги — то, что продаёте, и по каким ценам'],
   analytics: ['Аналитика', 'Сколько продали, конверсия, план и результаты менеджеров, качество ответов'],
+  training: ['Обучение', 'Материалы для партнёров: как вести переданный лид'],
+  routing: ['Очередь', 'Новые обращения, назначения, возвраты и передачи партнёрам'],
+  classification: ['Классификация', 'Предварительная разметка новых обращений'],
   competitors: ['Конкуренты', 'Проверка по открытым источникам и сравнение цен'],
   settings: ['Настройки', 'Компания, интеграции, поля, команда и резервные копии']
 };
@@ -957,6 +1086,9 @@ const SKELETONS = {
   contacts: () => `<div class="card"><div class="sk-line w60"></div><div class="sk-line"></div><div class="sk-line"></div><div class="sk-line w80"></div></div>`,
   tasks: () => `<div class="card"><div class="sk-line w40"></div>${'<div class="sk-line"></div>'.repeat(5)}</div>`,
   analytics: () => `<div class="sk-grid">${'<div class="skeleton sk-kpi"></div>'.repeat(4)}</div><div class="card"><div style="height:180px"></div></div>`,
+  training: () => `<div class="card"><div class="sk-line w40"></div>${'<div class="sk-line"></div>'.repeat(4)}</div>`,
+  routing: () => `<div class="cols"><div class="card"><div class="sk-line w40"></div>${'<div class="sk-line"></div>'.repeat(4)}</div><div class="card"><div class="sk-line w40"></div>${'<div class="sk-line"></div>'.repeat(4)}</div></div>`,
+  classification: () => `<div class="card"><div class="sk-line w40"></div>${'<div class="sk-line"></div>'.repeat(5)}</div>`,
   competitors: () => `<div class="sk-grid">${'<div class="skeleton sk-kpi"></div>'.repeat(3)}</div><div class="card">${'<div class="sk-line"></div>'.repeat(4)}</div>`,
   settings: () => `<div class="card"><div class="sk-line w40"></div>${'<div class="sk-line"></div>'.repeat(6)}</div>`,
   companies: () => `<div class="card"><div class="sk-line w40"></div>${'<div class="sk-line"></div>'.repeat(5)}</div>`,
@@ -970,15 +1102,30 @@ const SKELETONS = {
 // оценка команды в аналитике) проверяются по роли отдельно. Проверка стоит перед
 // отрисовкой, поэтому переход по старой ссылке или из палитры не заканчивается
 // экраном ошибки.
-const PARTNER_VIEWS = ['pipe', 'inbox', 'tasks', 'settings'];
+const PARTNER_VIEWS = ['pipe', 'inbox', 'tasks', 'training', 'settings'];
 function viewAllowed(view) {
   const role = state.me && state.me.role;
   if (!role) return true;
   if (role === 'partner') return PARTNER_VIEWS.includes(view);
+  if (role === 'rop') return ['routing', 'classification', 'analytics', 'settings'].includes(view);
+  if (role === 'classifier') return ['classification', 'settings'].includes(view);
   return true;
 }
+function defaultViewForRole(role, preferred = '') {
+  const allowed = view => {
+    if (role === 'partner') return PARTNER_VIEWS.includes(view);
+    if (role === 'rop') return ['routing', 'classification', 'analytics', 'settings'].includes(view);
+    if (role === 'classifier') return ['classification', 'settings'].includes(view);
+    return true;
+  };
+  if (preferred && allowed(preferred)) return preferred;
+  if (role === 'partner') return 'pipe';
+  if (role === 'rop') return 'routing';
+  if (role === 'classifier') return 'classification';
+  return 'dashboard';
+}
 async function go(view, subTab) {
-  if (!viewAllowed(view)) view = (state.me && state.me.role) === 'partner' ? 'pipe' : 'dashboard';
+  if (!viewAllowed(view)) view = defaultViewForRole(state.me?.role);
   const prevView = state.view;
   state.view = view;
   rememberPref(view);
@@ -1100,6 +1247,9 @@ async function renderNow() {
     if (state.view === 'products') return await products(v);
     if (state.view === 'competitors') return await competitorsView(v);
     if (state.view === 'analytics') return await analytics(v);
+    if (state.view === 'training') return await trainingView(v);
+    if (state.view === 'routing') return await routingView(v);
+    if (state.view === 'classification') return await classificationView(v);
     if (state.view === 'settings') return await settings(v);
   } catch (e) {
     v.innerHTML = `<div class="card err"><h3>Не удалось загрузить раздел</h3><p>${esc(e.message)}</p><button class="btn primary" onclick="render()">Повторить попытку</button></div>`;
@@ -1171,16 +1321,22 @@ async function navCounts(d) {
 /* ---------- dashboard ---------- */
 async function dashboard(v) {
   const d = await api('/api/dashboard?pipeline=' + (state.pipeline || 1));
+  const shiftState=state.me?.role==='manager'?await api('/api/shifts').catch(()=>({active:[]})):null;
+  const myShift=shiftState?.active?.[0]||null;
   navCounts(d);
   __myTasks = (await api('/api/tasks').catch(() => [])).filter(t => !t.done && (t.responsible_id === meId() || !t.responsible_id)).slice(0, 6);
+  const myQualityFeedback = state.me?.role === 'manager'
+    ? await api('/api/quality/my-reviews?days=90').catch(() => ({ reviews: [] })) : null;
   const max = Math.max(...d.stages.map(s => s.sum), 1);
   const todayTasks = d.myTasksToday ?? 0;
   const overdueTasks = d.myTasksOverdue ?? 0;
   const unreadChats = d.unreadMine ?? d.unread ?? 0;
   const companyLine = amAdmin() && (d.tasksOverdue > overdueTasks || d.tasksToday > todayTasks || (d.unread || 0) > unreadChats)
     ? `По компании целиком: просрочено ${d.tasksOverdue ?? 0}, на сегодня ${d.tasksToday ?? 0}, непрочитанных чатов ${d.unread ?? 0}.` : '';
+  const shiftCard=state.me?.role==='manager'?`<div class="card shift-card"><div><h3>${icon('clock',16)} Моя смена</h3><p>${myShift?`Смена начата ${esc(dt(myShift.started_at))}. Открытые обращения без первого ответа вернутся в общую очередь после закрытия.`:'Смена не начата. Новые лиды назначаются только сотрудникам с активной сменой.'}</p>${!state.meta?.autoAssign?'<small class="danger-text">Автоматическая выдача лидов сейчас отключена администратором.</small>':''}</div>${myShift?`<button class="btn danger" onclick="openEndShift()">Завершить смену</button>`:`<button class="btn primary" onclick="startManagerShift()">Начать смену</button>`}</div>`:'';
 
   v.innerHTML = `
+   ${shiftCard}
    <div class="card" style="margin-bottom:12px;padding:12px 16px">
      ${!todayTasks && !overdueTasks && !unreadChats
       ? `<div class="all-clear">${icon('checkCircle', 16)} <b>Всё под контролем</b> — просроченных задач и непрочитанных чатов нет</div>`
@@ -1249,10 +1405,29 @@ async function dashboard(v) {
   <div>
    <div class="card"><div class="row" style="border:0"><h3>Мои задачи</h3><button class="btn sm" onclick="go('tasks')">Все задачи</button></div>
     <div class="list">${myTasksBlock()}</div></div>
+   ${myQualityFeedback ? qualityMyReviewsBlock(myQualityFeedback.reviews || []) : ''}
    <div class="card"><h3>Последние события компании</h3>
     <p class="form-hint">Что недавно меняли коллеги: клиенты, этапы сделок, письма, документы.</p>
     <div class="list feed">${d.activities.map(a => `<div class="row"><span>• ${esc(a.text)}<br><small>${esc(dt(a.created_at))}${a.user_name ? ' · ' + esc(a.user_name) : ''}</small></span></div>`).join('') || '<div class="row"><span><small>Событий пока нет: здесь появятся записи, когда сотрудники добавят клиента, поменяют этап сделки или отправят письмо.</small></span></div>'}</div></div>
   </div></div>`;
+}
+async function startManagerShift() {
+  try {
+    const result=await api('/api/shifts/start',{method:'POST',body:'{}'});
+    toast(result.assigned?.length?`Смена начата. Получено обращений из очереди: ${result.assigned.length}.`:'Смена начата. Новых обращений из очереди пока нет.');
+    await render();
+  } catch(e) { toast(e.message,'err'); }
+}
+function openEndShift() {
+  openModal(`<h3>Завершить смену</h3><p>Неотвеченные лиды вернутся в очередь. Сделки, где уже началась переписка, останутся за вами.</p><form onsubmit="return endManagerShift(event)"><label>Причина завершения<input name="reason" required minlength="5" maxlength="500" placeholder="Например: рабочий день закончен"></label><button class="btn primary w">Завершить смену</button></form>`);
+}
+async function endManagerShift(e) {
+  e.preventDefault();
+  try {
+    const result=await api('/api/shifts/end',{method:'POST',body:JSON.stringify({reason:new FormData(e.target).get('reason')})});
+    closeModal();toast(`Смена завершена. В очередь возвращено: ${result.returned?.length||0}; оставлено за вами: ${result.retained?.length||0}.`);await render();
+  } catch(err) { toast(err.message,'err'); }
+  return false;
 }
 
 function getAvatarColor(str = '') {
@@ -1294,7 +1469,7 @@ function dragDealEnd() {
 // бывают тысячи, а доска должна открываться мгновенно. Счётчики и суммы
 // колонки считаются по всем сделкам, а не по видимой порции.
 const dealCardHtml = (x, s) => `<article class="deal ${selSet('deals').has(x.id) ? 'selected' : ''}" ${canEdit() ? `draggable="true" ondragstart="dragDealStart(event,${x.id})" ondragend="dragDealEnd()"` : ''} onclick="openDealCard(${x.id})" style="border-left-color:${esc(s.color)}${selSet('deals').has(x.id) ? ';box-shadow:0 0 0 2px var(--green)' : ''}">
-    <b>${esc(x.title)}</b>${canEdit() ? `<input type="checkbox" title="Выбрать для массового действия" data-selkey="deals" data-selid="${x.id}" style="position:absolute;top:8px;right:8px" ${selSet('deals').has(x.id) ? 'checked' : ''} onclick="event.stopPropagation()" onchange="toggleSel('deals',${x.id})">` : ''}<span class="sum">${fmt(x.amount)}</span>
+    <b>${esc(x.title)}</b>${canBulk() ? `<input type="checkbox" title="Выбрать для массового действия" data-selkey="deals" data-selid="${x.id}" style="position:absolute;top:8px;right:8px" ${selSet('deals').has(x.id) ? 'checked' : ''} onclick="event.stopPropagation()" onchange="toggleSel('deals',${x.id})">` : ''}<span class="sum">${fmt(x.amount)}</span>
     <small>${icon('contact', 13)} ${esc(x.contact_name || 'Без контакта')}${x.deadline ? ' · ' + icon('clock', 13) + ' ' + esc(dateText(x.deadline)) : ''}</small>
     <div>${dealTaskBadge(x)}</div>
     <div class="deal-foot"><span class="prio ${esc(x.priority)}">${x.priority === 'high' ? 'высокий' : x.priority === 'low' ? 'низкий' : 'обычный'}</span>${canEdit() ? `<span><button class="btn sm" title="Передвинуть на следующий этап" onclick="event.stopPropagation();moveDeal(${x.id},1)">→</button></span>` : ''}</div></article>`;
@@ -1318,7 +1493,7 @@ async function pipe(v) {
 function pipeDraw(v, d) {
   $('#navDeals').textContent = d.deals.filter(x => !['won', 'lost'].includes(x.stage)).length;
   const q = (state.dealQuery || '').toLowerCase();
-  let baseDeals = state.dealScope === 'mine' ? d.deals.filter(x => x.responsible_id === meId())
+  let baseDeals = state.dealScope === 'mine' && !isPartner() ? d.deals.filter(x => x.responsible_id === meId())
     : state.dealScope === 'notask' ? d.deals.filter(x => !x.tasks_open && !['won', 'lost'].includes(x.stage))
     : state.dealScope === 'overdue' ? d.deals.filter(x => x.tasks_open > 0 && taskDueMeta(x.next_task_due).overdue && !['won', 'lost'].includes(x.stage))
     : d.deals;
@@ -1328,17 +1503,17 @@ function pipeDraw(v, d) {
 
   v.innerHTML = `${viewerNote()}<div class="card toolbar">
     <b>Воронка:</b><select style="width:auto" onchange="setPipeline(this.value)">${d.pipelines.map(p => `<option value="${p.id}" ${p.id === state.pipeline ? 'selected' : ''}>${esc(p.name)}</option>`).join('')}</select>
-    <span class="tabs" style="margin:0"><button class="${state.dealScope !== 'mine' && state.dealScope !== 'notask' && state.dealScope !== 'overdue' ? 'active' : ''}" onclick="setDealScope('all')">Все сделки</button><button class="${state.dealScope === 'mine' ? 'active' : ''}" onclick="setDealScope('mine')">Мои (${d.deals.filter(x => x.responsible_id === meId()).length})</button><button class="${state.dealScope === 'notask' ? 'active' : ''}" onclick="setDealScope('notask')">Без задач (${noTaskCount})</button><button class="${state.dealScope === 'overdue' ? 'active' : ''}" onclick="setDealScope('overdue')">Просрочено (${overdueCount})</button></span>
+    <span class="tabs" style="margin:0"><button class="${state.dealScope !== 'mine' && state.dealScope !== 'notask' && state.dealScope !== 'overdue' ? 'active' : ''}" onclick="setDealScope('all')">Все сделки</button>${isPartner() ? '' : `<button class="${state.dealScope === 'mine' ? 'active' : ''}" onclick="setDealScope('mine')">Мои (${d.deals.filter(x => x.responsible_id === meId()).length})</button>`}<button class="${state.dealScope === 'notask' ? 'active' : ''}" onclick="setDealScope('notask')">Без задач (${noTaskCount})</button><button class="${state.dealScope === 'overdue' ? 'active' : ''}" onclick="setDealScope('overdue')">Просрочено (${overdueCount})</button></span>
     <span class="tag" title="Сделок в текущем фильтре">Показано: ${shown.length}${shown.length !== shown.filter(x => !['won', 'lost'].includes(x.stage)).length ? ` · в работе: ${shown.filter(x => !['won', 'lost'].includes(x.stage)).length}` : ''}</span><span class="tag orange" title="Сумма активных сделок в фильтре">В работе на ${fmt(shown.filter(x => !['won', 'lost'].includes(x.stage)).reduce((a, x) => a + x.amount, 0))}</span>
-    ${state.me?.role !== 'partner' ? `<button class="btn sm" style="margin-left:auto" onclick="download('/api/export/deals','deals.csv')" title="Выгрузить сделки в CSV">${icon('download', 13)} Экспорт</button>` : ''}
+    ${canExport() ? `<button class="btn sm" style="margin-left:auto" onclick="download('/api/export/deals','deals.csv')" title="Выгрузить сделки в CSV">${icon('download', 13)} Экспорт</button>` : ''}
     <input id="dealSearch" class="searchfield searchfield-sm" placeholder="Поиск по сделкам и клиентам" value="${esc(state.dealQuery || '')}" oninput="liveSearch('deals',()=>setDealQuery(this.value))">
     ${(state.me && state.me.role) === 'admin' ? `<button class="btn sm" onclick="openPipelineEditor()">${icon('settings', 13)} Настроить воронку</button>` : ''}</div>
-  ${canEdit() && !isPartner() ? bulkSlot('deals', `${bulkStage()}${bulkOwner('deals')}`) : ''}
+  ${canBulk() ? bulkSlot('deals', `${bulkStage()}${bulkOwner('deals')}`) : ''}
   <div class="kanban">${d.stages.map(s => {
     const colDeals = shown.filter(x => x.stage === s.code);
     const colSum = colDeals.reduce((a, x) => a + x.amount, 0);
     return `<div class="col" ${canEdit() ? `ondragover="dragOver(event,this)" ondragleave="this.classList.remove('drag-over')" ondrop="dropDeal(event,'${s.code}',this)"` : ''}>
-   <h3><span style="color:${esc(s.color)}">● ${esc(s.name)}</span><span style="display:inline-flex;align-items:center;gap:6px"><small style="font-weight:normal;color:var(--muted)">${fmt(colSum)}</small><span>${colDeals.length}</span>${canEdit() ? `<button type="button" class="btn-col-add" onclick="openDeal(null,'${s.code}')" title="Добавить сделку в этап «${esc(s.name)}»">${icon('plus', 12)}</button>` : ''}</span></h3>
+   <h3><span style="color:${esc(s.color)}">● ${esc(s.name)}</span><span style="display:inline-flex;align-items:center;gap:6px"><small style="font-weight:normal;color:var(--muted)">${fmt(colSum)}</small><span>${colDeals.length}</span>${canEdit() && !isPartner() ? `<button type="button" class="btn-col-add" onclick="openDeal(null,'${s.code}')" title="Добавить сделку в этап «${esc(s.name)}»">${icon('plus', 12)}</button>` : ''}</span></h3>
    <div class="deals">${dealColHtml(colDeals, s)}</div></div>`;
   }).join('')}</div>
   <div id="dropCloseBar" class="drop-close-bar hidden">
@@ -1436,10 +1611,10 @@ async function openDeal(contactId, stageCode) {
    ${formLegend()}
    ${fld('Название сделки', `<input name="title" required placeholder="Каркасный дом 8×10">`, true)}
    ${cfInputs('deals', {}, 2, 'required')}
-   ${grid2(`${fld('Сумма (' + CUR() + ')', `<input name="amount" type="number" value="0" placeholder="0">`)}
-     ${fld('Клиент', pickSlot('contact_id', preContact))}`)}
-   ${grid2(`${fld('Этап', `<select name="stage">${def.map(st => `<option value="${esc(st.code)}" ${st.code === curStage ? 'selected' : ''}>${esc(st.name)}</option>`).join('')}</select>`)}
-     ${ownerField(meId())}`)}
+   ${dealQualificationFields({}, preContact?.source)}
+   ${grid2(`${fld('Клиент', pickSlot('contact_id', preContact))}
+     ${fld('Этап', `<select name="stage">${def.map(st => `<option value="${esc(st.code)}" ${st.code === curStage ? 'selected' : ''}>${esc(st.name)}</option>`).join('')}</select>`)}`)}
+   ${ownerField(meId())}
    ${grid2(`${fld('Дедлайн', '<input name="deadline" type="date">')}
      ${fld('Приоритет', `<select name="priority"><option value="normal">Обычный</option><option value="high">Высокий</option><option value="low">Низкий</option></select>`)}`)}
    ${cfInputs('deals', {}, 2, 'optional')}
@@ -1471,12 +1646,21 @@ async function quickDealStage(id, stage) {
 }
 async function saveDeal(e, id) {
   e.preventDefault();
-  const b = cfCollect(e.target);
+  const form = e.target;
+  let b = cfCollect(form);
+  if (form.elements.construction_date_unknown?.checked) b.construction_date = 'unknown';
+  delete b.construction_date_unknown;
+  // Партнёр отправляет только согласованные поля: сервер отклонит запрос
+  // с суммой, составом или сменой ответственного, поэтому форму не ломаем.
+  if (isPartner() && id) {
+    const allowed = ['title', 'stage', 'deal_object', 'land_status', 'construction_date', 'payment_type', 'lead_source', 'deadline'];
+    b = Object.fromEntries(Object.entries(b).filter(([k]) => allowed.includes(k)));
+  }
   // при редактировании воронку не меняем: сделка остаётся там, где она есть
   if (!id) b.pipeline_id = state.pipeline;
-  b.amount = num(b.amount);
-  b.contact_id = b.contact_id ? +b.contact_id : null;
-  b.responsible_id = b.responsible_id ? +b.responsible_id : null;
+  if (b.amount !== undefined) b.amount = num(b.amount);
+  if (b.contact_id !== undefined) b.contact_id = b.contact_id ? +b.contact_id : null;
+  if (b.responsible_id !== undefined) b.responsible_id = b.responsible_id ? +b.responsible_id : null;
   const user = __team.find(u => u.id === b.responsible_id);
   if (user) b.responsible = user.name;
   await api(id ? '/api/deals/' + id : '/api/deals', { method: id ? 'PATCH' : 'POST', body: JSON.stringify(b) });
@@ -1511,9 +1695,9 @@ async function openDealCard(id) {
      ${deal.contact_phone ? `<a class="btn sm" href="tel:${esc(String(deal.contact_phone).replace(/[^+\d]/g, ''))}">${icon('phone', 13)} Позвонить</a>` : ''}
      ${deal.contact_phone ? `<a class="btn sm" href="https://wa.me/${esc(String(deal.contact_phone).replace(/[^\d]/g, ''))}" target="_blank" rel="noopener">${icon('whatsapp', 13)} WhatsApp</a>` : ''}
      <button class="btn sm" onclick="openTask(null,{deal_id:${deal.id},contact_id:${deal.contact_id || 'null'}})">${icon('plus', 13)} Задача</button>
-     <button class="btn sm primary" onclick="setDealTab('products',${deal.id})">${icon('products', 13)} Добавить товар</button>
-     <button class="btn sm" style="margin-left:auto" onclick="quickDealStage(${deal.id},'${esc(kindStage('won'))}')">${icon('checkCircle', 13)} Выиграна</button>
-     <button class="btn sm danger" onclick="quickDealStage(${deal.id},'${esc(kindStage('lost'))}')">${icon('xCircle', 13)} Отказ</button>
+     ${canEditDealComposition() ? `<button class="btn sm primary" onclick="setDealTab('products',${deal.id})">${icon('products', 13)} Добавить товар</button>` : ''}
+     ${isPartner() ? '' : `<button class="btn sm" style="margin-left:auto" onclick="quickDealStage(${deal.id},'${esc(kindStage('won'))}')">${icon('checkCircle', 13)} Выиграна</button>
+     <button class="btn sm danger" onclick="quickDealStage(${deal.id},'${esc(kindStage('lost'))}')">${icon('xCircle', 13)} Отказ</button>`}
    </div>`}
    <div class="tabs" style="margin-bottom:12px">
      <button class="${state.dealTab === 'details' ? 'active' : ''}" onclick=\"setDealTab('details',${id})\">Детали</button>
@@ -1528,20 +1712,38 @@ async function openDealCard(id) {
 
 function dealTab(deal, d) {
   if (state.dealTab === 'details') {
+    if (isPartner()) {
+      // Партнёр ведёт только согласованные поля переданного лида: сумму,
+      // состав, клиента, компанию, ответственного и свои поля меняет офис.
+      const land = String(deal.land_status || '');
+      const payment = String(deal.payment_type || '');
+      return `<form onsubmit="return saveDeal(event,${deal.id})">
+       ${formLegend()}
+       ${fld('Название сделки', `<input name="title" required value="${esc(deal.title)}">`, true)}
+       ${grid2(`${fld('Объект сделки', `<input name="deal_object" required maxlength="160" value="${esc(deal.deal_object || '')}">`, true)}
+         ${fld('Источник лида', `<input name="lead_source" required maxlength="80" value="${esc(deal.lead_source || '')}">`, true)}`)}
+       ${grid2(`${fld('Наличие земли', `<select name="land_status" required><option value="">Выберите</option><option value="yes" ${land === 'yes' ? 'selected' : ''}>Есть</option><option value="no" ${land === 'no' ? 'selected' : ''}>Нет</option><option value="unknown" ${land === 'unknown' ? 'selected' : ''}>Пока не выяснено</option></select>`, true)}
+         ${dealDateField(deal.construction_date)}`)}
+       ${grid2(`${fld('Тип оплаты', `<select name="payment_type" required><option value="">Выберите</option><option value="cash" ${payment === 'cash' ? 'selected' : ''}>Свои средства</option><option value="mortgage" ${payment === 'mortgage' ? 'selected' : ''}>Ипотека или кредит</option><option value="installment" ${payment === 'installment' ? 'selected' : ''}>Рассрочка</option><option value="mixed" ${payment === 'mixed' ? 'selected' : ''}>Смешанная оплата</option><option value="unknown" ${payment === 'unknown' ? 'selected' : ''}>Пока не выяснено</option></select>`, true)}
+         ${fld('Этап', `<select name="stage">${selStages(deal.stage, state.cardStages)}</select>`)}`)}
+       ${fld('Дедлайн', `<input name="deadline" type="date" value="${esc((deal.deadline || '').slice(0, 10))}">`)}
+       <p class="form-hint">Сумма, состав сделки, клиент, компания и ответственный — за офисом. Партнёр двигает лид по согласованным этапам и ведёт задачи и переписку.</p>
+       <div style="display:flex;gap:8px;margin-top:12px"><button class="btn primary">Сохранить изменения</button></div></form>`;
+    }
     return `<form onsubmit="return saveDeal(event,${deal.id})">
      ${formLegend()}
      ${fld('Название сделки', `<input name="title" required value="${esc(deal.title)}">`, true)}
      ${cfInputs('deals', deal, 2, 'required')}
-     ${grid2(`${fld('Сумма (' + CUR() + ')', `<input name="amount" type="number" value="${deal.amount}">`)}
-       ${fld('Этап', `<select name="stage">${selStages(deal.stage, state.cardStages)}</select>`)}`)}
-     ${grid2(`${fld('Клиент', pickSlot('contact_id', deal.contact_id ? { id: deal.contact_id, name: deal.contact_name } : null))}
-       ${fld('Компания', pickSlot('company_id', deal.company_id ? { id: deal.company_id, name: deal.company_name } : null))}`)}
-     ${grid2(`${fld('Дедлайн', `<input name="deadline" type="date" value="${esc((deal.deadline || '').slice(0, 10))}">`)}
-       ${ownerField(deal.responsible_id)}`)}
-     ${grid2(`${fld('Приоритет', `<select name="priority"><option value="normal" ${deal.priority === 'normal' ? 'selected' : ''}>Обычный</option><option value="high" ${deal.priority === 'high' ? 'selected' : ''}>Высокий</option><option value="low" ${deal.priority === 'low' ? 'selected' : ''}>Низкий</option></select>`)}
-       ${fld('Причина отказа (если сделка проиграна)', `<input name="loss_reason" value="${esc(deal.loss_reason || '')}" placeholder="Дорого, выбрали другого подрядчика…">`)}`)}
+     ${dealQualificationFields(deal)}
+     ${grid2(`${fld('Этап', `<select name="stage">${selStages(deal.stage, state.cardStages)}</select>`)}
+       ${fld('Клиент', pickSlot('contact_id', deal.contact_id ? { id: deal.contact_id, name: deal.contact_name } : null))}`)}
+     ${grid2(`${fld('Компания', pickSlot('company_id', deal.company_id ? { id: deal.company_id, name: deal.company_name } : null))}
+       ${fld('Дедлайн', `<input name="deadline" type="date" value="${esc((deal.deadline || '').slice(0, 10))}">`)}`)}
+     ${grid2(`${ownerField(deal.responsible_id)}
+       ${fld('Приоритет', `<select name="priority"><option value="normal" ${deal.priority === 'normal' ? 'selected' : ''}>Обычный</option><option value="high" ${deal.priority === 'high' ? 'selected' : ''}>Высокий</option><option value="low" ${deal.priority === 'low' ? 'selected' : ''}>Низкий</option></select>`)}`)}
+     ${fld('Причина отказа (если сделка проиграна)', `<input name="loss_reason" value="${esc(deal.loss_reason || '')}" placeholder="Дорого, выбрали другого подрядчика…">`)}
      ${cfInputs('deals', deal, 2, 'optional')}
-     <div style="display:flex;gap:8px;margin-top:12px"><button class="btn primary">Сохранить изменения</button><button class="btn danger" type="button" onclick="del('deals',${deal.id})">Удалить</button></div></form>`;
+     <div style="display:flex;gap:8px;margin-top:12px"><button class="btn primary">Сохранить изменения</button>${canDeleteDeal() ? `<button class="btn danger" type="button" onclick="del('deals',${deal.id})">Удалить</button>` : ''}</div></form>`;
   }
   if (state.dealTab === 'chat') {
     if (!d.conversation) return '<div class="empty">У этой сделки нет контакта или переписки</div>';
@@ -1552,8 +1754,8 @@ function dealTab(deal, d) {
     // строка и итог считаются по тому же правилу, что документ и сумма сделки
     const lineSum = p => Math.round((Number(p.price) || 0) * (Number(p.qty) || 0));
     const total = d.products.reduce((a, p) => a + lineSum(p), 0);
-    return `<table><tr><th>Товар / проект</th><th>Цена</th><th>Кол-во</th><th>Сумма</th><th></th></tr>${d.products.map(p => `<tr><td>${esc(p.name)}</td><td>${fmt(p.price)}</td><td>${p.qty}</td><td><b>${fmt(lineSum(p))}</b></td><td>${canEdit() ? `<button class="btn sm danger" onclick="delRow('deal_products',${p.id},${deal.id})">${icon('close', 13)}</button>` : ''}</td></tr>`).join('') || '<tr><td colspan="5"><small>Позиций нет — добавьте проект дома или доп. опцию</small></td></tr>'}${d.products.length ? `<tr><td colspan="3" style="text-align:right"><b>Итого по позициям:</b></td><td><b>${fmt(total)}</b></td><td></td></tr>${Math.abs(total - deal.amount) >= 1 && canEdit() ? `<tr><td colspan="5"><small>Сумма сделки — ${fmt(deal.amount)}. <button class="btn sm" onclick="syncDealAmount(${deal.id},${total})">Подставить ${fmt(total)} в сделку</button></small></td></tr>` : ''}` : ''}</table>
-     ${canEdit() ? `<hr><button class="btn sm primary" onclick="addDealProduct(${deal.id})">+ Добавить товар / услугу</button>` : ''}`;
+    return `<table><tr><th>Товар / проект</th><th>Цена</th><th>Кол-во</th><th>Сумма</th><th></th></tr>${d.products.map(p => `<tr><td>${esc(p.name)}</td><td>${fmt(p.price)}</td><td>${p.qty}</td><td><b>${fmt(lineSum(p))}</b></td><td>${canEditDealComposition() ? `<button class="btn sm danger" onclick="delRow('deal_products',${p.id},${deal.id})">${icon('close', 13)}</button>` : ''}</td></tr>`).join('') || '<tr><td colspan="5"><small>Позиций нет — добавьте проект дома или доп. опцию</small></td></tr>'}${d.products.length ? `<tr><td colspan="3" style="text-align:right"><b>Итого по позициям:</b></td><td><b>${fmt(total)}</b></td><td></td></tr>${Math.abs(total - deal.amount) >= 1 && canEditDealComposition() ? `<tr><td colspan="5"><small>Сумма сделки — ${fmt(deal.amount)}. <button class="btn sm" onclick="syncDealAmount(${deal.id},${total})">Подставить ${fmt(total)} в сделку</button></small></td></tr>` : ''}` : ''}</table>
+     ${canEditDealComposition() ? `<hr><button class="btn sm primary" onclick="addDealProduct(${deal.id})">+ Добавить товар / услугу</button>` : ''}`;
   }
   if (state.dealTab === 'tasks') {
     return `<div class="list">${d.tasks.map(t => {
@@ -1844,7 +2046,7 @@ function dayLabel(key) {
 function msgsHtml(list) {
   let last = '';
   return (list || []).map(m => {
-    const key = dt(m.created_at).slice(0, 10);
+    const key = dt(m.event_at || m.created_at).slice(0, 10);
     const sep = key && key !== last ? `<div class="msg-day"><span>${esc(dayLabel(key))}</span></div>` : '';
     last = key;
     return sep + msgHtml(m);
@@ -1884,7 +2086,11 @@ function msgHtml(m) {
   // в тонкой строке меты. Одна правая сторона не говорит «это не моё» —
   // отсюда путаница «вроде от меня, вроде мне»
   const authorLine = who ? `<div class="msg-author">${who}</div>` : '';
-  const meta = [chan, msgTime(m.created_at), st].filter(Boolean).join(' · ') + badge;
+  const timestamp=m.event_at||m.created_at;
+  const timeTitle=m.event_time_source==='provider'?'Время события, полученное от Wazzup':m.event_time_source==='crm'?'Время отправки из CRM':'Время записи сообщения в CRM';
+  const shownTime=msgTime(timestamp);
+  const time=shownTime?`<time class="msg-time" title="${esc(timeTitle)}">${esc(shownTime)}</time>`:'';
+  const meta = [chan, time, st].filter(Boolean).join(' · ') + badge;
   const content = attach || body ? `${attach}${body}` : missingAttach || '<span class="msg-empty">Сообщение без текста</span>';
   return `<div class="msg ${own ? 'out' : ''}"><div>${authorLine}${content}</div><small>${meta}</small></div>`;
 }
@@ -2039,7 +2245,7 @@ async function inbox(v) {
        <button type="button" class="tmpl-settings" onclick="go('settings','templates')">${icon('settings', 12)} настроить шаблоны</button>
      </div>
      <p class="form-hint" id="sendAccountHint" style="margin:-2px 0 0"></p></form>` : `<div class="composer"><p class="form-hint" style="margin:0">${icon('eye', 14)} Режим просмотра: переписка доступна для чтения, отвечает менеджер или администратор.</p></div>`}` : '<div class="empty">Выберите диалог</div>'}</div>
-   <div class="profile">${cur ? `<h3>Клиент</h3><p><b>${esc(displayTitle(cur.title))}</b>${cur.position ? `<br><small>${esc(cur.position)}</small>` : ''}</p><p>${icon('phone', 13)} ${esc(cur.phone ? prettyPhone(cur.phone) : '—')}<br>${icon('email', 13)} ${esc(cur.email || '—')}${cur.company ? `<br>${icon('company', 13)} ${esc(cur.company)}` : ''}${cur.source ? `<br>${icon('tag', 13)} Источник: ${esc(sourceLabel(cur.source))}` : ''}${cur.contact_responsible_name ? `<br>${icon('contact', 13)} Ответственный: ${esc(cur.contact_responsible_name)}` : ''}</p><p>Каналы: ${chan(cur.channels)}${(cur.channels || '').includes('email') ? ' <span class="tag grey">почта подключена</span>' : ''}</p><p><button class="btn sm" onclick="attachContact(${cur.contact_id})">Открыть карточку клиента</button></p><hr><div class="profile-actions">${cur.phone ? `<a class="btn sm" href="tel:${esc(String(cur.phone).replace(/[^+\d]/g, ''))}">${icon('phone', 13)} Позвонить</a>` : ''}${canEdit() ? `<button class="btn sm" onclick="openTask(null,{contact_id:${cur.contact_id}})">+ Задача</button><button class="btn sm" onclick="quickDeal(${cur.contact_id})">+ Сделка</button><button class="btn sm" onclick="quickNote(${cur.contact_id})">+ Заметка</button>` : ''}</div>` : '<div class="empty">Выберите чат</div>'}</div></div>`;
+   <div class="profile">${cur ? `<h3>Клиент</h3><p><b>${esc(displayTitle(cur.title))}</b>${cur.position ? `<br><small>${esc(cur.position)}</small>` : ''}</p><p>${icon('phone', 13)} ${esc(cur.phone ? prettyPhone(cur.phone) : '—')}<br>${icon('email', 13)} ${esc(cur.email || '—')}${cur.company ? `<br>${icon('company', 13)} ${esc(cur.company)}` : ''}${cur.source ? `<br>${icon('tag', 13)} Источник: ${esc(sourceLabel(cur.source))}` : ''}${cur.contact_responsible_name ? `<br>${icon('contact', 13)} Ответственный: ${esc(cur.contact_responsible_name)}` : ''}</p><p>Каналы: ${chan(cur.channels)}${(cur.channels || '').includes('email') ? ' <span class="tag grey">почта подключена</span>' : ''}</p><p><button class="btn sm" onclick="attachContact(${cur.contact_id})">Открыть карточку клиента</button></p><hr><div class="profile-actions">${cur.phone ? `<a class="btn sm" href="tel:${esc(String(cur.phone).replace(/[^+\d]/g, ''))}">${icon('phone', 13)} Позвонить</a>` : ''}${canEdit() ? `<button class="btn sm" onclick="openTask(null,{contact_id:${cur.contact_id}})">+ Задача</button>${isPartner() ? '' : `<button class="btn sm" onclick="quickDeal(${cur.contact_id})">+ Сделка</button>`}<button class="btn sm" onclick="quickNote(${cur.contact_id})">+ Заметка</button>` : ''}</div>` : '<div class="empty">Выберите чат</div>'}</div></div>`;
   if (cur && canEdit()) { refreshSendAccount(cur.id); const t = $('#msgText'); if (t) { t.value = state.drafts[cur.id] || ''; autoGrow(t); } }
   const mDiv = $('#chatMsgs');
   if (mDiv) mDiv.scrollTop = mDiv.scrollHeight;
@@ -2444,9 +2650,9 @@ async function contacts(v) {
    <span class="tag grey" style="margin-left:auto">показано ${Math.min(filtered.length, state.contactLimit || 50)} из ${filtered.length}${filtered.length !== list.length ? ` (всего в базе ${list.length})` : ''}</span>
    <button class="btn sm" onclick="openMenu(event, contactsMoreMenu())" title="Дубли, экспорт и импорт">${icon('more', 13)} Ещё</button>
    ${canEdit() ? `<button class="btn sm primary" onclick="openContact()">${icon('plus', 13)} Новый контакт</button>` : ''}</div>
-  ${canEdit() ? bulkSlot('contacts', `${bulkOwner('contacts')}<button class="btn sm" onclick="bulkAddTag()">${icon('tag', 13)} Добавить тег</button>${canCampaign() ? `<button class="btn sm" onclick="bulkCampaign()">${icon('campaigns', 13)} Отправить рассылку</button>` : ''}<button class="btn sm danger" onclick="bulkApply('contacts','delete')">${icon('trash', 13)} Удалить</button>`) : ''}
+  ${canBulk() ? bulkSlot('contacts', `${bulkOwner('contacts')}<button class="btn sm" onclick="bulkAddTag()">${icon('tag', 13)} Добавить тег</button>${canCampaign() ? `<button class="btn sm" onclick="bulkCampaign()">${icon('campaigns', 13)} Отправить рассылку</button>` : ''}<button class="btn sm danger" onclick="bulkApply('contacts','delete')">${icon('trash', 13)} Удалить</button>`) : ''}
   <div class="card"><div class="tbl-scroll"><table><tr><th class="sel"></th>${sortTh('contacts','name','Клиент')}<th>Телефон / E-mail</th>${sortTh('contacts','company','Компания')}${sortTh('contacts','source','Источник')}<th>Теги</th>${sortTh('contacts','owner','Ответственный')}<th></th></tr>
-   ${applySort(filtered, 'contacts', { name: c => c.name, company: c => c.company || '', source: c => c.source || '', owner: c => __team.find(u => u.id === c.responsible_id)?.name || '' }).slice(0, state.contactLimit || 50).map(c => `<tr class="${selSet('contacts').has(c.id) ? 'selected' : ''}"><td class="sel">${canEdit() ? `<input type="checkbox" title="Выбрать для массового действия" data-selkey="contacts" data-selid="${c.id}" ${selSet('contacts').has(c.id) ? 'checked' : ''} onchange="toggleSel('contacts',${c.id})">` : ''}</td>
+   ${applySort(filtered, 'contacts', { name: c => c.name, company: c => c.company || '', source: c => c.source || '', owner: c => __team.find(u => u.id === c.responsible_id)?.name || '' }).slice(0, state.contactLimit || 50).map(c => `<tr class="${selSet('contacts').has(c.id) ? 'selected' : ''}"><td class="sel">${canBulk() ? `<input type="checkbox" title="Выбрать для массового действия" data-selkey="contacts" data-selid="${c.id}" ${selSet('contacts').has(c.id) ? 'checked' : ''} onchange="toggleSel('contacts',${c.id})">` : ''}</td>
     <td><a href="#" onclick="openContactCard(${c.id});return false"><b>${esc(c.name)}</b></a></td><td>${esc(c.phone || '—')}<br><small>${esc(c.email || '')}</small></td><td>${esc(c.company || '—')}</td><td><span class="tag grey">${esc(sourceLabel(c.source))}</span></td>
     <td>${(c.tags || '').split(',').filter(Boolean).map(t => `<span class="tag">${esc(t.trim())}</span>`).join('')}</td>
     <td><small>${esc(__team.find(u => u.id === c.responsible_id)?.name || '—')}</small></td>
@@ -2487,7 +2693,7 @@ function applySort(list, view, getters) {
 // Пункты меню «Ещё» в контактах: чтение доступно всем, загрузка — не наблюдателю.
 function contactsMoreMenu() {
   return `<button type="button" onclick="closeMenu();openDuplicates()">${icon('search', 13)} Найти дубли клиентов</button>
-   <button type="button" onclick="closeMenu();download('/api/export/contacts','contacts.csv')">${icon('download', 13)} Выгрузить в CSV</button>
+   ${canExport() ? `<button type="button" onclick="closeMenu();download('/api/export/contacts','contacts.csv')">${icon('download', 13)} Выгрузить в CSV</button>` : ''}
    ${canEdit() ? `<button type="button" onclick="closeMenu();importContacts()">${icon('upload', 13)} Загрузить список из CSV</button>` : ''}`;
 }
 function bulkAddTag() {
@@ -2627,8 +2833,8 @@ async function openContactCard(id) {
         ? `<button class="btn sm" onclick="closeModal();openConv(${conv.id})">${icon('chat', 13)} Чат</button>`
         : `${canEdit() ? `<button class="btn sm" onclick="startConv(${c.id})">${icon('chat', 13)} Написать</button>` : ''}`}
        ${canEdit() ? `<button class="btn sm" onclick="openTask(null,{contact_id:${c.id}})">+ Задача</button>
-       <button class="btn sm primary" onclick="openDeal(${c.id})">+ Сделка</button>
-       <button class="btn sm" onclick="openContact(${c.id})">Редактировать</button>` : ''}
+       ${isPartner() ? '' : `<button class="btn sm primary" onclick="openDeal(${c.id})">+ Сделка</button>
+       <button class="btn sm" onclick="openContact(${c.id})">Редактировать</button>`}` : ''}
      </div>
    </div>
    <hr>
@@ -2643,14 +2849,15 @@ async function openContactCard(id) {
            ${canEdit() ? `<span style="display:flex;gap:6px"><button class="btn sm mark" onclick="toggleTask(${t.id},1);openContactCard(${c.id})">${icon('check', 13)} Выполнить</button><button class="btn sm" onclick="openTask(${t.id})">${icon('edit', 13)}</button></span>` : ''}</div>`;
        }).join('') || '<small>Открытых задач нет — поставьте звонок или встречу, чтобы не потерять клиента.</small>'}</div>
        ${canEdit() ? `<button class="btn sm" style="margin-top:8px" onclick="openTask(null,{contact_id:${c.id}})">+ Задача клиенту</button>` : ''}
-       <h4 style="margin-top:16px">Заметки</h4>
+       ${isPartner() ? '' : `<h4 style="margin-top:16px">Заметки</h4>
        <form onsubmit="return addNote(event,'contacts',${c.id})"><textarea name="body" rows="2" required placeholder="Заметка о клиенте…"></textarea><button class="btn sm primary" style="margin-top:6px">Добавить заметку</button></form>
-       <div class="list" style="margin-top:10px">${notes.map(n => noteRow(n, 'contacts', c.id, `${n.id},${c.id}`)).join('') || '<small>Заметок нет</small>'}</div>
+       <div class="list" style="margin-top:10px">${notes.map(n => noteRow(n, 'contacts', c.id, `${n.id},${c.id}`)).join('') || '<small>Заметок нет</small>'}</div>`}
      </div>
      <div>
-       <div class="row" style="border:0;padding-bottom:2px"><h4 style="margin:0">Контактные данные</h4>${canEdit() ? `<button class="btn sm" onclick="openContact(${c.id})">${icon('edit', 13)} Изменить</button>` : ''}</div>
+       <div class="row" style="border:0;padding-bottom:2px"><h4 style="margin:0">Контактные данные</h4>${canEdit() && !isPartner() ? `<button class="btn sm" onclick="openContact(${c.id})">${icon('edit', 13)} Изменить</button>` : ''}</div>
        <p>Телефон: <b>${esc(c.phone || '—')}</b><br>E-mail: <b>${esc(c.email || '—')}</b><br>Компания: <b>${esc(c.company || '—')}</b><br>Ответственный: <b>${esc(__team.find(u => u.id === c.responsible_id)?.name || 'Не назначен')}</b></p>
        ${c.notes ? `<p><small><b>Заметка в карточке:</b> ${esc(c.notes)}</small></p>` : ''}
+       ${(Number(c.email_opt_out) === 1 || Number(c.whatsapp_opt_out) === 1) ? `<p><small>Отписка от рассылок: ${Number(c.email_opt_out) === 1 ? 'почта' : ''}${Number(c.email_opt_out) === 1 && Number(c.whatsapp_opt_out) === 1 ? ' и ' : ''}${Number(c.whatsapp_opt_out) === 1 ? 'мессенджеры' : ''}</small></p>` : ''}
        ${cfTable('contacts', c) ? `<h4>Свои поля</h4><table class="mini">${cfTable('contacts', c)}</table>` : ''}
        <p><small>Создан: ${esc(dt(c.created_at))}</small></p>
      </div>
@@ -2676,6 +2883,8 @@ async function openContact(id) {
    <p class="form-hint">${esc(responsibleHint())}</p>
    ${fld('Теги', `<input name="tags" value="${esc(c.tags || '')}" placeholder="VIP, каркас, участок">`)}
    ${fld('Заметки', `<textarea name="notes" rows="2" placeholder="Что важно помнить об этом клиенте">${esc(c.notes || '')}</textarea>`)}
+   <label class="check-line"><input type="checkbox" name="email_opt_out" style="width:auto" ${Number(c.email_opt_out) === 1 ? 'checked' : ''}><span>Не отправлять почтовые рассылки</span></label>
+   <label class="check-line"><input type="checkbox" name="whatsapp_opt_out" style="width:auto" ${Number(c.whatsapp_opt_out) === 1 ? 'checked' : ''}><span>Не отправлять рассылки в мессенджерах</span></label>
    ${cfInputs('contacts', c, 2, 'optional')}
    <button class="btn primary w">${id ? 'Сохранить' : 'Создать контакт'}</button></form>`);
 }
@@ -2685,6 +2894,8 @@ async function saveContact(e, id, allowDuplicate = false) {
   const b = cfCollect(e.target);
   b.company_id = b.company_id ? +b.company_id : null;
   b.responsible_id = b.responsible_id ? +b.responsible_id : null;
+  b.email_opt_out = b.email_opt_out ? 1 : 0;
+  b.whatsapp_opt_out = b.whatsapp_opt_out ? 1 : 0;
   const url = id ? '/api/contacts/' + id : '/api/contacts' + (allowDuplicate ? '' : '?check_duplicates=1');
   try {
     await api(url, { method: id ? 'PATCH' : 'POST', body: JSON.stringify(b) });
@@ -2730,9 +2941,9 @@ async function companies(v) {
   v.innerHTML = `${viewerNote()}<div class="card"><div class="row" style="border:0;flex-wrap:wrap;gap:8px"><h3>Компании (${shown.length}${shown.length !== rows.length ? ` из ${rows.length}` : ''})</h3>
    <input id="companySearch" class="searchfield" placeholder="Поиск: название, ИНН, телефон, почта" value="${esc(state.companyQuery || '')}" oninput="liveSearch('companies',()=>setCompanyQuery(this.value))">
    ${canEdit() ? `<button class="btn sm primary" style="margin-left:auto" onclick="openCompany()">+ Компания</button>` : ''}</div>
-  ${canEdit() ? bulkSlot('companies', `<button class="btn sm danger" onclick="bulkApply('companies','delete')">${icon('trash', 13)} Удалить</button>`) : ''}
+  ${canBulk() ? bulkSlot('companies', `<button class="btn sm danger" onclick="bulkApply('companies','delete')">${icon('trash', 13)} Удалить</button>`) : ''}
   <div class="tbl-scroll"><table><tr><th class="sel"></th>${sortTh('companies','name','Компания')}${sortTh('companies','inn','ИНН')}<th>Телефон</th><th>E-mail</th><th>Сайт</th><th></th></tr>
-   ${applySort(shown, 'companies', { name: c => c.name, inn: c => c.inn || '' }).slice(0, state.companyLimit || 100).map(c => `<tr class="${selSet('companies').has(c.id) ? 'selected' : ''}"><td class="sel">${canEdit() ? `<input type="checkbox" data-selkey="companies" data-selid="${c.id}" title="Выбрать для массового действия" ${selSet('companies').has(c.id) ? 'checked' : ''} onchange="toggleSel('companies',${c.id})">` : ''}</td><td><a href="#" onclick="openCompanyCard(${c.id});return false"><b>${esc(c.name)}</b></a></td><td>${esc(c.inn || '—')}</td><td>${esc(c.phone || '—')}</td><td>${esc(c.email || '—')}</td><td>${siteHref(c.site) ? `<a href="${esc(siteHref(c.site))}" target="_blank" rel="noopener">${esc(c.site)}</a>` : '—'}</td><td style="white-space:nowrap">${canEdit() ? `<button class="btn sm" title="Открыть карточку компании" onclick="openCompany(${c.id})">${icon('edit', 13)} Изменить</button> <button class="btn sm danger" title="Удалить компанию" onclick="del('companies',${c.id})">${icon('close', 13)}</button>` : `<button class="btn sm" onclick="openCompanyCard(${c.id})">Открыть</button>`}</td></tr>`).join('') || '<tr><td colspan="7"><div class="empty">Компаний не найдено — измените поиск или добавьте компанию</div></td></tr>'}</table></div>
+   ${applySort(shown, 'companies', { name: c => c.name, inn: c => c.inn || '' }).slice(0, state.companyLimit || 100).map(c => `<tr class="${selSet('companies').has(c.id) ? 'selected' : ''}"><td class="sel">${canBulk() ? `<input type="checkbox" data-selkey="companies" data-selid="${c.id}" title="Выбрать для массового действия" ${selSet('companies').has(c.id) ? 'checked' : ''} onchange="toggleSel('companies',${c.id})">` : ''}</td><td><a href="#" onclick="openCompanyCard(${c.id});return false"><b>${esc(c.name)}</b></a></td><td>${esc(c.inn || '—')}</td><td>${esc(c.phone || '—')}</td><td>${esc(c.email || '—')}</td><td>${siteHref(c.site) ? `<a href="${esc(siteHref(c.site))}" target="_blank" rel="noopener">${esc(c.site)}</a>` : '—'}</td><td style="white-space:nowrap">${canEdit() ? `<button class="btn sm" title="Открыть карточку компании" onclick="openCompany(${c.id})">${icon('edit', 13)} Изменить</button> <button class="btn sm danger" title="Удалить компанию" onclick="del('companies',${c.id})">${icon('close', 13)}</button>` : `<button class="btn sm" onclick="openCompanyCard(${c.id})">Открыть</button>`}</td></tr>`).join('') || '<tr><td colspan="7"><div class="empty">Компаний не найдено — измените поиск или добавьте компанию</div></td></tr>'}</table></div>
    ${shown.length > (state.companyLimit || 100) ? `<div style="text-align:center;margin-top:10px"><button class="btn" onclick="showMoreCompanies()">Показать ещё</button></div>` : ''}</div>`;
 }
 // Карточка компании: кто у неё работает и что с ней продаётся.
@@ -2824,12 +3035,12 @@ async function tasks(v) {
    ${canEdit() ? `<button class="btn sm primary" style="margin-left:auto" onclick="openTask()">${icon('plus', 14)} Задача</button>` : ''}</div>
    ${state.taskScope === 'mine' ? `<p><small>Здесь задачи, назначенные на вас (${esc((state.me && state.me.name) || '')}), и неназначенные — их удобно разобрать первыми.</small></p>` : ''}
    ${state.taskView === 'week' ? weekCalendar(rows) : ''}
-   ${state.taskView !== 'week' && canEdit() && !isPartner() ? bulkSlot('tasks', `<button class="btn sm" onclick="bulkApply('tasks','update',{done:1})">${icon('check', 14)} Выполнить выбранные</button> <button class="btn sm" onclick="bulkRescheduleTasks()">Перенести</button> <button class="btn sm danger" onclick="bulkApply('tasks','delete')">${icon('trash', 14)} Удалить</button>`) : ''}
+   ${state.taskView !== 'week' && canBulk() ? bulkSlot('tasks', `<button class="btn sm" onclick="bulkApply('tasks','update',{done:1})">${icon('check', 14)} Выполнить выбранные</button> <button class="btn sm" onclick="bulkRescheduleTasks()">Перенести</button> <button class="btn sm danger" onclick="bulkApply('tasks','delete')">${icon('trash', 14)} Удалить</button>`) : ''}
    ${state.taskView === 'week' ? '' : groups.map(([t, list]) => list.length ? `<h3 style="margin-top:12px">${t} <small>${list.length}</small></h3>${list.slice(0, state.taskLimit || 50).map(x => {
      const meta = taskDueMeta(x.due, x.done);
      return `<div class="row taskrow ${selSet('tasks').has(x.id) ? 'selected' : ''}">
        <div style="display:flex;gap:10px;align-items:center;min-width:0;flex:1">
-         ${canEdit() ? `<input type="checkbox" data-selkey="tasks" data-selid="${x.id}" style="width:16px;flex-shrink:0" ${selSet('tasks').has(x.id) ? 'checked' : ''} onchange="toggleSel('tasks',${x.id})" title="Отметить для массового действия">` : ''}
+         ${canBulk() ? `<input type="checkbox" data-selkey="tasks" data-selid="${x.id}" style="width:16px;flex-shrink:0" ${selSet('tasks').has(x.id) ? 'checked' : ''} onchange="toggleSel('tasks',${x.id})" title="Отметить для массового действия">` : ''}
          ${canEdit() ? `<button type="button" class="btn sm mark ${x.done ? 'done' : ''}" onclick="toggleTask(${x.id}, ${x.done ? 0 : 1})">${x.done ? icon('check', 13) + ' Выполнено' : 'Выполнить'}</button>` : ''}
          <span class="${x.done ? 'task-done' : ''}">${types[x.type] || icon('task', 14)} <b>${esc(x.title)}</b>${x.repeat && x.repeat !== 'none' ? ' <span class="tag grey" title="Повторяется">' + icon('repeat', 12) + ' ' + ({ daily: 'ежедневно', weekly: 'еженедельно', monthly: 'ежемесячно' }[x.repeat] || '') + '</span>' : ''}</span>
          <small class="${meta.overdue ? 'task-due-overdue' : (meta.label.startsWith('сегодня') ? 'task-due-today' : '')}">${esc(meta.label)}${x.contact_name ? ' · ' + esc(x.contact_name) : ''}${x.deal_title ? ' · ' + esc(x.deal_title) : ''}${x.responsible_name ? ' · ' + esc(x.responsible_name) : ''}</small>
@@ -3038,7 +3249,7 @@ async function products(v) {
   v.innerHTML = `${viewerNote()}<div class="card"><div class="row" style="border:0;flex-wrap:wrap;gap:8px"><h3>Каталог и прайс-лист (${shown.length})</h3>
    <input id="productSearch" class="searchfield" placeholder="Поиск: название, артикул, примечание" value="${esc(state.productQuery || '')}" oninput="liveSearch('products',()=>setProductQuery(this.value))">
    <span class="tabs" style="margin:0"><button class="${onlyActive ? 'active' : ''}" onclick="setProductScope('active')">В продаже</button><button class="${!onlyActive ? 'active' : ''}" onclick="setProductScope('all')">Все${archived ? ` (+${archived} в архиве)` : ''}</button></span>
-   <button class="btn sm" title="Скачать прайс-лист таблицей CSV — откроется в Excel" onclick="download('/api/prices/export?scope=ours','price-list.csv')">${icon('download', 13)} Скачать прайс</button>
+   ${canExport() ? `<button class="btn sm" title="Скачать прайс-лист таблицей CSV — откроется в Excel" onclick="download('/api/prices/export?scope=ours','price-list.csv')">${icon('download', 13)} Скачать прайс</button>` : ''}
    ${amAdmin() ? `<button class="btn sm" title="Загрузить прайс из Excel или CSV" onclick="openPriceImport(null,'ours')">${icon('upload', 13)} Загрузить из файла</button>` : ''}
    ${amAdmin() ? `<button class="btn sm primary" style="margin-left:auto" onclick="openProduct()">+ Товар / проект</button>` : ''}</div>
   <p class="form-hint" style="margin:-2px 0 10px">Это <b>один список</b>: отсюда позиции берутся в сделки, и эти же цены CRM сравнивает с ценами конкурентов (раздел «Конкуренты» → «Наш прайс-лист»). В продаже: <b>${onSale.length}</b>${archived ? ` · в архиве: ${archived}` : ''}${noPrice ? ` · без цены: ${noPrice} — в сравнении они не участвуют` : ''}.</p>
@@ -3071,18 +3282,35 @@ async function saveProduct(e, id) {
 
 /* ---------- analytics ---------- */
 // Вкладки аналитики: «Продажи» — цифры компании, «Команда» — качество работы
-// менеджеров, прежде отдельный раздел контроля качества. Вкладку «Команда» видит
-// администратор: разбор сотрудников не предназначен менеджеру и наблюдателю, и
-// сервер отвечает на /api/quality только администратору.
+// менеджеров, прежде отдельный раздел контроля качества. Вкладку «Команда» видят
+// администратор и РОП своей команды: разбор сотрудников не предназначен
+// менеджеру и наблюдателю, сервер отдаёт /api/quality только этим ролям.
 function analyticsTabs(tab, right = '') {
+  if (state.me?.role === 'rop') {
+    return `<div class="card toolbar"><div class="tabs" style="margin:0">
+      <button class="${tab === 'leader' ? 'active' : ''}" onclick="setAnalyticsTab('leader')">${icon('pipe', 14)} Очередь и SLA</button>
+      <button class="${tab === 'team' ? 'active' : ''}" onclick="setAnalyticsTab('team')">${icon('quality', 14)} ОКК и конверсия</button>
+    </div>${right}</div>`;
+  }
   if (state.me?.role !== 'admin') return '';
   return `<div class="card toolbar"><div class="tabs" style="margin:0">
     <button class="${tab === 'sales' ? 'active' : ''}" onclick="setAnalyticsTab('sales')">${icon('analytics', 14)} Продажи</button>
     <button class="${tab === 'team' ? 'active' : ''}" onclick="setAnalyticsTab('team')">${icon('quality', 14)} Команда</button>
+    <button class="${tab === 'leader' ? 'active' : ''}" onclick="setAnalyticsTab('leader')">${icon('pipe', 14)} Очередь и SLA</button>
   </div>${right}</div>`;
 }
 function setAnalyticsTab(t) { state.aTab = t; render(); }
 async function analytics(v) {
+  if (state.me?.role === 'rop') {
+    if (state.aTab === 'team') {
+      const right = state.qTab === 'metrics' ? qualityPeriod() : state.qTab === 'reviews' ? qualityReviewPeriod() : '';
+      v.innerHTML = analyticsTabs('team', right) + await qualityBody();
+      return;
+    }
+    v.innerHTML = analyticsTabs('leader') + await teamReportsBody(false);
+    return;
+  }
+  if (state.me?.role === 'admin' && state.aTab === 'leader') { v.innerHTML=analyticsTabs('leader')+await teamReportsBody(true); return; }
   if (state.me?.role === 'admin' && state.aTab === 'team') {
     const right = state.qTab === 'metrics' ? qualityPeriod() : state.qTab === 'reviews' ? qualityReviewPeriod() : '';
     v.innerHTML = analyticsTabs('team', right) + await qualityBody();
@@ -3117,6 +3345,282 @@ async function analytics(v) {
    <div class="card"><h3>Причины проигрыша сделок</h3><div class="tbl-scroll"><table><tr><th>Причина</th><th>Число</th><th>Сумма потерь</th></tr>${a.byLoss.map(x => `<tr><td>${esc(x.name || 'Не указана')}</td><td>${x.count}</td><td><b>${fmt(x.sum)}</b></td></tr>`).join('') || '<tr><td colspan="3"><small>Сделок в отказе нет</small></td></tr>'}</table></div></div>
   </div></div>`;
 }
+function teamReportFilters() {
+  if (!state.reportFilters) state.reportFilters={from:isoDate(new Date(Date.now()-6*864e5)),to:todayISO(),team_id:'',manager_id:'',source:''};
+  return state.reportFilters;
+}
+function teamReportQuery(metric='') {
+  const f=teamReportFilters(),q=new URLSearchParams();
+  for(const k of ['from','to','team_id','manager_id','source'])if(f[k])q.set(k,String(f[k]));
+  if(metric)q.set('metric',metric);
+  return q.toString();
+}
+async function loadTeamReport(e) {
+  e.preventDefault();
+  const f=Object.fromEntries(new FormData(e.target));
+  state.reportFilters={from:f.from,to:f.to,team_id:f.team_id||'',manager_id:f.manager_id||'',source:f.source||''};
+  await render();return false;
+}
+function setTeamReportSourceIndex(index) {
+  const source=state.reportSources?.[Number(index)];
+  if(source){teamReportFilters().source=source;render();}
+}
+function setTeamReportManager(id) { teamReportFilters().manager_id=String(id||'');render(); }
+function reportMinutes(value) {
+  if(value===null||value===undefined||!Number.isFinite(Number(value)))return 'нет данных';
+  const n=Number(value);return n<1?'< 1 мин':`${new Intl.NumberFormat('ru-RU',{maximumFractionDigits:1}).format(n)} мин`;
+}
+function teamReportMetric(title,value,caption,metric) {
+  return `<div class="kpi clickable-card" role="button" tabindex="0" onclick="openTeamReportRecords('${metric}')" onkeydown="if(event.key==='Enter'||event.key===' '){event.preventDefault();openTeamReportRecords('${metric}')}"><span>${esc(title)}</span><b>${esc(value)}</b><small>${esc(caption)}</small></div>`;
+}
+async function openTeamReportRecords(metric) {
+  try {
+    const result=await api('/api/reports/team/records?'+teamReportQuery(metric));
+    const labels={all:'Лиды за период',assignment:'Время до назначения',first_response:'Время до первого ответа',queued:'Сейчас в очереди',returns:'Возвраты в очередь',calls:'Звонки',meetings:'Встречи'};
+    const rows=result.records||[];
+    const table=rows.length?`<div class="tbl-scroll"><table><tr><th>Обращение</th><th>Источник</th><th>Ответственный</th><th>Поступило</th><th>Назначено</th><th>Первый ответ</th><th>До назначения</th><th>До ответа</th></tr>${rows.map(r=>`<tr><td><b>${esc(r.title||'Без названия')}</b><br><small>№ ${r.id}</small></td><td>${esc(r.lead_source||'нет данных')}</td><td>${esc(r.manager_name||'не назначен')}</td><td>${esc(r.received_at?dt(r.received_at):'нет данных')}</td><td>${esc(r.first_assigned_at?dt(r.first_assigned_at):'не назначено')}</td><td>${esc(r.first_response_at?dt(r.first_response_at):'не отвечено')}</td><td>${esc(reportMinutes(r.assignment_minutes))}</td><td>${esc(reportMinutes(r.first_response_minutes))}</td></tr>`).join('')}</table></div>${result.hasMore?`<p class="form-hint">Показаны первые ${rows.length} из ${numFmt(result.count)} записей. Уточните период или фильтры.</p>`:''}`:`<div class="empty">${esc(result.reason||'За выбранный период записей нет.')}</div>`;
+    openModal(`<h3>${esc(labels[metric]||'Записи отчёта')}</h3><p class="form-hint">${result.status==='нет данных'?'Нет подтверждённых данных для этого показателя.':`Найдено записей: ${numFmt(result.count||0)}.`}</p>${table}`);
+  } catch(e){toast(e.message,'err');}
+}
+async function teamReportsBody(isAdmin=false) {
+  const f=teamReportFilters(),query=teamReportQuery();
+  const [report,managers,teams]=await Promise.all([
+    api('/api/reports/team?'+query),
+    api('/api/routing/managers').catch(()=>[]),
+    isAdmin?api('/api/teams').catch(()=>[]):Promise.resolve([]),
+  ]);
+  state.reportSources=(report.sources||[]).map(x=>x.source);
+  const managerRows=report.managers||[],sourceRows=report.sources||[];
+  const managerOptions=managers.filter(m=>!f.team_id||Number(m.team_id)===Number(f.team_id));
+  const reportStatus=report.totals?.leads?`${numFmt(report.totals.leads)} обращений за период`:'За выбранный период обращений нет.';
+  const assignment=report.assignment||{},response=report.first_response||{};
+  const slaCaption=(metric,label)=>`${metric.samples?`${numFmt(metric.samples)} измерений`:'нет измерений'}${metric.sla_minutes?` · порог ${numFmt(metric.sla_minutes)} мин${metric.violations===null?'':` · нарушений ${numFmt(metric.violations)}`}`:' · порог не задан'}`;
+  const cards=[
+    teamReportMetric('Уникальные лиды',numFmt(report.totals?.unique_leads||0),'По источникам поступления','all'),
+    teamReportMetric('В очереди сейчас',numFmt(report.totals?.queued_now||0),'Не назначены менеджеру','queued'),
+    teamReportMetric('Возвраты',numFmt(report.totals?.returned||0),'В периоде отчёта','returns'),
+    teamReportMetric('Поступление → назначение',reportMinutes(assignment.median_minutes),slaCaption(assignment,'назначения'),'assignment'),
+    teamReportMetric('Назначение → первый ответ',reportMinutes(response.median_minutes),slaCaption(response,'ответа'),'first_response'),
+    teamReportMetric('Звонки и пропуски','нет данных',report.calls?.reason||'Источник телефонии не подключён.','calls'),
+    teamReportMetric('Встречи','нет данных',report.meetings?.reason||'Статусы встреч не согласованы.','meetings'),
+  ].join('');
+  return `<div class="card"><div class="row" style="border:0;flex-wrap:wrap"><div><h3>Работа команды и сроки реакции</h3><small>${esc(reportStatus)}</small></div></div>
+    <form class="report-filters" onsubmit="return loadTeamReport(event)">
+      <label>С даты<input type="date" name="from" value="${esc(f.from)}" required></label>
+      <label>По дату<input type="date" name="to" value="${esc(f.to)}" required></label>
+      ${isAdmin?`<label>Команда<select name="team_id"><option value="">Все команды</option>${teams.map(t=>`<option value="${t.id}" ${Number(f.team_id)===Number(t.id)?'selected':''}>${esc(t.name)}</option>`).join('')}</select></label>`:''}
+      <label>Менеджер<select name="manager_id"><option value="">Все менеджеры</option>${managerOptions.map(m=>`<option value="${m.id}" ${Number(f.manager_id)===Number(m.id)?'selected':''}>${esc(m.name)}</option>`).join('')}</select></label>
+      <label>Источник<select name="source"><option value="">Все источники</option>${sourceRows.map(s=>`<option value="${esc(s.source)}" ${f.source===s.source?'selected':''}>${esc(s.source)}</option>`).join('')}</select></label>
+      <button class="btn primary">Показать</button>
+    </form>
+  </div>
+  <div class="grid report-kpis">${cards}</div>
+  <div class="cols"><div class="card"><h3>Лиды по источникам</h3><div class="tbl-scroll"><table><tr><th>Источник</th><th>Уникальные лиды</th></tr>${sourceRows.map((s,i)=>`<tr><td><button class="btn sm" onclick="setTeamReportSourceIndex(${i})">${esc(s.source)}</button></td><td><b>${numFmt(s.unique_leads)}</b></td></tr>`).join('')||'<tr><td colspan="2"><small>Нет данных за период</small></td></tr>'}</table></div></div>
+   <div class="card"><h3>Менеджеры и смены</h3><div class="tbl-scroll"><table><tr><th>Менеджер</th><th>Лиды</th><th>Уникальные</th><th>Назначение</th><th>Первый ответ</th><th>Возвраты</th><th>В работе</th><th>Смена</th></tr>${managerRows.map(m=>`<tr><td><button class="btn sm" onclick="setTeamReportManager(${Number(m.id)})">${esc(m.name)}</button></td><td>${numFmt(m.leads)}</td><td>${numFmt(m.unique_leads)}</td><td>${esc(reportMinutes(m.median_assignment_minutes))}<br><small>${numFmt(m.assignment_samples)} измерений</small></td><td>${esc(reportMinutes(m.median_first_response_minutes))}<br><small>${numFmt(m.first_response_samples)} измерений</small></td><td>${numFmt(m.returns)}</td><td>${numFmt(m.open_load)}</td><td>${m.on_shift?'Активна':'Не начата'}</td></tr>`).join('')||'<tr><td colspan="8"><small>Нет данных по менеджерам за период</small></td></tr>'}</table></div></div></div>
+  <div class="card"><h3>Смены за период</h3><div class="tbl-scroll"><table><tr><th>Менеджер</th><th>Смены начаты</th><th>Сейчас активны</th></tr>${(report.shifts||[]).map(s=>`<tr><td>${esc(s.manager_name)}</td><td>${numFmt(s.shifts||0)}</td><td>${numFmt(s.active_shifts||0)}</td></tr>`).join('')||'<tr><td colspan="3"><small>Нет данных о сменах за период</small></td></tr>'}</table></div></div>
+  <div class="notice info"><b>Как читать показатели</b><ul>${(report.definitions||[]).map(x=>`<li>${esc(x)}</li>`).join('')}<li>${esc(response.definition||'Первый ответ учитывает сообщение живого сотрудника; автоматические ответы не входят.')}</li><li>Звонки и встречи показывают «нет данных», пока не появится подтверждённый источник и согласованные статусы.</li></ul></div>`;
+}
+async function trainingView(v) {
+  const items = await api('/api/partner-training');
+  v.innerHTML = `<div class="card"><div class="row"><div><h3>Обучение партнёров</h3><small>Материалы для работы с переданными лидами. Раздел доступен только партнёрам.</small></div></div>
+    ${items.length ? `<div class="grid">${items.map(t => `<div class="card"><h3>${esc(t.title)}</h3>
+      ${t.body ? `<p>${esc(t.body).replace(/\n/g, '<br>')}</p>` : ''}
+      ${t.url ? `<p><a href="${esc(t.url)}" target="_blank" rel="noopener">Открыть материал</a></p>` : ''}
+      <p><small>Обновлено: ${esc(dt(t.updated_at) || '')}</small></p></div>`).join('')}</div>`
+    : '<div class="empty">Материалов пока нет. Администратор добавит их в Настройки → Обучение партнёров.</div>'}</div>`;
+}
+async function classificationView(v) {
+  const response=await api('/api/classification/queue'),isSupervisor=['admin','rop'].includes(state.me?.role);
+  const [items,unassigned,classifiers]=[response.items||[],response.unassigned||[],isSupervisor?await api('/api/classification/classifiers'):[]];
+  state.classificationQueue=items;state.classificationUnassigned=unassigned;state.classifiers=classifiers;
+  const pending=items.map(row=>`<tr><td><b>${esc(row.title)}</b><br><small>${esc(row.contact_name||'Клиент не указан')} · № ${row.id}</small></td><td>${esc(row.lead_source||'нет данных')}</td><td>${esc(dt(row.received_at||row.created_at))}</td><td>${esc(row.region||'не указан')}</td><td>${esc(row.direction||'не указано')}</td><td>${esc(row.last_incoming||'Входящего текста нет')}</td><td><button class="btn sm primary" onclick="openClassificationDeal(${row.id})">Открыть</button></td></tr>`).join('');
+  const unassignedRows=unassigned.map(row=>`<tr><td><b>${esc(row.title)}</b><br><small>${esc(row.contact_name||'Клиент не указан')} · № ${row.id}</small></td><td>${esc(row.lead_source||'нет данных')}</td><td>${esc(dt(row.received_at||row.created_at))}</td><td>${esc(row.last_incoming||'Входящего текста нет')}</td><td><button class="btn sm" onclick="openAssignClassifier(${row.id})">Назначить</button></td></tr>`).join('');
+  v.innerHTML=`${isSupervisor?`<div class="tabs"><button class="active" type="button">Классификация</button><button type="button" onclick="go('routing')">Очередь лидов</button></div>`:''}
+    <div class="card"><div class="row"><div><h3>${state.me?.role==='classifier'?'Мои обращения на разбор':'Обращения на классификации'}</h3><small>Классификатор видит только назначенные обращения и входящий контекст. Сумма сделки, внутренние заметки и переписка вне этих сообщений не раскрываются.</small></div></div>
+    ${items.length?`<div class="tbl-scroll"><table><tr><th>Обращение</th><th>Источник</th><th>Поступило</th><th>Регион</th><th>Направление</th><th>Последнее сообщение</th><th></th></tr>${pending}</table></div>`:'<div class="empty">Назначенных обращений в работе нет.</div>'}</div>
+    ${isSupervisor?`<div class="card"><h3>Не назначены классификатору</h3><p class="form-hint">Руководитель назначает разбор с причиной. Это не назначает менеджера и не включает автоматическую маршрутизацию.</p>${unassigned.length?`<div class="tbl-scroll"><table><tr><th>Обращение</th><th>Источник</th><th>Поступило</th><th>Последнее сообщение</th><th></th></tr>${unassignedRows}</table></div>`:'<div class="empty">Нет очередных лидов без классификатора.</div>'}</div>`:''}`;
+}
+function setRoutingTab(tab) { state.routingTab=tab;render(); }
+function queuePriorityLabel(priority) { return priority==='urgent'?'Срочный':'Обычный'; }
+function routingManagerFits(manager,deal) {
+  if(!manager?.on_shift)return false;
+  if(Number(manager.max_open_leads)>0&&Number(manager.open_leads)>=Number(manager.max_open_leads))return false;
+  const tokens=value=>String(value||'').split(/[;,\\n]/).map(x=>x.trim().toLocaleLowerCase('ru-RU')).filter(Boolean);
+  const regions=tokens(manager.routing_regions),directions=tokens(manager.routing_directions);
+  if(regions.length&&(!deal.region||!regions.includes(String(deal.region).trim().toLocaleLowerCase('ru-RU'))))return false;
+  if(directions.length&&(!deal.direction||!directions.includes(String(deal.direction).trim().toLocaleLowerCase('ru-RU'))))return false;
+  return true;
+}
+function openRoutingAssign(dealId) {
+  const deal=(state.routingQueue||[]).find(row=>Number(row.id)===Number(dealId));
+  if(!deal)return toast('Обращение уже изменилось. Обновите очередь.','err');
+  const candidates=(state.routingManagers||[]).filter(m=>routingManagerFits(m,deal));
+  openModal(`<h3>Назначить обращение</h3><p><b>${esc(deal.title)}</b>${deal.contact_name?' · '+esc(deal.contact_name):''}</p>
+    ${candidates.length?`<form onsubmit="return saveRoutingAssign(event,${Number(dealId)})"><label>Менеджер<select name="manager_id" required><option value="">Выберите сотрудника</option>${candidates.map(m=>`<option value="${m.id}">${esc(m.name)} · ${numFmt(m.open_leads)} в работе</option>`).join('')}</select></label>
+    <label>Причина назначения<input name="reason" minlength="5" maxlength="500" required placeholder="Например: менеджер дежурит по этому направлению"></label><button class="btn primary w">Назначить</button></form>`:`<div class="empty">Сейчас нет подходящего менеджера с активной сменой и свободной нагрузкой. Обращение останется в очереди.</div>`}`);
+}
+async function saveRoutingAssign(e,dealId) {
+  e.preventDefault();const form=Object.fromEntries(new FormData(e.target));
+  try{await api('/api/routing/assign',{method:'POST',body:JSON.stringify({deal_id:dealId,manager_id:Number(form.manager_id),reason:form.reason})});closeModal();toast('Обращение назначено');await render();}
+  catch(err){toast(err.message,'err');}
+  return false;
+}
+function openRoutingReturn(dealId) {
+  const deal=(state.routingAssigned||[]).find(row=>Number(row.id)===Number(dealId));
+  openModal(`<h3>Вернуть в очередь</h3><p>${esc(deal?.title||'Обращение')} · ответственный: ${esc(deal?.manager_name||'не указан')}</p><p>Причина останется в журнале назначений.</p>
+    <form onsubmit="return saveRoutingReturn(event,${Number(dealId)})"><label>Причина возврата<input name="reason" minlength="5" maxlength="500" required placeholder="Например: менеджер завершил смену"></label><button class="btn primary w">Вернуть в очередь</button></form>`);
+}
+async function saveRoutingReturn(e,dealId) {
+  e.preventDefault();const reason=new FormData(e.target).get('reason');
+  try{await api('/api/routing/return',{method:'POST',body:JSON.stringify({deal_id:dealId,reason})});closeModal();toast('Обращение возвращено в очередь');await render();}
+  catch(err){toast(err.message,'err');}
+  return false;
+}
+function openRoutingPriority(dealId,current) {
+  openModal(`<h3>Приоритет обращения</h3><form onsubmit="return saveRoutingPriority(event,${Number(dealId)})"><label>Приоритет<select name="priority"><option value="urgent" ${current==='urgent'?'selected':''}>Срочный</option><option value="normal" ${current==='urgent'?'':'selected'}>Обычный</option></select></label>
+   <label>Причина изменения<input name="reason" minlength="5" maxlength="500" required placeholder="Например: клиент просит связаться сегодня"></label><button class="btn primary w">Сохранить</button></form>`);
+}
+async function saveRoutingPriority(e,dealId) {
+  e.preventDefault();const form=Object.fromEntries(new FormData(e.target));
+  try{await api('/api/routing/priority',{method:'POST',body:JSON.stringify({deal_id:dealId,priority:form.priority,reason:form.reason})});closeModal();toast('Приоритет обновлён');await render();}
+  catch(err){toast(err.message,'err');}
+  return false;
+}
+function openClassificationDeal(dealId) { state.classificationDealId=Number(dealId);openModal('<div class="empty">Загружаем карточку обращения…</div>');loadClassificationDeal(Number(dealId)); }
+async function loadClassificationDeal(dealId) {
+  try{
+    const [{deal,messages},managers]=await Promise.all([
+      api('/api/classification/deals/'+dealId),
+      ['admin','rop'].includes(state.me?.role)?api('/api/routing/managers').catch(()=>[]):Promise.resolve([]),
+    ]);
+    if(state.classificationDealId!==dealId||$('#modal').classList.contains('hidden'))return;
+    const role=state.me?.role,isClassifier=role==='classifier',canRoute=['admin','rop'].includes(role);
+    const msgHtml=messages.length?messages.map(m=>`<div class="row"><span><small>${esc(m.channel||'Переписка')} · ${esc(dt(m.event_at||m.created_at))}</small><br>${esc(m.body||'Вложение')}</span></div>`).join(''):'<div class="empty">Входящих сообщений нет.</div>';
+    const suggested=deal.suggested_manager_id||'';
+    $('#modalBody').innerHTML=`<h3>Классификация обращения</h3><p><b>${esc(deal.title)}</b>${deal.contact_name?' · '+esc(deal.contact_name):''}</p>
+      <div class="card"><small>Источник: ${esc(deal.lead_source||'нет данных')} · поступило: ${esc(dt(deal.received_at||deal.created_at)||'нет данных')} · приоритет: ${esc(queuePriorityLabel(deal.queue_priority))}</small></div>
+      <h4>Последние входящие сообщения</h4><div class="list">${msgHtml}</div>
+      <form onsubmit="return saveClassification(event,${dealId})">
+        <div class="grid2"><label>Тема<input name="topic" maxlength="120" value="${esc(deal.topic||'')}" placeholder="Например: дом для постоянного проживания"></label>
+        <label>Регион<input name="region" maxlength="120" value="${esc(deal.region||'')}" placeholder="Укажите, если выяснен"></label></div>
+        <label>Направление<input name="direction" maxlength="120" value="${esc(deal.direction||'')}" placeholder="Укажите, если выяснено"></label>
+        <label>Заметка<textarea name="classification_note" rows="3" maxlength="500" placeholder="Коротко: что выяснено и чего не хватает">${esc(deal.classification_note||'')}</textarea></label>
+        ${canRoute?`<label>Рекомендованный менеджер<select name="suggested_manager_id"><option value="">Пока не рекомендовать</option>${managers.map(m=>`<option value="${m.id}" ${Number(suggested)===Number(m.id)?'selected':''}>${esc(m.name)}${m.on_shift?' · смена активна':' · смена не начата'}</option>`).join('')}</select><small>Это рекомендация. Лид не назначится автоматически; руководитель назначает его отдельно в очереди.</small></label>`:''}
+        ${isClassifier||canRoute?`<label>Статус<select name="status"><option value="pending" ${deal.status==='complete'?'':'selected'}>В работе</option><option value="complete" ${deal.status==='complete'?'selected':''}>Готово</option></select></label><button class="btn primary w">Сохранить классификацию</button>`:'<p class="form-hint">Только просмотр.</p>'}
+      </form>`;
+  }catch(e){if(!$('#modal').classList.contains('hidden'))$('#modalBody').innerHTML=`<h3>Не удалось открыть обращение</h3><p>${esc(e.message)}</p>`;}
+}
+async function saveClassification(e,dealId) {
+  e.preventDefault();const form=Object.fromEntries(new FormData(e.target));
+  try{await api('/api/classification/deals/'+dealId,{method:'PATCH',body:JSON.stringify(form)});toast('Классификация сохранена');closeModal();await render();}
+  catch(err){toast(err.message,'err');}
+  return false;
+}
+function openAssignClassifier(dealId) {
+  const item=(state.classificationUnassigned||[]).find(row=>Number(row.id)===Number(dealId));
+  const classifiers=state.classifiers||[];
+  if(!item)return toast('Обращение уже назначено или классифицировано. Обновите список.','err');
+  openModal(`<h3>Назначить классификатора</h3><p><b>${esc(item.title)}</b>${item.contact_name?' · '+esc(item.contact_name):''}</p>
+    ${classifiers.length?`<form onsubmit="return saveClassifierAssign(event,${dealId})"><label>Классификатор<select name="classifier_id" required><option value="">Выберите сотрудника</option>${classifiers.map(c=>`<option value="${c.id}">${esc(c.name)}</option>`).join('')}</select></label>
+    <label>Причина назначения<input name="reason" minlength="5" maxlength="500" required placeholder="Например: распределение новой очереди"></label><button class="btn primary w">Назначить</button></form>`:'<div class="empty">Нет активных классификаторов, подходящих для этой команды.</div>'}`);
+}
+async function saveClassifierAssign(e,dealId) {
+  e.preventDefault();const form=Object.fromEntries(new FormData(e.target));
+  try{await api('/api/classification/assign',{method:'POST',body:JSON.stringify({deal_id:dealId,classifier_id:Number(form.classifier_id),reason:form.reason})});closeModal();toast('Классификатор назначен');await render();}
+  catch(err){toast(err.message,'err');}
+  return false;
+}
+function openPartnerTransfer(dealId=0) {
+  const policy=state.routingTransferData?.policy||{},partners=state.routingTransferData?.partners||[];
+  const deals=state.routingEligibleDeals||[];
+  const selected=Number(dealId||0);
+  openModal(`<h3>Передать сделку партнёру</h3>${policy.enabled?`<p>Передача разрешена только для выбранной воронки и этапов. Доступ партнёра немедленно закрывается при отзыве.</p>
+    ${deals.length&&partners.length?`<form onsubmit="return savePartnerTransfer(event)"><label>Сделка<select name="deal_id" required><option value="">Выберите сделку</option>${deals.map(d=>`<option value="${d.id}" ${selected===Number(d.id)?'selected':''}>${esc(d.title)} · ${esc(d.contact_name||'без контакта')}</option>`).join('')}</select></label>
+    <label>Партнёр<select name="partner_id" required><option value="">Выберите партнёра</option>${partners.map(p=>`<option value="${p.id}">${esc(p.name)}</option>`).join('')}</select></label>
+    <label>Причина передачи<input name="reason" minlength="5" maxlength="500" required placeholder="Например: клиент согласовал сопровождение партнёра"></label><button class="btn primary w">Передать доступ</button></form>`:'<div class="empty">Для передачи нужны подходящая открытая сделка и активная учётная запись партнёра.</div>'}`:`<div class="notice info">Передача выключена. Администратор сначала выбирает воронку и разрешённые этапы в правилах очереди.</div>`}`);
+}
+async function savePartnerTransfer(e) {
+  e.preventDefault();const form=Object.fromEntries(new FormData(e.target));
+  try{await api('/api/partner-transfers',{method:'POST',body:JSON.stringify({deal_id:Number(form.deal_id),partner_id:Number(form.partner_id),reason:form.reason})});closeModal();toast('Доступ партнёру выдан');await render();}
+  catch(err){toast(err.message,'err');}
+  return false;
+}
+function openRevokePartnerTransfer(id) {
+  openModal(`<h3>Отозвать доступ партнёра</h3><p>После подтверждения список, карточка, переписка и старые ссылки на вложения перестанут быть доступны.</p><form onsubmit="return revokePartnerTransfer(event,${Number(id)})"><label>Причина отзыва<input name="reason" minlength="5" maxlength="500" required placeholder="Например: сопровождение завершено"></label><button class="btn danger w">Отозвать доступ</button></form>`);
+}
+async function revokePartnerTransfer(e,id) {
+  e.preventDefault();const reason=new FormData(e.target).get('reason');
+  try{await api('/api/partner-transfers/'+id,{method:'DELETE',body:JSON.stringify({reason})});closeModal();toast('Доступ партнёра отозван');await render();}
+  catch(err){toast(err.message,'err');}
+  return false;
+}
+function routingPipelineChanged(select) {
+  const id=String(select.value||'');
+  select.form?.querySelectorAll('[data-stage-pipeline]').forEach(group=>{const active=group.dataset.stagePipeline===id;group.disabled=!active;group.classList.toggle('hidden',!active);});
+}
+async function saveRoutingPolicy(e) {
+  e.preventDefault();const fd=new FormData(e.target),payload={
+    AUTO_ASSIGN:fd.get('AUTO_ASSIGN')?'1':'0',SHIFT_BACKLOG_LIMIT:fd.get('SHIFT_BACKLOG_LIMIT'),
+    ROUTING_DEFAULT_TEAM_ID:fd.get('ROUTING_DEFAULT_TEAM_ID')||'',LEAD_CLASSIFIER_USER_ID:fd.get('LEAD_CLASSIFIER_USER_ID')||'',
+    PARTNER_TRANSFER_PIPELINE_ID:fd.get('PARTNER_TRANSFER_PIPELINE_ID')||'',PARTNER_TRANSFER_ALLOWED_STAGES:fd.getAll('PARTNER_TRANSFER_ALLOWED_STAGES').join(','),
+    SLA_ASSIGN_MINUTES:fd.get('SLA_ASSIGN_MINUTES')||'',SLA_FIRST_RESPONSE_MINUTES:fd.get('SLA_FIRST_RESPONSE_MINUTES')||''
+  };
+  const save=async()=>{await api('/api/settings',{method:'PUT',body:JSON.stringify(payload)});toast('Правила очереди сохранены');state.cache.settings=null;await render();};
+  const wasOn=state.routingSettings?.auto_assign==='1';
+  if(payload.AUTO_ASSIGN==='1'&&!wasOn)return askConfirm('Включить автоматическое распределение? Новые лиды будут назначаться только подходящим менеджерам с активной сменой; без такой смены они останутся в очереди. При старте смены выдаётся не более установленного числа старых лидов. После подтверждения настройка вступит в силу.',save,{okText:'Включить',danger:false});
+  try{await save();}catch(err){toast(err.message,'err');}
+  return false;
+}
+async function routingView(v) {
+  const isAdmin=state.me?.role==='admin';
+  if(!isAdmin&&state.me?.role!=='rop')return;
+  const [queueData,assignedData,managers,shiftData,transferData]=await Promise.all([
+    api('/api/routing/queue'),api('/api/routing/assigned'),api('/api/routing/managers'),api('/api/shifts'),api('/api/partner-transfers')
+  ]);
+  const queue=queueData.queue||[],assigned=assignedData.assigned||[];
+  state.routingQueue=queue;state.routingAssigned=assigned;state.routingManagers=managers;state.routingTransferData=transferData;
+  state.routingSettings=null;state.routingTeams=[];state.routingPipelines=[];state.routingClassifiers=[];
+  if(isAdmin){
+    const [settings,teams,pipelines,users]=await Promise.all([api('/api/settings'),api('/api/teams'),api('/api/pipelines'),api('/api/users')]);
+    state.routingSettings=settings;state.routingTeams=teams.filter(t=>t.active!==0);state.routingPipelines=pipelines;state.routingClassifiers=users.filter(u=>u.role==='classifier'&&u.active!==0);
+  }
+  const policy=transferData.policy||{},allowedStages=new Set((policy.allowed_stages||[]).map(String));
+  state.routingEligibleDeals=[...queue,...assigned].filter(d=>Number(d.pipeline_id)===Number(policy.pipeline_id)&&allowedStages.has(String(d.stage)));
+  const activeTransfers=transferData.transfers||[];
+  if(!state.routingTab||!['queue','assigned','shifts','partners','rules'].includes(state.routingTab))state.routingTab='queue';
+  if(!isAdmin&&state.routingTab==='rules')state.routingTab='queue';
+  const tabs=[['queue',`В очереди <span class="badge">${numFmt(queue.length)}</span>`],['assigned',`Назначенные <span class="badge">${numFmt(assigned.length)}</span>`],['shifts','Смены'],['partners','Партнёры'],...(isAdmin?[['rules','Правила']]:[])];
+  const head=`<div class="tabs routing-tabs">${tabs.map(([key,label])=>`<button class="${state.routingTab===key?'active':''}" onclick="setRoutingTab('${key}')">${label}</button>`).join('')}</div>`;
+  let body='';
+  if(state.routingTab==='queue'){
+    const urgent=queue.filter(d=>(d.queue_priority||d.priority)==='urgent').length;
+    body=`<div class="grid report-kpis"><div class="kpi"><span>В очереди</span><b>${numFmt(queue.length)}</b><small>новые обращения ждут назначения</small></div><div class="kpi"><span>Срочные</span><b class="accent">${numFmt(urgent)}</b><small>вверх списка при распределении</small></div><div class="kpi"><span>Менеджеры на смене</span><b>${numFmt(managers.filter(m=>m.on_shift).length)}</b><small>активных сотрудников команды</small></div></div>
+      <div class="card"><div class="row"><div><h3>Новые обращения</h3><small>Сначала срочные, затем более старые. Без подходящей активной смены лид остаётся здесь.</small></div></div>${queue.length?`<div class="tbl-scroll"><table><tr><th>Приоритет</th><th>Обращение</th><th>Источник</th><th>Поступило</th><th>Разметка</th><th></th></tr>${queue.map(d=>{const priority=d.queue_priority||d.priority||'normal';return `<tr><td><span class="tag ${priority==='urgent'?'orange':'grey'}">${esc(queuePriorityLabel(priority))}</span></td><td><b>${esc(d.title)}</b><br><small>${esc(d.contact_name||d.contact_phone||'Клиент не указан')} · ${esc(d.stage)}</small></td><td>${esc(d.lead_source||'нет данных')}</td><td>${esc(dt(d.received_at||d.created_at))}</td><td>${d.classification_status?`<span class="tag grey">${esc(d.classification_status==='complete'?'Готово':'В работе')}</span>`:'<span class="tag grey">Не назначена</span>'}</td><td class="act"><div class="row-actions"><button class="btn sm primary" onclick="openRoutingAssign(${d.id})">Назначить</button><button class="btn sm" onclick="openRoutingPriority(${d.id},'${priority}')">${priority==='urgent'?'Обычный':'Срочный'}</button><button class="btn sm" onclick="go('classification')">Классификация</button></div></td></tr>`}).join('')}</table></div>`:'<div class="empty">Очередь пуста. Новые обращения появятся здесь, если подходящего менеджера нет на смене.</div>'}</div>`;
+  }else if(state.routingTab==='assigned'){
+    body=`<div class="card"><h3>Назначенные открытые лиды</h3><p class="form-hint">Время первой передачи и первого ответа не сбрасываются при возврате или переназначении.</p>${assigned.length?`<div class="tbl-scroll"><table><tr><th>Обращение</th><th>Источник</th><th>Ответственный</th><th>Первая передача</th><th>Первый ответ</th><th></th></tr>${assigned.map(d=>`<tr><td><b>${esc(d.title)}</b><br><small>${esc(d.contact_name||'Клиент не указан')} · ${esc(d.stage)}</small></td><td>${esc(d.lead_source||'нет данных')}</td><td>${esc(d.manager_name||'не назначен')}<br><small>${numFmt(d.open_leads||0)} в работе</small></td><td>${esc(dt(d.first_assigned_at||d.assigned_at)||'нет данных')}</td><td>${esc(dt(d.first_response_at)||'не отвечено')}</td><td class="act"><button class="btn sm" onclick="openRoutingReturn(${d.id})">Вернуть в очередь</button></td></tr>`).join('')}</table></div>`:'<div class="empty">Открытых назначенных лидов нет.</div>'}</div>`;
+  }else if(state.routingTab==='shifts'){
+    const historical=shiftData.shifts||[];
+    body=`<div class="card"><h3>Смены команды</h3><p class="form-hint">Смену начинает и завершает сам менеджер. Завершение возвращает неотвеченные лиды, а сделки с начатой перепиской остаются ответственному.</p><div class="tbl-scroll"><table><tr><th>Менеджер</th><th>Сейчас</th><th>Открытых лидов</th><th>Начал</th><th>Завершил</th><th>Причина завершения</th></tr>${managers.map(m=>{const s=historical.find(x=>Number(x.user_id)===Number(m.id)&&!x.ended_at)||historical.find(x=>Number(x.user_id)===Number(m.id));return `<tr><td>${esc(m.name)}</td><td>${m.on_shift?'<span class="tag green">На смене</span>':'Не на смене'}</td><td>${numFmt(m.open_leads)}</td><td>${esc(dt(s?.started_at)||'нет данных')}</td><td>${esc(dt(s?.ended_at)|| (m.on_shift?'—':'нет данных'))}</td><td>${esc(s?.end_reason||'—')}</td></tr>`}).join('')||'<tr><td colspan="6"><small>В команде пока нет активных менеджеров.</small></td></tr>'}</table></div></div>`;
+  }else if(state.routingTab==='partners'){
+    body=`<div class="card"><div class="row"><div><h3>Передачи партнёрам</h3><small>${policy.enabled?`Разрешена воронка ${esc(String(policy.pipeline_id))}, этапы: ${esc((policy.allowed_stages||[]).join(', '))}`:'Передача пока выключена: нужно выбрать воронку и этапы.'}</small></div><button class="btn primary sm" ${policy.enabled&&state.routingEligibleDeals.length&&transferData.partners?.length?'':'disabled'} onclick="openPartnerTransfer()">Передать сделку</button></div>${activeTransfers.length?`<div class="tbl-scroll"><table><tr><th>Сделка</th><th>Клиент</th><th>Партнёр</th><th>Причина</th><th>Передана</th><th></th></tr>${activeTransfers.map(t=>`<tr><td><b>${esc(t.deal_title)}</b><br><small>№ ${t.deal_id}</small></td><td>${esc(t.contact_name||'—')}</td><td>${esc(t.partner_name||'—')}</td><td>${esc(t.reason||'—')}</td><td>${esc(dt(t.created_at)||'')}</td><td><button class="btn sm danger" onclick="openRevokePartnerTransfer(${t.id})">Отозвать</button></td></tr>`).join('')}</table></div>`:'<div class="empty">Активных передач нет.</div>'}</div>`;
+  }else{
+    const s=state.routingSettings||{},cfg=s.routing||{},selectedPipeline=String(cfg.partner_pipeline_id||'');
+    const stageGroups=(state.routingPipelines||[]).map(p=>`<fieldset data-stage-pipeline="${p.id}" ${String(p.id)===selectedPipeline?'':'disabled hidden'}><legend>${esc(p.name)} — разрешённые этапы</legend>${(p.stages||[]).map(st=>`<label class="check-row"><input type="checkbox" name="PARTNER_TRANSFER_ALLOWED_STAGES" value="${esc(st.code)}" ${Number(p.id)===Number(selectedPipeline)&&allowedStages.has(String(st.code))?'checked':''}> ${esc(st.name)}</label>`).join('')||'<small>В воронке нет этапов.</small>'}</fieldset>`).join('');
+    body=`<div class="card"><h3>Распределение и SLA</h3><p class="form-hint">Смена считается активной только после нажатия менеджером «Начать смену». Не задавайте порог SLA, пока компания не согласовала норматив.</p>
+      <form class="routing-policy-form" onsubmit="return saveRoutingPolicy(event)">
+        <label class="check-row"><input type="checkbox" name="AUTO_ASSIGN" value="1" ${s.auto_assign==='1'?'checked':''}> Автоматически распределять лиды между подходящими менеджерами на смене</label>
+        <label>Сколько старых лидов выдать при начале смены<input type="number" name="SHIFT_BACKLOG_LIMIT" min="0" max="5" step="1" value="${Number(cfg.shift_backlog_limit??5)}" required><small>Не больше пяти. Срочные выдаются первыми; при нуле очередь не выдаёт старые лиды.</small></label>
+        <label>Команда для новых обращений<select name="ROUTING_DEFAULT_TEAM_ID"><option value="">Автоматически, если в компании одна команда</option>${state.routingTeams.map(t=>`<option value="${t.id}" ${Number(cfg.default_team_id)===Number(t.id)?'selected':''}>${esc(t.name)}</option>`).join('')}</select></label>
+        <label>Классификатор новых обращений<select name="LEAD_CLASSIFIER_USER_ID"><option value="">Не назначать автоматически</option>${state.routingClassifiers.map(c=>`<option value="${c.id}" ${Number(cfg.classifier_user_id)===Number(c.id)?'selected':''}>${esc(c.name)}</option>`).join('')}</select></label>
+        <div class="grid2"><label>Порог назначения, минут<input type="number" min="1" max="10080" name="SLA_ASSIGN_MINUTES" value="${esc(cfg.sla_assignment_minutes||'')}" placeholder="Не задан"><small>От поступления до первой передачи менеджеру.</small></label>
+        <label>Порог первого ответа, минут<input type="number" min="1" max="10080" name="SLA_FIRST_RESPONSE_MINUTES" value="${esc(cfg.sla_first_response_minutes||'')}" placeholder="Не задан"><small>Автоответы не учитываются.</small></label></div>
+        <div class="card"><h4>Передача партнёрам</h4><label>Разрешённая воронка<select name="PARTNER_TRANSFER_PIPELINE_ID" onchange="routingPipelineChanged(this)"><option value="">Передачи выключены</option>${state.routingPipelines.map(p=>`<option value="${p.id}" ${Number(selectedPipeline)===Number(p.id)?'selected':''}>${esc(p.name)}</option>`).join('')}</select></label><div class="stage-choice-list">${stageGroups||'<small>Сначала создайте воронку.</small>'}</div><small>Вне выбранных этапов передача невозможна. Отзыв доступа сразу закрывает карточки, поиск, сообщения и файлы.</small></div>
+        <button class="btn primary">Сохранить правила</button>
+      </form></div>`;
+  }
+  v.innerHTML=`${head}<div class="routing-page">${body}</div>`;
+}
+
 async function setSalesPlan(e) {
   e.preventDefault(); const target = new FormData(e.target).get('target');
   await api('/api/settings', { method: 'PUT', body: JSON.stringify({ SALES_TARGET: target }) });
@@ -3208,9 +3712,9 @@ async function openCampaign(picked) {
       <label id="campSubjectWrap" style="${channel === 'email' ? '' : 'display:none'}">Тема письма<input name="subject" maxlength="200" placeholder="Например: Предложение по вашему участку"></label>
     </div>
     <label>Текст сообщения <b>*</b><textarea name="message" rows="5" required maxlength="4000" placeholder="Здравствуйте, {имя}!"></textarea>
-      <small class="form-hint">{имя} заменится именем клиента. В WhatsApp получат только те, у кого заполнен телефон и кто уже переписывался с вами или дал номер; в почтовой рассылке — у кого указан e-mail.</small></label>
+      <small class="form-hint">{имя} заменится именем клиента. В WhatsApp получат только те, у кого заполнен телефон; в почтовой рассылке — у кого указан e-mail. Отписавшиеся от этого канала не получат сообщение.</small></label>
     ${ids.length ? `<p style="margin:14px 0 6px"><b>Кому отправить</b> <small class="form-hint">отмеченные клиенты — ${ids.length} шт.</small></p>
-    <p class="form-hint" style="margin:-6px 0 12px">Сообщение уйдёт только выбранным клиентам. В WhatsApp получат те, у кого заполнен телефон, в письме — у кого указан e-mail.</p>
+    <p class="form-hint" style="margin:-6px 0 12px">Сообщение уйдёт только выбранным клиентам. В WhatsApp получат те, у кого заполнен телефон, в письме — у кого указан e-mail. Отписавшиеся не получат.</p>
     <input type="hidden" name="ids" value="${ids.join(',')}">`
     : `<p style="margin:14px 0 6px"><b>Кому отправить</b> <small class="form-hint">фильтры сужают сегмент, пустые — значит «все клиенты»</small></p>
     <div class="form-grid2">
@@ -3269,11 +3773,24 @@ async function campaignSubmit(e) {
     if (when.getTime() < Date.now() - 60000) { toast('Это время уже прошло: выберите будущее или отправьте сразу', 'err'); return false; }
     body.scheduled_at = when.toISOString(); // момент в UTC, не зависит от пояса сервера
   }
-  await api('/api/campaigns', { method: 'POST', body: JSON.stringify(body) });
-  toast(body.scheduled_at ? 'Рассылка запланирована' : 'Рассылка создана и встанет в очередь');
-  // рассылка отмеченным клиентам: галочки снимаем и показываем очередь отправки
-  if (b.audience.ids) { clearSel('contacts'); state.cTab = 'campaigns'; }
-  closeModal(); render(); return false;
+  const doCreate = async () => {
+    await api('/api/campaigns', { method: 'POST', body: JSON.stringify(body) });
+    toast(body.scheduled_at ? 'Рассылка запланирована' : 'Рассылка создана и встанет в очередь');
+    // рассылка отмеченным клиентам: галочки снимаем и показываем очередь отправки
+    if (b.audience.ids) { clearSel('contacts'); state.cTab = 'campaigns'; }
+    closeModal(); render();
+  };
+  // Большая рассылка — необратимое действие: показываем точное число
+  // получателей и просим подтвердить, чтобы ошибочный сегмент не ушёл всей базе.
+  try {
+    const preview = await api('/api/campaigns/preview', { method: 'POST', body: JSON.stringify({ channel: b.channel, audience: b.audience }) });
+    if (preview.count > 500) {
+      askConfirm(`Рассылка уйдёт ${preview.count} клиентам. Проверьте канал и текст — отменить отправленные сообщения нельзя.`, doCreate, { okText: 'Создать рассылку' });
+      return false;
+    }
+  } catch { /* preview не обязателен: сервер всё равно проверит получателей */ }
+  await doCreate();
+  return false;
 }
 const CAMPAIGN_ITEM = { queued: 'В очереди', sent: 'Отправлено', failed: 'Ошибка', canceled: 'Отменено' };
 async function openCampaignCard(id) {
@@ -3321,9 +3838,9 @@ function qualityPeriod() {
     <span class="tag grey" title="Показатели собираются из CRM и не выставляют оценку сотруднику">Данные CRM</span></span>`;
 }
 function qualityReviewPeriod() {
-  const days=state.qReviewDays||90;
-  return `<span class="quality-period"><b>Период отчёта:</b>
-    <span class="tabs" style="margin:0">${[30,90,365].map(n=>`<button class="${days===n?'active':''}" onclick="setQualityReviewDays(${n})">${n===30?'30 дней':n===90?'90 дней':'Год'}</button>`).join('')}</span></span>`;
+  const days=state.qReviewDays||7;
+  return `<span class="quality-period"><b>Проверки завершены:</b>
+    <span class="tabs" style="margin:0">${[7,30,90,365].map(n=>`<button class="${days===n?'active':''}" onclick="setQualityReviewDays(${n})">${n===7?'Неделя':n===30?'30 дней':n===90?'90 дней':'Год'}</button>`).join('')}</span></span>`;
 }
 function qualityTabs(tab) {
   return `<div class="card toolbar quality-tabs"><div class="tabs" style="margin:0">
@@ -3342,23 +3859,25 @@ async function qualityMetricsBody() {
   const t=d.totals||{};
   const managers=d.managers||[];
   return `${qualityTabs('metrics')}
-  <div class="notice info quality-note">${icon('alertCircle',16)} <span><b>Это сигналы для проверки, не рейтинг сотрудников.</b> Содержание разговора оценивается отдельно во вкладке «Проверки ОКК» и только по подтверждённым данным. Показатели очереди частично отражают текущую нагрузку.</span></div>
+  <div class="notice info quality-note">${icon('alertCircle',16)} <span><b>Автоматическая оценка по данным CRM.</b> Ответ, заполненность карточки, задачи и конверсия считаются автоматически. Содержание разговора оценивается отдельно во вкладке «Проверки ОКК» и только по подтверждённым данным. Показатели очереди частично отражают текущую нагрузку.</span></div>
   <div class="grid">
     <div class="kpi"><i>${icon('inbox',20)}</i><span>Диалоги, где клиент ждёт ответа</span><b class="${t.unansweredDialogs?'red':'green'}">${t.unansweredDialogs??0}</b><small>за выбранный период; автоответ не засчитывается</small></div>
-    <div class="kpi"><i>${icon('clock',20)}</i><span>Медиана ответа сотрудника</span><b>${t.medianResponseMin===null||t.medianResponseMin===undefined?'—':t.medianResponseMin+' мин'}</b><small>только там, где клиент ждал ответа</small></div>
+    <div class="kpi"><i>${icon('clock',20)}</i><span>Медиана ответа сотрудника</span><b>${t.medianResponseMin===null||t.medianResponseMin===undefined?'—':t.medianResponseMin+' мин'}</b><small>по ${numFmt(t.responseTimeSamples||0)} парам с достоверными отметками</small></div>
     <div class="kpi"><i>${icon('pipe',20)}</i><span>Открытые сделки без движения</span><b>${t.stalled??0}</b><small>текущий список, больше 14 дней</small></div>
     <div class="kpi"><i>${icon('tasks',20)}</i><span>Просроченные открытые задачи</span><b class="${t.overdueTasks?'red':''}">${t.overdueTasks??0}</b><small>текущий список задач</small></div>
   </div>
   <div class="card"><h3>Показатели по сотрудникам</h3>
     <p class="form-hint">Переписка считается за выбранный период; сделки и задачи — в текущем состоянии. Конверсия показана как выигранные среди закрытых, рядом видны число сделок и отказы.</p>
     <div class="tbl-scroll"><table>
-      <tr><th>Сотрудник</th><th>Сделок</th><th>Выиграно</th><th>Отказ</th><th>Конверсия закрытых</th><th>Диалогов без ответа</th><th>Ответ, мин</th><th>Без движения</th><th>Просрочено</th></tr>
+      <tr><th>Сотрудник</th><th>Сделок</th><th>Выиграно</th><th>Отказ</th><th>Конверсия закрытых</th><th>Карточка заполнена</th><th>С задачей</th><th>Диалогов без ответа</th><th>Ответ, мин</th><th>Без движения</th><th>Просрочено</th></tr>
       ${managers.map(m=>`<tr>
         <td><b>${esc(m.name)}</b></td><td>${numFmt(m.deals)}</td><td class="green">${numFmt(m.won)}</td><td>${numFmt(m.lost)}</td>
         <td>${m.conversion===null?'—':m.conversion+'%'}</td>
+        <td>${numFmt(m.qualified||0)}<br><small>из ${numFmt(m.deals)}</small></td>
+        <td>${numFmt(m.withOpenTask||0)}<br><small>из ${numFmt(m.deals)}</small></td>
         <td>${m.unansweredDialogs?`<b class="red">${numFmt(m.unansweredDialogs)}</b>`:'0'}</td>
-        <td>${m.medianResponseMin===null?'—':numFmt(m.medianResponseMin)}</td><td>${numFmt(m.stalled)}</td><td>${numFmt(m.overdueTasks)}</td>
-      </tr>`).join('')||'<tr><td colspan="9"><small>Активных сотрудников нет</small></td></tr>'}
+        <td>${m.medianResponseMin===null?'—':`${numFmt(m.medianResponseMin)}<br><small>n=${numFmt(m.responseTimeSamples||0)}</small>`}</td><td>${numFmt(m.stalled)}</td><td>${numFmt(m.overdueTasks)}</td>
+      </tr>`).join('')||'<tr><td colspan="11"><small>Активных сотрудников нет</small></td></tr>'}
     </table></div>
   </div>
   <div class="card quality-definitions"><h3>Как читать показатели</h3>
@@ -3376,40 +3895,127 @@ function qualityStatusClass(status) {
 }
 function qualityInteractionLabel(kind) { return ({call:'Звонок',chat:'Переписка',mixed:'Звонок и переписка',other:'Другое',unknown:'Не определён'})[kind]||'Не указан'; }
 function qualityDataStatusLabel(kind) { return ({complete:'История полная',partial:'История частичная',unavailable:'История недоступна'})[kind]||'Полнота не указана'; }
+function qualityPercentText(value) {
+  if(value===null||value===undefined||!Number.isFinite(Number(value)))return '—';
+  return `≈${new Intl.NumberFormat('ru-RU',{minimumFractionDigits:1,maximumFractionDigits:1}).format(Number(value))}%`;
+}
 function qualityScoreText(score) {
-  if(!score) return 'Баллы не начисляются';
-  const pct=score.percent===null?'—':score.percent+'%';
-  return `${score.confirmed}/${score.applicable} применимых · ${pct} · охват ${score.applicable}/${score.total}`;
+  if(!score)return 'Проверка без количественной оценки';
+  const percent=qualityPercentText(score.percent);
+  const critical=score.criticalMarkedNo?.length?` · отметок «нет» по помеченным критичными пунктам: ${numFmt(score.criticalMarkedNo.length)}`:'';
+  const abandoned=score.abandonedCard?' · карточка отмечена как фактически заброшенная':'';
+  return `${numFmt(score.confirmed)}/${numFmt(score.applicable)} применимых · ${percent} · охват ${numFmt(score.applicable)}/${numFmt(score.total)}${critical}${abandoned}`;
+}
+function qualitySampleRuleLabel(key) {
+  return ({all_new:'Все новые обращения',random:'Случайная выборка',repeat_contact:'Повторное касание',closed_deal:'Завершённая сделка',risk_signal:'Сигнал риска',manager_choice:'Выбор руководителя',other:'Другое'})[key]||'Основание не указано';
+}
+function qualityQueryParams() {
+  const params=new URLSearchParams({days:String(state.qReviewDays||7)});
+  for(const [key,value] of Object.entries(state.qFilters||{})) if(String(value||'')) params.set(key,String(value));
+  return params.toString();
+}
+function setQualityFilter(key,value) {
+  if(key==='__clear__'){state.qFilters={manager_id:'',pipeline_id:'',stage:'',source:''};render();return;}
+  if(!['manager_id','pipeline_id','stage','source'].includes(key)) return;
+  state.qFilters={...(state.qFilters||{}),[key]:String(value||'')}; render();
+}
+function qualityFiltersHtml(options={}) {
+  const f=state.qFilters||{};
+  const select=(key,title,items,valueFn,labelFn,empty)=>`<label class="quality-filter">${title}<select onchange="setQualityFilter('${key}',this.value)"><option value="">${empty}</option>${items.map(x=>`<option value="${esc(valueFn(x))}" ${String(f[key]||'')===String(valueFn(x))?'selected':''}>${esc(labelFn(x))}</option>`).join('')}</select></label>`;
+  return `<div class="card quality-filters"><b>Срез отчёта</b><div class="quality-filter-grid">
+    ${select('manager_id','Ответственный',options.managers||[],x=>x.id,x=>x.name,'Все сотрудники')}
+    ${select('pipeline_id','Воронка',options.pipelines||[],x=>x.id,x=>x.name,'Все воронки')}
+    ${select('stage','Этап',options.stages||[],x=>x.id,x=>x.pipelines?`${x.name} · ${x.pipelines}`:x.name,'Все этапы')}
+    ${select('source','Источник',options.sources||[],x=>x,x=>sourceLabel(x)||x,'Все источники')}
+    <button class="btn sm" onclick="setQualityFilter('__clear__','')">Сбросить фильтры</button>
+  </div><small>Фильтры сотрудника, воронки, этапа и источника применяются к проверкам. В конверсии этап ограничивает только таблицу переходов; период для сделок считается от даты создания, а источник и ответственный берутся из CRM-снимка события.</small></div>`;
+}
+function qualityMetricCard(def,metric) {
+  const m=metric||{numerator:0,denominator:0,percent:null,target:def.target,excluded:0};
+  const isCalls=def.key==='calls';
+  const targetMet=isCalls?Number(m.weeklyRate||0)>=def.target:(m.percent!==null&&m.percent>=def.target);
+  let value=isCalls?`${new Intl.NumberFormat('ru-RU',{minimumFractionDigits:0,maximumFractionDigits:1}).format(m.weeklyRate||0)}`:(m.percent===null?'—':qualityPercentText(m.percent));
+  let base=isCalls?`${numFmt(m.numerator)} из ${numFmt(m.denominator)} разборов с действием за выбранный период`:`${numFmt(m.numerator)} / ${numFmt(m.denominator)} применимых случаев`;
+  const target=isCalls?`Среднее за неделю · цель ${def.target} разборов`:`Ориентир из рабочей таблицы: ${def.target}%`;
+  if(isCalls&&!m.denominator){value='—';base='Нет проверенных звонков за выбранный период';}
+  else if(!isCalls&&m.percent!==null)value=qualityPercentText(m.percent);
+  return `<div class="kpi quality-metric-card"><span>${esc(def.title)}</span><b class="${m.denominator?(targetMet?'green':'orange'):''}">${value}</b><small>${base}<br>${target}${m.excluded?`<br>Не оценивалось: ${numFmt(m.excluded)}`:''}</small></div>`;
+}
+function qualityConversionRows(rows) {
+  return (rows||[]).map(r=>`<tr><td>${esc(r.name||r.stage_name||'—')}</td><td>${numFmt(r.total??r.entered??0)}</td><td>${numFmt(r.won||0)} / ${numFmt(r.closed||0)}${r.conversion===null?'':` · ${r.conversion}%`}</td><td>${numFmt(r.open||0)}</td></tr>`).join('')||'<tr><td colspan="4"><small>За этот период подходящих данных нет</small></td></tr>';
+}
+function qualityConversionPanel(c) {
+  const rows=c||{};
+  return `<div class="card quality-conversion"><div class="row"><span><h3>Конверсия по воронке, этапам и источнику</h3><small>Победа и отказ считаются отдельно; открытые сделки не входят в знаменатель.</small></span></div>
+    <div class="cols">
+      <div><h4>По воронкам</h4><div class="tbl-scroll"><table><tr><th>Воронка при создании</th><th>Создано</th><th>Выиграно / закрыто</th><th>Открыто</th></tr>${qualityConversionRows(rows.byPipeline)}</table></div></div>
+      <div><h4>По источнику при создании</h4><div class="tbl-scroll"><table><tr><th>Источник</th><th>Создано</th><th>Выиграно / закрыто</th><th>Открыто</th></tr>${qualityConversionRows(rows.bySource)}</table></div></div>
+    </div>
+    <h4>По этапам, куда сделка вошла в выбранный период</h4><div class="tbl-scroll"><table><tr><th>Воронка · этап</th><th>Уникальных сделок вошло</th><th>Выиграно / закрыто</th><th>Открыто</th></tr>${(rows.byStage||[]).map(r=>`<tr><td>${esc(r.pipeline_name)} · ${esc(r.stage_name||r.stage)}</td><td>${numFmt(r.entered||0)}</td><td>${numFmt(r.won||0)} / ${numFmt(r.closed||0)}${r.conversion===null?'':` · ${r.conversion}%`}</td><td>${numFmt(r.open||0)}</td></tr>`).join('')||'<tr><td colspan="4"><small>За этот период переходов по этапам нет.</small></td></tr>'}</table></div>
+    ${rows.creationHistoryUnavailable?`<p class="notice warn">Для ${numFmt(rows.creationHistoryUnavailable)} сделок, созданных в периоде, нет события создания в истории. Они не включены в срезы по воронке и источнику.</p>`:''}
+    <ul class="quality-definitions-list">${(rows.definitions||[]).map(x=>`<li>${esc(x)}</li>`).join('')}</ul>
+  </div>`;
 }
 async function qualityReviewsBody() {
-  const d=await api('/api/quality/reviews?days='+(state.qReviewDays||90));
-  const a=d.summary||{};
-  const rows=d.reviews||[];
+  const query=qualityQueryParams();
+  const [d,conversion]=await Promise.all([
+    api('/api/quality/reviews?'+query),
+    api('/api/quality/conversion?'+query),
+  ]);
+  const a=d.summary||{},rows=d.reviews||[],metrics=d.metrics||{},metricRows=d.metricsByManager||[];
+  const fmtOne=value=>new Intl.NumberFormat('ru-RU',{minimumFractionDigits:0,maximumFractionDigits:1}).format(Number(value)||0);
+  const targetLine=(m,key)=>{
+    const v=m?.metrics?.[key];if(!v)return '—';
+    if(key==='calls')return v.denominator?`${fmtOne(v.weeklyRate)} в неделю · ${numFmt(v.numerator)} с действием / ${numFmt(v.denominator)} звонков`:'нет проверенных звонков';
+    return `${numFmt(v.numerator)} / ${numFmt(v.denominator)}${v.percent===null?'':` · ${qualityPercentText(v.percent)}`} · исключено из знаменателя: ${numFmt(v.excluded||0)}`;
+  };
+  const stageRows=(d.stageBreakdown||[]).map(x=>`<tr><td>${esc(x.pipeline_name)}</td><td>${esc(x.stage_name)}</td><td>${numFmt(x.interactions)}</td><td>${numFmt(x.deals)}</td></tr>`).join('')||'<tr><td colspan="4"><small>Завершённых проверок за период нет</small></td></tr>';
+  const periodRows=(d.periodBreakdown||[]).map(x=>`<tr><td>${esc(dt(x.week_start))}</td><td>${numFmt(x.interactions)}</td><td>${numFmt(x.deals)}</td></tr>`).join('')||'<tr><td colspan="3"><small>Завершённых проверок за период нет</small></td></tr>';
+  const fmtDateRange=(from,to)=>from&&to?`${dt(from)} — ${dt(to)}`:'период не указан';
+  const criteriaRows=(items)=>items.map(c=>`<tr><td>${esc(c.title)}${c.critical?' <span class="tag grey">помечен критичным в таблице</span>':''}</td>
+      <td>${numFmt(c.yes||0)}</td><td>${numFmt(c.no||0)}</td><td>${numFmt(c.na||0)}</td><td>${numFmt(c.unknown||0)}</td><td>${numFmt(c.empty||0)}</td>
+      <td>${c.percent===null?'—':qualityPercentText(c.percent)}</td><td>${numFmt(c.applicable||0)} / ${numFmt(d.deduplication?.interactions||0)}${d.deduplication?.interactions?` · ${numFmt(c.coverage)}%`:''}</td></tr>`).join('');
   return `${qualityTabs('reviews')}
-    <div class="notice info quality-note">${icon('quality',16)} <span><b>Ручная проверка с доказательствами.</b> Берём только факты из переписки, звонка и карточки CRM. «Нет», «не применимо» и «данных недостаточно» — разные результаты. Исторические пороги из таблицы не утверждаем программой: сначала руководитель должен согласовать их.</span></div>
+    <div class="notice info quality-note">${icon('quality',16)} <span><b>ОКК полностью ручной и доказательный.</b> Здесь используется только рабочий чек-лист из 18 критериев. Исторический стандарт из 12 пунктов хранится отдельно и в эту шкалу не переносится. Десять развивающих пунктов из Excel дополняют проверку, но не меняют результат. CRM не отправляет сообщения и не меняет сделки, поля или задачи.</span></div>
+    ${qualityFiltersHtml(d.filterOptions||{})}
     <div class="grid quality-summary">
-      <div class="kpi"><i>${icon('checkCircle',20)}</i><span>Завершено</span><b>${numFmt(a.complete||0)}</b><small>за период отчёта</small></div>
+      <div class="kpi"><i>${icon('checkCircle',20)}</i><span>Завершено</span><b>${numFmt(a.complete||0)}</b><small>по дате завершения проверки</small></div>
       <div class="kpi"><i>${icon('edit',20)}</i><span>Черновики</span><b>${numFmt(a.drafts||0)}</b><small>можно продолжить</small></div>
-      <div class="kpi"><i>${icon('phone',20)}</i><span>Контакта не было</span><b>${numFmt(a.no_contact||0)}</b><small>не превращается в ноль баллов</small></div>
-      <div class="kpi"><i>${icon('alert',20)}</i><span>Данные недоступны</span><b>${numFmt(a.unavailable||0)}</b><small>не включено в оценку критериев</small></div>
+      <div class="kpi"><i>${icon('phone',20)}</i><span>Контакта не было</span><b>${numFmt(a.no_contact||0)}</b><small>отдельно от оценки</small></div>
+      <div class="kpi"><i>${icon('alert',20)}</i><span>Данные недоступны</span><b>${numFmt(a.unavailable||0)}</b><small>отдельно от оценки</small></div>
     </div>
-    <div class="card quality-criteria-stats"><div class="row"><span><h3>Результаты по критериям</h3><small>Доля «да» считается только среди «да» и «нет»; охват — среди завершённых разборов.</small></span></div>
-      <div class="tbl-scroll"><table><tr><th>Критерий</th><th>Да / применимых</th><th>Доля «да»</th><th>Охват</th></tr>
-      ${(d.criteria||[]).map(c=>`<tr><td>${esc(c.title)}${c.critical?' <span class="tag orange">критичный</span>':''}</td>
-        <td>${numFmt(c.yes||0)} / ${numFmt(c.applicable||0)}</td><td>${c.percent===null?'—':c.percent+'%'}</td>
-        <td>${numFmt(c.applicable||0)} / ${numFmt(a.complete||0)}${a.complete?` · ${c.coverage}%`:''}</td></tr>`).join('')}</table></div>
-      <p class="form-hint">Это агрегаты проверок руководителя, не автоматическая оценка всех диалогов. Статус «недостаточно данных» не считается ответом «нет».</p>
+    <div class="card quality-weekly"><div class="row"><span><h3>Показатели контура развития</h3><small>Цели взяты из листа «Контур развития ОКК»; расчёт ограничен завершёнными уникальными проверками выбранного периода.</small></span></div>
+      <div class="grid quality-weekly-grid">${(d.metricDefinitions||[]).map(def=>qualityMetricCard(def,metrics[def.key])).join('')}</div>
+      <div class="tbl-scroll"><table class="quality-manager-table"><tr><th>Ответственный на момент проверки</th><th>Квалификация 4/6<br><small>цель 75%</small></th><th>Город и участок в CRM<br><small>90%</small></th><th>Следующий шаг<br><small>85%</small></th><th>Материалы с контролем<br><small>90%</small></th><th>География<br><small>100%</small></th><th>Звонки с действием<br><small>5 в неделю</small></th><th>Повторные касания<br><small>80%</small></th></tr>
+      ${metricRows.map(m=>`<tr><td><b>${esc(m.name)}</b></td><td>${esc(targetLine(m,'qualification'))}</td><td>${esc(targetLine(m,'cityLandCrm'))}</td><td>${esc(targetLine(m,'nextStep'))}</td><td>${esc(targetLine(m,'materials'))}</td><td>${esc(targetLine(m,'geography'))}</td><td>${m.reviewedCalls?`${fmtOne(m.callsPerWeek)} / нед. · ${numFmt(m.callsWithAction||0)} из ${numFmt(m.reviewedCalls)} звонков`:'— · проверенных звонков нет'}</td><td>${esc(targetLine(m,'repeatFollowup'))}</td></tr>`).join('')||'<tr><td colspan="8"><small>Сотрудников для отчёта нет</small></td></tr>'}</table></div>
+      <p class="form-hint">Проценты показаны только при известном знаменателе и приблизительно округлены до 0,1 для чтения. «Не применимо», недостаток данных и незаполненные пункты не становятся отрицательным ответом. Категории, штрафы и автоматические действия не рассчитываются. Разборы звонков показаны как среднее за неделю выбранного периода; без проверенных звонков результат не отображается.</p>
+      <ul class="quality-definitions-list">${(d.metricDefinitions||[]).map(x=>`<li><b>${esc(x.title)}:</b> ${esc(x.definition)} ${x.key==='calls'?`Цель: ${x.target} на сотрудника в неделю.`:`Цель: ${x.target}%.`}</li>`).join('')}</ul>
     </div>
-    <div class="card quality-review-list"><div class="toolbar"><h3>Проверки (${numFmt(d.total||0)})</h3><button class="btn primary" onclick="qualityNewReview()">${icon('plus',14)} Новая проверка</button></div>
-      <div class="tbl-scroll"><table><tr><th>Сделка и клиент</th><th>Менеджер</th><th>Результат</th><th>Рецензент</th><th>Обновлена</th><th></th></tr>
+    <div class="card quality-criteria-stats"><div class="row"><span><h3>Рабочий чек-лист — 18 критериев</h3><small>Счётчики относятся к последней завершённой версии каждой уникальной проверки.</small></span></div>
+      <div class="tbl-scroll"><table><tr><th>Критерий</th><th>Да</th><th>Нет</th><th>Не применимо</th><th>Данных недостаточно</th><th>Не заполнено</th><th>Доля «да»</th><th>Охват</th></tr>
+      ${criteriaRows(d.criteria||[])||'<tr><td colspan="8"><small>Завершённых проверок за период нет</small></td></tr>'}</table></div>
+      <p class="form-hint">Процент считается только среди «да» и «нет». Отдельно показаны неприменимые, непроверенные и незаполненные пункты. Критические пометки из Excel отображаются как факт, но сами по себе не меняют результат.</p>
+    </div>
+    <div class="card quality-criteria-stats"><div class="row"><span><h3>Дополнительные критерии из «Контура развития»</h3><small>Эти десять пунктов не добавляются к основному результату.</small></span></div>
+      <div class="tbl-scroll"><table><tr><th>Наблюдение</th><th>Да</th><th>Нет</th><th>Не применимо</th><th>Данных недостаточно</th><th>Не заполнено</th><th>Доля «да»</th><th>Охват</th></tr>
+      ${criteriaRows(d.growthCriteria||[])||'<tr><td colspan="8"><small>Завершённых проверок за период нет</small></td></tr>'}</table></div>
+    </div>
+    <div class="card quality-breakdown"><h3>Проверки по этапу и времени</h3><p class="form-hint">Период задаётся датой завершения проверки. Повторные проверки одной выборки не учитываются повторно.</p>
+      <div class="cols"><div><h4>По этапу сделки на момент проверки</h4><div class="tbl-scroll"><table><tr><th>Воронка</th><th>Этап</th><th>Уникальных проверок</th><th>Уникальных сделок</th></tr>${stageRows}</table></div></div>
+      <div><h4>По неделям</h4><div class="tbl-scroll"><table><tr><th>Неделя начинается</th><th>Уникальных проверок</th><th>Уникальных сделок</th></tr>${periodRows}</table></div></div></div>
+    </div>
+    <div class="notice warn quality-policy-note"><b>Пороговые категории не включены.</b> Лист «Правила оценки» и исторические категории требуют отдельного согласования знаменателя, минимального охвата, округления и последствий критических пометок. Пока показываются исходные счётчики «да / нет», доля среди применимых критериев и охват; нормированный балл и автоматические действия не рассчитываются.</div>
+    ${qualityConversionPanel(conversion)}
+    <div class="card quality-review-list"><div class="toolbar"><h3>Проверки (${numFmt(d.total||0)})</h3>${state.me?.role === 'admin' ? `<button class="btn primary" onclick="qualityNewReview()">${icon('plus',14)} Новая проверка</button>` : '<small>Проверки ведёт администратор; РОП видит результаты своей команды.</small>'}</div>
+      <div class="tbl-scroll"><table><tr><th>Сделка и выборка</th><th>Период разговора</th><th>Менеджер</th><th>Результат</th><th>Рецензент</th><th>Завершена</th><th></th></tr>
       ${rows.map(r=>`<tr>
-        <td><b>${esc(r.deal_title)}</b><br><small>${esc(r.contact_name||'Контакт не указан')} · ${esc(r.stage_name||r.stage||'этап не указан')}</small></td>
-        <td>${esc(r.responsible_name||'—')}</td>
-        <td><span class="tag ${qualityStatusClass(r.status)}">${qualityStatusLabel(r.status)}</span><br><small>${esc(qualityScoreText(r.score))}</small><br><small>${esc(qualityDataStatusLabel(r.data_status))}</small>${r.score?.criticalFailures?`<br><small class="red">Критичных пропусков: ${numFmt(r.score.criticalFailures)}</small>`:''}</td>
-        <td>${esc(r.reviewer_name||'—')}</td><td>${esc(dt(r.updated_at)||'')}</td>
+        <td><b>${esc(r.deal_title)}</b><br><small>${esc(r.contact_name||'Контакт не указан')} · ${esc(r.pipeline_name||'воронка не указана')} · ${esc(r.stage_name||r.stage||'этап не указан')}</small><br><small>${esc(sourceLabel(r.source)||r.source||'Источник не указан')} · ${esc(qualitySampleRuleLabel(r.sample_rule))}</small></td>
+        <td>${esc(fmtDateRange(r.period_start,r.period_end))}</td><td>${esc(r.responsible_name||'—')}</td>
+        <td><span class="tag ${qualityStatusClass(r.status)}">${qualityStatusLabel(r.status)}</span><br><small>${esc(qualityScoreText(r.score))}</small><br><small>${esc(qualityDataStatusLabel(r.data_status))}</small></td>
+        <td>${esc(r.reviewer_name||'—')}</td><td>${esc(dt(r.completed_at||r.updated_at)||'')}</td>
         <td><button class="btn sm" onclick="qualityOpenReview(${r.id})">${r.status==='draft'?'Продолжить':'Открыть'}</button></td>
-      </tr>`).join('')||'<tr><td colspan="6"><small>Проверок пока нет. Откройте новую и выберите сделку из CRM.</small></td></tr>'}
-      </table></div>${d.truncated?'<p class="form-hint">Показаны последние 100 проверок; сводные показатели рассчитаны по всему выбранному периоду.</p>':''}
+      </tr>`).join('')||'<tr><td colspan="7"><small>Проверок пока нет. Откройте новую и выберите сделку из CRM.</small></td></tr>'}
+      </table></div>${d.truncated?'<p class="form-hint">Показаны последние 100 записей; агрегаты рассчитаны по всему выбранному периоду.</p>':''}
     </div>`;
 }
 let qualitySearchTimer=null;
@@ -3449,111 +4055,255 @@ function qualityOpenReview(id) { state.qReviewId=Number(id); state.qTab='edit'; 
 function qualityBackToReviews() { state.qReviewId=null; state.qTab='reviews'; render(); }
 function qualityItemStatus(v) { return ({yes:'Да',no:'Нет',na:'Не применимо',unknown:'Данных недостаточно','':'Не выбрано'})[v]??'Не выбрано'; }
 function qualitySourceLabel(v) { return ({message:'Переписка',recording:'Запись звонка',crm:'Карточка CRM',other:'Другое','':'Источник не указан'})[v]||v; }
-function qualityCriteriaEditor(criteria,items,readOnly) {
+function qualityEvidenceGroup(criteria,items,readOnly,growth=false) {
   const map=new Map(items.map(x=>[x.criterion_key,x]));
   const groups=new Map();
-  for(const c of criteria){ if(!groups.has(c.block)) groups.set(c.block,[]); groups.get(c.block).push(c); }
+  for(const c of criteria){if(!groups.has(c.block))groups.set(c.block,[]);groups.get(c.block).push(c);}
   return [...groups].map(([block,list])=>`<section class="quality-group"><h3>${esc(block)}</h3>
-    ${list.map(c=>{const i=map.get(c.key)||{};const disabled=readOnly?'disabled':'';
-      return `<article class="quality-criterion ${c.critical?'critical':''}">
-        <div class="quality-criterion-title"><b>${esc(c.title)}</b>${c.critical?'<span class="tag orange">критичный пункт</span>':''}</div>
+    ${list.map(c=>{
+      const i=map.get(c.key)||{},disabled=readOnly?'disabled':'',target=growth?`growth:${c.key}`:c.key;
+      const linked=(state.qReviewData?.messages||[]).find(m=>Number(m.id)===Number(i.message_id));
+      const who=linked?(linked.direction==='out'?(linked.author||'Сотрудник'):(linked.author||'Клиент')):'';
+      return `<article class="quality-criterion ${growth?'quality-growth-criterion':''} ${c.critical?'critical':''}" data-q-criterion="${esc(c.key)}">
+        <div class="quality-criterion-title"><b>${esc(c.title)}</b>${c.critical?'<span class="tag grey">помечен критичным в рабочей таблице</span>':''}</div>
         <p>${esc(c.guide)}</p>
         <div class="quality-fields">
-          <label>Результат<select data-q-status="${esc(c.key)}" ${disabled}>
+          <label><span class="quality-required-label">Результат <i>*</i></span><select ${growth?'data-q-growth-status':'data-q-status'}="${esc(c.key)}" ${disabled}>
             ${[['','Выберите статус'],['yes','Да — подтверждено'],['no','Нет — есть основание'],['na','Не применимо'],['unknown','Данных недостаточно']].map(([v,t])=>`<option value="${v}" ${v===(i.status||'')?'selected':''}>${t}</option>`).join('')}
           </select></label>
-          <label>Откуда подтверждение<select data-q-source="${esc(c.key)}" ${disabled}>
-            ${[['','Выберите источник'],['message','Переписка / событие CRM'],['recording','Запись звонка'],['crm','Карточка CRM'],['other','Другое']].map(([v,t])=>`<option value="${v}" ${v===(i.evidence_source||'')?'selected':''}>${t}</option>`).join('')}
+          <label><span class="quality-required-label">Источник <i>*</i></span><select data-q-source="${esc(target)}" onchange="qualityEvidenceSourceChanged('${esc(target)}',this.value)" ${disabled}>
+            ${[['','Выберите источник'],['message','Сообщение из CRM'],['recording','Аудиозапись из CRM'],['crm','Карточка CRM'],['other','Другое с пояснением']].map(([v,t])=>`<option value="${v}" ${v===(i.evidence_source||'')?'selected':''}>${t}</option>`).join('')}
+          </select></label>
+          <label><span class="quality-required-label">Проверка источника <i>*</i></span><select data-q-confidence="${esc(target)}" ${disabled}>
+            ${[['','Укажите достоверность'],['verified','Проверено вручную'],['needs_review','Нужна ручная перепроверка'],['low','Низкое качество / неразборчиво']].map(([v,t])=>`<option value="${v}" ${v===(i.evidence_confidence||'')?'selected':''}>${t}</option>`).join('')}
           </select></label>
         </div>
-        <label class="quality-evidence-label">Подтверждение или причина<textarea data-q-evidence="${esc(c.key)}" data-message-id="${Number(i.message_id)||''}" maxlength="1200" rows="2" ${disabled} placeholder="Цитата, проверенный фрагмент записи или объяснение, почему данных недостаточно">${esc(i.evidence_text||'')}</textarea></label>
-        ${i.message_id?`<small class="form-hint">Связано с сообщением №${Number(i.message_id)}. ${esc(qualitySourceLabel(i.evidence_source||''))}</small>`:''}
+        <label class="quality-evidence-label"><span class="quality-required-label">Цитата или причина <i>*</i></span><textarea data-q-evidence="${esc(target)}" data-message-id="${Number(i.message_id)||''}" data-message-source="${esc(i.evidence_source||'')}" maxlength="1200" rows="2" ${disabled} placeholder="Точная цитата или конкретная причина, почему данных недостаточно">${esc(i.evidence_text||'')}</textarea></label>
+        <div class="quality-evidence-meta">
+          <label>Таймкод аудиозаписи<input data-q-time="${esc(target)}" maxlength="40" value="${esc(i.evidence_timestamp||'')}" ${disabled} placeholder="00:15–00:32, если источник — запись"></label>
+          <label>Кто говорит в записи<select data-q-speaker="${esc(target)}" ${disabled}>
+            ${[['','Не указано'],['manager','Менеджер'],['client','Клиент'],['both','Оба собеседника'],['unknown','Неразборчиво']].map(([v,t])=>`<option value="${v}" ${v===(i.evidence_speaker||'')?'selected':''}>${t}</option>`).join('')}
+          </select></label>
+        </div>
+        ${i.message_id?`<div class="quality-evidence-link"><small>Сообщение №${Number(i.message_id)}${linked?` · ${esc(who)} · ${esc(channelLabel(linked.channel)||linked.channel||'')} · ${esc(dt(linked.event_at||linked.created_at)||'')} · ${linked.event_time_source==='provider'?'время канала Wazzup':linked.event_time_source==='crm'?'время отправки CRM':'время записи CRM'}`:''}</small>${linked?`<button type="button" class="btn sm ghost" onclick="qualityGoToMessage(${Number(i.message_id)})">К источнику</button>`:''}</div>`:''}
       </article>`;
     }).join('')}
   </section>`).join('');
 }
-function qualityMessagesPanel(messages,readOnly) {
-  return `<aside class="card quality-source-card"><div class="quality-source-head"><h3>Источники по сделке</h3><small>${numFmt(messages.length)} последних сообщений</small></div>
+function qualityCriteriaEditor(criteria,items,readOnly) { return qualityEvidenceGroup(criteria,items,readOnly,false); }
+function qualityDevelopmentEditor(criteria,items,readOnly) { return qualityEvidenceGroup(criteria,items,readOnly,true); }
+function qualityFactStatusSelect(kind,key,value,readOnly) {
+  const label=kind==='heard'?'В разговоре':'В карточке CRM';
+  return `<label class="quality-fact-status"><span class="quality-required-label">${label} <i>*</i></span><select data-q-fact-${kind}="${esc(key)}" ${readOnly?'disabled':''}>
+    ${[['','Выберите'],['yes',kind==='heard'?'Известно':'Заполнено'],['no',kind==='heard'?'Не выяснено':'Не заполнено'],['na','Не применимо'],['unknown','Данных недостаточно']].map(([v,t])=>`<option value="${v}" ${v===(value||'')?'selected':''}>${t}</option>`).join('')}
+  </select></label>`;
+}
+function qualityFactsEditor(facts,readOnly) {
+  const map=facts||{};
+  const proof={object_area:['need','«Выяснил потребность»'],city:['location','«Выяснил участок и город строительства»'],land:['location','«Выяснил участок и город строительства»'],timeline:['timeline','«Выяснил сроки»'],budget:['budget','«Выяснил бюджет»'],payment:['payment','«Обсудил подходящий способ оплаты»']};
+  return `<div class="card quality-facts-card"><h3>Факты квалификации и карточка CRM</h3>
+    <p class="form-hint">Отметьте только то, что установлено из доступного разговора и карточки. Для цитаты используйте связанное доказательство основного критерия; в панели CRM проверьте фактическое поле.</p>
+    <div class="tbl-scroll"><table class="quality-facts-table"><tr><th>Фактор</th><th>В разговоре</th><th>В карточке CRM</th></tr>
+    ${[['object_area','Объект и площадь'],['city','Город строительства'],['land','Участок / статус / доступ'],['timeline','Сроки'],['budget','Бюджет'],['payment','Способ оплаты']].map(([key,title])=>`<tr><td><b>${title}</b><br><button type="button" class="btn sm ghost" onclick="qualityFocusCriterion('${proof[key][0]}')">Показать доказательство: ${proof[key][1]}</button></td><td>${qualityFactStatusSelect('heard',key,map[key]?.heard_status,readOnly)}</td><td>${qualityFactStatusSelect('crm',key,map[key]?.crm_status,readOnly)}</td></tr>`).join('')}
+    </table></div>
+  </div>`;
+}
+function qualityCrmContextPanel(ctx) {
+  if(!ctx)return '';
+  if(!ctx.available)return `<div class="card quality-context-card"><h3>Карточка CRM</h3><p>${esc(ctx.note||'Карточка недоступна.')}</p></div>`;
+  const d=ctx.deal||{},c=ctx.contact||{};
+  const custom=(items)=>`<div class="quality-custom-fields">${(items||[]).map(f=>`<span><b>${esc(f.label)}:</b> ${f.present?(f.hidden?'заполнено, значение скрыто':esc(f.value||'заполнено')):'пусто'}</span>`).join('')||'<small>Свои поля не настроены</small>'}</div>`;
+  return `<div class="card quality-context-card"><h3>Текущие данные сделки, этапы и задачи из CRM</h3>
+    ${ctx.contactDealCount>1?`<div class="notice warn">У этого контакта ${numFmt(ctx.contactDealCount)} сделки. Переписка в CRM относится к контакту целиком, а не автоматически к одной сделке; проверьте вручную, что выбранное сообщение относится к проверяемому периоду и разговору.</div>`:''}
+    <div class="quality-context-grid"><div><small>Воронка</small><b>${esc(d.pipeline_name||'—')}</b></div><div><small>Этап сейчас</small><b>${esc(d.stage_name||'—')}</b></div>
+      <div><small>Источник</small><b>${esc(sourceLabel(d.source)||d.source||'—')}</b></div><div><small>Ответственный сейчас</small><b>${esc(d.responsible||'—')}</b></div>
+      <div><small>Создана</small><b>${esc(dt(d.created_at)||'—')}</b></div><div><small>Обновлена</small><b>${esc(dt(d.updated_at)||'—')}</b></div>
+      <div><small>Завершена</small><b>${esc(dt(d.closed_at)||'не закрыта')}</b></div><div><small>Сумма сделки</small><b>${fmt(d.amount||0)}</b></div></div>
+    <h4>Свои поля сделки</h4>${custom(d.custom)}<h4>Свои поля контакта</h4>${custom(c.custom)}
+    <h4>История этапов</h4>${(ctx.stageHistory||[]).length?`<div class="quality-stage-history">${(ctx.stageHistory||[]).map(x=>`<span><b>${x.event_type==='created'?'Сделка создана':x.event_type==='baseline'?'Снимок на момент включения журнала':'Вход в этап'}</b> · ${esc(x.stage_name||x.stage)} · ${esc(dt(x.entered_at)||'')}</span>`).join('')}</div>`:'<p class="form-hint">Записей истории этапов нет. Текущий этап не подтверждает, как сделка перемещалась раньше.</p>'}
+    ${ctx.stageHistoryBaseline?'<p class="notice warn">Для этой сделки сохранён только снимок на дату включения журнала. Переходы до этой даты не восстановлены и по текущему этапу не предполагаются.</p>':''}
+    <h4>Задачи сделки и контакта</h4><p class="form-hint">Отдельно показаны задачи самой сделки и задачи, связанные только с контактом.</p><div class="tbl-scroll"><table><tr><th>Связь</th><th>Задача</th><th>Срок</th><th>Состояние</th><th>Ответственный</th></tr>
+      ${(ctx.tasks||[]).map(t=>{const meta=taskDueMeta(t.due,Number(t.done)===1);return `<tr><td>${t.link_type==='contact'?'Контакт':'Сделка'}</td><td><b>#${numFmt(t.id)} ${esc(t.title||'Без названия')}</b>${t.result?`<br><small>${esc(t.result)}</small>`:''}</td><td>${esc(dueText(t.due)||'—')}</td><td>${Number(t.done)?'Выполнена':meta.overdue?'Просрочена':'Открыта'}</td><td>${esc(t.responsible_name||'—')}</td></tr>`;}).join('')||'<tr><td colspan="5"><small>Задач по сделке или контакту пока нет.</small></td></tr>'}
+    </table></div><p class="form-hint">Данные выше только для чтения. Из этой проверки CRM не меняет поля и не создаёт задачи.</p>
+  </div>`;
+}
+function qualitySlaPanel(sla) {
+  if(!sla)return '';
+  const elapsed=Number(sla.elapsedSeconds);
+  const elapsedText=Number.isFinite(elapsed)?(elapsed<60?`${Math.max(0,elapsed)} с`:`${Math.floor(elapsed/60)} мин ${String(Math.max(0,elapsed)%60).padStart(2,'0')} с`):'';
+  const stateText=sla.available?(sla.pending?'Живой ответ не найден':`${sla.onTime?'В пределах ориентира':'Дольше ориентира'} · ${elapsedText} · ориентир до ${numFmt(sla.thresholdMinutes)} мин`):'Нельзя посчитать по доступной истории';
+  const tone=sla.onTime===true?'green':sla.onTime===false||sla.pending?'orange':'grey';
+  const channel=channelLabel(sla.channel)||sla.channel||'';
+  return `<div class="notice ${tone==='green'?'info':tone==='orange'?'warn':'info'} quality-sla"><b>Сверка первого живого ответа: ${esc(stateText)}</b>
+    <small>${esc(sla.reason||'')}</small>
+    <small>${sla.firstIncomingAt?`Сообщение клиента: ${esc(dt(sla.firstIncomingAt)||sla.firstIncomingAt)}`:''}${sla.firstReplyAt?` · Ответ: ${esc(dt(sla.firstReplyAt)||sla.firstReplyAt)}`:''}</small>
+    ${sla.timingBasis?`<small>Основание времени: ${esc(sla.timingBasis)}${channel?` · канал ${esc(channel)}`:''}${sla.firstReplyAuthor?` · ответил ${esc(sla.firstReplyAuthor)}`:''}</small>`:''}
+    <p>Это подсказка для ручной проверки, а не оценка и не автоматический штраф. Проверьте период, источник и автора ответа, затем вручную выберите статус критерия.</p></div>`;
+}
+function qualityMyReviewsBlock(reviews) {
+  return `<div class="card quality-my-feedback"><h3>Обратная связь по ОКК</h3><p class="form-hint">Здесь видны только завершённые проверки ваших сделок. Руководитель сохраняет комментарии и действия вручную; сообщения автоматически не отправляются.</p>
+    ${(reviews||[]).slice(0,5).map(r=>`<button class="quality-my-review" type="button" onclick="qualityOpenMyReview(${Number(r.id)})"><span><b>${esc(r.deal_title)}</b><small>${esc(r.period_start&&r.period_end?`${dt(r.period_start)} — ${dt(r.period_end)}`:'Период не указан')} · проверил ${esc(r.reviewer_name||'руководитель')}</small></span><span>${esc(qualityScoreText(r.score))}<small>${(r.next_steps||[]).length?`${numFmt(r.next_steps.length)} конкретных действий`: 'Комментарий руководителя'}</small></span></button>`).join('')||'<div class="empty">Завершённой обратной связи пока нет.</div>'}
+  </div>`;
+}
+async function qualityOpenMyReview(id) {
+  try{
+    const d=await api('/api/quality/reviews/'+Number(id)),r=d.review;
+    openModal(`<div class="quality-manager-feedback"><div class="row"><h3>Обратная связь по ОКК</h3><button class="btn sm" onclick="closeModal()">Закрыть</button></div>
+      <div class="notice info quality-note"><b>${esc(qualityScoreText(r.score))}</b><small>Это разбор конкретного разговора, не рейтинг сотрудника за весь период.</small></div>
+      <div class="quality-review-context"><div><small>Сделка</small><b>${esc(r.deal_title)}</b></div><div><small>Период контакта</small><b>${esc(r.period_start&&r.period_end?`${dt(r.period_start)} — ${dt(r.period_end)}`:'не указан')}</b></div><div><small>Этап</small><b>${esc(r.stage_name||r.stage||'—')}</b></div><div><small>Источник</small><b>${esc(sourceLabel(r.source)||r.source||'—')}</b></div><div><small>Проверяющий</small><b>${esc(r.reviewer_name||'—')}</b></div></div>
+      ${r.summary?`<div class="card"><b>Сильные стороны</b><p>${esc(r.summary)}</p></div>`:''}
+      ${(r.issues||[]).length?`<div class="card"><b>Подтверждённые проблемы</b><ul>${r.issues.map(x=>`<li>${esc(x)}</li>`).join('')}</ul></div>`:''}
+      ${(r.next_steps||[]).length?`<div class="card"><b>Действия на следующее касание</b><ul>${r.next_steps.map(x=>`<li>${esc(x)}</li>`).join('')}</ul></div>`:''}
+      <div class="card"><h3>18 критериев ОКК</h3>${qualityCriteriaEditor(d.criteria||[],d.items||[],true)}</div>
+      <div class="card"><h3>Развивающие наблюдения</h3>${qualityDevelopmentEditor(d.growthCriteria||[],d.growthItems||[],true)}</div>
+      ${qualityFactsEditor(d.facts||r.facts||{},true)}
+    </div>`);
+  }catch(e){toast(e.message,'err');}
+}
+function qualityMessagesPanel(messages,readOnly,truncated=false) {
+  const data=state.qReviewData||{};
+  const criteria=[...(data.criteria||[]).map(c=>({...c,growth:false})),...(data.growthCriteria||[]).map(c=>({...c,growth:true}))];
+  const contactId=data.crmContext?.contact?.id||data.review?.contact_id||null;
+  const relatedCount=Number(data.crmContext?.contactDealCount)||0;
+  return `<aside class="card quality-source-card"><div class="quality-source-head"><h3>История общения по контакту</h3><small>${numFmt(messages.length)} сообщений ${truncated?'· окно ограничено':''}</small></div>
     <label class="quality-message-search">Найти фразу в истории<input id="qualityMessageSearch" type="search" placeholder="Введите слова из переписки" oninput="qualityFilterMessages(this.value)" ${messages.length?'':'disabled'}></label>
-    ${readOnly?'':`<label class="quality-message-search">К какому критерию приложить<select id="qualityEvidenceTarget"><option value="">Сначала выберите критерий</option>${(state.qReviewData?.criteria||[]).map(c=>`<option value="${esc(c.key)}">${esc(c.block)} — ${esc(c.title)}</option>`).join('')}</select></label>`}
-    <p class="form-hint">Выберите критерий выше, затем добавьте сообщение как источник. Для звонка используйте запись, если она прикреплена, и сверяйте фрагмент вручную.</p>
+    ${relatedCount>1?`<div class="notice warn">У контакта ${numFmt(relatedCount)} сделки. Сообщения привязаны к контакту, а не к отдельной сделке. Перед использованием проверьте принадлежность разговора и даты.</div>`:''}
+    ${!contactId?'<div class="notice warn">У сделки нет связанного контакта. Историю сообщений по ней показать нельзя.</div>':''}
+    ${readOnly?'':`<label class="quality-message-search">К какому пункту приложить<select id="qualityEvidenceTarget"><option value="">Сначала выберите пункт</option>${criteria.map(c=>`<option value="${c.growth?'growth:':''}${esc(c.key)}">${esc(c.block)} — ${esc(c.title)}</option>`).join('')}</select></label>`}
+    <p class="form-hint">Для звонка вручную прослушайте запись, проверьте длительность, таймкод и кто говорит. Неразборчивое место отмечайте как «данных недостаточно», а не как «нет».</p>
+    ${truncated?'<p class="notice warn">В выбранном периоде больше 500 сообщений. Уточните даты, чтобы проверить нужный отрезок истории.</p>':''}
     <div class="quality-message-list">
     ${messages.map(m=>{
       const who=m.direction==='out'?(m.author||'Сотрудник'):(m.author||'Клиент');
       const text=String(m.body||'').trim();
       const attach=m.content_uri?attachmentHtml(m):'';
       const searchable=`${who} ${text} ${m.content_name||''} ${m.channel||''}`.toLocaleLowerCase('ru-RU');
-      const used=(state.qReviewData?.items||[]).some(x=>Number(x.message_id)===Number(m.id));
-      return `<article class="quality-source-item ${used?'has-evidence':''}" data-q-message-text="${esc(searchable)}">
-        <div class="quality-source-meta"><b>${esc(who)}</b><span>${esc(channelLabel(m.channel)||m.channel||'')} · ${esc(dt(m.created_at)||'')}</span></div>
+      const used=[...(state.qReviewData?.items||[]),...(state.qReviewData?.growthItems||[])].some(x=>Number(x.message_id)===Number(m.id));
+      return `<article id="quality-message-${Number(m.id)}" class="quality-source-item ${used?'has-evidence':''}" data-q-message-text="${esc(searchable)}">
+        <div class="quality-source-meta"><b>${esc(who)}</b><span>${esc(channelLabel(m.channel)||m.channel||'')} · ${esc(dt(m.event_at||m.created_at)||'')} · ${m.event_time_source==='provider'?'Wazzup':m.event_time_source==='crm'?'CRM':'время записи CRM'}</span></div>
         ${used?'<span class="tag green quality-used-tag">Указано в проверке</span>':''}
         ${text?`<p>${esc(text)}</p>`:''}${attach}${!text&&!attach?'<small>Текст сообщения недоступен</small>':''}
-        ${readOnly?'':`<button type="button" class="btn sm quality-use-source" onclick="qualityUseEvidence(${Number(m.id)})">${icon('copy',13)} Использовать как доказательство</button>`}
+        ${readOnly?'':`<button type="button" class="btn sm quality-use-source" onclick="qualityUseEvidence(${Number(m.id)})">${icon('copy',13)} Использовать как источник</button>`}
       </article>`;
-    }).join('')||'<div class="empty">В переписке CRM пока нет сообщений. Если проверяете звонок, сначала убедитесь, что запись доступна руководителю.</div>'}
+    }).join('')||'<div class="empty">В проверяемом периоде нет сообщений CRM. Если проверяете звонок, убедитесь, что запись доступна руководителю.</div>'}
     </div>
   </aside>`;
+}
+function qualityGoToMessage(id) {
+  const target=document.getElementById(`quality-message-${Number(id)}`);
+  if(!target){toast('Источник не входит в открытую часть истории контакта.','err');return;}
+  if(target.hidden){const search=$('#qualityMessageSearch');if(search)search.value='';qualityFilterMessages('');}
+  target.scrollIntoView({behavior:'smooth',block:'center'});
+  target.classList.add('quality-source-focus');
+  setTimeout(()=>target.classList.remove('quality-source-focus'),1800);
+}
+function qualityFocusCriterion(key) {
+  const target=document.querySelector(`[data-q-criterion="${key}"]`);
+  if(!target){toast('Подтверждение этого факта не найдено в основном чек-листе.','err');return;}
+  target.scrollIntoView({behavior:'smooth',block:'center'});
+  target.classList.add('quality-source-focus');
+  setTimeout(()=>target.classList.remove('quality-source-focus'),1800);
 }
 function qualityFilterMessages(value) {
   const q=String(value||'').trim().toLocaleLowerCase('ru-RU');
   document.querySelectorAll('.quality-source-item').forEach(row=>{ row.hidden=Boolean(q)&&!String(row.dataset.qMessageText||'').includes(q); });
 }
+function qualityEvidenceSourceChanged(target,value) {
+  const field=document.querySelector(`[data-q-evidence="${target}"]`);
+  const timestamp=document.querySelector(`[data-q-time="${target}"]`);
+  const speaker=document.querySelector(`[data-q-speaker="${target}"]`);
+  if(field&&field.dataset.messageId&&field.dataset.messageSource&&field.dataset.messageSource!==value){
+    field.dataset.messageId='';field.dataset.messageSource='';
+    toast('Связь с выбранным сообщением снята. Добавьте новое сообщение или оставьте ручную ссылку на источник.');
+  }
+  if(value!=='recording'){if(timestamp)timestamp.value='';if(speaker)speaker.value='';}
+}
 function qualityUseEvidence(messageId) {
-  const data=state.qReviewData;
-  const msg=(data?.messages||[]).find(x=>Number(x.id)===Number(messageId));
-  if(!msg) return;
+  const data=state.qReviewData,msg=(data?.messages||[]).find(x=>Number(x.id)===Number(messageId));
+  if(!msg)return;
   const target=$('#qualityEvidenceTarget')?.value||'';
-  if(!target){toast('Сначала выберите критерий, к которому приложить источник.','err');return;}
-  const type=String(msg.content_type||'').toLowerCase();
-  const isRecording=type.startsWith('audio/')||type.startsWith('video/')||/\.(mp3|ogg|opus|wav|m4a|aac|mp4|webm|mov|3gp)$/i.test(msg.content_uri||'');
+  if(!target){toast('Сначала выберите пункт, к которому приложить источник.','err');return;}
+  const isRecording=Boolean(msg.content_uri)&&attachKind(msg)==='audio';
+  if(!String(msg.body||'').trim()&&!msg.content_uri){toast('В этой записи нет текста или вложения для ссылки.','err');return;}
   const source=isRecording?'recording':'message';
   const who=msg.direction==='out'?(msg.author||'Сотрудник'):(msg.author||'Клиент');
   const proof=String(msg.body||'').trim()||`[Вложение: ${attachName(msg)}]`;
-  const stamp=`${who}, ${dt(msg.created_at)||'время не указано'}: «${proof.slice(0,700)}»`;
+  const stamp=isRecording
+    ?`Запись приложена (${who}, ${dt(msg.event_at||msg.created_at)||'время не указано'}). После прослушивания внесите таймкод и проверенную реплику.`
+    :`${who}, ${dt(msg.event_at||msg.created_at)||'время не указано'}: «${proof.slice(0,700)}»`;
   const field=document.querySelector(`[data-q-evidence="${target}"]`);
   const select=document.querySelector(`[data-q-source="${target}"]`);
-  if(field){field.value=stamp;field.dataset.messageId=String(msg.id);}
-  if(select) select.value=source;
-  toast('Источник добавлен. Проверьте цитату и самостоятельно выберите результат критерия.');
+  const confidence=document.querySelector(`[data-q-confidence="${target}"]`);
+  const timestamp=document.querySelector(`[data-q-time="${target}"]`);
+  const speakerSelect=document.querySelector(`[data-q-speaker="${target}"]`);
+  if(field){field.value=stamp;field.dataset.messageId=String(msg.id);field.dataset.messageSource=source;}
+  if(select)select.value=source;
+  if(confidence)confidence.value='needs_review';
+  if(timestamp)timestamp.value='';
+  if(speakerSelect)speakerSelect.value='';
+  toast(isRecording?'Запись приложена. После прослушивания укажите таймкод, автора реплики и проверьте цитату.':'Сообщение добавлено как источник. Проверьте, подтверждает ли оно выбранный вывод.');
 }
 function qualityCollectItems() {
-  return [...document.querySelectorAll('[data-q-status]')].map(el=>{
-    const key=el.dataset.qStatus;
-    const evidence=document.querySelector(`[data-q-evidence="${key}"]`);
-    const source=document.querySelector(`[data-q-source="${key}"]`);
-    return {key,status:el.value,evidence_source:source?.value||'',message_id:evidence?.value.trim()?Number(evidence.dataset.messageId)||null:null,evidence_text:evidence?.value||''};
-  });
+  const collect=(el,key,target)=>{
+    const evidence=document.querySelector(`[data-q-evidence="${target}"]`);
+    const source=document.querySelector(`[data-q-source="${target}"]`);
+    const confidence=document.querySelector(`[data-q-confidence="${target}"]`);
+    const timestamp=document.querySelector(`[data-q-time="${target}"]`);
+    const speaker=document.querySelector(`[data-q-speaker="${target}"]`);
+    return {key,status:el.value,evidence_source:source?.value||'',message_id:evidence?.value.trim()?Number(evidence.dataset.messageId)||null:null,
+      evidence_text:evidence?.value||'',evidence_timestamp:timestamp?.value||'',evidence_speaker:speaker?.value||'',evidence_confidence:confidence?.value||''};
+  };
+  return [...document.querySelectorAll('[data-q-status]')].map(el=>collect(el,el.dataset.qStatus,el.dataset.qStatus));
+}
+function qualityCollectGrowthItems() {
+  const collect=(el,key,target)=>{
+    const evidence=document.querySelector(`[data-q-evidence="${target}"]`),source=document.querySelector(`[data-q-source="${target}"]`);
+    const confidence=document.querySelector(`[data-q-confidence="${target}"]`),timestamp=document.querySelector(`[data-q-time="${target}"]`),speaker=document.querySelector(`[data-q-speaker="${target}"]`);
+    return {key,status:el.value,evidence_source:source?.value||'',message_id:evidence?.value.trim()?Number(evidence.dataset.messageId)||null:null,
+      evidence_text:evidence?.value||'',evidence_timestamp:timestamp?.value||'',evidence_speaker:speaker?.value||'',evidence_confidence:confidence?.value||''};
+  };
+  return [...document.querySelectorAll('[data-q-growth-status]')].map(el=>collect(el,el.dataset.qGrowthStatus,`growth:${el.dataset.qGrowthStatus}`));
+}
+function qualityCollectFacts() {
+  const facts={};
+  for(const el of document.querySelectorAll('[data-q-fact-heard]')){
+    const key=el.dataset.qFactHeard;
+    facts[key]={heard_status:el.value,crm_status:document.querySelector(`[data-q-fact-crm="${key}"]`)?.value||''};
+  }
+  return facts;
 }
 async function qualitySave(status,button) {
   const data=state.qReviewData;
-  if(!data?.review?.id) return;
-  const original=button?.innerHTML;
-  if(button){button.disabled=true;button.innerHTML=icon('refresh',13)+' Сохраняем…';}
+  if(!data?.review?.id)return;
+  const original=button?.innerHTML;if(button){button.disabled=true;button.innerHTML=icon('refresh',13)+' Сохраняем…';}
   const splitLines=id=>String($(id)?.value||'').split(/\r?\n/).map(x=>x.trim()).filter(Boolean);
-  let items=qualityCollectItems();
-  if(status==='no_contact'||status==='unavailable') items=items.map(x=>({...x,status:'',evidence_source:'',message_id:null,evidence_text:''}));
+  let items=qualityCollectItems(),growthItems=qualityCollectGrowthItems(),facts=qualityCollectFacts();
+  if(status==='no_contact'||status==='unavailable'){
+    items=items.map(x=>({...x,status:'',evidence_source:'',message_id:null,evidence_text:'',evidence_timestamp:'',evidence_speaker:'',evidence_confidence:''}));
+    growthItems=growthItems.map(x=>({...x,status:'',evidence_source:'',message_id:null,evidence_text:'',evidence_timestamp:'',evidence_speaker:'',evidence_confidence:''}));
+    facts=Object.fromEntries(Object.keys(facts).map(k=>[k,{heard_status:'',crm_status:''}]));
+  }
   const body={
-    status,
-    data_status:$('#qualityDataStatus')?.value||'partial',
-    interaction_type:$('#qualityInteractionType')?.value||'mixed',
+    status,data_status:$('#qualityDataStatus')?.value||'partial',interaction_type:$('#qualityInteractionType')?.value||'mixed',
     period_start:$('#qualityPeriodStart')?.value||'',period_end:$('#qualityPeriodEnd')?.value||'',
     data_notes:$('#qualityDataNotes')?.value||'',summary:$('#qualitySummaryText')?.value||'',
-    issues:splitLines('#qualityIssues'),next_steps:splitLines('#qualityNextSteps'),
-    crm_observation:$('#qualityCrmObservation')?.value||'',items
+    issues:splitLines('#qualityIssues'),next_steps:splitLines('#qualityNextSteps'),crm_observation:$('#qualityCrmObservation')?.value||'',
+    sample_rule:$('#qualitySampleRule')?.value||'',sample_note:$('#qualitySampleNote')?.value||'',
+    abandoned_card:$('#qualityAbandonedCard')?.checked||false,abandoned_card_evidence:$('#qualityAbandonedEvidence')?.value||'',
+    facts,items,growth_items:growthItems,
   };
-  try {
+  try{
     await api('/api/quality/reviews/'+data.review.id,{method:'PUT',body:JSON.stringify(body)});
-    toast(status==='draft'?'Черновик ОКК сохранён':status==='complete'?'Проверка ОКК завершена':'Результат ОКК сохранён');
-    await render();
-  } catch(e) { toast(e.message,'err'); }
-  finally { if(button){button.disabled=false;button.innerHTML=original;} }
+    toast(status==='draft'?'Черновик ОКК сохранён':status==='complete'?'Проверка ОКК завершена':'Результат ОКК сохранён');await render();
+  }catch(e){toast(e.message,'err');}
+  finally{if(button){button.disabled=false;button.innerHTML=original;}}
 }
 function qualityFinish(status) {
   const message=status==='complete'
-    ?'Завершить проверку? После сохранения её нельзя переписать или удалить. Проверьте цитаты, даты и выбранный знаменатель.'
+    ?'Завершить проверку? После сохранения её нельзя переписать или удалить. Проверьте период, все статусы и доказательства.'
     :status==='no_contact'
-      ?'Отметить, что контакта с клиентом не было? Запись останется в истории отдельно и баллы за отсутствующий разговор не начисляются.'
-      :'Отметить, что история недоступна? Запись останется отдельно и не превратится в нулевую оценку.';
+      ?'Отметить, что контакта с клиентом не было? Запись останется отдельно от оценки критериев.'
+      :'Отметить, что история недоступна? Запись останется отдельно от оценки критериев.';
   askConfirm(message,()=>qualitySave(status),{okText:'Завершить проверку',danger:status!=='complete'});
 }
 function qualityDeleteDraft() {
@@ -3565,57 +4315,67 @@ function qualityDeleteDraft() {
   },{okText:'Удалить черновик',danger:true});
 }
 async function qualityReviewEditor() {
-  const d=await api('/api/quality/reviews/'+Number(state.qReviewId));
-  state.qReviewData=d;
+  const d=await api('/api/quality/reviews/'+Number(state.qReviewId));state.qReviewData=d;
   const r=d.review,readOnly=r.status!=='draft',score=r.score;
-  const final=readOnly?`<div class="notice ${r.status==='complete'?'info':'warn'} quality-note"><span><b>${esc(qualityStatusLabel(r.status))}.</b> ${r.status==='complete'?`Итог по применимым пунктам: ${esc(qualityScoreText(score))}. Это не рейтинг сотрудника; охват и знаменатель показаны рядом.`:esc(r.data_notes||'Баллы не начисляются.')}</span></div>`:'';
+  const final=readOnly?`<div class="notice ${r.status==='complete'?'info':'warn'} quality-note"><span><b>${esc(qualityStatusLabel(r.status))}.</b> ${r.status==='complete'?`Результат: ${esc(qualityScoreText(score))}. Пороговые категории и автоматические действия не применяются.`:esc(r.data_notes||'Оценка не выполнялась.')}</span></div>`:'';
   const manager=r.responsible_name||'не назначен';
   const selectorText=`${qualityStatusLabel(r.status)} · ${esc(r.contact_name||'Контакт не указан')} · ${esc(manager)}`;
   const criteria=readOnly&&r.status!=='complete'
-    ?`<div class="empty quality-no-score">${icon(r.status==='no_contact'?'phone':'alert',22)}<b>Критерии не оценивались</b><span>${esc(r.data_notes||'Для этого результата баллы не начисляются.')}</span></div>`
+    ?`<div class="empty quality-no-score">${icon(r.status==='no_contact'?'phone':'alert',22)}<b>Критерии не оценивались</b><span>${esc(r.data_notes||'Для этого результата критерии не оценивались.')}</span></div>`
     :`<div class="quality-criterion-list">${qualityCriteriaEditor(d.criteria||[],d.items||[],readOnly)}</div>`;
-  return `<div class="card toolbar quality-editor-toolbar"><button class="btn" onclick="qualityBackToReviews()">${icon('arrowLeft',14)} К проверкам</button>
-    <span><b>Проверка ОКК</b><small>${selectorText}</small></span>
-    <span class="tag ${qualityStatusClass(r.status)}">${qualityStatusLabel(r.status)}</span>
-  </div>
-  ${final}
-  <div class="card quality-review-context"><div><small>Сделка</small><b>${esc(r.deal_title)}</b></div><div><small>Клиент</small><b>${esc(r.contact_name||'не указан')}</b></div><div><small>Ответственный на дату проверки</small><b>${esc(manager)}</b></div><div><small>Этап на дату проверки</small><b>${esc(r.stage_name||r.stage||'—')}</b></div><div><small>Источник</small><b>${esc(sourceLabel(r.source)||r.source||'—')}</b></div><div><small>Проверяющий</small><b>${esc(r.reviewer_name||'—')}</b></div>${readOnly?`<div><small>Тип контакта</small><b>${esc(qualityInteractionLabel(r.interaction_type))}</b></div><div><small>Полнота истории</small><b>${esc(qualityDataStatusLabel(r.data_status))}</b></div><div><small>Проверенный период</small><b>${esc(r.period_start&&r.period_end?`${dt(r.period_start)} — ${dt(r.period_end)}`:'не указан')}</b></div>`:''}</div>
-  ${readOnly?`<div class="quality-final-notes card"><h3>Запись руководителя</h3>
+  const meta=`<div class="card quality-review-context">
+    <div><small>ID сделки</small><b>${numFmt(r.deal_id)}</b><button type="button" class="btn sm ghost" onclick="openDealCard(${Number(r.deal_id)})">Открыть карточку сделки</button></div>
+    <div><small>Сделка</small><b>${esc(r.deal_title)}</b></div><div><small>Клиент</small><b>${esc(r.contact_name||'не указан')}</b></div>
+    <div><small>Ответственный на момент проверки</small><b>${esc(manager)}</b></div><div><small>Воронка на момент проверки</small><b>${esc(r.pipeline_name||'—')}</b></div>
+    <div><small>Этап на момент проверки</small><b>${esc(r.stage_name||r.stage||'—')}</b></div><div><small>Источник при создании проверки</small><b>${esc(sourceLabel(r.source)||r.source||'—')}</b></div>
+    <div><small>Проверяющий</small><b>${esc(r.reviewer_name||'—')}</b></div><div><small>Основание выборки</small><b>${esc(qualitySampleRuleLabel(r.sample_rule))}${r.sample_note?` · ${esc(r.sample_note)}`:''}</b></div>
+    ${readOnly?`<div><small>Тип контакта</small><b>${esc(qualityInteractionLabel(r.interaction_type))}</b></div><div><small>Полнота истории</small><b>${esc(qualityDataStatusLabel(r.data_status))}</b></div>
+      <div><small>Проверенный период разговора</small><b>${esc(r.period_start&&r.period_end?`${dt(r.period_start)} — ${dt(r.period_end)}`:'не указан')}</b></div><div><small>Завершена</small><b>${esc(dt(r.completed_at)||'—')}</b></div>`:''}</div>`;
+  const record=readOnly?`<div class="quality-final-notes card"><h3>Запись руководителя</h3>
     ${r.summary?`<div><b>Сильные стороны</b><p>${esc(r.summary)}</p></div>`:''}
     ${(r.issues||[]).length?`<div><b>Подтверждённые проблемы</b><ul>${r.issues.map(x=>`<li>${esc(x)}</li>`).join('')}</ul></div>`:''}
-    ${(r.next_steps||[]).length?`<div><b>Следующие действия</b><ul>${r.next_steps.map(x=>`<li>${esc(x)}</li>`).join('')}</ul></div>`:''}
-    ${r.crm_observation?`<div><b>Проверка карточки CRM</b><p>${esc(r.crm_observation)}</p></div>`:''}
+    ${(r.next_steps||[]).length?`<div><b>Действия на следующее касание</b><ul>${r.next_steps.map(x=>`<li>${esc(x)}</li>`).join('')}</ul></div>`:''}
+    ${r.crm_observation?`<div><b>Контроль CRM</b><p>${esc(r.crm_observation)}</p></div>`:''}
     ${r.data_notes?`<div><b>Доступность данных</b><p>${esc(r.data_notes)}</p></div>`:''}
-  </div>`:''}
-  ${readOnly?'':`<div class="card quality-review-form">
-    <h3>Контекст проверки</h3><p class="form-hint">Проверяйте доступную историю. Не заполняйте неизвестное догадками и не меняйте карточку сделки, задачи или переписку из этого экрана.</p>
+    ${Number(r.abandoned_card)?`<div class="notice warn"><b>Отдельная отметка: карточка фактически заброшена.</b><p>${esc(r.abandoned_card_evidence||'')}</p><small>Отметка не меняет процент и не создаёт автоматических действий.</small></div>`:''}
+  </div>`:'';
+  const form=readOnly?'':`<div class="card quality-review-form">
+    <h3>Контекст проверки</h3><p class="form-hint">Руководитель вручную проверяет сделку и источники. Не меняйте поля, задачи или переписку из этого экрана; неизвестное отмечайте как недоступное.</p>
     <div class="quality-form-grid">
-      <label>Тип контакта<select id="qualityInteractionType"><option value="unknown" ${r.interaction_type==='unknown'?'selected':''}>Не определён</option><option value="chat" ${r.interaction_type==='chat'?'selected':''}>Переписка</option><option value="call" ${r.interaction_type==='call'?'selected':''}>Звонок</option><option value="mixed" ${r.interaction_type==='mixed'?'selected':''}>Звонок и переписка</option><option value="other" ${r.interaction_type==='other'?'selected':''}>Другое</option></select></label>
-      <label>Полнота истории<select id="qualityDataStatus"><option value="complete" ${r.data_status==='complete'?'selected':''}>Доступная история полная</option><option value="partial" ${r.data_status!=='complete'?'selected':''}>История частичная</option></select></label>
-      <label>Начало периода<input id="qualityPeriodStart" type="date" value="${esc(r.period_start||'')}"></label>
-      <label>Конец периода<input id="qualityPeriodEnd" type="date" value="${esc(r.period_end||'')}"></label>
+      <label><span class="quality-required-label">Тип контакта <i>*</i></span><select id="qualityInteractionType"><option value="unknown" ${r.interaction_type==='unknown'?'selected':''}>Не определён</option><option value="chat" ${r.interaction_type==='chat'?'selected':''}>Переписка</option><option value="call" ${r.interaction_type==='call'?'selected':''}>Звонок</option><option value="mixed" ${r.interaction_type==='mixed'?'selected':''}>Звонок и переписка</option><option value="other" ${r.interaction_type==='other'?'selected':''}>Другое</option></select></label>
+      <label><span class="quality-required-label">Полнота доступной истории <i>*</i></span><select id="qualityDataStatus"><option value="complete" ${r.data_status==='complete'?'selected':''}>История полная</option><option value="partial" ${r.data_status!=='complete'?'selected':''}>История частичная</option></select></label>
+      <label><span class="quality-required-label">Начало проверяемого периода <i>*</i></span><input id="qualityPeriodStart" type="date" value="${esc(r.period_start||'')}"></label>
+      <label><span class="quality-required-label">Конец проверяемого периода <i>*</i></span><input id="qualityPeriodEnd" type="date" value="${esc(r.period_end||'')}"></label>
+      <label><span class="quality-required-label">Основание выборки <i>*</i></span><select id="qualitySampleRule"><option value="">Выберите основание</option>${[['all_new','Все новые обращения'],['random','Случайная выборка'],['repeat_contact','Повторное касание'],['closed_deal','Завершённая сделка'],['risk_signal','Сигнал риска'],['manager_choice','Выбор руководителя'],['other','Другое']].map(([v,t])=>`<option value="${v}" ${r.sample_rule===v?'selected':''}>${t}</option>`).join('')}</select></label>
     </div>
-    <label>Доступность источников и причина результата<textarea id="qualityDataNotes" rows="2" maxlength="1200" placeholder="Например: менеджер ещё не связался с клиентом; запись обрывается до договорённости; условия нужно сверить с руководителем">${esc(r.data_notes||'')}</textarea></label>
-  </div>`}
-  <div class="quality-review-layout">
-    <div class="quality-checklist-column"><div class="card quality-checklist-head"><h3>18 критериев проверки</h3><p class="form-hint">Для каждого пункта выберите «да», «нет», «не применимо» или «данных недостаточно» и запишите источник с цитатой либо причину. Критичные пункты выделены, но автоматически не вычитают баллы.</p>
-      ${readOnly&&r.status==='complete'?`<div class="quality-result-summary"><b>${esc(qualityScoreText(score))}</b><small>${score?.insufficient?`Недостаточно данных: ${numFmt(score.insufficient)}.`:''} Неприменимо: ${numFmt(score?.notApplicable||0)}. ${score?.criticalFailures?`Критичных пунктов со статусом «нет»: ${numFmt(score.criticalFailures)}. `:''}Пороговые статусы не назначаются.</small></div>`:''}
-    </div>${criteria}
-    ${readOnly?'':`<div class="card quality-review-form">
-      <h3>Краткое заключение</h3>
-      <label>Подтверждённые сильные стороны<textarea id="qualitySummaryText" rows="2" maxlength="2000">${esc(r.summary||'')}</textarea></label>
-      <label>До трёх подтверждённых проблем<textarea id="qualityIssues" rows="3" maxlength="1500" placeholder="Одна проблема на строку">${esc((r.issues||[]).join('\n'))}</textarea></label>
-      <label>До трёх действий на следующее касание<textarea id="qualityNextSteps" rows="3" maxlength="1500" placeholder="Одно действие на строку">${esc((r.next_steps||[]).join('\n'))}</textarea></label>
-      <label>Проверка CRM<textarea id="qualityCrmObservation" rows="2" maxlength="2000" placeholder="Факты в карточке, задача, ответственный; ничего не меняется автоматически">${esc(r.crm_observation||'')}</textarea></label>
-    </div>
-    <div class="card quality-editor-actions"><button class="btn" onclick="qualitySave('draft',this)">${icon('save',14)} Сохранить черновик</button>
-      <button class="btn primary" onclick="qualityFinish('complete')">${icon('checkCircle',14)} Завершить проверку</button>
-      <button class="btn sm ghost" onclick="qualityFinish('no_contact')">Контакта не было</button>
-      <button class="btn sm ghost" onclick="qualityFinish('unavailable')">Данные недоступны</button>
-      <button class="btn sm danger quality-delete" onclick="qualityDeleteDraft()">${icon('trash',13)} Удалить черновик</button>
-    </div>`}
-    ${qualityMessagesPanel(d.messages||[],readOnly)}
+    <label>Пояснение к выборке <small>(обязательно для «Другое»)</small><input id="qualitySampleNote" maxlength="500" value="${esc(r.sample_note||'')}" placeholder="Например, выборка новых обращений за неделю по Авито"></label>
+    <label>Что недоступно или требует ручной перепроверки<textarea id="qualityDataNotes" rows="2" maxlength="1200" placeholder="Например: запись обрывается до договорённости; источник объявления недоступен; есть повторные касания">${esc(r.data_notes||'')}</textarea></label>
   </div>`;
+  const scoreSummary=readOnly&&r.status==='complete'?`<div class="quality-result-summary"><b>${esc(qualityScoreText(score))}</b><small>${score?.insufficient?`Данных недостаточно: ${numFmt(score.insufficient)}. `:''}Не применимо: ${numFmt(score?.notApplicable||0)}. ${score?.criticalMarkedNo?.length?`Отметок «нет» по пунктам, помеченным критичными в рабочей таблице: ${numFmt(score.criticalMarkedNo.length)}.`:'Отметок «нет» по помеченным критичными пунктам нет.'}</small></div>`:'';
+  const abandoned=readOnly?'':`<div class="quality-abandoned-card"><label class="check-line"><input id="qualityAbandonedCard" type="checkbox" style="width:auto" ${Number(r.abandoned_card)?'checked':''}><span>Карточка фактически заброшена <small>Отдельная отметка из рабочей таблицы. Укажите проверяемый факт; отметка не меняет процент и не создаёт автоматических действий.</small></span></label>
+    <label>Подтверждение<textarea id="qualityAbandonedEvidence" rows="2" maxlength="1200" placeholder="Что отсутствует и какой факт показывает, что сделка оставлена без контроля">${esc(r.abandoned_card_evidence||'')}</textarea></label></div>`;
+  const growth=readOnly&&r.status!=='complete'?'':`<div class="card quality-growth-head"><h3>10 дополнительных критериев из «Контура развития»</h3><p class="form-hint">Они нужны для анализа и недельных показателей, но не добавляются к результату по 18 основным критериям.</p></div><div class="quality-criterion-list">${qualityDevelopmentEditor(d.growthCriteria||[],d.growthItems||[],readOnly)}</div>`;
+  const facts=readOnly&&r.status!=='complete'?'':qualityFactsEditor(d.facts||r.facts||{},readOnly);
+  return `<div class="card toolbar quality-editor-toolbar"><button class="btn" onclick="qualityBackToReviews()">${icon('arrowLeft',14)} К проверкам</button>
+    <span><b>Проверка ОКК</b><small>${selectorText}</small></span><span class="tag ${qualityStatusClass(r.status)}">${qualityStatusLabel(r.status)}</span></div>
+    ${final}${meta}${form}${qualitySlaPanel(d.firstReply)}${qualityCrmContextPanel(d.crmContext)}${record}
+    <div class="quality-review-layout"><div class="quality-checklist-column">
+      <div class="card quality-checklist-head"><h3>18 критериев рабочей таблицы</h3><p class="form-hint">Для каждого статуса требуется источник и проверяемая цитата или причина. Для аудио вручную проверьте длительность, таймкод и собеседника. Неразборчивый или недоступный фрагмент остаётся «данных недостаточно». Распознавание речи не используется.</p>
+        ${scoreSummary}${abandoned}</div>
+      ${criteria}${facts}${growth}
+      ${readOnly?'':`<div class="card quality-review-form"><h3>Краткое заключение руководителя</h3>
+        <label>Подтверждённые сильные стороны<textarea id="qualitySummaryText" rows="2" maxlength="2000">${esc(r.summary||'')}</textarea></label>
+        <label>До трёх подтверждённых проблем<textarea id="qualityIssues" rows="3" maxlength="1500" placeholder="Одна проблема на строку">${esc((r.issues||[]).join('\\n'))}</textarea></label>
+        <label>До трёх конкретных действий на следующее касание<textarea id="qualityNextSteps" rows="3" maxlength="1500" placeholder="Например: подтвердить регион по актуальной карте и назначить время повторного звонка">${esc((r.next_steps||[]).join('\\n'))}</textarea></label>
+        <label>Проверка карточки CRM<textarea id="qualityCrmObservation" rows="2" maxlength="2000" placeholder="Факты в карточке, ближайшая задача и срок; ничего не меняется автоматически">${esc(r.crm_observation||'')}</textarea></label>
+      </div>
+      <div class="card quality-editor-actions"><button class="btn" onclick="qualitySave('draft',this)">${icon('save',14)} Сохранить черновик</button>
+        <button class="btn primary" onclick="qualityFinish('complete')">${icon('checkCircle',14)} Завершить проверку</button>
+        <button class="btn sm ghost" onclick="qualityFinish('no_contact')">Контакта не было</button>
+        <button class="btn sm ghost" onclick="qualityFinish('unavailable')">Данные недоступны</button>
+        <button class="btn sm danger quality-delete" onclick="qualityDeleteDraft()">${icon('trash',13)} Удалить черновик</button>
+      </div>`}
+    </div>${qualityMessagesPanel(d.messages||[],readOnly,d.messageHistoryTruncated)}</div>`;
 }
 /* ---------- competitors view ---------- */
 // Уровень риска сервер считает словами — цвета подбираем к тем же словам,
@@ -3637,11 +4397,11 @@ async function competitorsView(v) {
     ${canEdit() ? `<button class="btn primary" style="margin-left:auto" onclick="openCompetitor()">${icon('plus', 14)} Добавить конкурента</button>` : `<span style="margin-left:auto"></span>`}
     <button class="btn" title="Наш прайс-лист — это раздел «Каталог»: те же позиции и цены" onclick="openOurPrices()">${icon('excel', 14)} Наш прайс-лист${ours.rows.length ? ` (${ours.rows.length})` : ''}</button>
   </div>
-  ${canEdit() ? bulkSlot('competitors', `<button class="btn sm danger" onclick="bulkDeleteCompetitors()">${icon('trash', 13)} Удалить</button>`) : ''}
+  ${canDeleteCompetitors() ? bulkSlot('competitors', `<button class="btn sm danger" onclick="bulkDeleteCompetitors()">${icon('trash', 13)} Удалить</button>`) : ''}
   <div class="card">
    <div class="tbl-scroll"><table><tr><th class="sel"></th><th>Конкурент</th><th>ИНН</th><th>Риск и проверка</th><th>Цены</th><th></th></tr>
     ${shown.map(c => `<tr class="${selSet('competitors').has(c.id) ? 'selected' : ''}">
-     <td class="sel">${canEdit() ? `<input type="checkbox" data-selkey="competitors" data-selid="${c.id}" title="Выбрать для массового действия" ${selSet('competitors').has(c.id) ? 'checked' : ''} onchange="toggleSel('competitors',${c.id})">` : ''}</td>
+     <td class="sel">${canDeleteCompetitors() ? `<input type="checkbox" data-selkey="competitors" data-selid="${c.id}" title="Выбрать для массового удаления" ${selSet('competitors').has(c.id) ? 'checked' : ''} onchange="toggleSel('competitors',${c.id})">` : ''}</td>
      <td><a href="#" onclick="openCompetitorCard(${c.id});return false"><b>${esc(c.name)}</b></a><br><small>${esc(c.city || '')}${c.city && siteHref(c.website) ? ' · ' : ''}${siteHref(c.website) ? `<a href="${esc(siteHref(c.website))}" target="_blank" rel="noopener">${esc(c.website)}</a>` : ''}</small></td>
      <td><code>${esc(c.inn || '—')}</code></td>
      <td>${c.risk === null || c.risk === undefined ? '<span class="tag grey">не проверялся</span>' : `<span class="tag risk-tag" style="--risk:${esc(riskColor(c.level))}" title="Риск-оценка от 0 до 100 по открытым источникам">риск ${c.risk} · ${esc(RISK_LABELS[String(c.level || '').toLowerCase()] || c.level || '—')}</span>`}<br><small>${esc(dt(c.checked_at) || '')}</small></td>
@@ -3649,8 +4409,8 @@ async function competitorsView(v) {
      <td style="white-space:nowrap">
        <button class="btn sm" onclick="openCompetitorCard(${c.id})">Отчёт</button>
        ${canEdit() ? `<button class="btn sm" onclick="checkCompetitor(${c.id})">${icon('refresh', 13)} Проверить</button>
-       <button class="btn sm" title="Изменить карточку конкурента" onclick="openCompetitor(${c.id})">${icon('edit', 13)}</button>
-       <button class="btn sm danger" title="Удалить конкурента" onclick="delCompetitor(${c.id})">${icon('close', 13)}</button>` : ''}
+       <button class="btn sm" title="Изменить карточку конкурента" onclick="openCompetitor(${c.id})">${icon('edit', 13)}</button>` : ''}
+       ${canDeleteCompetitors() ? `<button class="btn sm danger" title="Удалить конкурента" onclick="delCompetitor(${c.id})">${icon('close', 13)}</button>` : ''}
      </td></tr>`).join('') || `<tr><td colspan="6"><div class="empty">${q ? 'Ничего не найдено — измените поиск' : 'Конкурентов пока нет — добавьте первого кнопкой выше'}</div></td></tr>`}
    </table></div>
   </div>`;
@@ -3707,7 +4467,7 @@ async function openOurPrices(backId = null) {
   openModal(`<h3>${icon('excel', 18)} Наш прайс-лист</h3>
    <p class="form-hint">Ваш прайс-лист: позиции подставляются в сделки, и эти же цены сравниваются с ценами конкурентов. Позиций: <b>${rows.length}</b>${rows.length ? ` · суммарно на <b>${fmt(sum)}</b>` : ''}.</p>
    <div style="display:flex;gap:8px;flex-wrap:wrap;margin:10px 0">
-     <button class="btn sm" title="Скачать прайс-лист таблицей CSV" onclick="download('/api/prices/export?scope=ours','price-list.csv')">${icon('download', 13)} Скачать прайс (CSV)</button>
+     ${canExport() ? `<button class="btn sm" title="Скачать прайс-лист таблицей CSV" onclick="download('/api/prices/export?scope=ours','price-list.csv')">${icon('download', 13)} Скачать прайс (CSV)</button>` : ''}
      ${amAdmin() ? `<button class="btn sm primary" onclick="openPriceImport(null,'ours')">${icon('upload', 13)} Загрузить из файла</button>` : ''}
      <button class="btn sm" title="Открыть раздел «Каталог» — там прайс и редактируется" onclick="closeModal();go('products')">${icon('products', 13)} Открыть каталог</button>
      ${state.ourPricesBack ? `<button class="btn sm" onclick="openCompetitorCard(${state.ourPricesBack})">${icon('arrowLeft', 13)} Назад к отчёту</button>` : ''}
@@ -3758,12 +4518,14 @@ async function checkCompetitor(id) {
 }
 
 function delCompetitor(id) {
+  if (!canDeleteCompetitors()) { toast('Удалять общие карточки конкурентов может только администратор.', 'err'); return; }
   askConfirm('Удалить конкурента вместе со всеми его отчётами? Действие необратимо.', async () => {
     await api('/api/competitors/' + id, { method: 'DELETE' });
     toast('Удалено'); render();
   }, { okText: 'Удалить' });
 }
 function bulkDeleteCompetitors() {
+  if (!canDeleteCompetitors()) { toast('Удалять общие карточки конкурентов может только администратор.', 'err'); return; }
   const ids = [...selSet('competitors')];
   if (!ids.length) return;
   askConfirm(`Удалить выбранные карточки конкурентов — ${ids.length} шт.? Отчёты, отзывы, найденные изменения и прайсы этих карточек удалятся вместе с ними.`, async () => {
@@ -3790,8 +4552,6 @@ async function openCompetitor(id) {
    ${grid2(`${fld('Город', `<input name="city" value="${esc(c.city || '')}">`)}
      ${fld('Сайт', `<input name="website" value="${esc(c.website || '')}" placeholder="brusdom.ru">`)}`)}
    ${fld('Телефон', `<input name="phone" value="${esc(c.phone || '')}">`)}
-   ${fld('Ссылка на прайс', `<input name="price_url" value="${esc(c.price_url || '')}" placeholder="https://…/price.csv">`)}
-   <p class="form-hint" style="margin-top:-4px">Если конкурент публикует прайс таблицей, укажите адрес — CRM сама подтянет его при каждой проверке, и позиции попадут в сравнение цен.</p>
    ${fld('Заметки', `<textarea name="notes" rows="2">${esc(c.notes || '')}</textarea>`)}
    <button class="btn primary w">Сохранить</button></form>`);
 }
@@ -3813,7 +4573,7 @@ async function openCompetitorCard(id) {
      <div style="display:flex;gap:6px;flex-wrap:wrap">
        ${canEdit() ? `<button class="btn sm primary" onclick="checkCompetitor(${c.id})">${icon('refresh', 13)} Проверить сейчас</button>
        <button class="btn sm" onclick="openPriceImport(${c.id},'theirs')">${icon('excel', 13)} Загрузить прайс</button>` : ''}
-       ${(c.prices || []).length ? `<button class="btn sm" title="Скачать прайс конкурента таблицей CSV" onclick="download('/api/prices/export?scope=competitor&competitor=${c.id}','competitor-prices.csv')">${icon('download', 13)} Скачать прайс</button>` : ''}
+       ${canExport() && (c.prices || []).length ? `<button class="btn sm" title="Скачать прайс конкурента таблицей CSV" onclick="download('/api/prices/export?scope=competitor&competitor=${c.id}','competitor-prices.csv')">${icon('download', 13)} Скачать прайс</button>` : ''}
        <button class="btn sm" title="Скопировать сводку отчёта текстом: риск, вердикт, аргументы, суды, рейтинг, цены" onclick="copyReportSummary(${c.id})">${icon('copy', 13)} Скопировать сводку</button>
      </div>
    </div>
@@ -3834,10 +4594,10 @@ async function openCompetitorCard(id) {
 // оценкой. Держать два места для одного смысла — значит расходиться в данных.
 const FINDING_KINDS = ['долги', 'суды', 'связи', 'прочее'];
 
-// Банк данных ФССП, «Связи» на Rusprofile и отзывы на Авито автоматически не
-// отдаются: API закрыт, сайт закрыт от роботов, данные за платным доступом.
-// Поэтому то, что менеджер посмотрел сам, записывается сюда и попадает в отчёт
-// и в оценку риска — иначе проверка испаряется вместе с закрытой вкладкой.
+// Долги ФССП, связи в Rusprofile и отзывы Авито не собираются автоматически:
+// API закрыт или отсутствует, часть сведений доступна по платной подписке.
+// Поэтому то, что менеджер проверил сам, записывается сюда и попадает в отчёт
+// и оценку риска — иначе проверка испаряется вместе с закрытой вкладкой.
 function findingsBlock(c) {
   const finds = c.findings || [];
   return `<hr><div class="row" style="border:0"><h4>Найдено вручную (${finds.length})</h4></div>
@@ -3846,7 +4606,7 @@ function findingsBlock(c) {
       ${f.amount ? `<br><small>${f.kind === 'суды' ? esc(numFmt(f.amount) + ' ' + plural(f.amount, 'дело', 'дела', 'дел')) : esc(fmt(f.amount))}</small>` : ''}
       ${f.note ? `<br><small>${esc(f.note)}</small>` : ''}
       <br><small>${esc(f.author || '')} · ${esc(dt(f.created_at))}${f.source_url ? ` · <a href="${esc(f.source_url)}" target="_blank" rel="noopener">источник</a>` : ''}</small></span>
-      ${canEdit() ? `<button class="btn sm ghost" onclick="deleteFinding(${f.id},${c.id})">Удалить</button>` : ''}</div>`).join('') || '<small>Записей пока нет</small>'}</div>
+      ${canDeleteCompetitors() ? `<button class="btn sm ghost" onclick="deleteFinding(${f.id},${c.id})">Удалить</button>` : ''}</div>`).join('') || '<small>Записей пока нет</small>'}</div>
    ${canEdit() ? `<form onsubmit="return saveFinding(event,${c.id})" style="margin-top:10px">
      <div class="find-grid">
       <label>Что нашли<select name="kind">${FINDING_KINDS.map(k => `<option value="${k}">${k}</option>`).join('')}</select></label>
@@ -3870,6 +4630,7 @@ async function saveFinding(e, cid) {
 }
 
 function deleteFinding(fid, cid) {
+  if (!canDeleteCompetitors()) { toast('Удалять общие записи проверки может только администратор.', 'err'); return; }
   askConfirm('Удалить запись о находке? Она перестанет учитываться в оценке риска.', async () => {
     try {
       await api(`/api/competitors/${cid}/findings/${fid}`, { method: 'DELETE' });
@@ -3930,17 +4691,16 @@ function competitorTab(c) {
     // Паспорт компании собран из ответов реестров: карточка предприятия уже
     // приходит в проверке источников, но в отчёте до сих пор не показывалась
     const fCard = (g('fns').data || {}).card || {};
-    const rCard = (g('rusprofile').data || {}).card || {};
     const pget = (...vals) => { for (const v of vals) if (v !== undefined && v !== null && v !== '') return v; return ''; };
     const num = v => { const n = Number(v); return Number.isFinite(n) ? n : 0; };
-    const status = String(pget(fCard.status, rCard.status));
+    const status = String(pget(fCard.status));
     const statusTag = !status ? '' : /недейств|прекращ|ликвидац|банкрот/i.test(status)
       ? `<span class="tag orange">${esc(status)}</span>` : `<span class="tag">${esc(status)}</span>`;
     const passport = [
       ['Статус', statusTag],
-      ['ИНН / ОГРН', [c.inn || fCard.inn || rCard.inn, c.ogrn || fCard.ogrn || rCard.ogrn].filter(Boolean).map(esc).join(' · ')],
+      ['ИНН / ОГРН', [c.inn || fCard.inn, c.ogrn || fCard.ogrn].filter(Boolean).map(esc).join(' · ')],
       ['Регистрация', [pget(fCard.regDate), pget(fCard.region)].filter(Boolean).map(esc).join(' · ')],
-      ['Адрес', esc(pget(fCard.address, rCard.address))],
+      ['Адрес', esc(pget(fCard.address))],
       ['Руководитель', esc(pget(fCard.director))],
       ['Учредители', esc((fCard.founders || []).join(', '))],
       ['Численность', fCard.employees ? esc(numFmt(fCard.employees)) + ' чел.' : ''],
@@ -4038,7 +4798,7 @@ function competitorTab(c) {
       <p class="form-hint">Ключи добавляет администратор в разделе «Настройки → Интеграции». Пока ключа нет, данные смотрятся по ссылкам.</p>
       <div class="list">${noKey.map(row).join('')}</div>` : ''}
      ${manual.length ? `<hr><h4>Проверяется вручную по официальным ссылкам</h4>
-      <p class="form-hint">Эти реестры не отдают данные программам: нет открытого API или сайт закрыт от роботов. Откройте ссылку и запишите найденное в блок «Найдено вручную».</p>
+      <p class="form-hint">Эти источники CRM не проверяет автоматически: у них нет открытого API, доступ закрыт или данные доступны по подписке. Откройте ссылку и запишите найденное в блок «Найдено вручную».</p>
       <div class="list">${manual.map(row).join('')}</div>` : ''}
      ${checks.length ? '' : '<p class="form-hint">Источники ещё не опрашивались — нажмите «Проверить сейчас».</p>'}`;
   }
@@ -4064,7 +4824,7 @@ function competitorTab(c) {
   }
   if (state.compTab === 'reviews') {
     return `<div class="row" style="border:0"><h4>Отзывы клиентов (${(c.reviews || []).length})</h4><button class="btn sm" onclick="addReview(${c.id})">+ Добавить отзыв</button></div>
-     <div class="list">${(c.reviews || []).map(r => `<div class="row"><span><b>${esc(r.author || 'Клиент')}</b> (${r.rating} ${icon('star', 12)}) — <small>${esc(r.source || 'карты')}</small><br>${esc(r.text)}</span>${canEdit() ? `<button class="btn sm danger" onclick="delReview(${r.id},${c.id})">${icon('close', 13)}</button>` : ''}</div>`).join('') || '<small>Отзывов пока нет</small>'}</div>`;
+     <div class="list">${(c.reviews || []).map(r => `<div class="row"><span><b>${esc(r.author || 'Клиент')}</b> (${r.rating} ${icon('star', 12)}) — <small>${esc(r.source || 'карты')}</small><br>${esc(r.text)}</span>${canDeleteCompetitors() ? `<button class="btn sm danger" onclick="delReview(${r.id},${c.id})">${icon('close', 13)}</button>` : ''}</div>`).join('') || '<small>Отзывов пока нет</small>'}</div>`;
   }
   if (state.compTab === 'prices') {
     // сравнение считается по текущим данным: обновили цену в каталоге — цифры сразу свежие
@@ -4106,7 +4866,10 @@ function addReview(cid) {
    <button class="btn primary w">Сохранить</button></form>`);
 }
 async function saveReview(e, cid) { e.preventDefault(); const b = Object.fromEntries(new FormData(e.target)); b.competitor_id = cid; b.rating = +b.rating; await api('/api/reviews', { method: 'POST', body: JSON.stringify(b) }); closeModal(); toast('Отзыв добавлен'); openCompetitorCard(cid); return false; }
-async function delReview(rid, cid) { await api('/api/reviews/' + rid, { method: 'DELETE' }); toast('Удалено'); openCompetitorCard(cid); }
+async function delReview(rid, cid) {
+  if (!canDeleteCompetitors()) { toast('Удалять отзывы из общего справочника может только администратор.', 'err'); return; }
+  await api('/api/reviews/' + rid, { method: 'DELETE' }); toast('Удалено'); openCompetitorCard(cid);
+}
 
 // Как перенести файл в прайс-лист. По умолчанию — безопасно: знакомые позиции
 // обновляются, новые добавляются, ничего не пропадает.
@@ -4120,18 +4883,20 @@ function priceModeField() {
 }
 function openPriceImport(competitorId, scope) {
   const ours = scope === 'ours';
+  if (ours && !canExport()) { toast('Скачать и менять общий прайс может только администратор.', 'err'); return; }
+  if (!ours && !canEdit()) { toast('Недостаточно прав для изменения прайса конкурента.', 'err'); return; }
   openModal(`<h3>${ours ? 'Загрузка прайс-листа' : 'Загрузка прайса конкурента'} (Excel / CSV)</h3>
    <p class="form-hint">${ours
     ? 'Прайс-лист — это ваш каталог: загруженные цены сразу появятся в сделках и в сравнении с конкурентами.'
     : 'Прайс конкурента нужен для сравнения позиций во вкладке «Сравнение цен».'}</p>
-   ${ours ? `<div class="notice info" style="margin-bottom:10px">Удобнее всего так: скачайте текущий прайс, поправьте цены в Excel и загрузите файл обратно — знакомые позиции обновятся, новые добавятся.<div style="margin-top:8px"><button type="button" class="btn sm" onclick="download('/api/prices/export?scope=ours','price-list.csv')">${icon('download', 13)} Скачать текущий прайс</button></div></div>`
-     : `<p class="form-hint">Загрузка заменит предыдущий прайс этого конкурента.</p>`}
+   ${ours && canExport() ? `<div class="notice info" style="margin-bottom:10px">Удобнее всего так: скачайте текущий прайс, поправьте цены в Excel и загрузите файл обратно — знакомые позиции обновятся, новые добавятся.<div style="margin-top:8px"><button type="button" class="btn sm" onclick="download('/api/prices/export?scope=ours','price-list.csv')">${icon('download', 13)} Скачать текущий прайс</button></div></div>`
+     : !ours ? `<p class="form-hint">Загрузка заменит предыдущий прайс этого конкурента.</p>` : ''}
    <p><small>Первая строка — заголовки: <code>Наименование;Цена;Ед</code>. Например: <code>Дом 8×10;3850000;шт</code>. Подойдёт файл CSV (обычная таблица) или первый лист Excel; цены — числами. <a href="/examples/prices.csv" download>Скачать пример</a>.</small></p>
-   <div class="tabs"><button class="active" onclick="this.parentElement.nextElementSibling.classList.remove('hidden');this.nextElementSibling.classList.remove('active');this.classList.add('active');">Файл .xlsx / .csv</button><button onclick="openPriceTextForm(${competitorId},'${scope}')">Текст / ссылки</button></div>
+   <div class="tabs"><button class="active" onclick="this.parentElement.nextElementSibling.classList.remove('hidden');this.nextElementSibling.classList.remove('active');this.classList.add('active');">Файл .xlsx / .csv</button><button onclick="openPriceTextForm(${competitorId},'${scope}')">${ours ? 'Текст / ссылка' : 'Вставить текст'}</button></div>
    <div><form onsubmit="return importPriceFile(event,${competitorId || 'null'},'${scope}')">
      <label>Выберите файл таблицы (.xlsx или .csv)<input type="file" accept=".xlsx,.csv,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet,text/csv" required></label>
      ${ours ? priceModeField() : ''}
-     <button class="btn primary w">Загрузить и разобрать</button></form></div>`);
+     <button class="btn primary w">Загрузить прайс</button></form></div>`);
 }
 
 async function importPriceFile(e, competitorId, scope) {
@@ -4154,17 +4919,21 @@ async function importPriceFile(e, competitorId, scope) {
 }
 
 function openPriceTextForm(competitorId, scope) {
-  openModal(`<h3>Загрузка прайса текстом или по URL</h3><form onsubmit="return importPriceText(event,${competitorId || 'null'},'${scope}')">
-   <label>Ссылка на опубликованную таблицу Google Sheets / CSV<input name="url" placeholder="https://docs.google.com/spreadsheets/d/…/export?format=csv"></label>
-   <label>Или вставьте строки (Позиция;Цена;Ед)<textarea name="text" rows="6" placeholder="Каркасный дом 8х10;3850000;шт&#10;Баня 4х6;890000;шт"></textarea></label>
-   ${scope === 'ours' ? priceModeField() : ''}
+  const ours = scope === 'ours';
+  openModal(`<h3>${ours ? 'Загрузка прайса текстом или по ссылке' : 'Вставить прайс конкурента'}</h3><form onsubmit="return importPriceText(event,${competitorId || 'null'},'${scope}')">
+   ${ours ? '<label>Ссылка на опубликованную таблицу Google Sheets / CSV<input name="url" placeholder="https://docs.google.com/spreadsheets/d/…/export?format=csv"></label>'
+     : '<p class="form-hint">Мы не скачиваем прайсы с сайтов конкурентов. Скопируйте строки из таблицы сюда или загрузите файл.</p>'}
+   <label>${ours ? 'Или вставьте' : 'Вставьте'} строки (Позиция;Цена;Ед)<textarea name="text" rows="6" placeholder="Каркасный дом 8х10;3850000;шт&#10;Баня 4х6;890000;шт"></textarea></label>
+   ${ours ? priceModeField() : ''}
    <button class="btn primary w">Сохранить</button></form>`);
 }
 
 async function importPriceText(e, competitorId, scope) {
   e.preventDefault(); const f = Object.fromEntries(new FormData(e.target));
   const endpoint = competitorId ? `/api/competitors/${competitorId}/prices` : '/api/prices/ours';
-  const out = await api(endpoint, { method: 'POST', body: JSON.stringify({ url: f.url, text: f.text, scope, mode: f.mode || 'merge' }) });
+  const body = { text: f.text, scope, mode: f.mode || 'merge' };
+  if (scope === 'ours' && f.url) body.url = f.url;
+  const out = await api(endpoint, { method: 'POST', body: JSON.stringify(body) });
   closeModal(); toast(priceImportText(out));
   afterPriceImport(competitorId);
   return false;
@@ -4203,16 +4972,15 @@ async function settings(v) {
     templates: 'Шаблоны сообщений',
     competitors: 'Конкуренты и источники',
     team: 'Команда',
+    training: 'Обучение партнёров',
     data: 'Данные и компания',
     profile: 'Профиль'
   };
-  const adminOnly = ['integrations', 'competitors', 'fields', 'pipelines', 'automations', 'team', 'data'];
-  // Наблюдателю остаётся только «Профиль»: шаблоны ответов — рабочий
-  // инструмент менеджера, а менять что-либо наблюдатель не может вовсе
-  const isViewer = (state.me && state.me.role) === 'viewer';
-  // партнёру тоже остаётся только «Профиль»: справочники офиса — не его инструмент
-  const isPartner = (state.me && state.me.role) === 'partner';
-  const tabs = Object.fromEntries(Object.entries(allTabs).filter(([k]) => isAdmin ? true : ((isViewer || isPartner) ? k === 'profile' : !adminOnly.includes(k))));
+  const adminOnly = ['integrations', 'competitors', 'fields', 'pipelines', 'automations', 'team', 'training', 'data'];
+  // Ограниченным ролям доступен только личный профиль. Справочники и настройки
+  // организации не становятся доступны из-за прямого перехода в этот раздел.
+  const isRestricted=['viewer','partner','rop','classifier'].includes(state.me?.role);
+  const tabs = Object.fromEntries(Object.entries(allTabs).filter(([k]) => isAdmin ? true : (isRestricted ? k === 'profile' : !adminOnly.includes(k))));
   // вкладка по умолчанию — первая доступная этой роли: менеджеру открываются
   // шаблоны сообщений (его рабочий инструмент), а не свой профиль
   if (!tabs[state.settingsTab]) state.settingsTab = Object.keys(tabs)[0] || 'profile';
@@ -4349,12 +5117,12 @@ async function settings(v) {
     </div><div>
      <div class="card"><h3>Как работает разведка конкурентов</h3>
       <p><small>CRM опрашивает открытые реестры и карты, собирает долги, суды, банкротство и отзывы, считает риск-оценку от 0 до 100 и подсказывает менеджеру аргументы для переговоров.</small></p>
-      <p><small><b>Без ключей</b> CRM сама опрашивает картотеку арбитражных судов (Кад.Арбитр) и пробует Федресурс (банкротство) и Rusprofile. Эти два сайта часто закрываются от автоматических запросов — тогда в отчёте остаются прямые ссылки на официальные реестры: ФНС, ГИР БО, Федресурс, Госзакупки, Яндекс Карты, 2ГИС и Авито. <b>С ключами</b> добавляются данные ЕГРЮЛ (api-fns.ru) и рейтинги с карт (Google, 2ГИС, Яндекс).</small></p>
+      <p><small><b>Без ключей</b> CRM проверяет картотеку арбитражных судов (Кад.Арбитр) и Федресурс (банкротство). Rusprofile не скачивается и не разбирается автоматически: в отчёте есть ссылка для ручной проверки. Для остальных реестров и карт тоже остаются прямые ссылки — ФНС, ГИР БО, Федресурс, Госзакупки, Яндекс Карты, 2ГИС и Авито. <b>С ключами</b> добавляются данные ЕГРЮЛ (api-fns.ru) и рейтинги с карт (Google, 2ГИС, Яндекс).</small></p>
       <p><small><b>Долги у приставов автоматически не подтягиваются.</b> Официальный API ФССП закрыт с марта 2022 года и, по ответу службы, восстанавливаться не будет. В отчёте есть ссылка на банк исполнительных производств: сотрудник открывает её и вводит ИНН — это занимает минуту. CRM в этом случае показывает прочерк, а не «0 ₽», чтобы ноль нельзя было принять за отсутствие долгов.</small></p>
       <p><small>Отзывы и прайс конкурента можно внести вручную прямо в его карточке — сравнение цен и рейтинг появятся в отчёте сразу.</small></p>
       <p><small><b>Наши цены</b> для сравнения берутся из раздела «Каталог» — это один и тот же список: поправили цену там, и сравнение в карточке конкурента сразу свежее. Позиций в каталоге: <b>${ours.rows.length}</b>; в сравнении участвуют только те, у которых указана цена.</small></p>
       <button class="btn sm" onclick="go('products')">${icon('products', 13)} Открыть каталог</button></div>
-     ${isAdmin ? `<div class="card"><h3>Адреса сервисов проверки</h3><p><small>Нужны только техническому специалисту — обычно здесь ничего менять не надо. Если сервис сменил адрес, его можно поправить.</small></p><form onsubmit="return saveCompetitorUrls(event)">${[['FNS_API_URL', 'ФНС API'], ['FEDRESURS_API_URL', 'Федресурс'], ['KAD_API_URL', 'Арбитр'], ['RUSPROFILE_URL', 'Rusprofile'], ['GOOGLE_API_URL', 'Google Places'], ['TWOGIS_API_URL', '2ГИС'], ['YANDEX_API_URL', 'Яндекс Геопоиск']].map(([k, n]) => `<label>${n}<input name="${k}" value="${esc((cs.urls || {})[k] || '')}"></label>`).join('')}<button class="btn">Сохранить адреса</button></form></div>` : ''}
+     ${isAdmin ? `<div class="card"><h3>Адреса сервисов проверки</h3><p><small>Нужны только техническому специалисту — обычно здесь ничего менять не надо. Если сервис сменил адрес, его можно поправить.</small></p><form onsubmit="return saveCompetitorUrls(event)">${[['FNS_API_URL', 'ФНС API'], ['FEDRESURS_API_URL', 'Федресурс'], ['KAD_API_URL', 'Арбитр'], ['GOOGLE_API_URL', 'Google Places'], ['TWOGIS_API_URL', '2ГИС'], ['YANDEX_API_URL', 'Яндекс Геопоиск']].map(([k, n]) => `<label>${n}<input name="${k}" value="${esc((cs.urls || {})[k] || '')}"></label>`).join('')}<button class="btn">Сохранить адреса</button></form></div>` : ''}
     </div></div>`;
   } else if (state.settingsTab === 'pipelines') {
     // счётчики сделок для каждой воронки считает сервер: вкладке не нужно
@@ -4503,8 +5271,12 @@ async function settings(v) {
        <form onsubmit="return saveAdvanced(event)">
        <label>Показывать CRM внутри другого сайта<input name="FRAME_ANCESTORS" value="${esc(s.advanced?.frame_ancestors || '')}" placeholder="пусто = запрещено · например https://портал.ru или *"></label>
        <p style="margin:-4px 0 10px"><small>Кому можно показывать CRM внутри своего сайта — например, встроить в портал компании. Пустое поле — никому (безопасно); адрес вида <code>https://портал.ru</code> — только этому сайту; <code>*</code> — любому сайту (не рекомендуется). На обычную работу CRM не влияет.</small></p>
-       <label>Сколько неудачных попыток входа разрешать за 5 минут<input name="LOGIN_RATE_LIMIT" type="number" min="1" max="10000" value="${esc(String(s.advanced?.login_rate_limit ?? 12))}"></label>
-       <p style="margin:-4px 0 10px"><small>Защита от подбора пароля: после указанного числа неудачных попыток вход с этого IP временно блокируется на 5 минут. Для офиса за одним IP ставьте значение повыше, для открытого интернета хватает 10–20.</small></p>
+       <label>Сколько неудачных попыток входа разрешать одной учётной записи за 5 минут<input name="LOGIN_RATE_LIMIT" type="number" min="1" max="10000" value="${esc(String(s.advanced?.login_rate_limit ?? 12))}"></label>
+       <p style="margin:-4px 0 10px"><small>Защита от подбора пароля сотрудника: после указанного числа неудачных попыток вход в эту учётную запись временно блокируется на 5 минут. Коллеги за тем же интернет-адресом при этом не страдают. Если сотрудник забывает пароль и пробует его много раз, поднимите значение.</small></p>
+       <label>Сколько неудачных входов с несуществующими e-mail разрешать с одного устройства за 5 минут<input name="LOGIN_SPRAY_LIMIT" type="number" min="10" max="10000" value="${esc(String(s.advanced?.login_spray_limit ?? 30))}"></label>
+       <p style="margin:-4px 0 10px"><small>Ловит перебор «разными» адресами. Считается по устройству, а не по сотруднику: опечатка в адресе уменьшает этот счётчик на один.</small></p>
+       <label>Сколько запросов на вход разрешать с одного устройства за 5 минут<input name="LOGIN_FLOOD_LIMIT" type="number" min="30" max="10000" value="${esc(String(s.advanced?.login_flood_limit ?? 300))}"></label>
+       <p style="margin:-4px 0 10px"><small>Общий потолок нагрузки на сервер: каждый вход требует проверки пароля. Для большого офиса за одним адресом или мобильного оператора значение можно поднять.</small></p>
        <button class="btn primary">Сохранить параметры</button>
        </form>
        </div>
@@ -4542,6 +5314,22 @@ async function settings(v) {
       <div id="s3status">${s3line(s.s3)}</div>
      </div>
     </div></div>`;
+  } else if (state.settingsTab === 'training') {
+    const items = await api('/api/partner-training').catch(() => []);
+    body = `<div class="settings-cols"><div>
+     <div class="card"><h3>Обучение партнёров</h3><p><small>Материалы видит только партнёр в разделе «Обучение». Сотрудникам офиса раздел не показывается.</small></p>
+      <form onsubmit="return saveTrainingItem(event)">
+        <label>Название <b>*</b><input name="title" required maxlength="200" placeholder="Как вести переданный лид"></label>
+        <label>Текст<textarea name="body" rows="4" maxlength="20000" placeholder="Краткая инструкция"></textarea></label>
+        <label>Ссылка<input name="url" type="url" maxlength="2000" placeholder="https://… (необязательно)"></label>
+        <label>Порядок<input name="sort" type="number" min="0" max="10000" value="0"></label>
+        <button class="btn primary">Добавить материал</button>
+      </form></div>
+     <div class="card"><h3>Материалы (${items.length})</h3>
+      ${items.map(t => `<div class="row"><span><b>${esc(t.title)}</b><br><small>${t.active ? 'виден партнёрам' : 'скрыт'} · порядок ${esc(t.sort)}</small></span>
+        <span style="display:flex;gap:6px"><button class="btn sm" onclick="toggleTrainingItem(${t.id},${t.active ? 0 : 1})">${t.active ? 'Скрыть' : 'Показать'}</button>
+        <button class="btn sm danger" onclick="deleteTrainingItem(${t.id})">Удалить</button></span></div>`).join('') || '<div class="empty">Материалов пока нет.</div>'}
+     </div></div></div>`;
   } else if (state.settingsTab === 'profile') {
     const me = state.me || {};
     body = `<div class="settings-cols"><div>
@@ -4554,8 +5342,9 @@ async function settings(v) {
      <div class="card"><h3>${icon('lock', 18)} Пароль и безопасность</h3>
       <p><small>Смените пароль здесь. После смены все другие сеансы (на других устройствах) завершаются — это защита аккаунта. Минимум 12 символов: используйте фразу из нескольких слов или менеджер паролей.</small></p>
       <form onsubmit="return savePassword(event)">
-        <label>Текущий пароль<input name="old_password" type="password" required autocomplete="current-password"></label>
+        <label>Текущий пароль<div class="pw-wrap"><input name="old_password" type="password" required autocomplete="current-password"><button type="button" class="pw-eye" title="Показать/скрыть пароль" onclick="togglePass(this)">${icon('eye', 16)}</button></div></label>
         <div class="pw-wrap"><label style="width:100%">Новый пароль<input name="new_password" type="password" required minlength="12" maxlength="256" autocomplete="new-password" placeholder="минимум 12 знаков"></label><button type="button" class="pw-eye" title="Показать/скрыть пароль" onclick="togglePass(this)">${icon('eye', 16)}</button></div>
+        <div class="pw-wrap"><label style="width:100%">Повторите новый пароль<input name="confirm_password" type="password" required minlength="12" maxlength="256" autocomplete="new-password" placeholder="повторите новый пароль"></label><button type="button" class="pw-eye" title="Показать/скрыть пароль" onclick="togglePass(this)">${icon('eye', 16)}</button></div>
         <button class="btn primary">Сохранить новый пароль</button>
       </form>
      </div>
@@ -4623,7 +5412,12 @@ const BUILTIN_FIELDS = {
     title: 'Сделки', where: 'в карточке сделки (вкладка «Сведения»)',
     rows: [
       ['Название сделки', 'да', 'Обязательное: его видно на доске и в документах'],
-      ['Сумма', 'нет', 'Считается в выручке и аналитике'],
+      ['Бюджет', 'да', 'Обязательное: сумма в валюте компании; если бюджет пока неизвестен, укажите 0 и уточните его позже'],
+      ['Объект сделки', 'да', 'Обязательное: какой объект нужен клиенту; если не выяснено, так и укажите'],
+      ['Наличие земли', 'да', 'Обязательное: есть, нет или пока не выяснено'],
+      ['Дата строительства', 'да', 'Обязательное: укажите дату либо отметьте «Пока не определена»'],
+      ['Тип оплаты', 'да', 'Обязательное: свои средства, кредит, рассрочка, смешанная или пока не выяснено'],
+      ['Источник лида', 'да', 'Обязательное: откуда пришёл клиент; для старой карточки сохранено исходное значение'],
       ['Этап', 'нет', 'Есть всегда: меняется перетаскиванием карточки на доске'],
       ['Клиент', 'нет', 'Привязка к карточке клиента'],
       ['Компания', 'нет', 'Привязка к карточке компании'],
@@ -4768,6 +5562,23 @@ async function probeSources(btn) {
 async function saveCompetitorKeys(e) { e.preventDefault(); const b = {}; for (const [k, v] of new FormData(e.target)) if (v && !String(v).includes('•')) b[k] = v; await api('/api/competitor-sources', { method: 'PUT', body: JSON.stringify(b) }); toast('Ключи сохранены'); render(); return false; }
 async function saveCompetitorUrls(e) { e.preventDefault(); const b = {}; for (const [k, v] of new FormData(e.target)) if (v) b[k] = v; await api('/api/competitor-sources', { method: 'PUT', body: JSON.stringify(b) }); toast('Адреса сохранены'); render(); return false; }
 async function saveCompanySettings(e) { e.preventDefault(); await api('/api/settings', { method: 'PUT', body: JSON.stringify(Object.fromEntries(new FormData(e.target))) }); toast('Сохранено'); state.cache.settings = null; render(); return false; }
+async function saveTrainingItem(e) {
+  e.preventDefault();
+  const b = Object.fromEntries(new FormData(e.target));
+  b.sort = Number(b.sort) || 0;
+  await api('/api/partner-training', { method: 'POST', body: JSON.stringify(b) });
+  toast('Материал добавлен'); render(); return false;
+}
+async function toggleTrainingItem(id, active) {
+  await api('/api/partner-training/' + id, { method: 'PATCH', body: JSON.stringify({ active }) });
+  toast(active ? 'Материал виден партнёрам' : 'Материал скрыт'); render();
+}
+function deleteTrainingItem(id) {
+  askConfirm('Удалить материал обучения партнёров?', async () => {
+    await api('/api/partner-training/' + id, { method: 'DELETE' });
+    toast('Материал удалён'); render();
+  }, { okText: 'Удалить' });
+}
 function randomSecret() {
   const bytes = crypto.getRandomValues(new Uint8Array(24));
   return Array.from(bytes, b => ('0' + b.toString(16)).slice(-2)).join('');
@@ -4792,28 +5603,47 @@ async function saveWebhookSecret() {
 }
 async function saveMaintenance(e) { e.preventDefault(); await api('/api/settings', { method: 'PUT', body: JSON.stringify(Object.fromEntries(new FormData(e.target))) }); toast('Настройки обслуживания сохранены'); state.cache.settings = null; render(); return false; }
 async function saveAdvanced(e) { e.preventDefault(); await api('/api/settings', { method: 'PUT', body: JSON.stringify(Object.fromEntries(new FormData(e.target))) }); toast('Параметры сохранены'); render(); return false; }
-async function savePassword(e) { e.preventDefault(); try { const result = await api('/api/me/password', { method: 'POST', body: JSON.stringify(Object.fromEntries(new FormData(e.target))) }); storeSessionToken(result.token); e.target.reset(); toast('Пароль изменён. Сеансы на других устройствах закрыты.'); } catch (err) { toast(err.message, 'err'); } return false; }
+async function savePassword(e) {
+  e.preventDefault();
+  const b = Object.fromEntries(new FormData(e.target));
+  if (b.new_password !== b.confirm_password) {
+    unlockForm(e.target);
+    toast('Новые пароли не совпадают. Проверьте повтор и попробуйте ещё раз.', 'err');
+    return false;
+  }
+  try {
+    const result = await api('/api/me/password', { method: 'POST', body: JSON.stringify({ old_password: b.old_password, new_password: b.new_password }) });
+    storeSessionToken(result.token); e.target.reset();
+    toast('Пароль изменён. На других устройствах войдите снова с новым паролем.');
+  } catch (err) { toast(err.message, 'err'); }
+  return false;
+}
 function addPipeline() { askInput({ title: 'Новая воронка', label: 'Название воронки', value: 'Новая воронка', okText: 'Создать' }, name => { if (!name) return; (async () => { await api('/api/pipelines', { method: 'POST', body: JSON.stringify({ name }) }); toast('Воронка создана'); render(); })(); }); }
 async function openPipelineEditor() { return editPipeline(state.pipeline || 1); }
+function pipelineStageRow(s, i) {
+  const fixed = s.code === 'deferred';
+  return `<div class="st" data-i="${i}"><span>${i + 1}</span><input value="${esc(s.name)}" ${fixed ? 'disabled title="Название системного этапа фиксировано"' : ''} oninput="pkStage(${i},'name',this.value)"><input type="color" value="${esc(s.color)}" ${fixed ? 'disabled title="Цвет системного этапа фиксирован"' : ''} oninput="pkStage(${i},'color',this.value)"><select ${fixed ? 'disabled title="Тип системного этапа фиксирован"' : ''} onchange="pkStage(${i},'kind',this.value)">${['open', 'won', 'lost'].map(k => `<option value="${k}" ${k === (s.kind || 'open') ? 'selected' : ''}>${({ open: 'обычный', won: 'успех', lost: 'отказ' })[k]}</option>`).join('')}</select><button class="btn sm danger" ${fixed ? 'disabled title="Этап «Отложенный спрос» нельзя удалить"' : ''} onclick="pkDel(${i})">${icon('close', 13)}</button></div>`;
+}
 async function editPipeline(id) {
   const pl = (await api('/api/pipelines')).find(p => p.id === id); const stages = JSON.parse(JSON.stringify(pl.stages));
-  // этапы «успех» и «отказ» обязательны в каждой воронке: по ним закрываются
-  // сделки и считается выручка. В старой воронке их могло не быть — добавляем
-  // сразу, чтобы сохранение прошло, а админ увидел их и переименовал под себя
+  // системный этап нужен в каждой воронке и остаётся открытым до результата сделки
+  if (!stages.some(x => x.code === 'deferred')) {
+    const terminal = stages.findIndex(x => ['won','lost'].includes(x.kind));
+    stages.splice(terminal < 0 ? stages.length : terminal, 0, { code: 'deferred', name: 'Отложенный спрос', color: '#0284c7', kind: 'open' });
+  }
   if (!stages.some(x => x.code === 'won')) stages.push({ code: 'won', name: 'Успешно реализовано', color: '#15803d', kind: 'won' });
   if (!stages.some(x => x.code === 'lost')) stages.push({ code: 'lost', name: 'Закрыто и не реализовано', color: '#78716c', kind: 'lost' });
-  const row = (s, i) => `<div class="st" data-i="${i}"><span>${i + 1}</span><input value="${esc(s.name)}" oninput="pkStage(${i},'name',this.value)"><input type="color" value="${esc(s.color)}" oninput="pkStage(${i},'color',this.value)"><select onchange="pkStage(${i},'kind',this.value)">${['open', 'won', 'lost'].map(k => `<option value="${k}" ${k === (s.kind || 'open') ? 'selected' : ''}>${({ open: 'обычный', won: 'успех', lost: 'отказ' })[k]}</option>`).join('')}</select><button class="btn sm danger" onclick="pkDel(${i})">${icon('close', 13)}</button></div>`;
   window.__pk = { id, name: pl.name, stages };
   openModal(`<h3>Воронка «${esc(pl.name)}»</h3>
    <label>Название воронки<input id="pkName" value="${esc(pl.name)}" oninput="window.__pk.name=this.value"></label>
-   <div class="stages-editor" id="pkList">${stages.map(row).join('')}</div>
+   <div class="stages-editor" id="pkList">${stages.map(pipelineStageRow).join('')}</div>
    <p><button class="btn sm" onclick="pkAdd()">+ Добавить этап</button></p>
    <button class="btn primary w" onclick="pkSave()">Сохранить воронку</button>`);
 }
-function pkStage(i, k, v) { window.__pk.stages[i][k] = v; }
-function pkDel(i) { const s = window.__pk.stages[i]; if (s && ['won', 'lost'].includes(s.code)) return toast('Этап успеха и этап отказа удалять нельзя: на них закрываются сделки и по ним считается выручка'); if (window.__pk.stages.length <= 2) return toast('Нужно минимум 2 этапа'); window.__pk.stages.splice(i, 1); editPipelineRefresh(); }
+function pkStage(i, k, v) { if (window.__pk.stages[i]?.code === 'deferred') return; window.__pk.stages[i][k] = v; }
+function pkDel(i) { const s = window.__pk.stages[i]; if (s?.code === 'deferred') return toast('Этап «Отложенный спрос» нужен в каждой воронке'); if (s && ['won', 'lost'].includes(s.code)) return toast('Этап успеха и этап отказа удалять нельзя: на них закрываются сделки и по ним считается выручка'); if (window.__pk.stages.length <= 2) return toast('Нужно минимум 2 этапа'); window.__pk.stages.splice(i, 1); editPipelineRefresh(); }
 function pkAdd() { window.__pk.stages.push({ code: 's' + Date.now(), name: 'Новый этап', color: '#16a34a', kind: 'open' }); editPipelineRefresh(); }
-function editPipelineRefresh() { const stages = window.__pk.stages; $('#pkList').innerHTML = stages.map((s, i) => `<div class="st"><span>${i + 1}</span><input value="${esc(s.name)}" oninput="pkStage(${i},'name',this.value)"><input type="color" value="${esc(s.color)}" oninput="pkStage(${i},'color',this.value)"><select onchange="pkStage(${i},'kind',this.value)">${['open', 'won', 'lost'].map(k => `<option value="${k}" ${k === (s.kind || 'open') ? 'selected' : ''}>${({ open: 'обычный', won: 'успех', lost: 'отказ' })[k]}</option>`).join('')}</select><button class="btn sm danger" onclick="pkDel(${i})">${icon('close', 13)}</button></div>`).join(''); }
+function editPipelineRefresh() { $('#pkList').innerHTML = window.__pk.stages.map(pipelineStageRow).join(''); }
 async function pkSave() {
   const btn = document.querySelector('#modalBody .btn.primary');
   if (btn) btn.disabled = true;
@@ -4950,7 +5780,7 @@ function delTemplate(id) {
   }, { okText: 'Удалить' });
 }
 async function openUser(id) {
-  const rows = await api('/api/users'); const x = id ? (rows.find(u => u.id === id) || {}) : {};
+  const [rows,teams] = await Promise.all([api('/api/users'),api('/api/teams')]); const x = id ? (rows.find(u => u.id === id) || {}) : {};
   // В карточке сотрудника поля пароля нет: сброс делается отдельной кнопкой с
   // подтверждением. Раньше сгенерированный «посмотреть» пароль уезжал в базу
   // вместе с правкой роли или доступа, сеансы сотрудника закрывались, а он
@@ -4963,25 +5793,36 @@ async function openUser(id) {
        <button type="button" class="btn sm" onclick="resetUserPassword(${id})">${icon('key', 14)} Сбросить пароль</button></div>`
     : `${fld('Пароль (мин. 12 символов)', `<div class="pw-wrap"><input name="password" type="password" minlength="12" autocomplete="new-password" required placeholder="минимум 12 знаков"><button type="button" class="pw-eye" title="Показать/скрыть пароль" onclick="togglePass(this)">${icon('eye', 16)}</button></div>`, true)}
    <button type="button" class="btn w" onclick="generateUserPassword(this.form)">Сгенерировать пароль</button>`;
+  const userRoles={admin:'Администратор — все настройки и данные',rop:'Руководитель отдела продаж — очередь и отчёты своей команды',manager:'Менеджер — свои сделки, клиенты, задачи и чаты',classifier:'Классификатор — только назначенные обращения',viewer:'Наблюдатель — просмотр',partner:'Партнёр — только переданные сделки'};
+  const teamRole=['rop','manager','classifier'].includes(x.role||'manager');
+  const teamField=`<label id="userTeamField" ${teamRole?'':'class="hidden"'}>Команда<select id="userTeam" name="team_id" ${x.role==='rop'?'required':''}><option value="">Без команды</option>${teams.filter(t=>t.active!==0).map(t=>`<option value="${t.id}" ${Number(x.team_id)===Number(t.id)?'selected':''}>${esc(t.name)}</option>`).join('')}</select><small>${teams.length?'Руководителю отдела продаж команда обязательна.':'Сначала создайте команду во вкладке «Команда».'}</small></label>`;
   openModal(`<h3>${id ? 'Пользователь' : 'Новый пользователь'}</h3><form onsubmit="return saveUser(event,${id || 'null'})">
    ${formLegend()}
    ${grid2(`${fld('Имя', `<input name="name" required value="${esc(x.name || '')}">`, true)}
      ${fld('E-mail', `<input name="email" type="email" required value="${esc(x.email || '')}">`, true)}`)}
    ${pwBlock}
-   ${fld('Роль', `<select name="role">${Object.entries({ admin: 'Администратор — всё, включая настройки', manager: 'Менеджер — клиенты, сделки, задачи, чаты', viewer: 'Наблюдатель — только просмотр', partner: 'Партнёр — свои лиды, их переписка и свои задачи' }).map(([k, n]) => `<option value="${k}" ${k === (x.role || 'manager') ? 'selected' : ''}>${n}</option>`).join('')}</select>`)}
+   ${fld('Роль', `<select name="role" onchange="toggleUserTeamField(this)">${Object.entries(userRoles).map(([k,n])=>`<option value="${k}" ${k===(x.role||'manager')?'selected':''}>${n}</option>`).join('')}</select>`)}
+   ${teamField}
    <label style="display:flex;gap:8px;align-items:center"><input type="checkbox" name="active" style="width:auto" ${x.active === 0 ? '' : 'checked'}> Сотрудник может входить в CRM</label>
    <p><small>${id
     ? 'Сброс пароля закрывает все сеансы сотрудника: он войдёт по временному паролю и задаст личный. Действие остаётся в журнале на рабочем столе.'
     : 'Сохраните пароль и передайте сотруднику по защищённому каналу. При первом входе он задаст личный пароль, а временный перестанет действовать.'}</small></p>
    <button class="btn primary w">Сохранить</button></form>`);
 }
+function toggleUserTeamField(select) {
+  const wrap=$('#userTeamField'),input=$('#userTeam'),role=String(select?.value||'');
+  if(!wrap||!input)return;
+  const needsTeam=['rop','manager','classifier'].includes(role);
+  wrap.classList.toggle('hidden',!needsTeam);input.disabled=!needsTeam;input.required=role==='rop';
+  if(!needsTeam)input.value='';
+}
 // Временный пароль: 16 знаков без похожих друг на друга букв и цифр и без
 // специальных символов. Его передают в мессенджере, читают вслух и набирают на
 // телефоне, поэтому опечатка не должна выглядеть как «пароль не работает».
 function randomPassword() {
   // Без 0, O, o, I, l, 1 и без специальных знаков: пароль передают в
-  // мессенджере, читают вслух и набирают на телефоне. 55 знаков, 16 позиций —
-  // больше 90 бит энтропии, перебор через ограниченный вход бессмысленен.
+  // мессенджере, читают вслух и набирают на телефоне. 56 знаков, 16 позиций —
+  // около 93 бит энтропии; перебор через ограниченный вход практически невозможен.
   const alphabet = 'ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnpqrstuvwxyz23456789';
   const limit = 256 - (256 % alphabet.length); // отсечка хвоста: без перекоса к первым знакам
   const out = [];
@@ -5286,6 +6127,9 @@ const PALETTE_ACTIONS = [
     { ico: 'companies', title: 'Компании', hint: 'юридические лица', view: 'companies', run: () => go('companies') },
     { ico: 'products', title: 'Каталог', hint: 'он же прайс-лист: дома, проекты и опции', view: 'products', run: () => go('products') },
     { ico: 'analytics', title: 'Аналитика', hint: 'воронка, план и качество ответов', view: 'analytics', run: () => go('analytics') },
+    { ico: 'pipe', title: 'Очередь', hint: 'назначение лидов, смены и передачи партнёрам', roles: ['admin', 'rop'], view: 'routing', run: () => go('routing') },
+    { ico: 'contacts', title: 'Классификация', hint: 'разбор входящих обращений', roles: ['admin', 'rop', 'classifier'], view: 'classification', run: () => go('classification') },
+    { ico: 'fileText', title: 'Обучение', hint: 'материалы для партнёров', view: 'training', run: () => go('training') },
     { ico: 'competitors', title: 'Конкуренты', hint: 'разведка и проверка', view: 'competitors', run: () => go('competitors') },
     { ico: 'settings', title: 'Настройки', hint: 'интеграции и права', view: 'settings', run: () => go('settings') }
   ]},
@@ -5294,8 +6138,8 @@ const PALETTE_ACTIONS = [
   // roles: действие доступно не всем, кто может менять данные (компанию и
   // проверку конкурента сервер партнёру не открывает)
   { group: 'Быстрое создание', edit: true, items: [
-    { ico: 'plus', title: 'Новая сделка', hint: 'открыть форму', run: () => openDeal() },
-    { ico: 'plus', title: 'Новый контакт', hint: 'добавить клиента', run: () => openContact() },
+    { ico: 'plus', title: 'Новая сделка', hint: 'открыть форму', roles: ['admin', 'manager'], run: () => openDeal() },
+    { ico: 'plus', title: 'Новый контакт', hint: 'добавить клиента', roles: ['admin', 'manager'], run: () => openContact() },
     { ico: 'plus', title: 'Новая задача', hint: 'поставить дело', run: () => openTask() },
     { ico: 'company', title: 'Новая компания', hint: 'добавить юрлицо', roles: ['admin', 'manager'], run: () => openCompany() },
     { ico: 'campaigns', title: 'Новая рассылка', hint: 'сообщение клиентам: WhatsApp или почта', roles: ['admin', 'manager'], run: () => openCampaign() },
@@ -5306,7 +6150,7 @@ const PALETTE_ACTIONS = [
     { ico: 'sun', title: 'Светлая тема', hint: 'включить светлую', run: () => applyTheme('light') },
     { ico: 'moon', title: 'Тёмная тема', hint: 'включить тёмную', run: () => applyTheme('dark') },
     { ico: 'theme', title: 'Тема как в системе', hint: 'автоматически', run: () => applyTheme('auto') },
-    { ico: 'bell', title: 'Уведомления и задачи на сегодня', hint: 'открыть список', run: () => openNotifications() }
+    { ico: 'bell', title: 'Уведомления и задачи на сегодня', hint: 'открыть список', roles: ['admin','manager','viewer','partner'], run: () => openNotifications() }
   ]}
 ];
 
@@ -5381,7 +6225,7 @@ async function paletteRender(query = '') {
     }).join('')}`).join('') || '<div style="padding:18px;text-align:center;color:var(--muted)">Ничего не найдено</div>';
 
   clearTimeout(paletteSearchTimer);
-  if (query.trim().length >= 2) {
+  if (query.trim().length >= 2 && !['rop','classifier'].includes(state.me?.role)) {
     paletteSearchTimer = setTimeout(async () => {
       try {
         const d = await api('/api/search?q=' + encodeURIComponent(query.trim()));
@@ -5450,13 +6294,15 @@ const VIEW_TABLES = {
   companies: ['companies'],
   products: ['products'],
   analytics: ['deals', 'contacts', 'pipelines', 'users', 'tasks'],
+  routing: ['routing', 'classification', 'partner-transfers', 'teams', 'users', 'deals'],
+  classification: ['classification', 'routing', 'deals', 'users'],
   competitors: ['competitors', 'products'],
   settings: [], // формы настроек события не дёргают: заполнение не сбивается;
   // список «Команда» обновляется адресной веткой ниже
 };
 const KNOWN_TABLES = new Set(['tasks', 'deals', 'contacts', 'companies', 'products', 'templates',
   'automations', 'notes', 'pipelines', 'competitors', 'channels', 'conversations', 'settings', 'users',
-  'campaigns']);
+  'campaigns','routing','classification','partner-transfers','teams']);
 // Чаты обновляются только на событиях, которые их касаются: диалог взял
 // коллега, изменилась карточка клиента, канал или шаблон ответа. Ценник,
 // задачи и доска сделок переписку не перечитывают.
@@ -5479,7 +6325,7 @@ function connectSSE() {
   // после переподключения события за время обрыва не придут задним числом:
   // счётчики сверяются с сервером сразу, как соединение снова открыто
   es.addEventListener('open', () => {
-    api('/api/dashboard').then(navCounts).catch(() => {});
+    if(!['rop','classifier'].includes(state.me?.role))api('/api/dashboard').then(navCounts).catch(() => {});
     syncMe(); // права и имя подтягиваются после любого обрыва соединения
   });
   es.addEventListener('notify', e => {
@@ -5501,6 +6347,9 @@ function connectSSE() {
         title: 'Вам передали сделку', kind: 'task', text: d.title,
         actionLabel: 'Открыть сделку', onAction: () => openDealCard(d.id),
       });
+    }
+    if (d.type === 'classification_assigned') {
+      notify({title:'Вам назначили обращение на классификацию',kind:'task',text:d.title||'Новое обращение',actionLabel:'Открыть разбор',onAction:()=>openClassificationDeal(d.id)});
     }
     if (d.type === 'contact_assigned') {
       notify({
@@ -5526,7 +6375,7 @@ function connectSSE() {
     }
     // уведомления касаются задач и передач: ленту чатов они не меняют,
     // на рабочем столе плитки «Требует внимания» перерисовываем
-    api('/api/dashboard').then(navCounts).catch(() => {});
+    if(!['rop','classifier'].includes(state.me?.role))api('/api/dashboard').then(navCounts).catch(() => {});
     if (state.view === 'dashboard') render();
   });
   es.addEventListener('message', e => {
@@ -5550,7 +6399,7 @@ function connectSSE() {
       if (Number(d.conversation_id) === Number(state.conv)) refreshInbox();
       else refreshConvList();
     }
-    api('/api/dashboard').then(navCounts).catch(() => {});
+    if(!['rop','classifier'].includes(state.me?.role))api('/api/dashboard').then(navCounts).catch(() => {});
   });
   es.addEventListener('change', e => {
     let d = {}; try { d = JSON.parse(e.data); } catch { }
@@ -5605,9 +6454,13 @@ async function syncMe() {
       $('#passwordChange').classList.remove('hidden');
       return;
     }
-    // роль изменилась — разделы перерисовываются под новые права;
-    // открытое модальное окно не сбиваем
-    if (roleChanged && $('#modal').classList.contains('hidden')) render();
+    // После смены роли закрываем открытую карточку: у сотрудника могли
+    // измениться права на её поля. Новый экран выбирается уже по свежей роли.
+    if (roleChanged) {
+      if(!$('#modal').classList.contains('hidden'))closeModal();
+      const nextView=defaultViewForRole(u.role,state.view);
+      if(nextView!==state.view)go(nextView);else render();
+    }
   } catch { /* профиль не освежился — не беда, сервер права уже применил */ }
 }
 function initRealtime() {
@@ -5617,7 +6470,7 @@ function initRealtime() {
   // живое соединение не работает: при открытом SSE счётчики и так приходят
   // событиями, и лишний запрос каждые полминуты на каждого сотрудника не нужен
   navTimer = setInterval(() => {
-    if (realtime && realtime.readyState === 1) return;
+    if (['rop','classifier'].includes(state.me?.role)||(realtime&&realtime.readyState===1)) return;
     api('/api/dashboard').then(navCounts).catch(() => {});
   }, 30000);
 }
