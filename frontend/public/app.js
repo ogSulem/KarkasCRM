@@ -389,7 +389,7 @@ function renderWatermark() {
   const label = watermarkLabel();
   if (!label) { el.classList.remove('on'); el.style.backgroundImage = ''; return; }
   const dark = document.documentElement.dataset.theme === 'dark';
-  const fill = dark ? 'rgba(226,232,240,.20)' : 'rgba(15,23,42,.09)';
+  const fill = dark ? 'rgba(226,232,240,.26)' : 'rgba(15,23,42,.13)';
   const safe = label.replace(/[<>&"']/g, c => ({ '<': '&lt;', '>': '&gt;', '&': '&amp;', '"': '&quot;', "'": '&apos;' }[c]));
   const svg = `<svg xmlns="http://www.w3.org/2000/svg" width="520" height="320"><text x="260" y="160" text-anchor="middle" dominant-baseline="middle" transform="rotate(-24 260 160)" fill="${fill}" font-family="system-ui,-apple-system,Segoe UI,Roboto,sans-serif" font-size="13" font-weight="600">${safe}</text></svg>`;
   // адрес картинки кодируется строго: скобки и кавычки внутри url() ломают
