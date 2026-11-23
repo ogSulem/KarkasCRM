@@ -1052,3 +1052,12 @@ html[data-theme=dark] .routing-policy-form fieldset{border-color:var(--line)}
   .routing-page .act{min-width:150px}
   .report-kpis{grid-template-columns:repeat(auto-fit,minmax(145px,1fr))}
 }
+
+/* ── водяной знак ───────────────────────────────────────────────────────────
+   На экране с клиентскими данными видно, кто смотрит карточку и когда.
+   Знак рисуется отдельным слоем поверх содержимого, ничего не перехватывает
+   и не выводится на экране входа: там сотрудника ещё не видно. */
+.watermark{position:fixed;inset:0;z-index:55;pointer-events:none;display:none;opacity:.5;
+  background-repeat:repeat;background-position:0 0}
+.watermark.on{display:block}
+@media print{.watermark{display:none!important}}

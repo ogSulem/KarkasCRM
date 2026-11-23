@@ -708,7 +708,13 @@ const isPrivateIp = ip => {
 function clientIp(req) {
   const remote = req.socket.remoteAddress || 'local';
   if (!isPrivateIp(remote)) return remote;
-  const list = String(req.headers['x-forwarded-for'] || '').split(',').map(x => x.trim()).filter(Boolean);
+  // За прокси адрес клиента берётся из цепочки X-Forwarded-For. Реальный адрес
+  // дописывает ближайший прокси (nginx — $proxy_add_x_forwarded_for, Caddy —
+  // подставляет заголовок сам), поэтому берём ПОСЛЕДНИЙ элемент: значение
+  // слева клиент может подделать из браузера, а справа — это адрес, за который
+  // поручился наш прокси. Офис за одним адресом при этом не делит счётчики:
+  // предел неудачных попыток входа считается на учётную запись.
+  const list = String(req.headers['x-forwarded-for'] || '').split(',').map(x => x.trim()).filter(x => /^[0-9a-f:.]{3,45}$/i.test(x));
   return list.length ? list[list.length - 1] : remote;
 }
 const setSetting = (k, v) => { db.prepare('INSERT INTO settings(key,value) VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value').run(k, String(v ?? '')); scheduleSettingsMirror(); };
@@ -910,6 +916,34 @@ if (!db.prepare('SELECT id FROM users LIMIT 1').get()) {
   logActivity('Система инициализирована: создана чистая база и учётная запись администратора');
 }
 export function getStages(pipeline_id = 1) { return db.prepare('SELECT * FROM stages WHERE pipeline_id=? ORDER BY sort,id').all(pipeline_id); }
+// E-mail сотрудника приводится к общему виду один раз при запуске. Раньше адрес
+// сохранялся как вводили, а вход искал адрес в нижнем регистре: сотрудник,
+// чей адрес когда-то завели с заглавной буквы или с пробелом, вводил свой
+// адрес и получал «Неверный e-mail или пароль» — выглядит как «не могу зайти».
+// Запись приводится к нижнему регистру; если такой адрес уже занят, строка не
+// трогается, а в журнал пишется предупреждение: решать это должен администратор.
+export function normalizeUserEmails() {
+  try { db.exec('CREATE INDEX IF NOT EXISTS idx_users_email_lower ON users(lower(email))'); } catch {}
+  const rows = db.prepare('SELECT id,email,name FROM users').all();
+  const norm = r => String(r.email || '').trim().toLowerCase();
+  // сколько записей претендуют на один и тот же адрес без учёта регистра:
+  // если претендентов больше одного, адрес не трогаем — решает администратор
+  const counts = new Map();
+  for (const r of rows) counts.set(norm(r), (counts.get(norm(r)) || 0) + 1);
+  let fixed = 0;
+  for (const r of rows) {
+    const n = norm(r);
+    if (!n || n === r.email) continue;
+    if ((counts.get(n) || 0) > 1) {
+      console.warn(`E-mail сотрудника «${r.name}» (${r.email}) совпадает с другим адресом без учёта регистра — запись не изменена, проверьте адрес в карточке сотрудника`);
+      continue;
+    }
+    db.prepare('UPDATE users SET email=? WHERE id=?').run(n, r.id);
+    fixed++;
+  }
+  return fixed;
+}
+normalizeUserEmails();
 export function getCustomFields() {
   try {
     const v = JSON.parse(getSetting('CUSTOM_FIELDS', '[]'));
@@ -3391,26 +3425,39 @@ export const server = http.createServer(async (req, res) => {
     if (p === '/api/auth/login' && req.method === 'POST') {
       const ip = clientIp(req);
       // Жёсткий потолок на все запросы входа с одного IP: защищает от лавины запросов
-      // (каждый требует вычисления scrypt). 300 за 5 минут — с запасом для офиса за одним IP.
-      const flood = rateLimit('login-flood:' + ip, 300, 300000);
+      // (каждый требует вычисления scrypt). Порог настраивается: большой офис за
+      // одним адресом или мобильный оператор со многими сотрудниками иначе
+      // упрутся в потолок и сотрудник получит отказ на ровном месте.
+      const floodLimit = Math.max(30, Number(getSetting('LOGIN_FLOOD_LIMIT', '300')) || 300);
+      const flood = rateLimit('login-flood:' + ip, floodLimit, 300000);
       if (!flood.ok) { res.setHeader('Retry-After', String(flood.retryAfter || 300)); return json(res, 429, { error: `Слишком много запросов на вход. Повторите через ${flood.retryAfter || 300} с.` }) }
-      // Лимит из настроек считает только НЕУДАЧНЫЕ попытки: 50 сотрудников за одним
-      // офисным IP могут войти одновременно, а подбор пароля всё равно упирается в предел.
+      // Лимит из настроек считает только НЕУДАЧНЫЕ попытки по конкретной
+      // учётной записи: 50 сотрудников за одним офисным IP входят одновременно,
+      // а подбор пароля всё равно упирается в предел.
       const limit = Math.max(1, Number(getSetting('LOGIN_RATE_LIMIT', '12')) || 12);
       const b = await readBody(req);
       const emailKey = String(b.email || '').trim().toLowerCase().slice(0, 160);
-      const user = db.prepare('SELECT * FROM users WHERE email=? AND active=1').get(String(b.email || '').trim().toLowerCase());
+      // адрес ищем без учёта регистра и пробелов: сотрудник вводит свой адрес
+      // так, как он записан в карточке, и получает вход, а не отказ
+      const user = db.prepare('SELECT * FROM users WHERE lower(trim(email))=? AND active=1 ORDER BY id LIMIT 1').get(emailKey);
       // проверяем пароль даже для несуществующего e-mail: время ответа не выдаёт, зарегистрирован ли адрес
       const passOk = await checkPassAsync(String(b.password || ''), user ? user.pass : 'fake-salt:00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000');
       if (!user || !passOk) {
-        const rlIp = rateLimit('login:' + ip, limit, 300000);
-        // второй лимит — на конкретный аккаунт: распределённый перебор с разных IP тоже упирается в предел
-        const rlAcc = emailKey ? rateLimit('login-acc:' + emailKey, Math.max(limit * 2, 24), 300000) : { ok: true };
-        if (!rlIp.ok || !rlAcc.ok) { res.setHeader('Retry-After', String(rlIp.retryAfter || rlAcc.retryAfter || 300)); return json(res, 429, { error: 'Слишком много неудачных попыток входа. Подождите несколько минут или обратитесь к администратору.' }) }
+        // Лимит на учётную запись — основная защита от подбора: он считает
+        // неудачные попытки конкретного сотрудника и не трогает остальных.
+        const rlAcc = emailKey ? rateLimit('login-acc:' + emailKey, limit, 300000) : { ok: true };
+        if (!rlAcc.ok) { res.setHeader('Retry-After', String(rlAcc.retryAfter || 300)); return json(res, 429, { error: `Слишком много неудачных попыток входа для этого e-mail. Повторите через ${Math.max(1, Math.ceil((rlAcc.retryAfter || 300) / 60))} мин. или обратитесь к администратору для сброса пароля.` }) }
+        // Лимит на адрес считает только попытки для несуществующих e-mail:
+        // офис за одним интернет-адресом не должен отвечать блокировкой на
+        // чужую опечатку, а перебор «разными» адресами упирается в предел.
+        if (!user && emailKey) {
+          const rlSpray = rateLimit('login-spray:' + ip, Math.max(10, Number(getSetting('LOGIN_SPRAY_LIMIT', '30')) || 30), 300000);
+          if (!rlSpray.ok) { res.setHeader('Retry-After', String(rlSpray.retryAfter || 300)); return json(res, 429, { error: 'Слишком много попыток входа с несуществующими e-mail. Проверьте адрес или обратитесь к администратору.' }) }
+        }
         return json(res, 401, { error: 'Неверный e-mail или пароль' });
       }
-      // успешный вход обнуляет счётчики неудач — опечатка в пароле не блокирует офис
-      RL.delete('login:' + ip);
+      // успешный вход обнуляет счётчик неудач этой учётной записи — опечатка
+      // в пароле не блокирует сотрудника и не мешает коллегам за тем же IP
       if (emailKey) RL.delete('login-acc:' + emailKey);
       // администратору видно, когда сотрудник заходил последний раз
       try { db.prepare("UPDATE users SET last_login=datetime('now') WHERE id=?").run(user.id); } catch {}
@@ -3427,6 +3474,9 @@ export const server = http.createServer(async (req, res) => {
     // попадают в историю браузера, журналы и заголовки Referer.
     const presented = bearer || cookieOf(req).karkas_token || '';
     const user = verify(presented);
+    // Ответ на недействительный сеанс намеренно общий: поддельная подпись не
+    // должна получать больше сведений, чем её отсутствие. Причину обрыва
+    // сеанса объясняет интерфейс — по признаку «здесь уже работали».
     if (p.startsWith('/api/') && !user) return json(res, 401, sessionFailure(presented) || { error: 'Требуется авторизация' });
     if (user?.must_change_password && (p.startsWith('/api/') || p.startsWith('/uploads/')) && !['/api/me', '/api/me/password'].includes(p)) return json(res, 403, { code: 'PASSWORD_CHANGE_REQUIRED', error: 'Сначала смените временный пароль' });
     if (user && user.role !== 'admin' && ['/api/settings', '/api/competitor-sources', '/api/backup', '/api/export/json', '/api/backups'].includes(p)) return json(res, 403, { error: 'Только для администратора' });
@@ -5692,7 +5742,7 @@ ${user?.name || ''}`.trim();
         const role = b.role || 'manager';
         if(role==='rop'&&!b.team_id)return json(res,400,{error:'Для руководителя выберите команду — без неё доступ к очереди и отчётам закрыт.'});
         const email = b.email.trim().toLowerCase();
-        if (db.prepare('SELECT id FROM users WHERE email=?').get(email)) return json(res, 409, { error: 'Этот e-mail уже используется' });
+        if (db.prepare('SELECT id FROM users WHERE lower(trim(email))=?').get(email)) return json(res, 409, { error: 'Этот e-mail уже используется' });
         const r = db.prepare("INSERT INTO users(name,email,pass,role,active,must_change_password,pass_changed_at,team_id,max_open_leads,routing_regions,routing_directions) VALUES(?,?,?,?,?,1,datetime('now'),?,?,?,?)").run(b.name.trim(), email, hashPass(b.password), role, b.active ?? 1, b.team_id ?? null, b.max_open_leads ?? null, b.routing_regions || '', b.routing_directions || '');
         // кто и кому выдал доступ, должно быть видно в журнале: иначе на вопрос
         // «пароль поменялся сам» ответить нечем
@@ -5716,7 +5766,7 @@ ${user?.name || ''}`.trim();
         return json(res, 400, { error: 'Нельзя отключить последнего администратора' });
       if (b.email !== undefined) {
         b.email = b.email.trim().toLowerCase();
-        if (db.prepare('SELECT id FROM users WHERE email=? AND id!=?').get(b.email, id)) return json(res, 409, { error: 'Этот e-mail уже используется' });
+        if (db.prepare('SELECT id FROM users WHERE lower(trim(email))=? AND id!=?').get(b.email, id)) return json(res, 409, { error: 'Этот e-mail уже используется' });
       }
       if (b.password) db.prepare("UPDATE users SET pass=?,must_change_password=1,session_version=session_version+1,pass_changed_at=datetime('now') WHERE id=?").run(hashPass(b.password), id);
       const ks = ['name','email','role','active','team_id','max_open_leads','routing_regions','routing_directions'].filter(k=>b[k]!==undefined);
@@ -6316,7 +6366,7 @@ ${user?.name || ''}`.trim();
           maintenance: { backup_keep_days: num('BACKUP_KEEP_DAYS', 7), backup_hour: num('BACKUP_HOUR', 3), notify_webhook: getSetting('NOTIFY_WEBHOOK') },
           s3: s3status(),
           requisites: companyRequisites(),
-          advanced: { frame_ancestors: getSetting('FRAME_ANCESTORS'), login_rate_limit: num('LOGIN_RATE_LIMIT', 12) },
+          advanced: { frame_ancestors: getSetting('FRAME_ANCESTORS'), login_rate_limit: num('LOGIN_RATE_LIMIT', 12), login_spray_limit: num('LOGIN_SPRAY_LIMIT', 30), login_flood_limit: num('LOGIN_FLOOD_LIMIT', 300) },
           auto_deal: getSetting('AUTO_DEAL', '1'), auto_assign: getSetting('AUTO_ASSIGN', '0'),
           routing: { default_team_id: defaultQueueTeamId(), shift_backlog_limit: Math.min(5,Math.max(0,Number(getSetting('SHIFT_BACKLOG_LIMIT','5'))||0)), classifier_user_id:Number(getSetting('LEAD_CLASSIFIER_USER_ID','0'))||null,
             partner_pipeline_id:partnerPipelineId()||null,partner_allowed_stages:[...partnerAllowedStages()],sla_assignment_minutes:Number(getSetting('SLA_ASSIGN_MINUTES','0'))||null,sla_first_response_minutes:Number(getSetting('SLA_FIRST_RESPONSE_MINUTES','0'))||null },
@@ -6370,6 +6420,8 @@ ${user?.name || ''}`.trim();
         if (b.S3_AUTO !== undefined) setSetting('S3_AUTO', String(b.S3_AUTO) === '1' || b.S3_AUTO === true ? '1' : '0');
         if (b.BACKUP_HOUR !== undefined) putNum('BACKUP_HOUR', b.BACKUP_HOUR, 0, 23, 3);
         if (b.LOGIN_RATE_LIMIT !== undefined) putNum('LOGIN_RATE_LIMIT', b.LOGIN_RATE_LIMIT, 1, 10000, 12);
+        if (b.LOGIN_SPRAY_LIMIT !== undefined) putNum('LOGIN_SPRAY_LIMIT', b.LOGIN_SPRAY_LIMIT, 10, 10000, 30);
+        if (b.LOGIN_FLOOD_LIMIT !== undefined) putNum('LOGIN_FLOOD_LIMIT', b.LOGIN_FLOOD_LIMIT, 30, 10000, 300);
         // FRAME_ANCESTORS: только хосты и схемы — иначе ломаем CSP и сам заголовок
         if (b.FRAME_ANCESTORS !== undefined) {
           const fa = String(b.FRAME_ANCESTORS).replace(/[\r\n\t]/g, ' ').replace(/[^a-zA-Z0-9\s:'"*,.\/-]/g, '').trim().slice(0, 512);

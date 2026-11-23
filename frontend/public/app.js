@@ -359,12 +359,55 @@ function applyTheme(mode = currentThemeMode()) {
     btn.innerHTML = icon(res === 'dark' ? 'moon' : 'sun', 16);
     btn.title = `Тема: ${res === 'dark' ? 'тёмная' : 'светлая'} (режим: ${mode})`;
   }
+  if (state.me && (state.me.email || state.me.name)) renderWatermark();
 }
 function toggleTheme() {
   const cur = currentThemeMode();
   const next = cur === 'auto' ? (resolvedTheme('auto') === 'dark' ? 'light' : 'dark') : (cur === 'light' ? 'dark' : 'auto');
   applyTheme(next);
   toast({ light: 'Светлая тема', dark: 'Тёмная тема', auto: 'Как в системе' }[next]);
+}
+
+/* ── водяной знак ───────────────────────────────────────────────────────────
+   ТЗ требует на экранах с чувствительными данными водяной знак с
+   идентификатором пользователя и временем: снимок экрана или фотография
+   показывают, кто именно смотрел карточку и когда. Знак рисуется поверх
+   интерфейса отдельным слоем, ничего не перехватывает, а время обновляется
+   раз в минуту — картинка не перерисовывается при каждом движении мыши. */
+let watermarkTimer = 0;
+function watermarkLabel() {
+  // state.me — сам сотрудник (объект /api/me), а не обёртка с полем user
+  const u = state.me || {};
+  const who = [u.name, u.email].filter(Boolean).join(' · ');
+  if (!who) return '';
+  const time = new Date().toLocaleTimeString('ru-RU', { hour: '2-digit', minute: '2-digit' });
+  return `${who} · ${time}`;
+}
+function renderWatermark() {
+  const el = $('#watermark');
+  if (!el) return;
+  const label = watermarkLabel();
+  if (!label) { el.classList.remove('on'); el.style.backgroundImage = ''; return; }
+  const dark = document.documentElement.dataset.theme === 'dark';
+  const fill = dark ? 'rgba(226,232,240,.20)' : 'rgba(15,23,42,.09)';
+  const safe = label.replace(/[<>&"']/g, c => ({ '<': '&lt;', '>': '&gt;', '&': '&amp;', '"': '&quot;', "'": '&apos;' }[c]));
+  const svg = `<svg xmlns="http://www.w3.org/2000/svg" width="520" height="320"><text x="260" y="160" text-anchor="middle" dominant-baseline="middle" transform="rotate(-24 260 160)" fill="${fill}" font-family="system-ui,-apple-system,Segoe UI,Roboto,sans-serif" font-size="13" font-weight="600">${safe}</text></svg>`;
+  // адрес картинки кодируется строго: скобки и кавычки внутри url() ломают
+  // разбор стиля в некоторых браузерах, и знак просто не рисуется
+  const dataUri = encodeURIComponent(svg).replace(/[!'()*]/g, c => '%' + c.charCodeAt(0).toString(16).toUpperCase());
+  el.style.backgroundImage = `url("data:image/svg+xml,${dataUri}")`;
+  el.classList.add('on');
+}
+function startWatermark() {
+  renderWatermark();
+  clearInterval(watermarkTimer);
+  watermarkTimer = setInterval(renderWatermark, 60000);
+}
+function stopWatermark() {
+  clearInterval(watermarkTimer);
+  watermarkTimer = 0;
+  const el = $('#watermark');
+  if (el) { el.classList.remove('on'); el.style.backgroundImage = ''; }
 }
 if (window.matchMedia) {
   try {
@@ -512,6 +555,7 @@ async function api(path, opt = {}) {
     const d = await r.json().catch(() => ({}));
     const err = new Error(d.error || 'Нужно войти в систему.');
     err.unauthorized = true;
+    err.data = d; // код причины (SESSION_EXPIRED, SESSION_REVOKED, USER_DISABLED) различает случаи
     // сервер объясняет, что устарел именно сеанс: пароль мог сменить сам
     // сотрудник или сбросить администратор; новый вход нужен во всех случаях
     if (!opt.noSessionEnd && path !== '/api/auth/login') endSession(d.error || 'Сеанс завершён. Войдите, пожалуйста, заново.');
@@ -857,20 +901,32 @@ window.addEventListener('keydown', e => {
 function endSession(reason = '') {
   token = '';
   totalStop();
+  stopWatermark();
   __getCache.clear(); // следующий вход может быть другим сотрудником
   try { localStorage.removeItem('karkas_token'); } catch {}
   loginScreen(reason);
 }
 
+/* В браузере хранится только признак того, что в нём уже работали: сам
+   токен сессии — в HttpOnly-cookie и в памяти страницы, в localStorage его
+   нет. Признак нужен для одного: показать на экране входа, что сеанс
+   закончился, а не просто «введите пароль». Секретом он не является. */
+const sessionWasUsed = () => { try { return !!localStorage.getItem('karkas_seen'); } catch { return false; } };
+const markSessionUsed = () => { try { localStorage.setItem('karkas_seen', '1'); } catch {} };
+const forgetSessionUsed = () => { try { localStorage.removeItem('karkas_seen'); } catch {} };
+
 async function logout() {
   token = '';
   totalStop();
+  stopWatermark();
+  forgetSessionUsed();
   try { localStorage.removeItem('karkas_token'); } catch {}
   try { await fetch('/api/auth/logout', { method: 'POST' }); } catch {}
   loginScreen();
 }
 
 async function loginScreen(note = '') {
+  stopWatermark();
   $('#passwordChange').classList.add('hidden');
   $('#passwordChangeForm').reset();
   $('#app').classList.add('hidden');
@@ -934,6 +990,7 @@ async function boot() {
     $('#uEmail').textContent = me.user.email;
     $('#uAva').textContent = (me.user.name || 'A')[0].toUpperCase();
     state.me = me.user;
+    markSessionUsed();
     // открываем раздел, на котором сотрудник закончил в прошлый раз: ежедневная
     // работа начинается сразу со своих чатов или сделок, а не с пустого стола
     if (['partner','rop','classifier'].includes(me.user.role)) {
@@ -957,6 +1014,7 @@ async function boot() {
       return;
     }
     $('#passwordChange').classList.add('hidden');
+    startWatermark(); // знак с сотрудником и временем — на экранах с клиентскими данными
     state.meta = await api('/api/meta');
     // менеджеру не показываем карточку «Интеграции»: настройки всё равно только у администратора
     const sideInt = $('#sideIntegrations');
@@ -972,7 +1030,13 @@ async function boot() {
     initRealtime();
     await go(state.view);
   } catch (e) {
-    if (e.unauthorized) { await loginScreen(); return; }
+    if (e.unauthorized) {
+      // причина закрытого сеанса объясняется на экране входа: сотрудник должен
+      // понимать, что произошло, а не гадать, почему «снова не пускает»
+      const note = sessionWasUsed() ? 'Сеанс закончился — войдите заново.' : '';
+      await loginScreen(note);
+      return;
+    }
     endSession('Сеанс истёк или связь с сервером потерялась — войдите заново.');
   }
 }
@@ -5207,8 +5271,12 @@ async function settings(v) {
        <form onsubmit="return saveAdvanced(event)">
        <label>Показывать CRM внутри другого сайта<input name="FRAME_ANCESTORS" value="${esc(s.advanced?.frame_ancestors || '')}" placeholder="пусто = запрещено · например https://портал.ru или *"></label>
        <p style="margin:-4px 0 10px"><small>Кому можно показывать CRM внутри своего сайта — например, встроить в портал компании. Пустое поле — никому (безопасно); адрес вида <code>https://портал.ru</code> — только этому сайту; <code>*</code> — любому сайту (не рекомендуется). На обычную работу CRM не влияет.</small></p>
-       <label>Сколько неудачных попыток входа разрешать за 5 минут<input name="LOGIN_RATE_LIMIT" type="number" min="1" max="10000" value="${esc(String(s.advanced?.login_rate_limit ?? 12))}"></label>
-       <p style="margin:-4px 0 10px"><small>Защита от подбора пароля: после указанного числа неудачных попыток вход с этого IP временно блокируется на 5 минут. Для офиса за одним IP ставьте значение повыше, для открытого интернета хватает 10–20.</small></p>
+       <label>Сколько неудачных попыток входа разрешать одной учётной записи за 5 минут<input name="LOGIN_RATE_LIMIT" type="number" min="1" max="10000" value="${esc(String(s.advanced?.login_rate_limit ?? 12))}"></label>
+       <p style="margin:-4px 0 10px"><small>Защита от подбора пароля сотрудника: после указанного числа неудачных попыток вход в эту учётную запись временно блокируется на 5 минут. Коллеги за тем же интернет-адресом при этом не страдают. Если сотрудник забывает пароль и пробует его много раз, поднимите значение.</small></p>
+       <label>Сколько неудачных входов с несуществующими e-mail разрешать с одного устройства за 5 минут<input name="LOGIN_SPRAY_LIMIT" type="number" min="10" max="10000" value="${esc(String(s.advanced?.login_spray_limit ?? 30))}"></label>
+       <p style="margin:-4px 0 10px"><small>Ловит перебор «разными» адресами. Считается по устройству, а не по сотруднику: опечатка в адресе уменьшает этот счётчик на один.</small></p>
+       <label>Сколько запросов на вход разрешать с одного устройства за 5 минут<input name="LOGIN_FLOOD_LIMIT" type="number" min="30" max="10000" value="${esc(String(s.advanced?.login_flood_limit ?? 300))}"></label>
+       <p style="margin:-4px 0 10px"><small>Общий потолок нагрузки на сервер: каждый вход требует проверки пароля. Для большого офиса за одним адресом или мобильного оператора значение можно поднять.</small></p>
        <button class="btn primary">Сохранить параметры</button>
        </form>
        </div>

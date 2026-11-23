@@ -44,6 +44,10 @@
   </form>
 </div>
 
+<!-- водяной знак: на экранах с чувствительными данными видно, кто именно смотрит
+     карточку и в какое время. Знак не перехватывает clicks и не мешает читать. -->
+<div id="watermark" class="watermark" aria-hidden="true"></div>
+
 <!-- ── приложение ───────────────────────────────────────────────────────── -->
 <div id="app" class="layout hidden"><aside>
   <div class="brand" onclick="go('dashboard')" style="cursor:pointer" title="На главную">

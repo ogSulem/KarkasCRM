@@ -12,7 +12,7 @@ process.env.DATA_DIR = '/tmp/karkas-password-' + Date.now();
 process.env.PORT = '18097';
 process.env.SEED_MODE = 'off';
 const require = createRequire(import.meta.url);
-const { server, db, clearLoginAttempts } = await import('../backend/src/server.js');
+const { server, db, clearLoginAttempts, normalizeUserEmails } = await import('../backend/src/server.js');
 const base = 'http://127.0.0.1:18097';
 const ADMIN_TMP = 'admin1234567';
 const ADMIN_PASS = 'AdministratorPersonal2026';
@@ -245,4 +245,101 @@ test('подбор пароля упирается в лимит, а опеча�
   const ok = await login(manager.email, manager.personal);
   assert.equal(ok.status, 200);
   assert.equal((await login('guess@example.com', 'WrongPasswordGuess1')).status, 401, 'после обнуления счёт работает заново, а не остаётся заблокированным');
+});
+
+test('e-mail сотрудника не зависит от регистра: свой адрес — и вход есть', async () => {
+  const legacy = { name: 'Иван Устаревший', email: 'Legacy.User@Example.com', temp: 'TempPasswordLegacy2026' };
+  const created = await call('/api/users', {
+    method: 'POST',
+    body: JSON.stringify({ name: legacy.name, email: legacy.email, password: legacy.temp, role: 'manager', active: 1 }),
+  }, admin);
+  assert.equal(created.status, 201);
+  // адрес, заведённый до приведения к общему виду, в базе остаётся с заглавной
+  // буквой: так выглядит запись, сделанная до исправления
+  db.prepare('UPDATE users SET email=? WHERE id=?').run(legacy.email, created.body.id);
+  assert.equal(db.prepare('SELECT email FROM users WHERE id=?').get(created.body.id).email, legacy.email);
+
+  const entered = await login('legacy.user@example.com', legacy.temp);
+  assert.equal(entered.status, 200, 'сотрудник вводит свой адрес и входит, а не получает «неверный e-mail или пароль»');
+  assert.equal(String(entered.body.user.email).toLowerCase(), 'legacy.user@example.com');
+
+  // при запуске сервера адрес приводится к общему виду один раз
+  const fixed = normalizeUserEmails();
+  assert.ok(fixed >= 1, 'миграция привела адрес к нижнему регистру');
+  assert.equal(db.prepare('SELECT email FROM users WHERE id=?').get(created.body.id).email, 'legacy.user@example.com');
+  const afterMigration = await login('legacy.user@example.com', legacy.temp);
+  assert.equal(afterMigration.status, 200, 'после миграции вход прежний');
+  assert.equal(afterMigration.body.user.email, 'legacy.user@example.com', 'в профиле адрес показан в общем виде');
+
+  // два сотрудника с адресами, различающимися только регистром, — не двое:
+  const dup = await call('/api/users', {
+    method: 'POST',
+    body: JSON.stringify({ name: 'Второй Иван', email: 'LEGACY.USER@example.com', password: 'TempPasswordLegacy22026', role: 'manager', active: 1 }),
+  }, admin);
+  assert.equal(dup.status, 409, 'адрес, отличающийся только регистром, занят');
+});
+
+test('блокировка подбора не закрывает вход остальному офису', async () => {
+  clearLoginAttempts();
+  const limit = Number(db.prepare("SELECT value FROM settings WHERE key='LOGIN_RATE_LIMIT'").get()?.value || 12);
+  const colleague = { name: 'Сидоров Сотрудник', email: 'sidorov@example.com', temp: 'TempPasswordSidorov2026' };
+  const created = await call('/api/users', {
+    method: 'POST',
+    body: JSON.stringify({ name: colleague.name, email: colleague.email, password: colleague.temp, role: 'manager', active: 1 }),
+  }, admin);
+  assert.equal(created.status, 201);
+
+  let blocked = null;
+  for (let i = 0; i < limit + 3; i++) {
+    const r = await login(manager.email, 'WrongPassword' + i);
+    if (r.status === 429) { blocked = r; break; }
+  }
+  assert.ok(blocked, 'подбор пароля сотрудника останавливается');
+  assert.match(blocked.body.error, /для этого e-mail|неудачных попыток/, 'причина отказа названа точно: предел по учётной записи');
+
+  const other = await login(colleague.email, colleague.temp);
+  assert.equal(other.status, 200, 'сотрудник с другого адреса входит: чужая опечатка не блокирует весь офис');
+  // предел замедляет подбор, а не запирает сотрудника с его собственным паролем
+  assert.equal((await login(manager.email, manager.personal)).status, 200, 'сотрудник со своим паролем входит даже после чужого подбора');
+  // удачный вход гасит счётчик: следующая серия подбора снова упирается в предел
+  let again = null;
+  for (let i = 0; i < limit + 3; i++) {
+    const r = await login(manager.email, 'WrongPasswordAgain' + i);
+    if (r.status === 429) { again = r; break; }
+  }
+  assert.ok(again, 'подбор этого сотрудника снова останавливается тем же пределом');
+  clearLoginAttempts();
+  assert.equal((await login(manager.email, manager.personal)).status, 200, 'после снятия предела сотрудник входит');
+});
+
+test('адрес клиента за прокси — последний в цепочке: подделка слева не даёт новой квоты', async () => {
+  clearLoginAttempts();
+  const sprayLimit = Number(db.prepare("SELECT value FROM settings WHERE key='LOGIN_SPRAY_LIMIT'").get()?.value || 30);
+  // реальный адрес дописывает наш прокси — он в конце цепочки
+  let blocked = null;
+  for (let i = 0; i < sprayLimit + 3; i++) {
+    const r = await call('/api/auth/login', {
+      method: 'POST',
+      headers: { 'X-Forwarded-For': `198.51.100.${i}, 203.0.113.5` },
+      body: JSON.stringify({ email: `ghost${i}@example.com`, password: 'WrongGhostPassword' }),
+    });
+    if (r.status === 429) { blocked = r; break; }
+  }
+  assert.ok(blocked, 'подбор несуществующих адресов с одного клиента останавливается');
+
+  // тот же клиент с подделанным адресом слева: квота общая, обойти предел нельзя
+  const spoofed = await call('/api/auth/login', {
+    method: 'POST',
+    headers: { 'X-Forwarded-For': '198.51.100.99, 203.0.113.5' },
+    body: JSON.stringify({ email: 'ghost-spoof@example.com', password: 'WrongGhostPassword' }),
+  });
+  assert.equal(spoofed.status, 429, 'подделанный адрес в начале цепочки не выдаёт новую квоту');
+
+  // другой клиент за тем же прокси — отдельная квота
+  const neighbour = await call('/api/auth/login', {
+    method: 'POST',
+    headers: { 'X-Forwarded-For': '198.51.100.99, 203.0.113.6' },
+    body: JSON.stringify({ email: 'ghost-neighbour@example.com', password: 'WrongGhostPassword' }),
+  });
+  assert.equal(neighbour.status, 401, 'соседний сотрудник за тем же прокси не заблокирован подбором соседа');
 });

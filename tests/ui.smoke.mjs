@@ -76,7 +76,8 @@ Object.assign(window, {
   selectAllVisible, toggleConvSelect, markConvsRead, convRow, imgFail, listStamp,
   WZ_TRANSPORT_TO_CHAT, WZ_DEAD_STATES, WZ_CHAT_SET, WZ_TRANSPORTS, WZ_STATE_LABELS, wzTransportLabel,
   saveChannel, startConv, submitStartConv, scAddrHint, sendDoc, submitSendDoc,
-  saveS3, uploadS3, s3line, cancelQueued
+  saveS3, uploadS3, s3line, cancelQueued,
+  renderWatermark, startWatermark, stopWatermark, watermarkLabel
 });`;
 const pageErrors = [];
 const vConsole = new VirtualConsole();
@@ -1183,6 +1184,11 @@ try {
     $$('.tabs button').find(b => /^Профиль$/.test(b.textContent.trim())).click(); await wait(400);
     check('в профиле есть тема и смена пароля с повтором нового пароля', window.__state.settingsTab === 'profile' && /Тема оформления/.test($('#view').textContent) && Boolean($('#view form [name=new_password]')) && Boolean($('#view form [name=confirm_password]')));
     check('поля пароля профиля можно проверить перед сохранением', $$('#view .pw-wrap .pw-eye').length >= 3);
+    // пределы входа: по учётной записи, по несуществующим адресам и общий потолок
+    $$('.tabs button').find(b => /^Данные и компания$/.test(b.textContent.trim())).click(); await wait(450);
+    const loginLimits = $$('#view form [name=LOGIN_RATE_LIMIT], #view form [name=LOGIN_SPRAY_LIMIT], #view form [name=LOGIN_FLOOD_LIMIT]');
+    check('администратор настраивает пределы входа: по учётной записи, по подбору адресов и общий потолок',
+      loginLimits.length === 3, loginLimits.map(x => x.name).join(', '));
 
     window.go('tasks'); await wait(450);
     $$('#view .tabs button').find(b => /Неделя/.test(b.textContent)).click(); await wait(450);
@@ -2081,6 +2087,7 @@ try {
   window.closeModal();
   check('временный пароль удалён из DOM после закрытия', !$('#createdCredentials'));
   await window.logout();
+  check('на экране входа водяного знака нет — сотрудник ещё не определён', !$('#watermark').classList.contains('on'));
   $('#loginForm [name=email]').value = 'onboard-ui@example.com';
   $('#loginForm [name=password]').value = temporary;
   $('#loginForm').dispatchEvent(new window.Event('submit', { bubbles: true, cancelable: true }));
@@ -2095,6 +2102,18 @@ try {
   changeForm.elements.confirm_password.value = 'PersonalPassword2026!';
   await changeForm.onsubmit({ preventDefault() {}, target: changeForm });
   check('после смены пароля CRM открывается', $('#passwordChange').classList.contains('hidden') && !$('#app').classList.contains('hidden'));
+  // водяной знак из ТЗ: на экране с клиентскими данными видно сотрудника и время
+  const wmStyle = $('#watermark').getAttribute('style') || '';
+  const wmSvg = decodeURIComponent(wmStyle);
+  const wmLabel = window.watermarkLabel();
+  check('на экране с клиентскими данными стоит водяной знак с сотрудником и временем',
+    $('#watermark').classList.contains('on') && wmLabel.includes('onboard-ui@example.com')
+    && /\d{1,2}:\d{2}/.test(wmLabel) && wmSvg.includes('onboard-ui@example.com'),
+    wmLabel);
+  check('в браузере хранится только признак сеанса, сам токен — в cookie и в памяти',
+    window.localStorage.getItem('karkas_seen') === '1' && !window.localStorage.getItem('karkas_token'));
+  check('водяной знак не перехватывает нажатия и не выводится на печать',
+    /\.watermark\{[^}]*pointer-events:none/.test(cssText) && /@media print\{\.watermark\{display:none!important\}\}/.test(cssText));
 
 } catch (e) { checks.push({ name: 'выполнение сценариев', ok: false, extra: e.message + '\n' + (e.stack || '') }) }
 
