@@ -5004,6 +5004,44 @@ export const server = http.createServer(async (req, res) => {
           'Фильтр этапа относится к истории проверок и таблице этапов. Фильтр сотрудника в конверсии использует ответственного на момент создания сделки или перехода.',
         ]});
     }
+    if (p === '/api/quality/ai-draft' && req.method === 'POST') {
+      if (!['admin', 'rop'].includes(user.role)) return json(res, 403, { error: 'Только для администратора или РОПа' });
+      const b = await readBody(req);
+      const dealId = Number(b.deal_id);
+      if (!Number.isSafeInteger(dealId) || dealId < 1) return json(res, 400, { error: 'Выберите сделку' });
+      const deal = db.prepare('SELECT id,title,responsible_id FROM deals WHERE id=?').get(dealId);
+      if (!deal) return json(res, 404, { error: 'Сделка не найдена' });
+      if (user.role === 'rop' && !ropCanSeeManager(user, deal.responsible_id)) return json(res, 403, { error: 'Нет доступа к сделке другой команды' });
+      let text = String(b.transcript || '').trim();
+      let source = 'transcript';
+      if (!text) {
+        const msgs = db.prepare("SELECT direction,body FROM messages WHERE deal_id=? AND trim(COALESCE(body,''))!='' ORDER BY id DESC LIMIT 30").all(dealId);
+        if (msgs.length) {
+          text = msgs.reverse().map(m => `${m.direction === 'out' ? 'Менеджер' : 'Клиент'}: ${m.body}`).join('\n');
+          source = 'messages';
+        }
+      }
+      if (!text) return json(res, 200, { experimental: true, draft: true, status: 'no_data', message: 'Нет данных: нет расшифровки звонка или переписки по сделке', items: [] });
+      const lines = text.split(/\r?\n/).map(l => l.trim()).filter(Boolean);
+      const findEvidence = re => lines.find(l => re.test(l)) || '';
+      const checks = [
+        { code: 'greeting_qualification', title: 'Приветствие и квалификация', re: /(здравствуйте|добрый день|меня зовут|какой|планируете|дом|проект)/i },
+        { code: 'location_land', title: 'Город и наличие участка', re: /(участок|земл|город|район|область|посёлок|поселок)/i },
+        { code: 'budget_payment', title: 'Бюджет и тип оплаты', re: /(бюджет|миллион|тысяч|руб|ипотек|налич|рассроч|маткапитал|оплат)/i },
+        { code: 'next_step', title: 'Следующий шаг', re: /(созвон|встреч|отправлю|кп|расчёт|расчет|завтра|договорились)/i },
+      ];
+      const items = checks.map(c => {
+        const evidence = findEvidence(c.re);
+        return { code: c.code, title: c.title, status: evidence ? 'found' : 'no_data', evidence: evidence ? evidence.slice(0, 180) : null };
+      });
+      return json(res, 200, {
+        experimental: true,
+        draft: true,
+        source,
+        message: 'Тестовый черновик ОКК (требует подтверждения РОПа)',
+        items
+      });
+    }
     if (p === '/api/quality/reviews' && req.method === 'POST') {
       if (!requireAdmin(user, res)) return;
       const b = await readBody(req);
